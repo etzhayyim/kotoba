@@ -1,52 +1,55 @@
-//! kotoba-hello — minimal Kotoba node program (WASM Component Model guest)
+//! kotoba-hello — Kotoba node program demonstrating EVM compatibility (WASM Component Model guest)
 //!
 //! Implements the `kotoba-node` WIT world:
-//!   - imports: kqe / kse / auth / llm / chain
+//!   - imports: kqe / kse / auth / llm / chain / evm
 //!   - exports: run(ctx-cbor) → result<list<u8>, string>
 //!
 //! What it does:
 //!   1. Read current agent DID from auth.current-did
-//!   2. Assert a "greeted" quad into the graph
-//!   3. Return b"hello from kotoba-wasm" as output
+//!   2. Assert an EVM-address quad into the graph
+//!   3. Publish to KSE journal
+//!   4. Fetch ETH balance from public RPC via evm.eth-get-balance
+//!   5. Return output including the balance
 
 wit_bindgen::generate!({
     path: "../../crates/kotoba-runtime/wit/world.wit",
     world: "kotoba-node",
 });
 
-use kotoba::kais::{auth, kqe, kse};
+use kotoba::kais::{auth, evm, kqe, kse};
 
 struct KotobaHello;
 
 impl Guest for KotobaHello {
     fn run(ctx_cbor: Vec<u8>) -> Result<Vec<u8>, String> {
-        // 1. Get current agent DID
         let did = auth::current_did();
 
-        // 2. Assert a greeting quad
-        let q = kqe::Quad {
-            graph:       "g:hello-world".to_string(),
-            subject:     did.clone(),
-            predicate:   "greeted".to_string(),
-            // CBOR-encoded boolean `true` = 0xF5
-            object_cbor: vec![0xF5],
+        // Assert a quad representing an EVM address linked to this agent
+        let evm_address = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"; // vitalik.eth
+        let addr_cbor = evm_address.as_bytes().to_vec();
+        kqe::assert_quad(&kqe::Quad {
+            graph:       "eip155:1".into(),
+            subject:     evm_address.into(),
+            predicate:   "erc20/holder".into(),
+            object_cbor: addr_cbor,
+        })?;
+
+        // Publish to KSE Journal
+        kse::publish("kotoba/evm/hello", did.as_bytes())
+            .map_err(|e| format!("publish failed: {e}"))?;
+
+        // Fetch ETH balance from public RPC
+        let rpc_url = "https://ethereum-rpc.publicnode.com";
+        let balance = match evm::eth_get_balance(rpc_url, evm_address) {
+            Ok(bal) => bal,
+            Err(e)  => format!("rpc_err:{e}"),
         };
-        kqe::assert_quad(&q).map_err(|e| format!("assert failed: {e}"))?;
 
-        // 3. Publish to KSE journal
-        kse::publish(
-            "kotoba/hello/greet",
-            &format!("hello from {did}").into_bytes(),
-        )
-        .map_err(|e| format!("publish failed: {e}"))?;
-
-        // ctx_cbor echoed back + greeting suffix
-        let mut out = b"hello from kotoba-wasm | did=".to_vec();
-        out.extend_from_slice(did.as_bytes());
-        out.extend_from_slice(b" | ctx_len=");
-        out.extend_from_slice(ctx_cbor.len().to_string().as_bytes());
-
-        Ok(out)
+        let output = format!(
+            "hello from kotoba-wasm | did={did} | ctx_len={} | eth_balance={balance}",
+            ctx_cbor.len()
+        );
+        Ok(output.into_bytes())
     }
 }
 

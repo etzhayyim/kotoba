@@ -72,6 +72,34 @@ interface llm {
     load-lora: func(base-model-cid: string, lora-cid: string) -> result<_, string>;
 }
 
+/// EVM — CALL_FOREIGN(0xF) bridge to Ethereum JSON-RPC endpoints
+/// Gas: all calls are CALL_FOREIGN class = 1000 gas each
+interface evm {
+    /// ABI-encoded view call (eth_call).
+    /// calldata: ABI-encoded function selector + args.
+    /// block-tag: "latest" | "finalized" | hex block number. None = "latest".
+    eth-call: func(
+        rpc-url:   string,
+        to:        string,
+        calldata:  list<u8>,
+        block-tag: option<string>,
+    ) -> result<list<u8>, string>;
+
+    /// Read raw storage slot (eth_getStorageAt).
+    /// slot: 32-byte hex string (0x-prefixed).
+    eth-get-storage-at: func(
+        rpc-url: string,
+        address: string,
+        slot:    string,
+    ) -> result<list<u8>, string>;
+
+    /// eth_getBalance → returns hex wei string (e.g. "0x1a8f...").
+    eth-get-balance: func(
+        rpc-url: string,
+        address: string,
+    ) -> result<string, string>;
+}
+
 /// Source chain append — write Invoke/Result/Infer entries to the agent's chain
 interface chain {
     /// Append an Infer ChainEntry (LLM inference record)
@@ -95,6 +123,7 @@ world kotoba-node {
     import auth;
     import llm;
     import chain;
+    import evm;
 
     /// Entry point called by KotobaRuntime for each Invoke ChainEntry.
     /// ctx-cbor: CBOR-encoded InvokeContext { graph, session_cid, args }

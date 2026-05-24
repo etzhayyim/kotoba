@@ -14,3 +14,6 @@ k256.workspace = true
 sha3.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
+ciborium.workspace = true
+anyhow.workspace  = true
+hex.workspace      = true

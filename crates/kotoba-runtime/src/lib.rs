@@ -129,6 +129,47 @@ mod tests {
                     Ok((false,))
                 })?;
         }
+        {
+            let mut inst = linker.instance("kotoba:kais/llm@0.1.0")?;
+            inst.func_wrap("infer",
+                |_: wasmtime::StoreContextMut<TestState>, (_m, _p): (String, Vec<u8>)| -> Result<(Result<Vec<u8>, String>,)> {
+                    Ok((Err("stub".to_string()),))
+                })?;
+            inst.func_wrap("embed",
+                |_: wasmtime::StoreContextMut<TestState>, (_m, _t): (String, String)| -> Result<(Result<Vec<u8>, String>,)> {
+                    Ok((Err("stub".to_string()),))
+                })?;
+            inst.func_wrap("load-lora",
+                |_: wasmtime::StoreContextMut<TestState>, (_b, _l): (String, String)| -> Result<(Result<(), String>,)> {
+                    Ok((Err("stub".to_string()),))
+                })?;
+        }
+        {
+            let mut inst = linker.instance("kotoba:kais/chain@0.1.0")?;
+            inst.func_wrap("append-infer",
+                |_: wasmtime::StoreContextMut<TestState>, (_m, _p, _o): (String, String, String)| -> Result<(Result<String, String>,)> {
+                    Ok((Err("stub".to_string()),))
+                })?;
+            inst.func_wrap("head-cid",
+                |_: wasmtime::StoreContextMut<TestState>, (): ()| -> Result<(Option<String>,)> {
+                    Ok((None,))
+                })?;
+        }
+        {
+            let mut inst = linker.instance("kotoba:kais/evm@0.1.0")?;
+            inst.func_wrap("eth-call",
+                |_: wasmtime::StoreContextMut<TestState>, (_url, _to, _cd, _bt): (String, String, Vec<u8>, Option<String>)| -> Result<(Result<Vec<u8>, String>,)> {
+                    Ok((Ok(vec![]),))
+                })?;
+            inst.func_wrap("eth-get-storage-at",
+                |_: wasmtime::StoreContextMut<TestState>, (_url, _addr, _slot): (String, String, String)| -> Result<(Result<Vec<u8>, String>,)> {
+                    Ok((Ok(vec![0u8; 32]),))
+                })?;
+            inst.func_wrap("eth-get-balance",
+                |_: wasmtime::StoreContextMut<TestState>, (_url, _addr): (String, String)| -> Result<(Result<String, String>,)> {
+                    Ok((Ok("0x0".to_string()),))
+                })?;
+        }
 
         let state = TestState {
             wasi_ctx: WasiCtxBuilder::new().inherit_stderr().build(),

@@ -173,14 +173,18 @@ pub async fn invoke_run(
         None => vec![],
     };
 
-    let wasm_ref: Option<&[u8]> = if wasm_bytes.is_empty() { None } else { Some(&wasm_bytes) };
+    // Move owned data into spawn_blocking — dispatch is CPU-bound (Cranelift JIT)
+    let program_cid = req.program_cid.clone();
+    let agent_did   = req.agent_did.clone();
+    let router      = Arc::clone(&state.router);
+    let wasm_owned  = if wasm_bytes.is_empty() { None } else { Some(wasm_bytes) };
 
-    let result = state
-        .router
-        .dispatch(
-            &req.program_cid,
+    let result = tokio::task::spawn_blocking(move || {
+        let wasm_ref = wasm_owned.as_deref();
+        router.dispatch(
+            &program_cid,
             program_type,
-            &req.agent_did,
+            &agent_did,
             0,
             wasm_ref,
             ctx_cbor,
@@ -189,7 +193,10 @@ pub async fn invoke_run(
             &[],
             10_000,
         )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     use kotoba_core::cid::KotobaCid;
     use kotoba_vm::DispatchResult;

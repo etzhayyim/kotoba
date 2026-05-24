@@ -2,6 +2,7 @@ use anyhow::Result;
 use wasmtime::{Config, Engine, Store};
 use wasmtime::component::{Component, ComponentType, Lift, Linker, Lower};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiView, ResourceTable};
+use kotoba_auth::delegation::DelegationChain;
 
 /// WIT record type for kotoba:kais/kqe.quad.
 ///
@@ -113,6 +114,7 @@ impl KotobaLinker {
         bind_auth(&mut self.0)?;
         bind_llm(&mut self.0)?;
         bind_chain(&mut self.0)?;
+        bind_evm(&mut self.0)?;
         Ok(())
     }
 }
@@ -241,11 +243,17 @@ fn bind_auth(linker: &mut Linker<HostState>) -> Result<()> {
     inst.func_wrap(
         "verify-cacao",
         |mut ctx: wasmtime::StoreContextMut<HostState>,
-         (_cacao_cbor,): (Vec<u8>,)|
+         (cacao_cbor,): (Vec<u8>,)|
          -> Result<(Result<String, String>,)> {
             ctx.data_mut().charge_gas(50)?;
-            // TODO(Phase 3): delegate to kotoba-auth DelegationChain::verify
-            Ok((Err("not implemented".to_string()),))
+            let result = (|| -> anyhow::Result<String> {
+                let chain = DelegationChain::from_cbor(&cacao_cbor)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let did = chain.verify("", "")
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                Ok(did)
+            })();
+            Ok((result.map_err(|e| e.to_string()),))
         },
     )?;
 
@@ -324,6 +332,115 @@ fn bind_chain(linker: &mut Linker<HostState>) -> Result<()> {
          (): ()| -> Result<(Option<String>,)> {
             ctx.data_mut().charge_gas(1)?;
             Ok((None,))
+        },
+    )?;
+
+    Ok(())
+}
+
+// ── kotoba:kais/evm ────────────────────────────────────────────────────────
+// EVM JSON-RPC bridge — CALL_FOREIGN class (gas = 1000 per call)
+// All calls use a shared ureq Agent with 5-second timeout.
+
+fn bind_evm(linker: &mut Linker<HostState>) -> Result<()> {
+    use std::time::Duration;
+
+    // Build a reusable agent with 5-second timeout per spec requirement
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(5))
+        .build();
+
+    let agent1 = agent.clone();
+    let agent2 = agent.clone();
+    let agent3 = agent;
+
+    let mut inst = linker.instance("kotoba:kais/evm@0.1.0")?;
+
+    // eth-call: ABI-encoded view call
+    inst.func_wrap(
+        "eth-call",
+        move |mut ctx: wasmtime::StoreContextMut<HostState>,
+              (rpc_url, to, calldata, block_tag): (String, String, Vec<u8>, Option<String>)|
+              -> Result<(Result<Vec<u8>, String>,)> {
+            ctx.data_mut().charge_gas(1000)?;
+            let block = block_tag.as_deref().unwrap_or("latest");
+            let data_hex = format!("0x{}", hex::encode(&calldata));
+            let body = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "method": "eth_call",
+                "params": [{"to": to, "data": data_hex}, block]
+            });
+            let result = (|| -> Result<Vec<u8>, String> {
+                let resp: serde_json::Value = agent1.post(&rpc_url)
+                    .set("Content-Type", "application/json")
+                    .send_json(body)
+                    .map_err(|e| e.to_string())?
+                    .into_json()
+                    .map_err(|e| e.to_string())?;
+                if let Some(err) = resp.get("error") {
+                    return Err(err.to_string());
+                }
+                hex::decode(resp["result"].as_str().unwrap_or("0x").trim_start_matches("0x"))
+                    .map_err(|e| e.to_string())
+            })();
+            Ok((result,))
+        },
+    )?;
+
+    // eth-get-storage-at: read raw storage slot
+    inst.func_wrap(
+        "eth-get-storage-at",
+        move |mut ctx: wasmtime::StoreContextMut<HostState>,
+              (rpc_url, address, slot): (String, String, String)|
+              -> Result<(Result<Vec<u8>, String>,)> {
+            ctx.data_mut().charge_gas(1000)?;
+            let body = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "method": "eth_getStorageAt",
+                "params": [address, slot, "latest"]
+            });
+            let result = (|| -> Result<Vec<u8>, String> {
+                let resp: serde_json::Value = agent2.post(&rpc_url)
+                    .set("Content-Type", "application/json")
+                    .send_json(body)
+                    .map_err(|e| e.to_string())?
+                    .into_json()
+                    .map_err(|e| e.to_string())?;
+                if let Some(err) = resp.get("error") {
+                    return Err(err.to_string());
+                }
+                hex::decode(resp["result"].as_str().unwrap_or("0x").trim_start_matches("0x"))
+                    .map_err(|e| e.to_string())
+            })();
+            Ok((result,))
+        },
+    )?;
+
+    // eth-get-balance: get ETH balance as hex wei string
+    inst.func_wrap(
+        "eth-get-balance",
+        move |mut ctx: wasmtime::StoreContextMut<HostState>,
+              (rpc_url, address): (String, String)|
+              -> Result<(Result<String, String>,)> {
+            ctx.data_mut().charge_gas(1000)?;
+            let body = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "method": "eth_getBalance",
+                "params": [address, "latest"]
+            });
+            let result = (|| -> Result<String, String> {
+                let resp: serde_json::Value = agent3.post(&rpc_url)
+                    .set("Content-Type", "application/json")
+                    .send_json(body)
+                    .map_err(|e| e.to_string())?
+                    .into_json()
+                    .map_err(|e| e.to_string())?;
+                if let Some(err) = resp.get("error") {
+                    return Err(err.to_string());
+                }
+                Ok(resp["result"].as_str().unwrap_or("0x0").to_string())
+            })();
+            Ok((result,))
         },
     )?;
 
