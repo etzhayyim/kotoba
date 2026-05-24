@@ -1,0 +1,16 @@
+[package]
+name = "kotoba-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CACAO chain verification and DID Document parsing"
+
+[dependencies]
+kotoba-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ed25519-dalek.workspace = true
+k256.workspace = true
+sha3.workspace = true
+bytes.workspace = true
+thiserror.workspace = true

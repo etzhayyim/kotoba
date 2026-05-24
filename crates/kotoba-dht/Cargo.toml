@@ -1,0 +1,19 @@
+[package]
+name = "kotoba-dht"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kotoba DHT: Source Chain, Warrant, Neighborhood"
+
+[dependencies]
+kotoba-core.workspace = true
+kotoba-kse.workspace = true
+kotoba-kqe.workspace = true
+kotoba-auth = { path = "../kotoba-auth" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+hex = "0.4"
+blake3.workspace = true

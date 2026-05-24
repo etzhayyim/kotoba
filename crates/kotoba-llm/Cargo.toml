@@ -1,0 +1,18 @@
+[package]
+name = "kotoba-llm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LLM/weight integration: FP8 blob, LoRA delta, KV-cache, inference"
+
+[dependencies]
+kotoba-core.workspace = true
+kotoba-kse.workspace = true
+kotoba-kqe.workspace = true
+kotoba-vm = { path = "../kotoba-vm" }
+tokio.workspace = true
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

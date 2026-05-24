@@ -1,0 +1,79 @@
+name = "ai-gftd-project-kotoba"
+layer = 5
+tier = "alpha"
+role = "infrastructure-db"
+kind = "rust-workspace"
+toolchain = "cargo"
+maturity = "design"
+workspace = "standalone"
+execution_profiles = ["build", "test"]
+description = "Kotoba: Content-Addressed Distributed Datalog Database. Datom/EAVT × Pregel BSP × CIDv1 × Datalog on AT Protocol with LLM/weight integration."
+language = "rust"
+
+depends_on = [
+  "90-docs/adr/2605240001-kotoba-cleanroom-architecture.md",
+  "00-contracts/lexicons",
+]
+
+[runtime_dependencies.object_storage]
+kind = "blob-store"
+provider = "b2"
+notes = "Journal Segment SST + Vault blob (FP8 weight tensors)"
+
+[runtime_dependencies.libp2p]
+kind = "p2p-transport"
+notes = "QUIC + Noise XX + GossipSub + Kademlia DHT"
+
+[runtime_dependencies.agent_gateway]
+kind = "llm-bridge"
+notes = "CALL_FOREIGN (0xF) → AgentGateway MCP → Vultr A16 pool (ADR-2605211000)"
+
+adr = "90-docs/adr/2605240001-kotoba-cleanroom-architecture.md"
+
+[files."CLAUDE.md"]
+role = "project-rules"
+flags = ["editable"]
+
+[files."Cargo.toml"]
+role = "workspace-manifest"
+flags = ["editable"]
+
+[subdirs."crates/kotoba-core"]
+role = "cid-frame-prolly"
+tier = "alpha"
+
+[subdirs."crates/kotoba-kse"]
+role = "stream-engine"
+tier = "alpha"
+
+[subdirs."crates/kotoba-kqe"]
+role = "query-engine"
+tier = "alpha"
+
+[subdirs."crates/kotoba-dht"]
+role = "distributed-hash-table"
+tier = "alpha"
+
+[subdirs."crates/kotoba-net"]
+role = "libp2p-network"
+tier = "alpha"
+
+[subdirs."crates/kotoba-auth"]
+role = "cacao-auth"
+tier = "alpha"
+
+[subdirs."crates/kotoba-graph"]
+role = "graph-api"
+tier = "alpha"
+
+[subdirs."crates/kotoba-vm"]
+role = "virtual-machine"
+tier = "alpha"
+
+[subdirs."crates/kotoba-llm"]
+role = "llm-weight-integration"
+tier = "alpha"
+
+[subdirs."crates/kotoba-server"]
+role = "xrpc-mcp-server"
+tier = "alpha"

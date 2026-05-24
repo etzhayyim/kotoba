@@ -1,0 +1,28 @@
+[package]
+name = "kotoba-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kotoba XRPC / MCP server endpoints"
+
+[[bin]]
+name = "kotoba"
+path = "src/main.rs"
+
+[dependencies]
+kotoba-core.workspace = true
+kotoba-kse.workspace = true
+kotoba-kqe.workspace = true
+kotoba-dht = { path = "../kotoba-dht" }
+kotoba-auth = { path = "../kotoba-auth" }
+kotoba-graph = { path = "../kotoba-graph" }
+kotoba-vm = { path = "../kotoba-vm" }
+kotoba-llm = { path = "../kotoba-llm" }
+kotoba-net = { path = "../kotoba-net" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true

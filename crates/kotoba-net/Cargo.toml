@@ -1,0 +1,16 @@
+[package]
+name = "kotoba-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kotoba libp2p network: QUIC, Noise, GossipSub, Kademlia"
+
+[dependencies]
+kotoba-core.workspace = true
+kotoba-kse.workspace = true
+libp2p.workspace = true
+tokio.workspace = true
+futures.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

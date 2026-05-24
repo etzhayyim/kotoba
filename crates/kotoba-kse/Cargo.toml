@@ -1,0 +1,17 @@
+[package]
+name = "kotoba-kse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kotoba Stream Engine: Journal, Topic, Shelf, Vault"
+
+[dependencies]
+kotoba-core.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+object_store.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

@@ -1,0 +1,70 @@
+[workspace]
+members = [
+    "crates/kotoba-core",
+    "crates/kotoba-kse",
+    "crates/kotoba-kqe",
+    "crates/kotoba-dht",
+    "crates/kotoba-net",
+    "crates/kotoba-auth",
+    "crates/kotoba-graph",
+    "crates/kotoba-vm",
+    "crates/kotoba-llm",
+    "crates/kotoba-server",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+authors = ["Gftd Japan <dev@gftd.group>"]
+
+[workspace.dependencies]
+# async
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-trait = "0.1"
+
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ciborium = "0.2"          # CBOR (dag-cbor)
+
+# hashing + CID
+blake3 = "1"
+multihash = "0.19"
+cid = "0.11"
+multibase = "0.9"
+data-encoding = "2"
+
+# storage
+bytes = "1"
+object_store = { version = "0.10", features = ["aws"] }  # B2 S3-compat
+
+# networking
+libp2p = { version = "0.53", features = [
+    "quic", "noise", "yamux", "gossipsub", "kad",
+    "identify", "ping", "macros",
+] }
+
+# crypto / DID
+ed25519-dalek = { version = "2", features = ["serde"] }
+x25519-dalek = "2"
+k256 = { version = "0.13", features = ["ecdsa"] }  # secp256k1 for SIWE
+sha3 = "0.10"                                        # keccak for ETH address
+
+# errors
+thiserror = "1"
+anyhow = "1"
+
+# tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# internal crates
+kotoba-core = { path = "crates/kotoba-core" }
+kotoba-kse  = { path = "crates/kotoba-kse" }
+kotoba-kqe  = { path = "crates/kotoba-kqe" }
+kotoba-dht  = { path = "crates/kotoba-dht" }
+kotoba-auth = { path = "crates/kotoba-auth" }

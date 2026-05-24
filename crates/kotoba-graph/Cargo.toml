@@ -1,0 +1,18 @@
+[package]
+name = "kotoba-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kotoba Graph API: Quad write/read, SPARQL→Datalog, Commit DAG"
+
+[dependencies]
+kotoba-core.workspace = true
+kotoba-kse.workspace = true
+kotoba-kqe.workspace = true
+kotoba-auth = { path = "../kotoba-auth" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
