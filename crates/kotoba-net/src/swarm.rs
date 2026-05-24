@@ -177,6 +177,46 @@ impl KotobaSwarm {
             }
         }
     }
+
+    // ------------------------------------------------------------------
+    // Pregel GossipSub helpers
+    // ------------------------------------------------------------------
+
+    /// Subscribe to the Pregel gossip topic.
+    /// Must be called before `send_pregel_message` works.
+    pub fn subscribe_pregel(&mut self) -> Result<()> {
+        self.subscribe(crate::pregel_msg::PREGEL_GOSSIP_TOPIC)
+    }
+
+    /// Gossip a Pregel message to all peers subscribed to the pregel topic.
+    pub fn send_pregel_message(
+        &mut self,
+        src:     &str,
+        dst:     &str,
+        payload: &[u8],
+    ) -> Result<gossipsub::MessageId> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+        let msg = crate::pregel_msg::PregelNetMessage {
+            src:         src.to_string(),
+            dst:         dst.to_string(),
+            payload_b64: B64.encode(payload),
+        };
+        let data = serde_json::to_vec(&msg)?;
+        self.publish(crate::pregel_msg::PREGEL_GOSSIP_TOPIC, data)
+    }
+
+    /// Try to parse an incoming `KotobaNetEvent` as a `PregelNetMessage`.
+    /// Returns `None` if the event is not a Pregel gossip message.
+    pub fn parse_pregel_event(event: &KotobaNetEvent) -> Option<crate::pregel_msg::PregelNetMessage> {
+        if let KotobaNetEvent::GossipMessage { topic, data, .. } = event {
+            let full_topic =
+                crate::gossipsub::gossipsub_topic(crate::pregel_msg::PREGEL_GOSSIP_TOPIC);
+            if topic == &full_topic || topic.ends_with(crate::pregel_msg::PREGEL_GOSSIP_TOPIC) {
+                return serde_json::from_slice(data).ok();
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]

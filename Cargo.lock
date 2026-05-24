@@ -2839,11 +2839,14 @@ name = "kotoba-net"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "bytes",
  "futures",
  "kotoba-core",
  "kotoba-kse",
  "libp2p",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
