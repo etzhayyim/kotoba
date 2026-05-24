@@ -37,3 +37,4 @@ base64                   = "0.22"
 hex                      = "0.4"
 blake3.workspace         = true
 bytes.workspace          = true
+object_store.workspace   = true

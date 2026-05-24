@@ -11,6 +11,7 @@ members = [
     "crates/kotoba-llm",
     "crates/kotoba-runtime",
     "crates/kotoba-server",
+    "crates/kotoba-store",
 ]
 resolver = "2"
 
@@ -30,6 +31,7 @@ async-trait = "0.1"
 # serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_bytes = "0.11"
 ciborium = "0.2"          # CBOR (dag-cbor)
 
 # hashing + CID
@@ -41,12 +43,13 @@ data-encoding = "2"
 
 # storage
 bytes = "1"
+sled = "0.34"
 object_store = { version = "0.10", features = ["aws"] }  # B2 S3-compat
 
 # networking
 libp2p = { version = "0.53", features = [
     "quic", "noise", "yamux", "gossipsub", "kad",
-    "identify", "ping", "macros",
+    "identify", "ping", "macros", "request-response",
 ] }
 
 # crypto / DID
@@ -90,3 +93,4 @@ kotoba-dht     = { path = "crates/kotoba-dht" }
 kotoba-auth    = { path = "crates/kotoba-auth" }
 kotoba-runtime = { path = "crates/kotoba-runtime" }
 kotoba-llm     = { path = "crates/kotoba-llm" }
+kotoba-store   = { path = "crates/kotoba-store" }

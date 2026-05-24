@@ -1,13 +1,14 @@
 use anyhow::Result;
 use futures::StreamExt;
 use libp2p::{
-    gossipsub, identify, kad, ping,
+    gossipsub, identify, kad, ping, request_response,
     identity::Keypair,
     swarm::{Swarm, SwarmEvent},
     Multiaddr, PeerId,
 };
 
 use crate::behaviour::{KotobaBehaviour, KotobaBehaviourEvent};
+use crate::bitswap::{BitswapRequest, BitswapResponse, BITSWAP_PROTOCOL};
 use crate::protocol::KOTOBA_SYNC_PROTOCOL;
 
 pub type KotobaSwarmType = Swarm<KotobaBehaviour>;
@@ -18,7 +19,7 @@ pub struct KotobaSwarm {
     pub local_peer_id: PeerId,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum KotobaNetEvent {
     GossipMessage {
         topic:  String,
@@ -29,6 +30,15 @@ pub enum KotobaNetEvent {
     PeerDisconnected(PeerId),
     RoutingUpdated { peer: PeerId },
     ListenAddr(Multiaddr),
+    BitswapRequest {
+        peer:    PeerId,
+        request: BitswapRequest,
+        channel: request_response::ResponseChannel<BitswapResponse>,
+    },
+    BitswapResponse {
+        peer:     PeerId,
+        response: BitswapResponse,
+    },
 }
 
 impl KotobaSwarm {
@@ -68,7 +78,12 @@ impl KotobaSwarm {
 
         let ping = ping::Behaviour::default();
 
-        let behaviour = KotobaBehaviour { gossipsub, kademlia, identify, ping };
+        let bitswap = request_response::Behaviour::new(
+            vec![(BITSWAP_PROTOCOL, request_response::ProtocolSupport::Full)],
+            request_response::Config::default(),
+        );
+
+        let behaviour = KotobaBehaviour { gossipsub, kademlia, identify, ping, bitswap };
 
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
@@ -111,6 +126,22 @@ impl KotobaSwarm {
     /// Bootstrap Kademlia DHT discovery (requires at least one known peer first).
     pub fn bootstrap(&mut self) -> Result<kad::QueryId> {
         Ok(self.swarm.behaviour_mut().kademlia.bootstrap()?)
+    }
+
+    /// Request a block from a specific peer.
+    pub fn want_block(&mut self, peer: PeerId, cid: [u8; 36]) -> request_response::OutboundRequestId {
+        self.swarm.behaviour_mut().bitswap.send_request(&peer, BitswapRequest {
+            want_have:  vec![],
+            want_block: vec![cid],
+        })
+    }
+
+    /// Check if a peer has a block (no data transfer).
+    pub fn want_have(&mut self, peer: PeerId, cid: [u8; 36]) -> request_response::OutboundRequestId {
+        self.swarm.behaviour_mut().bitswap.send_request(&peer, BitswapRequest {
+            want_have:  vec![cid],
+            want_block: vec![],
+        })
     }
 
     /// Poll the swarm for the next user-visible event.
@@ -163,7 +194,27 @@ impl KotobaSwarm {
                     // Not a user-visible event — continue the loop
                 }
 
-                _ => { /* ignore ping, identify::Sent, etc. */ }
+                // Bitswap: incoming request from a peer
+                SwarmEvent::Behaviour(KotobaBehaviourEvent::Bitswap(
+                    request_response::Event::Message {
+                        peer,
+                        message: request_response::Message::Request { request, channel, .. },
+                    },
+                )) => {
+                    return Some(KotobaNetEvent::BitswapRequest { peer, request, channel });
+                }
+
+                // Bitswap: response received from a peer
+                SwarmEvent::Behaviour(KotobaBehaviourEvent::Bitswap(
+                    request_response::Event::Message {
+                        peer,
+                        message: request_response::Message::Response { response, .. },
+                    },
+                )) => {
+                    return Some(KotobaNetEvent::BitswapResponse { peer, response });
+                }
+
+                _ => { /* ignore ping, identify::Sent, bitswap failures, etc. */ }
             }
         }
     }

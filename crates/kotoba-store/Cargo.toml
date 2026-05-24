@@ -1,0 +1,14 @@
+[package]
+name = "kotoba-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kotoba content-addressed block store (sled-backed)"
+
+[dependencies]
+kotoba-core.workspace = true
+sled = { workspace = true }
+bytes.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

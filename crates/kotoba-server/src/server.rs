@@ -5,10 +5,10 @@ use kotoba_dht::{
     neighborhood::Neighborhood,
     node_id::NodeId,
 };
-use kotoba_kse::{Journal, Shelf, Topic};
+use kotoba_kse::{store::KseStore, Journal, Shelf, Topic};
 use kotoba_kqe::quad::Quad;
 use kotoba_runtime::{host::InferenceFn, UdfExecutor, WasmExecutor};
-use kotoba_vm::InvokeRouter;
+use kotoba_vm::{distributed::DistributedPregelRunner, InvokeRouter};
 
 /// Shared server state — Arc-wrapped and injected into every axum handler.
 pub struct KotobaState {
@@ -25,9 +25,11 @@ pub struct KotobaState {
     pub router:        Arc<InvokeRouter>,
     // ── P2P / Gossip ─────────────────────────────────────────────────────
     /// GossipSub outbound channel — `Some(tx)` when the swarm actor is running.
-    /// Send raw KSE topic strings (no "kotoba/" prefix) paired with payload bytes.
-    /// `KotobaSwarm::publish` adds the "kotoba/" prefix; the channel carries raw KSE names.
     pub gossip_tx:        Option<tokio::sync::mpsc::Sender<(String, Vec<u8>)>>,
+    // ── Distributed Pregel ───────────────────────────────────────────────
+    /// Pregel runner — `Some` after swarm is attached.
+    /// Lock to inject messages or trigger a superstep from XRPC handlers.
+    pub pregel_runner:    Option<Arc<tokio::sync::Mutex<DistributedPregelRunner>>>,
     // ── Inference ────────────────────────────────────────────────────────
     /// Gemma 4 E2B inference engine, loaded at startup when `KOTOBA_LOAD_GEMMA` is set.
     pub inference_engine: Option<InferenceFn>,
@@ -35,8 +37,17 @@ pub struct KotobaState {
 
 impl KotobaState {
     pub fn new(inference_engine: Option<InferenceFn>) -> anyhow::Result<Self> {
-        // KSE
-        let journal = Arc::new(Journal::new());
+        // KSE — wire B2 persistence when env vars are present
+        let journal = Arc::new(match build_kse_store("kotoba/journal/") {
+            Some(store) => {
+                tracing::info!("KSE Journal: B2 persistence enabled");
+                Journal::with_store(store)
+            }
+            None => {
+                tracing::info!("KSE Journal: in-memory only (set KOTOBA_B2_* for persistence)");
+                Journal::new()
+            }
+        });
         let shelf   = Arc::new(Shelf::new());
 
         // KDHT — generate ephemeral NodeId (dev mode; prod uses persisted Ed25519 key)
@@ -73,15 +84,21 @@ impl KotobaState {
             executor,
             udf,
             router,
-            gossip_tx: None,
+            gossip_tx:     None,
+            pregel_runner: None,
             inference_engine,
         })
     }
 
     /// Attach a GossipSub outbound channel after construction.
-    /// Called by `main.rs` once the swarm actor is running.
     pub fn attach_gossip(mut self, tx: tokio::sync::mpsc::Sender<(String, Vec<u8>)>) -> Self {
         self.gossip_tx = Some(tx);
+        self
+    }
+
+    /// Attach the distributed Pregel runner after swarm setup.
+    pub fn attach_pregel(mut self, runner: DistributedPregelRunner) -> Self {
+        self.pregel_runner = Some(Arc::new(tokio::sync::Mutex::new(runner)));
         self
     }
 
@@ -124,6 +141,31 @@ impl KotobaState {
         let entry = self.journal.publish(topic, Bytes::from(payload)).await;
         entry.cid.to_multibase()
     }
+}
+
+/// Build a `KseStore` backed by Backblaze B2 (S3-compatible) when the
+/// required env vars are present.
+///
+/// Required: `KOTOBA_B2_BUCKET`, `KOTOBA_B2_KEY_ID`, `KOTOBA_B2_APP_KEY`
+/// Optional: `KOTOBA_B2_ENDPOINT` (default: `https://s3.us-west-001.backblazeb2.com`)
+fn build_kse_store(prefix: &str) -> Option<Arc<KseStore>> {
+    let bucket   = std::env::var("KOTOBA_B2_BUCKET").ok()?;
+    let key_id   = std::env::var("KOTOBA_B2_KEY_ID").ok()?;
+    let app_key  = std::env::var("KOTOBA_B2_APP_KEY").ok()?;
+    let endpoint = std::env::var("KOTOBA_B2_ENDPOINT")
+        .unwrap_or_else(|_| "https://s3.us-west-001.backblazeb2.com".into());
+
+    use object_store::aws::AmazonS3Builder;
+    let s3 = AmazonS3Builder::new()
+        .with_bucket_name(&bucket)
+        .with_access_key_id(&key_id)
+        .with_secret_access_key(&app_key)
+        .with_endpoint(&endpoint)
+        .build()
+        .map_err(|e| tracing::warn!("B2 store build failed: {e}"))
+        .ok()?;
+
+    Some(Arc::new(KseStore::new(Arc::new(s3), prefix)))
 }
 
 /// Generate a deterministic-ish seed for the ephemeral dev NodeId.
