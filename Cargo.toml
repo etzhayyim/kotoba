@@ -9,6 +9,7 @@ members = [
     "crates/kotoba-graph",
     "crates/kotoba-vm",
     "crates/kotoba-llm",
+    "crates/kotoba-runtime",
     "crates/kotoba-server",
 ]
 resolver = "2"
@@ -62,9 +63,21 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# WASM runtime
+wasmtime      = { version = "22", features = ["component-model"] }
+wasmtime-wasi = { version = "22" }
+dashmap       = "5"
+
+# HTTP server
+axum       = "0.7"
+tower      = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+base64     = "0.22"
+
 # internal crates
-kotoba-core = { path = "crates/kotoba-core" }
-kotoba-kse  = { path = "crates/kotoba-kse" }
-kotoba-kqe  = { path = "crates/kotoba-kqe" }
-kotoba-dht  = { path = "crates/kotoba-dht" }
-kotoba-auth = { path = "crates/kotoba-auth" }
+kotoba-core    = { path = "crates/kotoba-core" }
+kotoba-kse     = { path = "crates/kotoba-kse" }
+kotoba-kqe     = { path = "crates/kotoba-kqe" }
+kotoba-dht     = { path = "crates/kotoba-dht" }
+kotoba-auth    = { path = "crates/kotoba-auth" }
+kotoba-runtime = { path = "crates/kotoba-runtime" }

@@ -10,9 +10,11 @@ kotoba-core.workspace = true
 kotoba-kse.workspace = true
 kotoba-kqe.workspace = true
 kotoba-dht = { path = "../kotoba-dht" }
-kotoba-auth = { path = "../kotoba-auth" }
+kotoba-auth    = { path = "../kotoba-auth" }
+kotoba-runtime = { path = "../kotoba-runtime" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+anyhow.workspace = true
 tracing.workspace = true

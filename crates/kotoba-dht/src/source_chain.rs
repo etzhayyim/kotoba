@@ -2,13 +2,25 @@ use kotoba_core::cid::KotobaCid;
 use kotoba_kqe::quad::Quad;
 use serde::{Deserialize, Serialize};
 
+/// How to dispatch an Invoke ChainEntry
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProgramType {
+    /// Evaluate via KotobaVm Datalog engine
+    Datalog,
+    /// Execute via WasmExecutor (kotoba-node world: exports `run`)
+    WasmNode,
+    /// Execute via UdfExecutor (kotoba-udf world: exports `eval`, stateless)
+    WasmUdf,
+}
+
 /// ChainContent — what a ChainEntry carries
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ChainContent {
     Quad(Quad),
     Commit { graph_cid: KotobaCid, prolly_root: KotobaCid },
     Invoke {
-        program_cid: KotobaCid,
+        program_cid:  KotobaCid,
+        program_type: ProgramType,
         input_topics: Vec<String>,
         max_steps:    u32,
         call_id:      u64,

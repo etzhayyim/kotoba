@@ -7,7 +7,7 @@ toolchain = "cargo"
 maturity = "design"
 workspace = "standalone"
 execution_profiles = ["build", "test"]
-description = "Kotoba: Content-Addressed Distributed Datalog Database. Datom/EAVT × Pregel BSP × CIDv1 × Datalog on AT Protocol with LLM/weight integration."
+description = "Kotoba: Content-Addressed Distributed Datalog Database. Datom/EAVT × Pregel BSP × CIDv1 × Datalog on AT Protocol with LLM/weight + WASM Component Model runtime."
 language = "rust"
 
 depends_on = [
@@ -74,6 +74,17 @@ tier = "alpha"
 role = "llm-weight-integration"
 tier = "alpha"
 
+[subdirs."crates/kotoba-runtime"]
+role = "wasm-component-runtime"
+tier = "alpha"
+notes = "wasmtime 22 Component Model host; WIT world kotoba:kais@0.1.0; WasmExecutor + UdfExecutor"
+
 [subdirs."crates/kotoba-server"]
 role = "xrpc-mcp-server"
 tier = "alpha"
+
+[runtime_dependencies.wasmtime]
+kind = "wasm-runtime"
+version = "22"
+features = ["component-model"]
+notes = "Cranelift JIT + WIT Component Model for multi-language node programs"

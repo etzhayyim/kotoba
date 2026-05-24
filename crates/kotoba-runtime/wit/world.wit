@@ -1,0 +1,112 @@
+/// kotoba:kais — Kotoba Instruction Set Architecture WIT package
+///
+/// WASM guest components import these interfaces to interact with the Kotoba host.
+/// Any language compiling to WASM Component Model (Rust/Python/JS/Go/C) can use these.
+///
+/// Host function mapping:
+///   kqe.*  → ASSERT(0x1) / RETRACT(0xD) / QUERY(0x2) frames
+///   kse.*  → SEND(0x3) / RECV(0x4) frames
+///   auth.* → CACAO delegation chain verification
+///   llm.*  → CALL_FOREIGN(0xF) bridge to AgentGateway MCP
+package kotoba:kais@0.1.0;
+
+/// KQE (Kotoba Query Engine) — Datalog/Quad read-write interface
+interface kqe {
+    /// Quad ≅ Datomic Datom (Subject, Predicate, Object, Graph)
+    record quad {
+        graph:     string,
+        subject:   string,
+        predicate: string,
+        /// CBOR-encoded QuadObject (Cid/Integer/Float/Text/Bytes/VectorF32/TensorCid)
+        object-cbor: list<u8>,
+    }
+
+    /// ASSERT frame (0x1): append Delta(quad, +1) to Arrangement
+    assert-quad: func(q: quad) -> result<_, string>;
+
+    /// RETRACT frame (0xD): append Delta(quad, -1) to Arrangement
+    retract-quad: func(q: quad) -> result<_, string>;
+
+    /// QUERY frame (0x2): evaluate Datalog program, return matching quads
+    query: func(datalog-src: string) -> result<list<quad>, string>;
+
+    /// SPO lookup: all Objects for (graph, subject, predicate)
+    get-objects: func(graph: string, subject: string, predicate: string) -> list<list<u8>>;
+
+    /// Read Commit CID for a named graph head
+    get-head: func(graph-name: string) -> option<string>;
+}
+
+/// KSE (Kotoba Stream Engine) — Journal topic publish/subscribe interface
+interface kse {
+    /// SEND frame (0x3): publish bytes to a KOTOBA topic
+    /// Returns CID of the JournalEntry
+    publish: func(topic: string, payload: list<u8>) -> result<string, string>;
+
+    /// RECV frame (0x4): drain pending messages from a topic cursor
+    /// Returns list of (topic, payload) pairs
+    drain: func(topic-pattern: string, max-items: u32) -> result<list<tuple<string, list<u8>>>, string>;
+}
+
+/// Auth — DID/CACAO identity interface
+interface auth {
+    /// DID of the agent executing this WASM invocation
+    current-did: func() -> string;
+
+    /// Verify a CACAO delegation chain; returns delegator DID on success
+    verify-cacao: func(cacao-cbor: list<u8>) -> result<string, string>;
+
+    /// Check if current DID holds a capability resource URI
+    has-capability: func(resource-uri: string, ability: string) -> bool;
+}
+
+/// LLM — CALL_FOREIGN(0xF) bridge to AgentGateway MCP / Vultr A16
+interface llm {
+    /// Text inference: model-cid is a Kotoba Vault blob CID for the GGUF/GGML
+    infer: func(model-cid: string, prompt-bytes: list<u8>) -> result<list<u8>, string>;
+
+    /// Dense embedding: returns VectorF32 as raw float bytes (little-endian IEEE 754)
+    embed: func(model-cid: string, text: string) -> result<list<u8>, string>;
+
+    /// Load a LoRA adapter CID and apply to current inference context
+    load-lora: func(base-model-cid: string, lora-cid: string) -> result<_, string>;
+}
+
+/// Source chain append — write Invoke/Result/Infer entries to the agent's chain
+interface chain {
+    /// Append an Infer ChainEntry (LLM inference record)
+    append-infer: func(
+        model-cid:  string,
+        prompt-cid: string,
+        output-cid: string,
+    ) -> result<string, string>;
+
+    /// Read the latest chain head CID for current agent DID
+    head-cid: func() -> option<string>;
+}
+
+/// KOTOBA world — imported by every WASM guest node program
+///
+/// Guest exports `run` to be called by the KotobaRuntime executor.
+/// Context bytes (CBOR) carry the Invoke ChainEntry fields.
+world kotoba-node {
+    import kqe;
+    import kse;
+    import auth;
+    import llm;
+    import chain;
+
+    /// Entry point called by KotobaRuntime for each Invoke ChainEntry.
+    /// ctx-cbor: CBOR-encoded InvokeContext { graph, session_cid, args }
+    /// Returns: CBOR-encoded output or error string
+    export run: func(ctx-cbor: list<u8>) -> result<list<u8>, string>;
+}
+
+/// KOTOBA UDF world — subset for RisingWave-style UDF programs
+/// (stateless, no chain write, mirrors RisingWave Python UDF contract)
+world kotoba-udf {
+    import kqe;
+
+    /// UDF entry: input rows as CBOR list<quad>, returns output rows
+    export eval: func(rows: list<list<u8>>) -> result<list<list<u8>>, string>;
+}

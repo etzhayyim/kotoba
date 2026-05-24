@@ -1,0 +1,29 @@
+[package]
+name        = "kotoba-runtime"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+authors.workspace     = true
+description = "Kotoba WASM Component Model runtime — WIT host for multi-language Kotoba programs"
+
+[dependencies]
+kotoba-core.workspace = true
+kotoba-kse.workspace  = true
+kotoba-kqe.workspace  = true
+kotoba-auth.workspace = true
+
+tokio.workspace       = true
+anyhow.workspace      = true
+thiserror.workspace   = true
+tracing.workspace     = true
+serde.workspace       = true
+serde_json.workspace  = true
+ciborium.workspace    = true
+bytes.workspace       = true
+
+# WASM component model runtime
+wasmtime        = { version = "22", features = ["component-model"] }
+wasmtime-wasi   = { version = "22" }
+
+# Caching compiled WASM components
+dashmap = "5"

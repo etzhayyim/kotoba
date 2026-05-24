@@ -1,0 +1,20 @@
+# kotoba-hello — minimal Kotoba WASM guest component
+#
+# Build (requires wasm32-wasip2 target):
+#   rustup target add wasm32-wasip2
+#   cargo build --target wasm32-wasip2 --release
+#
+# Output: target/wasm32-wasip2/release/kotoba_hello.wasm
+#
+# This is a STANDALONE project, NOT part of the workspace Cargo.toml.
+# (wasm32-wasip2 target must not contaminate the native host build)
+[package]
+name    = "kotoba-hello"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { version = "0.28", default-features = false, features = ["macros"] }
