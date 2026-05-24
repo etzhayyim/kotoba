@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Kotoba XRPC / MCP server endpoints"
 
+[features]
+default = []
+local-inference = ["kotoba-llm/local-inference"]
+
 [[bin]]
 name = "kotoba"
 path = "src/main.rs"
