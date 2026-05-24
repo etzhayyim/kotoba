@@ -15,4 +15,5 @@ serde_json.workspace = true
 ciborium.workspace = true
 object_store.workspace = true
 thiserror.workspace = true
+anyhow.workspace = true
 tracing.workspace = true

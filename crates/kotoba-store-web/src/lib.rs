@@ -2,7 +2,7 @@
 //!
 //! # Architecture
 //!
-//! ```
+//! ```text
 //! Agent loop (server)          Browser cache
 //! ┌────────────────────┐       ┌──────────────────────────────┐
 //! │ QuadStore          │──────▶│ IdbBlockStore                │

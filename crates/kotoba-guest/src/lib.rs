@@ -26,7 +26,7 @@ mod bindings {
 
 #[cfg(target_arch = "wasm32")]
 use bindings::{
-    exports::kotoba::kais::kotoba_node::Guest,
+    Guest,
     kotoba::kais::{
         auth,
         kqe::{self, Quad},

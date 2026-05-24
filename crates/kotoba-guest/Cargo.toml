@@ -2,7 +2,7 @@
 name = "kotoba-guest"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "Apache-2.0"
 
 # WASM Component Model guest — compiles to wasm32-wasip2 via `cargo component build`.
 # On native targets (aarch64-apple-darwin) it compiles as an rlib for IDE support.
@@ -20,6 +20,3 @@ package = "kotoba:echo-assert"
 
 [package.metadata.component.target]
 world = "kotoba-node"
-
-[package.metadata.component.dependencies]
-"kotoba:kais" = { path = "wit" }

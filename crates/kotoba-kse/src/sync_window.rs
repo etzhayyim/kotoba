@@ -73,7 +73,6 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::{Arc, RwLock};
     use bytes::Bytes;
-    use anyhow::Result;
 
     /// Minimal in-test BlockStore that tracks pins.
     #[derive(Default)]

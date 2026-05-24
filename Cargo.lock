@@ -2835,6 +2835,7 @@ dependencies = [
 name = "kotoba-kse"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bytes",
  "ciborium",
  "kotoba-core",
