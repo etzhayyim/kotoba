@@ -1,7 +1,7 @@
 use anyhow::Result;
 use kotoba_dht::source_chain::ProgramType;
 use kotoba_kqe::{arrangement::Arrangement, datalog::DatalogProgram, delta::Delta};
-use kotoba_runtime::{InvokeResult, UdfExecutor, WasmExecutor};
+use kotoba_runtime::{host::InferenceFn, InvokeResult, UdfExecutor, WasmExecutor};
 use thiserror::Error;
 
 use crate::executor::{ExecResult, ExecStatus, KotobaVm};
@@ -47,6 +47,21 @@ impl InvokeRouter {
     pub fn new(gas_limit: u64, gateway_url: impl Into<String>) -> Result<Self> {
         Ok(Self {
             wasm:    WasmExecutor::new(gas_limit)?,
+            udf:     UdfExecutor::new()?,
+            _bridge: ForeignBridge::new(gateway_url),
+        })
+    }
+
+    /// Construct an `InvokeRouter` where the WASM executor is pre-loaded with a
+    /// local inference engine (e.g. Gemma 4 E2B).  Datalog and UDF paths are
+    /// unaffected.
+    pub fn with_inference(
+        gas_limit:   u64,
+        gateway_url: impl Into<String>,
+        engine:      InferenceFn,
+    ) -> Result<Self> {
+        Ok(Self {
+            wasm:    WasmExecutor::with_inference(gas_limit, engine)?,
             udf:     UdfExecutor::new()?,
             _bridge: ForeignBridge::new(gateway_url),
         })

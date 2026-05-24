@@ -3,7 +3,7 @@ use tracing::instrument;
 use wasmtime::component::Func;
 
 use crate::error::RuntimeError;
-use crate::host::{HostState, KotobaEngine, PendingQuad};
+use crate::host::{HostState, InferenceFn, KotobaEngine, PendingQuad};
 use crate::program::ProgramStore;
 
 /// InvokeContext is CBOR-decoded from the Invoke ChainEntry input field.
@@ -56,16 +56,28 @@ impl From<PendingQuad> for SerializedQuad {
 ///   5. Collect pending_asserts + pending_retracts from HostState
 ///   6. Return InvokeResult (caller appends to SourceChain + applies to Arrangement)
 pub struct WasmExecutor {
-    engine:  KotobaEngine,
-    programs: ProgramStore,
-    gas_limit: u64,
+    engine:           KotobaEngine,
+    programs:         ProgramStore,
+    gas_limit:        u64,
+    inference_engine: Option<InferenceFn>,
 }
 
 impl WasmExecutor {
     pub fn new(gas_limit: u64) -> Result<Self> {
+        anyhow::ensure!(gas_limit > 0, "gas_limit must be > 0 (gas-less execution is prohibited)");
         let engine = KotobaEngine::new()?;
         let programs = ProgramStore::new(engine.clone());
-        Ok(Self { engine, programs, gas_limit })
+        Ok(Self { engine, programs, gas_limit, inference_engine: None })
+    }
+
+    /// Construct a `WasmExecutor` with a pre-loaded local inference engine.
+    ///
+    /// The engine is forwarded into every `HostState` created at execute time,
+    /// making `llm.infer` calls in guest WASM functional without a remote bridge.
+    pub fn with_inference(gas_limit: u64, engine: InferenceFn) -> Result<Self> {
+        let mut s = Self::new(gas_limit)?;
+        s.inference_engine = Some(engine);
+        Ok(s)
     }
 
     #[instrument(skip(self, agent_did, wasm_bytes, ctx_cbor), fields(program_cid))]
@@ -80,7 +92,10 @@ impl WasmExecutor {
             .get_or_compile(program_cid, wasm_bytes)
             .map_err(RuntimeError::CompileFailed)?;
 
-        let state = HostState::new(agent_did, self.gas_limit);
+        let state = match &self.inference_engine {
+            Some(e) => HostState::with_inference(agent_did, self.gas_limit, e.clone()),
+            None    => HostState::new(agent_did, self.gas_limit),
+        };
         let mut store = self.engine.new_store(state);
 
         let mut linker = self.engine.new_linker();
