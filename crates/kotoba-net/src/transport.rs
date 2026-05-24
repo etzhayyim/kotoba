@@ -1,12 +1,16 @@
-/// KOTOBA transport: libp2p QUIC + Noise XX + yamux
-/// NKey (Ed25519) ≡ did:key — same keypair for transport and DID auth
-pub struct KotobaTransport {
-    pub local_peer_id: String, // libp2p PeerId
-    // libp2p Swarm initialization in full implementation
+use libp2p::Multiaddr;
+
+/// Default listen address for KOTOBA nodes — QUIC-v1 over UDP, OS-assigned port.
+pub const DEFAULT_LISTEN_ADDR: &str = "/ip4/0.0.0.0/udp/0/quic-v1";
+
+/// Returns the default QUIC listen `Multiaddr`.
+pub fn default_listen_addr() -> Multiaddr {
+    DEFAULT_LISTEN_ADDR.parse().expect("valid QUIC multiaddr")
 }
 
-impl KotobaTransport {
-    pub fn new() -> Self {
-        Self { local_peer_id: String::new() }
-    }
+/// Build a QUIC listen `Multiaddr` on a specific UDP port.
+pub fn quic_addr(port: u16) -> Multiaddr {
+    format!("/ip4/0.0.0.0/udp/{port}/quic-v1")
+        .parse()
+        .expect("valid QUIC multiaddr")
 }
