@@ -73,6 +73,7 @@ axum       = "0.7"
 tower      = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 base64     = "0.22"
+hex        = "0.4"
 
 # internal crates
 kotoba-core    = { path = "crates/kotoba-core" }

@@ -41,3 +41,103 @@ pub use executor::{InvokeContext, InvokeResult, WasmExecutor};
 pub use host::{HostState, KotobaEngine, KotobaLinker};
 pub use program::ProgramStore;
 pub use udf::UdfExecutor;
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+    use wasmtime::{Config, Engine, Store};
+    use wasmtime::component::{Component, Linker};
+    use wasmtime_wasi::{WasiCtxBuilder, WasiView, ResourceTable, WasiCtx};
+
+    use crate::host::WitQuad;
+
+    struct TestState {
+        wasi_ctx: WasiCtx,
+        wasi_table: ResourceTable,
+    }
+    impl WasiView for TestState {
+        fn ctx(&mut self) -> &mut WasiCtx { &mut self.wasi_ctx }
+        fn table(&mut self) -> &mut ResourceTable { &mut self.wasi_table }
+    }
+
+    #[test]
+    fn test_wasm_instantiate() -> Result<()> {
+        let wasm_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/kotoba-hello/target/wasm32-wasip2/release/kotoba_hello.wasm"
+        );
+        let wasm_bytes = std::fs::read(wasm_path)?;
+
+        let mut config = Config::new();
+        config.wasm_component_model(true);
+        let engine = Engine::new(&config)?;
+        let component = Component::new(&engine, &wasm_bytes)?;
+
+        let mut linker: Linker<TestState> = Linker::new(&engine);
+        wasmtime_wasi::add_to_linker_sync(&mut linker)?;
+
+        {
+            let mut inst = linker.instance("kotoba:kais/kqe@0.1.0")?;
+            // assert-quad: func(q: quad) -> result<_, string>
+            // WIT record requires WitQuad (ComponentType/Lift/Lower), not a plain tuple.
+            inst.func_wrap("assert-quad",
+                |_: wasmtime::StoreContextMut<TestState>, (q,): (WitQuad,)| -> Result<(Result<(), String>,)> {
+                    println!("assert-quad: {} {} {}", q.graph, q.subject, q.predicate);
+                    Ok((Ok(()),))
+                })?;
+            inst.func_wrap("retract-quad",
+                |_: wasmtime::StoreContextMut<TestState>, (q,): (WitQuad,)| -> Result<(Result<(), String>,)> {
+                    println!("retract-quad: {} {} {}", q.graph, q.subject, q.predicate);
+                    Ok((Ok(()),))
+                })?;
+            inst.func_wrap("query",
+                |_: wasmtime::StoreContextMut<TestState>, (_src,): (String,)| -> Result<(Result<Vec<WitQuad>, String>,)> {
+                    Ok((Ok(vec![]),))
+                })?;
+            inst.func_wrap("get-objects",
+                |_: wasmtime::StoreContextMut<TestState>, (_g, _s, _p): (String, String, String)| -> Result<(Vec<Vec<u8>>,)> {
+                    Ok((vec![],))
+                })?;
+            inst.func_wrap("get-head",
+                |_: wasmtime::StoreContextMut<TestState>, (_g,): (String,)| -> Result<(Option<String>,)> {
+                    Ok((None,))
+                })?;
+        }
+        {
+            let mut inst = linker.instance("kotoba:kais/kse@0.1.0")?;
+            inst.func_wrap("publish",
+                |_: wasmtime::StoreContextMut<TestState>, (_t, _p): (String, Vec<u8>)| -> Result<(Result<String, String>,)> {
+                    Ok((Ok("cid".to_string()),))
+                })?;
+            inst.func_wrap("drain",
+                |_: wasmtime::StoreContextMut<TestState>, (_pat, _max): (String, u32)| -> Result<(Result<Vec<(String, Vec<u8>)>, String>,)> {
+                    Ok((Ok(vec![]),))
+                })?;
+        }
+        {
+            let mut inst = linker.instance("kotoba:kais/auth@0.1.0")?;
+            inst.func_wrap("current-did",
+                |_: wasmtime::StoreContextMut<TestState>, (): ()| -> Result<(String,)> {
+                    Ok(("did:plc:test".to_string(),))
+                })?;
+            inst.func_wrap("verify-cacao",
+                |_: wasmtime::StoreContextMut<TestState>, (_cbor,): (Vec<u8>,)| -> Result<(Result<String, String>,)> {
+                    Ok((Err("not implemented".to_string()),))
+                })?;
+            inst.func_wrap("has-capability",
+                |_: wasmtime::StoreContextMut<TestState>, (_uri, _ability): (String, String)| -> Result<(bool,)> {
+                    Ok((false,))
+                })?;
+        }
+
+        let state = TestState {
+            wasi_ctx: WasiCtxBuilder::new().inherit_stderr().build(),
+            wasi_table: ResourceTable::new(),
+        };
+        let mut store = Store::new(&engine, state);
+        let _instance = linker.instantiate(&mut store, &component)
+            .map_err(|e| anyhow::anyhow!("instantiate failed: {e}"))?;
+        println!("Instantiated OK!");
+        Ok(())
+    }
+}

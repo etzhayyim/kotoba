@@ -13,14 +13,16 @@ async fn main() -> anyhow::Result<()> {
         "kotoba starting"
     );
 
-    // Initialize shared state (WasmExecutor + UdfExecutor + InvokeRouter)
     let state = Arc::new(KotobaState::new()?);
-    tracing::info!(version = state.version, "subsystems ready");
 
-    // Build axum router
-    let app = build_router(state);
+    tracing::info!(
+        version  = state.version,
+        node_id  = %hex::encode(state.local_node_id.0),
+        "KSE Journal + Shelf + KDHT Neighborhood ready"
+    );
 
-    // Bind address
+    let app = build_router(Arc::clone(&state));
+
     let port = std::env::var("KOTOBA_PORT")
         .ok()
         .and_then(|p| p.parse::<u16>().ok())

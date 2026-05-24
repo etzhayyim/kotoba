@@ -10,13 +10,10 @@ use axum::{
 use tower_http::trace::TraceLayer;
 use crate::server::KotobaState;
 
-/// Build the axum router with all XRPC + meta routes.
 pub fn build_router(state: Arc<KotobaState>) -> Router {
     Router::new()
-        // Health / meta
-        .route("/_app/meta",   get(xrpc::health))
-        .route("/health",      get(xrpc::health))
-        // XRPC procedure routes
+        .route("/_app/meta",  get(xrpc::health))
+        .route("/health",     get(xrpc::health))
         .route(
             &format!("/xrpc/{}", xrpc::NSID_QUAD_CREATE),
             post(xrpc::quad_create),
@@ -24,6 +21,10 @@ pub fn build_router(state: Arc<KotobaState>) -> Router {
         .route(
             &format!("/xrpc/{}", xrpc::NSID_INVOKE_RUN),
             post(xrpc::invoke_run),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_NODE_STATUS),
+            get(xrpc::node_status),
         )
         .with_state(state)
         .layer(TraceLayer::new_for_http())

@@ -1,9 +1,24 @@
 use anyhow::Result;
 use wasmtime::{Config, Engine, Store};
-use wasmtime::component::{Component, Linker};
+use wasmtime::component::{Component, ComponentType, Lift, Linker, Lower};
+use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiView, ResourceTable};
+
+/// WIT record type for kotoba:kais/kqe.quad.
+///
+/// `func_wrap` requires an exact Rust type that mirrors the WIT record layout.
+/// Field names must match WIT field names (kebab-case via `#[component(name)]`).
+#[derive(Debug, Clone, ComponentType, Lift, Lower)]
+#[component(record)]
+pub struct WitQuad {
+    pub graph: String,
+    pub subject: String,
+    pub predicate: String,
+    #[component(name = "object-cbor")]
+    pub object_cbor: Vec<u8>,
+}
 
 /// Host-side state injected into every WASM Store.
-/// Carries the capabilities that host functions need.
+/// Carries the capabilities that host functions need plus WASI context.
 pub struct HostState {
     /// DID of the agent executing this invocation
     pub agent_did: String,
@@ -12,6 +27,9 @@ pub struct HostState {
     /// Accumulated output quads (asserted by guest via kqe.assert-quad)
     pub pending_asserts: Vec<PendingQuad>,
     pub pending_retracts: Vec<PendingQuad>,
+    /// WASI preview2 context (required by wasm32-wasip2 components)
+    pub wasi_ctx: WasiCtx,
+    pub wasi_table: ResourceTable,
 }
 
 #[derive(Debug, Clone)]
@@ -24,11 +42,14 @@ pub struct PendingQuad {
 
 impl HostState {
     pub fn new(agent_did: impl Into<String>, gas_limit: u64) -> Self {
+        let wasi_ctx = WasiCtxBuilder::new().inherit_stderr().build();
         Self {
             agent_did: agent_did.into(),
             gas_remaining: gas_limit,
             pending_asserts: Vec::new(),
             pending_retracts: Vec::new(),
+            wasi_ctx,
+            wasi_table: ResourceTable::new(),
         }
     }
 
@@ -39,6 +60,11 @@ impl HostState {
         self.gas_remaining -= cost;
         Ok(())
     }
+}
+
+impl WasiView for HostState {
+    fn table(&mut self) -> &mut ResourceTable { &mut self.wasi_table }
+    fn ctx(&mut self) -> &mut WasiCtx { &mut self.wasi_ctx }
 }
 
 /// Central wasmtime Engine shared across all invocations (thread-safe, clone is cheap).
@@ -77,7 +103,11 @@ impl KotobaLinker {
     /// Bind all KOTOBA WIT host interfaces:
     ///   kotoba:kais/kqe, kotoba:kais/kse, kotoba:kais/auth,
     ///   kotoba:kais/llm, kotoba:kais/chain
+    /// Also binds WASI preview2 interfaces (required by wasm32-wasip2 components).
     pub fn bind_kotoba_interfaces(&mut self) -> Result<()> {
+        // WASI preview2 — needed by all wasm32-wasip2 components
+        wasmtime_wasi::add_to_linker_sync(&mut self.0)?;
+        // Kotoba host interfaces
         bind_kqe(&mut self.0)?;
         bind_kse(&mut self.0)?;
         bind_auth(&mut self.0)?;
@@ -90,45 +120,50 @@ impl KotobaLinker {
 // ── kotoba:kais/kqe ────────────────────────────────────────────────────────
 
 fn bind_kqe(linker: &mut Linker<HostState>) -> Result<()> {
-    let mut inst = linker.instance("kotoba:kais/kqe")?;
+    let mut inst = linker.instance("kotoba:kais/kqe@0.1.0")?;
 
+    // assert-quad: func(q: quad) -> result<_, string>
+    // WIT record → Rust WitQuad (ComponentType/Lift/Lower).
     inst.func_wrap(
         "assert-quad",
         |mut ctx: wasmtime::StoreContextMut<HostState>,
-         (graph, subject, predicate, object_cbor): (String, String, String, Vec<u8>)|
+         (q,): (WitQuad,)|
          -> Result<(Result<(), String>,)> {
             ctx.data_mut().charge_gas(10)?;
             ctx.data_mut().pending_asserts.push(PendingQuad {
-                graph,
-                subject,
-                predicate,
-                object_cbor,
+                graph:       q.graph,
+                subject:     q.subject,
+                predicate:   q.predicate,
+                object_cbor: q.object_cbor,
             });
             Ok((Ok(()),))
         },
     )?;
 
+    // retract-quad: func(q: quad) -> result<_, string>
     inst.func_wrap(
         "retract-quad",
         |mut ctx: wasmtime::StoreContextMut<HostState>,
-         (graph, subject, predicate, object_cbor): (String, String, String, Vec<u8>)|
+         (q,): (WitQuad,)|
          -> Result<(Result<(), String>,)> {
             ctx.data_mut().charge_gas(10)?;
             ctx.data_mut().pending_retracts.push(PendingQuad {
-                graph,
-                subject,
-                predicate,
-                object_cbor,
+                graph:       q.graph,
+                subject:     q.subject,
+                predicate:   q.predicate,
+                object_cbor: q.object_cbor,
             });
             Ok((Ok(()),))
         },
     )?;
 
+    // query: func(datalog-src: string) -> result<list<quad>, string>
+    // Return type uses WitQuad for the list element.
     inst.func_wrap(
         "query",
         |mut ctx: wasmtime::StoreContextMut<HostState>,
          (datalog_src,): (String,)|
-         -> Result<(Result<Vec<Vec<u8>>, String>,)> {
+         -> Result<(Result<Vec<WitQuad>, String>,)> {
             ctx.data_mut().charge_gas(100)?;
             // TODO(Phase 4): delegate to KQE DatalogProgram evaluation
             let _ = datalog_src;
@@ -136,6 +171,7 @@ fn bind_kqe(linker: &mut Linker<HostState>) -> Result<()> {
         },
     )?;
 
+    // get-objects: func(graph: string, subject: string, predicate: string) -> list<list<u8>>
     inst.func_wrap(
         "get-objects",
         |mut ctx: wasmtime::StoreContextMut<HostState>,
@@ -146,6 +182,7 @@ fn bind_kqe(linker: &mut Linker<HostState>) -> Result<()> {
         },
     )?;
 
+    // get-head: func(graph-name: string) -> option<string>
     inst.func_wrap(
         "get-head",
         |mut ctx: wasmtime::StoreContextMut<HostState>,
@@ -162,7 +199,7 @@ fn bind_kqe(linker: &mut Linker<HostState>) -> Result<()> {
 // ── kotoba:kais/kse ────────────────────────────────────────────────────────
 
 fn bind_kse(linker: &mut Linker<HostState>) -> Result<()> {
-    let mut inst = linker.instance("kotoba:kais/kse")?;
+    let mut inst = linker.instance("kotoba:kais/kse@0.1.0")?;
 
     inst.func_wrap(
         "publish",
@@ -192,7 +229,7 @@ fn bind_kse(linker: &mut Linker<HostState>) -> Result<()> {
 // ── kotoba:kais/auth ───────────────────────────────────────────────────────
 
 fn bind_auth(linker: &mut Linker<HostState>) -> Result<()> {
-    let mut inst = linker.instance("kotoba:kais/auth")?;
+    let mut inst = linker.instance("kotoba:kais/auth@0.1.0")?;
 
     inst.func_wrap(
         "current-did",
@@ -228,7 +265,7 @@ fn bind_auth(linker: &mut Linker<HostState>) -> Result<()> {
 // ── kotoba:kais/llm ────────────────────────────────────────────────────────
 
 fn bind_llm(linker: &mut Linker<HostState>) -> Result<()> {
-    let mut inst = linker.instance("kotoba:kais/llm")?;
+    let mut inst = linker.instance("kotoba:kais/llm@0.1.0")?;
 
     inst.func_wrap(
         "infer",
@@ -268,7 +305,7 @@ fn bind_llm(linker: &mut Linker<HostState>) -> Result<()> {
 // ── kotoba:kais/chain ──────────────────────────────────────────────────────
 
 fn bind_chain(linker: &mut Linker<HostState>) -> Result<()> {
-    let mut inst = linker.instance("kotoba:kais/chain")?;
+    let mut inst = linker.instance("kotoba:kais/chain@0.1.0")?;
 
     inst.func_wrap(
         "append-infer",

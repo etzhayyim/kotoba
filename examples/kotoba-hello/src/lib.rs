@@ -14,6 +14,8 @@ wit_bindgen::generate!({
     world: "kotoba-node",
 });
 
+use kotoba::kais::{auth, kqe, kse};
+
 struct KotobaHello;
 
 impl Guest for KotobaHello {
@@ -29,12 +31,12 @@ impl Guest for KotobaHello {
             // CBOR-encoded boolean `true` = 0xF5
             object_cbor: vec![0xF5],
         };
-        kqe::assert_quad(q).map_err(|e| format!("assert failed: {e}"))?;
+        kqe::assert_quad(&q).map_err(|e| format!("assert failed: {e}"))?;
 
         // 3. Publish to KSE journal
         kse::publish(
-            "kotoba/hello/greet".to_string(),
-            format!("hello from {did}").into_bytes(),
+            "kotoba/hello/greet",
+            &format!("hello from {did}").into_bytes(),
         )
         .map_err(|e| format!("publish failed: {e}"))?;
 

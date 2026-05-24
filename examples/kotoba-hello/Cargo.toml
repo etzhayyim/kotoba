@@ -16,5 +16,7 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib"]
 
+[workspace]
+
 [dependencies]
 wit-bindgen = { version = "0.28", default-features = false, features = ["macros"] }
