@@ -80,3 +80,71 @@ impl Shelf {
         ).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kotoba_core::cid::KotobaCid;
+
+    #[tokio::test]
+    async fn get_on_unknown_key_returns_none() {
+        let shelf = Shelf::new();
+        let result = shelf.get(BUCKET_BLOCKS, "no-such-key").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn put_then_get_returns_value() {
+        let shelf = Shelf::new();
+        let value = Bytes::from_static(b"hello shelf");
+        shelf.put(BUCKET_BLOCKS, "key1".to_string(), value.clone()).await;
+        let got = shelf.get(BUCKET_BLOCKS, "key1").await;
+        assert_eq!(got, Some(value));
+    }
+
+    #[tokio::test]
+    async fn put_increments_revision_on_re_put() {
+        let shelf = Shelf::new();
+        let rev1 = shelf
+            .put(BUCKET_GRAPHS, "k".to_string(), Bytes::from_static(b"v1"))
+            .await;
+        let rev2 = shelf
+            .put(BUCKET_GRAPHS, "k".to_string(), Bytes::from_static(b"v2"))
+            .await;
+        assert_eq!(rev1, 1);
+        assert_eq!(rev2, 2);
+    }
+
+    #[tokio::test]
+    async fn delete_removes_key() {
+        let mut bucket = ShelfBucket::new("test-bucket");
+        bucket.put("del-key".to_string(), Bytes::from_static(b"to-delete"));
+        assert!(bucket.get("del-key").is_some());
+        bucket.delete("del-key");
+        assert!(bucket.get("del-key").is_none());
+    }
+
+    #[tokio::test]
+    async fn get_head_set_head_roundtrip() {
+        let shelf = Shelf::new();
+        let graph_cid = KotobaCid::from_bytes(b"graph-cid-data");
+        let commit_cid = KotobaCid::from_bytes(b"commit-cid-data");
+        // Before set_head, get_head returns None
+        assert!(shelf.get_head(&graph_cid).await.is_none());
+        shelf.set_head(&graph_cid, &commit_cid).await;
+        let retrieved = shelf.get_head(&graph_cid).await.expect("head should be set");
+        assert_eq!(retrieved, commit_cid);
+    }
+
+    #[tokio::test]
+    async fn put_to_unknown_bucket_creates_bucket_on_demand() {
+        let shelf = Shelf::new();
+        let custom_bucket = "KOTOBA_CUSTOM";
+        let rev = shelf
+            .put(custom_bucket, "some-key".to_string(), Bytes::from_static(b"val"))
+            .await;
+        assert_eq!(rev, 1);
+        let got = shelf.get(custom_bucket, "some-key").await;
+        assert_eq!(got, Some(Bytes::from_static(b"val")));
+    }
+}

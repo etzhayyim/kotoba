@@ -92,6 +92,14 @@ impl CommitDag {
             .and_then(|c| self.commits.get(&c.to_multibase()))
     }
 
+    /// Return all head commit CIDs as a map from graph multibase → commit multibase.
+    /// Used by `kqe.get-head` in WASM guests.
+    pub fn heads_as_map(&self) -> std::collections::HashMap<String, String> {
+        self.heads.iter()
+            .map(|(graph_mb, commit_cid)| (graph_mb.clone(), commit_cid.to_multibase()))
+            .collect()
+    }
+
     /// Persist the head commit for `graph_cid` to the block store.
     pub fn persist_head(
         &self,

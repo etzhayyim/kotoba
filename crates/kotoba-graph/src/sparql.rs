@@ -38,7 +38,8 @@ impl SparqlCompiler {
     /// `output_relation` becomes the head predicate. SELECT must project
     /// exactly 2 variables (the kotoba binary-relation arity invariant).
     pub fn compile(sparql: &str, output_relation: &str) -> anyhow::Result<CompiledSparqlMv> {
-        let query = spargebra::Query::parse(sparql, None)
+        let query = spargebra::SparqlParser::new()
+            .parse_query(sparql)
             .map_err(|e| anyhow!("SPARQL parse error: {e}"))?;
 
         let pattern = match query {

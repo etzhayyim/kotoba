@@ -89,9 +89,13 @@ pub async fn run_jetstream_client(journal: Arc<Journal>, quad_store: Arc<QuadSto
     }
 }
 
-fn build_subscribe_url(base: &str) -> String {
-    let collections: Vec<String> = std::env::var("KOTOBA_JETSTREAM_COLLECTIONS")
-        .unwrap_or_default()
+pub(crate) fn build_subscribe_url(base: &str) -> String {
+    let collections_env = std::env::var("KOTOBA_JETSTREAM_COLLECTIONS").unwrap_or_default();
+    build_subscribe_url_with(base, &collections_env)
+}
+
+fn build_subscribe_url_with(base: &str, collections_csv: &str) -> String {
+    let collections: Vec<String> = collections_csv
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -107,4 +111,41 @@ fn build_subscribe_url(base: &str) -> String {
         .collect();
 
     format!("{}?{}", base, params.join("&"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_subscribe_url_with;
+
+    #[test]
+    fn no_collections_returns_base_url() {
+        let url = build_subscribe_url_with("wss://example.com/subscribe", "");
+        assert_eq!(url, "wss://example.com/subscribe");
+    }
+
+    #[test]
+    fn single_collection_appends_param() {
+        let url = build_subscribe_url_with("wss://example.com/subscribe", "app.bsky.feed.post");
+        assert!(url.contains("wantedCollections=app.bsky.feed.post"), "got: {url}");
+    }
+
+    #[test]
+    fn multiple_collections_appends_multiple_params() {
+        let url = build_subscribe_url_with(
+            "wss://example.com/subscribe",
+            "app.bsky.feed.post,app.bsky.graph.follow",
+        );
+        assert!(url.contains("wantedCollections=app.bsky.feed.post"), "got: {url}");
+        assert!(url.contains("wantedCollections=app.bsky.graph.follow"), "got: {url}");
+    }
+
+    #[test]
+    fn whitespace_trimmed_from_collections() {
+        let url = build_subscribe_url_with(
+            "wss://example.com/subscribe",
+            " app.bsky.feed.post , app.bsky.graph.follow ",
+        );
+        assert!(url.contains("wantedCollections=app.bsky.feed.post"), "got: {url}");
+        assert!(!url.contains("wantedCollections= "), "should strip spaces, got: {url}");
+    }
 }

@@ -101,6 +101,61 @@ impl Default for Journal {
     fn default() -> Self { Self::new() }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::topic::Topic;
+    use bytes::Bytes;
+
+    #[tokio::test]
+    async fn publish_increments_seq() {
+        let journal = Journal::new();
+        let t = Topic::new("test/seq");
+        let e1 = journal.publish(t.clone(), Bytes::from_static(b"a")).await;
+        let e2 = journal.publish(t.clone(), Bytes::from_static(b"b")).await;
+        let e3 = journal.publish(t.clone(), Bytes::from_static(b"c")).await;
+        assert_eq!(e1.seq, 1);
+        assert_eq!(e2.seq, 2);
+        assert_eq!(e3.seq, 3);
+    }
+
+    #[tokio::test]
+    async fn publish_cid_is_deterministic() {
+        let journal = Journal::new();
+        let t = Topic::new("test/cid");
+        let payload = Bytes::from_static(b"hello kotoba");
+        let e1 = journal.publish(t.clone(), payload.clone()).await;
+        let e2 = journal.publish(t.clone(), payload.clone()).await;
+        assert_eq!(e1.cid, e2.cid, "same payload must produce same CID");
+    }
+
+    #[tokio::test]
+    async fn publish_returns_correct_topic_and_payload() {
+        let journal = Journal::new();
+        let topic_str = "kotoba/test/entry";
+        let payload = Bytes::from(vec![1u8, 2, 3, 4]);
+        let entry = journal
+            .publish(Topic::new(topic_str), payload.clone())
+            .await;
+        assert_eq!(entry.topic, topic_str);
+        assert_eq!(entry.payload, payload.to_vec());
+    }
+
+    #[tokio::test]
+    async fn subscribe_cursor_receives_published_entry() {
+        let journal = Journal::new();
+        // subscribe BEFORE publishing so the broadcast receiver is live
+        let mut cursor = journal.subscribe();
+        let topic = Topic::new("test/subscribe");
+        let payload = Bytes::from_static(b"broadcast me");
+        let published = journal.publish(topic, payload).await;
+        let received = cursor.next().await.expect("cursor should receive entry");
+        assert_eq!(received.seq, published.seq);
+        assert_eq!(received.cid, published.cid);
+        assert_eq!(received.payload, published.payload);
+    }
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

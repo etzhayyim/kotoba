@@ -1,0 +1,5 @@
+[build]
+# Host-side crates build and test for native aarch64-apple-darwin.
+# WASM guest crates (examples/kotoba-hello) use their own [workspace]
+# and must be built with an explicit --target flag.
+target = "aarch64-apple-darwin"

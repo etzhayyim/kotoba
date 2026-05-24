@@ -14,6 +14,7 @@ pub const NSID_NODE_STATUS:  &str = "ai.gftd.apps.kotoba.node.status";
 pub const NSID_BLOCK_PUT:    &str = "ai.gftd.apps.kotoba.block.put";
 pub const NSID_BLOCK_GET:    &str = "ai.gftd.apps.kotoba.block.get";
 pub const NSID_COMMIT_STORE: &str = "ai.gftd.apps.kotoba.commit.store";
+pub const NSID_AGENT_RUN:   &str = "ai.gftd.apps.kotoba.agent.run";
 
 use std::sync::Arc;
 use axum::{
@@ -203,6 +204,9 @@ pub async fn invoke_run(
         vec![]
     };
 
+    // Build head commits map for kqe.get-head in WASM guests.
+    let head_commits = state.quad_store.head_commit_map().await;
+
     // Move owned data into spawn_blocking — dispatch is CPU-bound (Cranelift JIT)
     let program_cid = req.program_cid.clone();
     let agent_did   = req.agent_did.clone();
@@ -223,6 +227,7 @@ pub async fn invoke_run(
             &[],
             10_000,
             quad_snapshot,
+            head_commits,
         )
     })
     .await
@@ -575,5 +580,372 @@ pub async fn weight_put(
         blob_cid: blob_cid.to_multibase(),
         quad_cid,
         layer:    req.layer,
+    }))
+}
+
+// ── Quad retract (D) ──────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct QuadRetractReq {
+    pub graph:     String,
+    pub subject:   String,
+    pub predicate: String,
+    pub object:    String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct QuadRetractResp {
+    pub status:      &'static str,
+    pub journal_cid: String,
+}
+
+/// POST /xrpc/ai.gftd.apps.kotoba.quad.retract
+pub async fn quad_retract(
+    State(state): State<Arc<KotobaState>>,
+    Json(req):    Json<QuadRetractReq>,
+) -> impl IntoResponse {
+    use kotoba_core::cid::KotobaCid;
+    use kotoba_kqe::quad::{Quad, QuadObject};
+
+    let quad = Quad {
+        graph:     KotobaCid::from_bytes(req.graph.as_bytes()),
+        subject:   KotobaCid::from_bytes(req.subject.as_bytes()),
+        predicate: req.predicate.clone(),
+        object:    QuadObject::Text(req.object.clone()),
+    };
+
+    let journal_cid = state.journal_retract(&quad).await;
+    state.quad_store.retract(quad).await;
+
+    tracing::info!(
+        graph     = %req.graph,
+        subject   = %req.subject,
+        predicate = %req.predicate,
+        cid       = %journal_cid,
+        "quad.retract → Journal + QuadStore"
+    );
+
+    (StatusCode::OK, Json(QuadRetractResp { status: "ok", journal_cid }))
+}
+
+// ── Weight get (E) ────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct WeightGetReq {
+    pub cid: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WeightGetResp {
+    pub cid:      String,
+    pub data_b64: String,
+}
+
+/// GET /xrpc/ai.gftd.apps.kotoba.weight.get?cid=<multibase>
+pub async fn weight_get(
+    State(state): State<Arc<KotobaState>>,
+    axum::extract::Query(req): axum::extract::Query<WeightGetReq>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+    use kotoba_core::cid::KotobaCid;
+
+    let cid = KotobaCid::from_multibase(&req.cid)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid CID".into()))?;
+    match state.block_store.get(&cid)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        None => Err((StatusCode::NOT_FOUND, "weight blob not found".into())),
+        Some(bytes) => Ok(Json(WeightGetResp {
+            cid:      req.cid.clone(),
+            data_b64: B64.encode(&bytes),
+        })),
+    }
+}
+
+// ── LoRA apply (F) ────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct LoraApplyReq {
+    /// Base model CID (multibase)
+    pub model_cid:   String,
+    /// LoRA adapter rank
+    pub rank:        u32,
+    /// Named graph CID (multibase) to index this adapter in
+    pub graph:       String,
+    /// Raw LoRA adapter bytes, base64-encoded
+    pub adapter_b64: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LoraApplyResp {
+    pub adapter_cid: String,
+    pub quad_cid:    String,
+}
+
+/// POST /xrpc/ai.gftd.apps.kotoba.lora.apply
+pub async fn lora_apply(
+    State(state): State<Arc<KotobaState>>,
+    Json(req):    Json<LoraApplyReq>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+    use kotoba_core::cid::KotobaCid;
+    use kotoba_kqe::quad::{Quad, QuadObject, TensorDtype};
+
+    let bytes = B64.decode(&req.adapter_b64)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    // Store adapter bytes in block store
+    let adapter_cid = KotobaCid::from_bytes(&bytes);
+    state.block_store.put(&adapter_cid, &bytes)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let model_cid = KotobaCid::from_multibase(&req.model_cid)
+        .unwrap_or_else(|| KotobaCid::from_bytes(req.model_cid.as_bytes()));
+    let graph_cid = KotobaCid::from_multibase(&req.graph)
+        .unwrap_or_else(|| KotobaCid::from_bytes(req.graph.as_bytes()));
+
+    // Assert LoRA Quad: (graph, model_cid) --lora/adapter--> adapter_cid
+    let quad = Quad {
+        graph:     graph_cid,
+        subject:   model_cid,
+        predicate: "lora/adapter".to_string(),
+        object:    QuadObject::TensorCid {
+            cid:   adapter_cid.clone(),
+            shape: vec![req.rank],
+            dtype: TensorDtype::F8E4M3,
+        },
+    };
+    let quad_cid = state.journal_assert(&quad).await;
+    state.quad_store.assert(quad).await;
+
+    tracing::info!(
+        adapter_cid = %adapter_cid.to_multibase(),
+        model_cid   = %req.model_cid,
+        rank        = req.rank,
+        "lora.apply stored"
+    );
+
+    Ok(Json(LoraApplyResp {
+        adapter_cid: adapter_cid.to_multibase(),
+        quad_cid,
+    }))
+}
+
+// ── Embed create (G) ──────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct EmbedCreateReq {
+    /// Text to embed
+    pub text:      String,
+    /// Document CID (multibase) — identifies the source document
+    pub doc_cid:   String,
+    /// Model CID (multibase) — identifies the embedding model
+    pub model_cid: String,
+    /// Named graph CID (multibase) to index this embedding in
+    pub graph:     String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmbedCreateResp {
+    pub status:   &'static str,
+    pub quad_cid: String,
+    pub dims:     usize,
+}
+
+/// POST /xrpc/ai.gftd.apps.kotoba.embed.create
+pub async fn embed_create(
+    State(state): State<Arc<KotobaState>>,
+    Json(req):    Json<EmbedCreateReq>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    use kotoba_core::cid::KotobaCid;
+    use kotoba_llm::embed::{Embedding, embed_to_quad};
+
+    let doc_cid   = KotobaCid::from_multibase(&req.doc_cid)
+        .unwrap_or_else(|| KotobaCid::from_bytes(req.doc_cid.as_bytes()));
+    let model_cid = KotobaCid::from_multibase(&req.model_cid)
+        .unwrap_or_else(|| KotobaCid::from_bytes(req.model_cid.as_bytes()));
+    let graph_cid = KotobaCid::from_multibase(&req.graph)
+        .unwrap_or_else(|| KotobaCid::from_bytes(req.graph.as_bytes()));
+
+    // Compute embedding vector — use inference engine if available, else blake3 pseudo-vector
+    let vector: Vec<f32> = if let Some(engine) = &state.inference_engine {
+        let engine = engine.clone();
+        let text   = format!("embed: {}", req.text);
+        let result = tokio::task::spawn_blocking(move || engine(&text, 256))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        // Parse space-separated floats from engine output, fallback to blake3 pseudo-vector
+        let parsed: Vec<f32> = result.split_whitespace()
+            .filter_map(|s| s.parse::<f32>().ok())
+            .collect();
+        if parsed.is_empty() {
+            // Inference engine returned non-numeric output — build blake3 pseudo-vector
+            blake3_pseudo_vector(&req.text, 128)
+        } else {
+            parsed
+        }
+    } else {
+        // No inference engine: 128-dim blake3 pseudo-embedding
+        blake3_pseudo_vector(&req.text, 128)
+    };
+
+    let dims = vector.len();
+    let emb = Embedding { doc_cid, model_cid, vector };
+    let delta = embed_to_quad(&emb, graph_cid);
+    let quad  = delta.quad;
+
+    let quad_cid = state.journal_assert(&quad).await;
+    state.quad_store.assert(quad).await;
+
+    Ok(Json(EmbedCreateResp { status: "ok", quad_cid, dims }))
+}
+
+/// Build a deterministic pseudo-embedding from blake3 hash bytes.
+fn blake3_pseudo_vector(text: &str, dims: usize) -> Vec<f32> {
+    let hash = blake3::hash(text.as_bytes());
+    let hash_bytes = hash.as_bytes();
+    (0..dims)
+        .map(|i| {
+            let b = hash_bytes[i % 32] as f32;
+            (b / 127.5) - 1.0
+        })
+        .collect()
+}
+
+// ── Infer run (H) ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct InferRunReq {
+    /// Prompt text
+    pub prompt:         String,
+    /// Maximum tokens to generate
+    pub max_new_tokens: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InferRunResp {
+    pub status: &'static str,
+    pub output: String,
+}
+
+/// POST /xrpc/ai.gftd.apps.kotoba.infer.run
+pub async fn infer_run(
+    State(state): State<Arc<KotobaState>>,
+    Json(req):    Json<InferRunReq>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let engine = state.inference_engine.clone()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "no inference engine loaded".into()))?;
+
+    let max_tokens = req.max_new_tokens.unwrap_or(256);
+    let prompt     = req.prompt.clone();
+
+    let output = tokio::task::spawn_blocking(move || engine(&prompt, max_tokens))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(InferRunResp { status: "ok", output }))
+}
+
+// ── Agent ReAct loop ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct AgentRunReq {
+    pub task:      String,
+    pub graph_cid: Option<String>,
+    pub max_steps: Option<u32>,
+    /// Maximum tokens per LLM thought step (default 256)
+    pub max_tokens: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentRunResp {
+    pub status:        &'static str,
+    pub session_cid:   String,
+    pub steps:         Vec<kotoba_vm::ReActStep>,
+    pub final_answer:  Option<String>,
+    pub supersteps:    usize,
+    /// Commit CID of the session history flushed to BlockStore (ProllyTree)
+    pub commit_cid:    Option<String>,
+}
+
+/// POST /xrpc/ai.gftd.apps.kotoba.agent.run
+///
+/// Runs a ReAct agent loop using the Kotoba **Pregel BSP** engine:
+///   - vertex_id  = session CID
+///   - superstep  = one cycle: Thought → Action → Observation
+///   - self-message  → advance to next superstep
+///   - vote_halt  → finish action or max_steps reached
+///
+/// Requires `KOTOBA_LOAD_GEMMA` (or another inference engine) to be loaded.
+pub async fn agent_run(
+    State(state): State<Arc<KotobaState>>,
+    Json(req):    Json<AgentRunReq>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    use kotoba_core::cid::KotobaCid;
+    use kotoba_vm::{AgentSession, PregelReActRunner, ReActStep, session_to_quads};
+
+    let engine = state.inference_engine.clone()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE,
+            "no inference engine loaded (set KOTOBA_LOAD_GEMMA)".into()))?;
+
+    let graph_cid = req.graph_cid
+        .as_deref()
+        .map(|s| KotobaCid::from_bytes(s.as_bytes()))
+        .unwrap_or_else(|| KotobaCid::from_bytes(b"agent-default-graph"));
+
+    let max_steps  = req.max_steps.unwrap_or(10);
+    let max_tokens = req.max_tokens.unwrap_or(256);
+    let task       = req.task.clone();
+    let graph_cid2 = graph_cid.clone();
+    let qs         = Arc::clone(&state.quad_store);
+
+    // Run the Pregel ReAct loop in a blocking thread (LLM is sync).
+    // Each BSP superstep = one Thought+Action+Observation cycle.
+    let (session, superstep_results) = tokio::task::spawn_blocking(move || {
+        let runner  = PregelReActRunner::new(engine, max_tokens);
+        let session = AgentSession::new(task, graph_cid2, max_steps);
+        runner.run(session)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let supersteps = superstep_results.len();
+
+    // Extract final answer from last Finish step
+    let final_answer = session.steps.iter().rev().find_map(|s| {
+        if let ReActStep::Finish { answer } = s { Some(answer.clone()) } else { None }
+    });
+
+    // Store session steps as Quads in the QuadStore
+    let deltas = session_to_quads(&session);
+    for delta in &deltas {
+        if delta.is_assert() {
+            qs.assert(delta.quad.clone()).await;
+        }
+    }
+
+    // Commit session history to BlockStore (ProllyTree)
+    let commit_cid = qs
+        .commit("agent", graph_cid.clone(), session.steps.len() as u64)
+        .await
+        .ok()
+        .map(|c| c.to_multibase());
+
+    // If IPFS pinning is enabled, pin the commit block in the background
+    if let (Some(cid_str), Some(pin)) = (commit_cid.clone(), state.ipfs_pin.clone()) {
+        tokio::spawn(async move { pin.pin(&cid_str).await });
+    }
+
+    let session_cid = session.session_cid.to_multibase();
+    let steps       = session.steps;
+
+    Ok(Json(AgentRunResp {
+        status: "ok",
+        session_cid,
+        steps,
+        final_answer,
+        supersteps,
+        commit_cid,
     }))
 }

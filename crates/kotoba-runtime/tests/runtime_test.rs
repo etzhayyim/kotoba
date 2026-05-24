@@ -108,6 +108,8 @@ fn wasm_executor_rejects_invalid_program() {
         b"not valid wasm component",
         "did:plc:test",
         vec![],
+        vec![],
+        std::collections::HashMap::new(),
     );
     assert!(result.is_err(), "invalid WASM should return RuntimeError");
     let err_str = format!("{:?}", result.unwrap_err());

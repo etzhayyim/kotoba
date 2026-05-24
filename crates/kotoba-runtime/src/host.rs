@@ -60,6 +60,14 @@ pub struct HostState {
     /// Type-erased as `InferenceFn` to avoid a direct kotoba-runtime → kotoba-llm
     /// dependency (which would create a cycle through kotoba-vm).
     pub inference_engine: Option<InferenceFn>,
+    /// LoRA loads buffered during WASM execution — (base_model_cid, lora_cid) pairs.
+    /// Applied by the caller after execute() returns.
+    pub pending_lora_loads: Vec<(String, String)>,
+    /// Head commit map (graph multibase → commit multibase) — pre-populated before execution
+    /// so that `kqe.get-head` can do synchronous lookups.
+    pub head_commits: std::collections::HashMap<String, String>,
+    /// Inbox for `kse.drain` — pre-populated by the caller with (topic, payload) entries.
+    pub kse_inbox: Vec<(String, Vec<u8>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -84,12 +92,21 @@ impl HostState {
             wasi_ctx,
             wasi_table: ResourceTable::new(),
             inference_engine: None,
+            pending_lora_loads: Vec::new(),
+            head_commits: std::collections::HashMap::new(),
+            kse_inbox: Vec::new(),
         }
     }
 
     /// Pre-populate the quad snapshot for `kqe.query` lookups during WASM execution.
     pub fn with_snapshot(mut self, snapshot: Vec<WitQuad>) -> Self {
         self.quad_snapshot = snapshot;
+        self
+    }
+
+    /// Pre-populate the head commits map for `kqe.get-head` lookups during WASM execution.
+    pub fn with_head_commits(mut self, head_commits: std::collections::HashMap<String, String>) -> Self {
+        self.head_commits = head_commits;
         self
     }
 
@@ -257,10 +274,14 @@ fn bind_kqe(linker: &mut Linker<HostState>) -> Result<()> {
     inst.func_wrap(
         "get-objects",
         |mut ctx: wasmtime::StoreContextMut<HostState>,
-         (_graph, _subject, _predicate): (String, String, String)|
+         (graph, subject, predicate): (String, String, String)|
          -> Result<(Vec<Vec<u8>>,)> {
             ctx.data_mut().charge_gas(5)?;
-            Ok((vec![],))
+            let matches: Vec<Vec<u8>> = ctx.data().quad_snapshot.iter()
+                .filter(|q| q.graph == graph && q.subject == subject && q.predicate == predicate)
+                .map(|q| q.object_cbor.clone())
+                .collect();
+            Ok((matches,))
         },
     )?;
 
@@ -268,10 +289,10 @@ fn bind_kqe(linker: &mut Linker<HostState>) -> Result<()> {
     inst.func_wrap(
         "get-head",
         |mut ctx: wasmtime::StoreContextMut<HostState>,
-         (_graph_name,): (String,)|
+         (graph_name,): (String,)|
          -> Result<(Option<String>,)> {
             ctx.data_mut().charge_gas(1)?;
-            Ok((None,))
+            Ok((ctx.data().head_commits.get(&graph_name).cloned(),))
         },
     )?;
 
@@ -299,10 +320,15 @@ fn bind_kse(linker: &mut Linker<HostState>) -> Result<()> {
     inst.func_wrap(
         "drain",
         |mut ctx: wasmtime::StoreContextMut<HostState>,
-         (_topic_pattern, _max_items): (String, u32)|
+         (topic_pattern, max_items): (String, u32)|
          -> Result<(Result<Vec<(String, Vec<u8>)>, String>,)> {
             ctx.data_mut().charge_gas(20)?;
-            Ok((Ok(vec![]),))
+            let matches: Vec<(String, Vec<u8>)> = ctx.data().kse_inbox.iter()
+                .filter(|(t, _)| topic_pattern.is_empty() || t.starts_with(&topic_pattern))
+                .take(max_items as usize)
+                .cloned()
+                .collect();
+            Ok((Ok(matches),))
         },
     )?;
 
@@ -387,20 +413,28 @@ fn bind_llm(linker: &mut Linker<HostState>) -> Result<()> {
     inst.func_wrap(
         "embed",
         |mut ctx: wasmtime::StoreContextMut<HostState>,
-         (_model_cid, _text): (String, String)|
+         (_model_cid, text): (String, String)|
          -> Result<(Result<Vec<u8>, String>,)> {
             ctx.data_mut().charge_gas(200)?;
-            Ok((Err("foreign bridge not yet wired".to_string()),))
+            let engine_opt = ctx.data().inference_engine.clone();
+            if let Some(engine_fn) = engine_opt {
+                return match engine_fn(&format!("embed:{text}"), 256) {
+                    Ok(text_out) => Ok((Ok(text_out.into_bytes()),)),
+                    Err(e)       => Ok((Err(e.to_string()),)),
+                };
+            }
+            Ok((Err("no inference engine".to_string()),))
         },
     )?;
 
     inst.func_wrap(
         "load-lora",
         |mut ctx: wasmtime::StoreContextMut<HostState>,
-         (_base_model_cid, _lora_cid): (String, String)|
+         (base_model_cid, lora_cid): (String, String)|
          -> Result<(Result<(), String>,)> {
             ctx.data_mut().charge_gas(500)?;
-            Ok((Err("foreign bridge not yet wired".to_string()),))
+            ctx.data_mut().pending_lora_loads.push((base_model_cid, lora_cid));
+            Ok((Ok(()),))
         },
     )?;
 

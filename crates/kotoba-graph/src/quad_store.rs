@@ -35,12 +35,15 @@ impl QuadStore {
         let g = quad.graph.to_multibase();
         let s = quad.subject.to_multibase();
         let p = &quad.predicate.clone();
-        let o = "o"; // object hash placeholder
+        let o = {
+            let obj_bytes = serde_json::to_vec(&quad.object).unwrap_or_default();
+            kotoba_core::cid::KotobaCid::from_bytes(&obj_bytes).to_multibase()
+        };
 
         let payload = serde_json::to_vec(&quad).unwrap_or_default().into();
-        self.journal.publish(Topic::quad_spo(&g, &s, p, o), bytes::Bytes::clone(&payload)).await;
-        self.journal.publish(Topic::quad_pos(&g, p, o, &s), bytes::Bytes::clone(&payload)).await;
-        self.journal.publish(Topic::quad_osp(&g, o, &s, p), payload).await;
+        self.journal.publish(Topic::quad_spo(&g, &s, p, &o), bytes::Bytes::clone(&payload)).await;
+        self.journal.publish(Topic::quad_pos(&g, p, &o, &s), bytes::Bytes::clone(&payload)).await;
+        self.journal.publish(Topic::quad_osp(&g, &o, &s, p), payload).await;
 
         let delta = Delta::assert(quad.clone());
         let mut arrs = self.arrangements.write().await;
@@ -62,6 +65,12 @@ impl QuadStore {
     /// Return the head Commit for `graph_cid` (if any).
     pub async fn head_commit(&self, graph_cid: &KotobaCid) -> Option<Commit> {
         self.commit_dag.read().await.head(graph_cid).cloned()
+    }
+
+    /// Return all head commit CIDs as a map from graph multibase → commit multibase.
+    /// Used by `kqe.get-head` host function.
+    pub async fn head_commit_map(&self) -> std::collections::HashMap<String, String> {
+        self.commit_dag.read().await.heads_as_map()
     }
 
     /// Flush the current Arrangement for `graph_cid` into a ProllyTree Leaf node,

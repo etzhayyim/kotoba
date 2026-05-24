@@ -91,6 +91,7 @@ impl InvokeRouter {
             program_bytes, ctx_cbor,
             program, arrangement, input_deltas, max_steps,
             vec![],
+            std::collections::HashMap::new(),
         )
     }
 
@@ -108,11 +109,12 @@ impl InvokeRouter {
         input_deltas:   &[Delta],
         max_steps:      u32,
         quad_snapshot:  Vec<WitQuad>,
+        head_commits:   std::collections::HashMap<String, String>,
     ) -> Result<DispatchResult, RouterError> {
         match program_type {
             ProgramType::WasmNode => {
                 let bytes = program_bytes.ok_or(RouterError::MissingWasmBytes)?;
-                let result = self.wasm.execute(program_cid, bytes, agent_did, ctx_cbor, quad_snapshot)?;
+                let result = self.wasm.execute(program_cid, bytes, agent_did, ctx_cbor, quad_snapshot, head_commits)?;
                 Ok(DispatchResult::Wasm(result))
             }
 
@@ -128,6 +130,7 @@ impl InvokeRouter {
                     retract_quads: vec![],
                     pending_publishes: vec![],
                     pending_chain_entries: vec![],
+                    pending_lora_loads: vec![],
                 }))
             }
 
