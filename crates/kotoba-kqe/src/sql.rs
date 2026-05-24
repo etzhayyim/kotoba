@@ -188,19 +188,7 @@ impl VarMap {
         }
     }
 
-    /// Return all registered alias strings.
-    fn aliases(&self) -> Vec<String> {
-        let mut seen = std::collections::HashSet::new();
-        let mut out = Vec::new();
-        for key in self.slots.keys() {
-            if let Some(alias) = key.rsplit_once('.').map(|(a, _)| a.to_string()) {
-                if seen.insert(alias.clone()) {
-                    out.push(alias);
-                }
-            }
-        }
-        out
-    }
+
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

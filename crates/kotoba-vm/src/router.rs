@@ -113,7 +113,7 @@ impl InvokeRouter {
                 let arr  = arrangement.expect("Datalog dispatch requires arrangement");
                 use kotoba_core::cid::KotobaCid;
                 let cid = KotobaCid::from_bytes(program_cid.as_bytes());
-                let result = KotobaVm::execute(&cid, prog, arr, input_deltas, max_steps, call_id);
+                let result = KotobaVm::execute(&cid, prog, arr, input_deltas, max_steps, call_id, None);
                 match result.status {
                     ExecStatus::Ok | ExecStatus::Halt => Ok(DispatchResult::Datalog(result)),
                     ExecStatus::StepsExceeded         => Err(RouterError::StepsExceeded),

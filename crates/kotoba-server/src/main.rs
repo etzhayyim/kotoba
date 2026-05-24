@@ -142,6 +142,15 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Jetstream client started (Journal + QuadStore)");
     }
 
+    // ── 6. subscribeRepos binary firehose (optional) ──────────────────────────
+    if std::env::var("KOTOBA_SUBSCRIBE_REPOS").is_ok() {
+        let journal_arc     = Arc::clone(&state.journal);
+        let quad_store_arc  = Arc::clone(&state.quad_store);
+        let block_store_arc = Arc::clone(&state.block_store);
+        tokio::spawn(kotoba_graph::run_subscribe_repos(journal_arc, quad_store_arc, block_store_arc));
+        tracing::info!("subscribeRepos firehose client started (CAR blocks + Quads)");
+    }
+
     let state = Arc::new(state);
 
     let app = build_router(Arc::clone(&state));

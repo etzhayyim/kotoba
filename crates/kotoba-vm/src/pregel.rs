@@ -215,11 +215,9 @@ impl PregelGraph {
     pub fn current_superstep(&self) -> u32 { self.superstep }
 
     /// Snapshot all vertex states into a content-addressed ProllyTree leaf node
-    /// and return the root CID — the Merkle proof for this superstep's state.
+    /// and return the root CID.
     ///
-    /// Entries are sorted by vertex CID for deterministic output regardless of
-    /// HashMap iteration order.  Calling this after each superstep gives one
-    /// root CID per BSP step, satisfying the "Merkle root per superstep" invariant.
+    /// Entries are sorted by vertex CID for deterministic output.
     pub fn checkpoint(&self, store: &dyn BlockStore) -> anyhow::Result<KotobaCid> {
         let mut entries: Vec<(Vec<u8>, Vec<u8>)> = self.vertices.values()
             .map(|v| (v.id.cid().0.to_vec(), v.state.clone()))
@@ -229,6 +227,32 @@ impl PregelGraph {
         let placeholder = KotobaCid::from_bytes(b"superstep-checkpoint");
         let leaf = ProllyNode::Leaf { entries, cid: placeholder };
         ProllyTree::put_node(&leaf, store)
+    }
+
+    /// Hash-chain checkpoint: `CID = blake3(root_bytes || prev_bytes)`.
+    ///
+    /// Links the current superstep state to the previous one so every step
+    /// cryptographically commits to the full execution history — tampering
+    /// with any intermediate step changes all subsequent chain-link CIDs.
+    ///
+    /// The link block (root_bytes || prev_bytes) is persisted so it can be
+    /// re-verified independently.  Pass `prev = None` for superstep 0.
+    pub fn checkpoint_chained(
+        &self,
+        store: &dyn BlockStore,
+        prev: Option<&KotobaCid>,
+    ) -> anyhow::Result<KotobaCid> {
+        let root_cid = self.checkpoint(store)?;
+
+        // link_bytes = root_cid_bytes ++ prev_cid_bytes (empty for step 0)
+        let mut link_bytes = root_cid.0.to_vec();
+        if let Some(p) = prev {
+            link_bytes.extend_from_slice(&p.0);
+        }
+
+        let link_cid = KotobaCid::from_bytes(&link_bytes);
+        store.put(&link_cid, &link_bytes)?;
+        Ok(link_cid)
     }
 }
 
@@ -520,5 +544,45 @@ mod tests {
         assert_eq!(graph.current_superstep(), 1);
         graph.superstep(&compute); // no active vertices, all halted
         assert_eq!(graph.current_superstep(), 2);
+    }
+
+    #[test]
+    fn test_checkpoint_produces_block() {
+        use kotoba_store::MemoryBlockStore;
+
+        let mut graph = PregelGraph::new();
+        let va = VertexId::from_str("a");
+        let vb = VertexId::from_str("b");
+        graph.add_vertex(va.clone(), b"state-a".to_vec());
+        graph.add_vertex(vb.clone(), b"state-b".to_vec());
+
+        let store = MemoryBlockStore::new();
+        let cid = graph.checkpoint(&store).unwrap();
+
+        // The returned CID must exist as a block in the store.
+        assert!(store.has(&cid), "checkpoint block must be persisted");
+    }
+
+    #[test]
+    fn test_checkpoint_deterministic_across_vertex_order() {
+        use kotoba_store::MemoryBlockStore;
+
+        // Two graphs with the same vertex states but inserted in different order
+        // must produce the same checkpoint CID.
+        let mut g1 = PregelGraph::new();
+        g1.add_vertex(VertexId::from_str("alpha"), b"state-1".to_vec());
+        g1.add_vertex(VertexId::from_str("beta"),  b"state-2".to_vec());
+
+        let mut g2 = PregelGraph::new();
+        g2.add_vertex(VertexId::from_str("beta"),  b"state-2".to_vec());
+        g2.add_vertex(VertexId::from_str("alpha"), b"state-1".to_vec());
+
+        let s1 = MemoryBlockStore::new();
+        let s2 = MemoryBlockStore::new();
+
+        let cid1 = g1.checkpoint(&s1).unwrap();
+        let cid2 = g2.checkpoint(&s2).unwrap();
+
+        assert_eq!(cid1, cid2, "checkpoint CID must be deterministic regardless of insertion order");
     }
 }

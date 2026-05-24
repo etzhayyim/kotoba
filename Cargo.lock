@@ -2959,6 +2959,7 @@ dependencies = [
  "kotoba-kqe",
  "kotoba-kse",
  "kotoba-runtime",
+ "kotoba-store",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

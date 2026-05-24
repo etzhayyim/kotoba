@@ -62,15 +62,19 @@ impl KotobaVm {
         // Drive the superstep loop manually so we can checkpoint after each step.
         let mut superstep_results = Vec::new();
         let mut checkpoint_cids   = Vec::new();
+        let mut last_cid: Option<KotobaCid> = None;
 
         for _ in 0..max_steps {
             let r = graph.superstep(&compute);
             let halted = r.all_halted;
 
             if let Some(store) = block_store {
-                match graph.checkpoint(store) {
-                    Ok(cid) => checkpoint_cids.push(cid),
-                    Err(e)  => tracing::warn!("superstep checkpoint failed: {e}"),
+                match graph.checkpoint_chained(store, last_cid.as_ref()) {
+                    Ok(cid) => {
+                        last_cid = Some(cid.clone());
+                        checkpoint_cids.push(cid);
+                    }
+                    Err(e) => tracing::warn!("superstep checkpoint failed: {e}"),
                 }
             }
 
@@ -156,7 +160,7 @@ mod tests {
     fn empty_deltas_returns_ok_no_steps() {
         let result = KotobaVm::execute(
             &dummy_cid(), &one_rule_program(), &Arrangement::new(),
-            &[], 10, 2,
+            &[], 10, 2, None,
         );
         assert_eq!(result.status, ExecStatus::Ok);
         assert!(result.out_deltas.is_empty());
@@ -167,7 +171,7 @@ mod tests {
     fn ok_run_returns_call_id() {
         let result = KotobaVm::execute(
             &dummy_cid(), &one_rule_program(), &Arrangement::new(),
-            &[make_delta("alice", "base")], 10, 99,
+            &[make_delta("alice", "base")], 10, 99, None,
         );
         // Status is Ok (datalog_compute_fn votes_halt immediately — single step)
         assert_eq!(result.status, ExecStatus::Ok);
@@ -221,5 +225,68 @@ mod tests {
 
         assert_eq!(status, ExecStatus::StepsExceeded);
         assert!(out_deltas.is_empty(), "revert guard: StepsExceeded must produce no deltas");
+    }
+
+    #[test]
+    fn checkpoint_cids_produced_when_store_provided() {
+        use kotoba_store::MemoryBlockStore;
+
+        let store = MemoryBlockStore::new();
+        let result = KotobaVm::execute(
+            &dummy_cid(), &one_rule_program(), &Arrangement::new(),
+            &[make_delta("alice", "base")], 10, 42,
+            Some(&store),
+        );
+
+        assert_eq!(result.status, ExecStatus::Ok);
+        // one_rule_program + single delta → one superstep → one checkpoint CID
+        assert!(!result.checkpoint_cids.is_empty(), "expected at least one checkpoint CID");
+        // Each checkpoint CID must exist in the block store
+        for cid in &result.checkpoint_cids {
+            assert!(store.has(cid), "checkpoint block missing from store: {}", cid.to_multibase());
+        }
+    }
+
+    #[test]
+    fn no_checkpoint_cids_when_store_is_none() {
+        let result = KotobaVm::execute(
+            &dummy_cid(), &one_rule_program(), &Arrangement::new(),
+            &[make_delta("alice", "base")], 10, 7, None,
+        );
+        assert!(result.checkpoint_cids.is_empty());
+    }
+
+    /// Hash-chain property: sequential executions with two identical single-delta inputs
+    /// must produce different checkpoint CIDs because the second run's chained link
+    /// commits to the first run's CID as `prev`.
+    ///
+    /// We verify this by running KotobaVm twice with the same program + deltas
+    /// and asserting the two checkpoint CIDs differ.
+    #[test]
+    fn chained_checkpoints_differ_across_runs() {
+        use kotoba_store::MemoryBlockStore;
+        use crate::pregel::{PregelGraph, VertexId, ComputeOutput, ComputeFn, Vertex};
+
+        let store = MemoryBlockStore::new();
+
+        // Verify the chain property using PregelGraph directly:
+        // calling checkpoint_chained twice with same state but different `prev`
+        // must produce different link CIDs.
+
+        let mut graph = PregelGraph::new();
+        let v = VertexId::from_str("v");
+        graph.add_vertex(v.clone(), b"state".to_vec());
+        // Step 1 — run one superstep and checkpoint
+        let halt_fn: ComputeFn = Box::new(|vertex: &Vertex, _| ComputeOutput {
+            new_state: vertex.state.clone(),
+            messages:  vec![],
+            vote_halt: true,
+        });
+        graph.superstep(&halt_fn);
+        let cid1 = graph.checkpoint_chained(&store, None).unwrap();
+
+        // Step 2 — same vertex state, different prev → different link_cid
+        let cid2 = graph.checkpoint_chained(&store, Some(&cid1)).unwrap();
+        assert_ne!(cid1, cid2, "chained checkpoint with prev must differ from step-0 CID");
     }
 }

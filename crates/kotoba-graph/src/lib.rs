@@ -3,6 +3,7 @@ pub mod commit;
 pub mod jetstream;
 pub mod quad_store;
 pub mod sparql;
+pub mod subscribe_repos;
 
 pub use atproto::{
     AtUri, JetstreamEvent,
@@ -12,3 +13,4 @@ pub use atproto::{
 pub use commit::{Commit, CommitDag};
 pub use quad_store::QuadStore;
 pub use jetstream::run_jetstream_client;
+pub use subscribe_repos::run_subscribe_repos;
