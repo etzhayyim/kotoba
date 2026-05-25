@@ -205,6 +205,10 @@ bytemuck = { version = "1",  features = ["derive"], optional = true }
 | | `quad_store/query_hot` | Arrangement hot-path クエリ |
 | | `quad_store/query_cold_prolly_1k` | ProllyTree 点引き + 模擬RTT |
 | `kotoba-store/benches/tiered_store.rs` | `tiered_store/*` | hot put/get, cold-promote, 予算 eviction |
+| `kotoba-store/benches/car_flush.rs` | `car/serialize` | CAR バンドルシリアライズ (GiB/s) |
+| | `car/flush_simulated` | single PUT vs 個別 PUT 比較 (simulated RTT) |
+| | `car/range_get` | インデックス lookup + range GET (simulated) |
+| | `car/index_insert` | CarBlockIndex 一括挿入スループット |
 
 ### ベンチの IPFS/S3 I/O スコープ
 
@@ -300,7 +304,71 @@ entities × 2 quads = 要素数 (throughput = quad/s)
 Run: `cargo bench -p kotoba-kqe --bench arrangement`  
 Run: `cargo bench -p kotoba-graph --bench quad_store`  
 Run: `cargo bench -p kotoba-store --bench tiered_store`  
+Run: `cargo bench -p kotoba-store --bench car_flush`  
 Run: `LOADTEST_MAX=10M LOADTEST_MEM_LIMIT_MB=8192 cargo run --release --example loadtest -p kotoba-graph`
+
+#### TieredBlockStore (2026-05-25, macOS aarch64)
+
+| ベンチ | p50 | スループット |
+|---|---|---|
+| hot put+get 1K blocks (memory) | 607 µs | **1.65 M blocks/s** |
+| hot put+get 10K blocks (memory) | 5.89 ms | **1.70 M blocks/s** |
+| cold promote 100 blocks (memory→hot) | 73.8 µs | **1.35 M blocks/s** |
+| cold promote 1K blocks | 847 µs | **1.18 M blocks/s** |
+| budgeted eviction under pressure | 583 µs | 256×8KB blocks, 1MB budget |
+| iroh LAN first_access_50 (cold miss) | **65.7 ms** (50 blocks × 1.31ms) | → 1.31ms/block cold |
+| iroh LAN repeat_access_hot_50 | **12.1 µs** (50 blocks) | → 242 ns/block hot |
+| S3 same-AZ first_access_10 (cold miss) | **25.6 ms** (10 blocks × 2.56ms) | → 2.56ms/block cold |
+| S3 same-AZ repeat_access_hot_10 | **2.55 µs** (10 blocks) | → 255 ns/block hot |
+
+hot キャッシュ効果: iroh LAN **5,413×**、S3 same-AZ **10,039×** 高速。
+
+#### CAR bundle flush (2026-05-25, macOS aarch64)
+
+`CarBundleWriter` — 複数ブロックを 1 ファイルにパックして S3/B2 を **単一 PUT** で flush (Hummock SST 相当)。
+
+**シリアライズ速度**:
+
+| サイズ | 時間 | スループット |
+|---|---|---|
+| 1K blocks × 1KB (1 MB) | **107 µs** | 8.9 GiB/s |
+| 4K blocks × 4KB (16 MB) | **4.45 ms** | 3.4 GiB/s |
+| 16K blocks × 4KB (64 MB) | **16.2 ms** | 3.8 GiB/s |
+
+1M quad commit (~16K blocks, ~64MB) のシリアライズは **16ms**。コミット全体 (4.7s) の 0.3%。
+
+**単一 PUT vs 個別 PUT 比較** (bench sleep は実 RTT の 1/1000; 実世界は ×1000):
+
+| シナリオ | CAR 単一 PUT | 個別 PUT 直列 | 実世界換算 (直列) | 実世界換算 (CAR) |
+|---|---|---|---|---|
+| S3 400 blocks | 38 µs (bench) | 4.98 ms (bench) | **4s** | **serialize 3ms + upload ~1-2s** |
+| S3 16K blocks | 1.77 ms (bench) | 163 ms (bench) | **163s** | **serialize 16ms + upload ~2-4s** |
+| iroh LAN 16K | 1.92 ms (bench) | 未計測 | **32s** | **serialize 16ms + transfer ~640ms** |
+
+**Range GET** (cold: block index lookup → 単一 HTTP range GET で 4KB 取得):
+
+| パターン | p50 |
+|---|---|
+| index lookup + extract (I/O なし) | **127 ns** |
+| S3 range GET (2ms simulated) | **2.52 ms** |
+| iroh LAN range GET (1ms simulated) | **1.28 ms** |
+
+range GET レイテンシは個別 block GET と同等 (帯域コスト削減が主目的)。  
+**CarBlockIndex 挿入**: 16K entries で **3.7ms** (HashMap 一括挿入)。
+
+**1M quad commit の end-to-end flush 試算 (CAR bundle 使用)**:
+
+| ステップ | 時間 |
+|---|---|
+| ProllyTree build (4 trees) | ~4.7 s |
+| CAR serialize (16K blocks, 64MB) | ~16 ms |
+| S3/B2 upload (64MB, single PUT) | ~2–4 s |
+| CarBlockIndex update (16K entries) | ~4 ms |
+| IPFS pin (root CID, fire-and-forget) | async |
+| **合計** | **~7–9 s** |
+
+現状 (個別 block async fire-and-forget): ProllyTree build 4.7s + cold sync 不保証。  
+CAR bundle: **total 7–9s で S3 flush 完了保証**。
 
 #### 100億 quad スケール ディスク試算
 
