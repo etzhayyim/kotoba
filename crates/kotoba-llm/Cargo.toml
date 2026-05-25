@@ -22,6 +22,9 @@ http-inference = ["reqwest"]
 # Enable WebGPU fine-tuning backend (embedding + LM head, f32 compute, FP8 storage).
 # wgpu = "24" aligned with kami-engine (ADR-2605250004).
 webgpu-train = ["dep:wgpu", "dep:bytemuck"]
+# Enable WebGPU full-transformer inference (Gemma 4 E2B/E4B, f32 compute, FP8 Vault).
+# wgpu = "24" aligned with kami-engine (ADR-2605250005).
+webgpu-infer = ["dep:wgpu", "dep:bytemuck"]
 
 [dependencies]
 kotoba-core.workspace = true

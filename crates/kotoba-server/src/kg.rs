@@ -403,6 +403,11 @@ pub struct KgIngestReq {
     pub valid_to:    Option<String>,
     pub ingested_at: Option<String>,
     pub source_id:   Option<String>,
+    /// Pre-computed embedding vector (e.g. from yatabase vLLM).
+    /// When present, stored as `kg/label_vec` VectorF32 quad so that
+    /// `kg_search` can do real cosine similarity without a local inference engine.
+    #[serde(default)]
+    pub label_vec: Vec<f32>,
     #[serde(default)]
     pub claims:    Vec<KgClaim>,
     #[serde(default)]
@@ -470,6 +475,16 @@ pub async fn kg_ingest(
             subject:   subject.clone(),
             predicate: format!("kg/relation/{}", rel.pred),
             object:    QuadObject::Cid(dst_cid),
+        }).await;
+        count += 1;
+    }
+
+    if !req.label_vec.is_empty() {
+        state.quad_store.assert(Quad {
+            graph:     graph.clone(),
+            subject:   subject.clone(),
+            predicate: "kg/label_vec".to_string(),
+            object:    QuadObject::VectorF32(req.label_vec.clone()),
         }).await;
         count += 1;
     }

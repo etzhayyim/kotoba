@@ -21,7 +21,7 @@ KOTOBA ≝ Datom[CID/T] × EAVT[KSE Topic] × Pregel[BSP] × Datalog[Δ]
 | kotoba-auth | CACAO chain verification, DID Document |
 | kotoba-graph | Quad API, SPARQL→Datalog, Commit DAG |
 | kotoba-vm | Invoke/Result ChainEntry, CALL_FOREIGN bridge (KVM) |
-| kotoba-llm | Weight blob (FP8), LoRA Delta, KV-cache, inference, WebGPU training (embedding + LM head) |
+| kotoba-llm | Weight blob (FP8), LoRA Delta, KV-cache, inference, WebGPU training (embed+lm_head), WebGPU inference (full transformer, Gemma 4 E2B/E4B) |
 | kotoba-runtime | WASM Component Model host: WasmExecutor + UdfExecutor + WIT bindings |
 | kotoba-server | XRPC / MCP endpoints |
 | kotoba-store | BlockStore implementations: Memory, Sled, S3; BudgetedBlockStore<S> LRU eviction |
@@ -47,6 +47,66 @@ KOTOBA ≝ Datom[CID/T] × EAVT[KSE Topic] × Pregel[BSP] × Datalog[Δ]
 - Inference = Invoke ChainEntry {program_cid: inference_datalog}
 - FP8 tensor = Vault blob (dim > 1024 はオフロード)
 
+## 統一 Weight 述語スキーム (ADR-2605250005)
+
+| 述語 | 説明 |
+|---|---|
+| `weight/embed` | Embedding table [vocab × H] |
+| `weight/lm_head` | LM head [H × vocab] |
+| `weight/norm/final` | Final RMSNorm [H] |
+| `weight/block/{N}/attn/{q,k,v,o}` | Attention projections |
+| `weight/block/{N}/ffn/{gate,up,down}` | SwiGLU FFN |
+| `weight/block/{N}/norm/{attn,ffn}` | RMSNorm per block |
+
+Rust: `WeightKind` enum + `WeightKind::predicate()` / `WeightKind::path()`.
+
+## WebGPU Inference 設計 (ADR-2605250005)
+
+### 対象モデル
+
+| モデル | n_layers | hidden | n_heads | n_kv_heads | head_dim |
+|---|---|---|---|---|---|
+| Gemma 4 E2B | 26 | 2048 | 8 | 4 | 256 |
+| Gemma 4 E4B | 34 | 2560 | 16 | 8 | 160 |
+
+### dtype 境界 (training と同一)
+
+```
+Vault FP8 ──dequantize──▶ f32 CPU/GPU buffer ──infer──▶ token IDs
+```
+
+### WGSL シェーダー
+
+| 定数名 | 演算 |
+|---|---|
+| `RMS_NORM_WGSL` | RMSNorm + weight scale |
+| `ROPE_WGSL` | Rotary Position Embedding |
+| `ATTENTION_WGSL` | Scaled dot-product (GQA causal) |
+| `SWIGLU_FFN_WGSL` | SwiGLU: `down(silu(gate) * up)` |
+| `SAMPLE_WGSL` | Greedy argmax |
+
+### Feature ゲート
+
+```toml
+webgpu-infer = ["dep:wgpu", "dep:bytemuck"]
+```
+
+### gpu_common (feature 不要、常時コンパイル)
+
+- `dequantize_fp8_e4m3` / `quantize_f32_to_fp8_e4m3`
+- `MATMUL_WGSL` / `cpu_matmul` / `f32_slice_to_bytes` / `bytes_to_f32_slice`
+
+### KV キャッシュ
+
+- In-memory f32: `[n_layers][seq_pos × n_kv_heads × head_dim]`
+- Vault / Arrangement に保存しない (session-scoped ephemeral)
+
+### 禁止
+
+- GPU 上での FP8 計算
+- KV キャッシュを Vault に永続化
+- `n_kv_heads > n_heads`
+
 ## WebGPU Training 設計 (ADR-2605250004)
 
 SSoT: `90-docs/adr/2605250004-kotoba-webgpu-training.md`
@@ -64,8 +124,8 @@ Vault FP8 ──dequantize──▶ f32 GPU buffer ──train──▶ quantize
 
 | layer | predicate | shape |
 |---|---|---|
-| 0 Embedding | `weight/layer/0` | `[vocab × H]` |
-| 1 LM head | `weight/layer/1` | `[H × vocab]` |
+| Embedding | `weight/embed` | `[vocab × H]` |
+| LM head | `weight/lm_head` | `[H × vocab]` |
 
 中間 Transformer 層は凍結。
 

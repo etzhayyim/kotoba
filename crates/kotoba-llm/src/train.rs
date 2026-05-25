@@ -1,13 +1,15 @@
 /// Training pipeline types: TrainBatch, GradientRef, AdamMoments, OptimizerStep.
 ///
-/// Datom encoding (ADR-2605250004):
-///   grad  → Quad(model_cid, "grad/layer/{N}/step/{M}",    TensorCid{f32})  — ephemeral
-///   adam  → Quad(model_cid, "train/adam/m1/layer/{N}",    TensorCid{f32})  — persistent
-///   adam  → Quad(model_cid, "train/adam/m2/layer/{N}",    TensorCid{f32})  — persistent
-///   weight update: retract(old) + assert(new) — atomic pair
+/// Datom encoding (ADR-2605250004, amended by ADR-2605250005):
+///   grad  → Quad(model_cid, "grad/{kind.path()}/step/{M}", TensorCid{f32})  — ephemeral
+///   adam  → Quad(model_cid, "train/adam/m1/{kind.path()}",  TensorCid{f32})  — persistent
+///   adam  → Quad(model_cid, "train/adam/m2/{kind.path()}",  TensorCid{f32})  — persistent
+///   weight update: retract(old) + assert(new) via kind.predicate() — atomic pair
 use kotoba_core::cid::KotobaCid;
 use kotoba_kqe::quad::{Quad, QuadObject, TensorDtype};
 use kotoba_kqe::delta::Delta;
+
+use crate::weight::WeightKind;
 
 /// A training mini-batch: token sequences with a quality score.
 ///
@@ -30,10 +32,8 @@ pub struct TrainBatch {
 #[derive(Debug, Clone)]
 pub struct GradientRef {
     pub model_cid: KotobaCid,
-    /// Layer index (0 = embedding, 1 = LM head in the 2-layer scope)
-    pub layer:     u32,
-    /// Optimizer step counter — used as part of the predicate to avoid
-    /// CID collisions when multiple steps are in flight
+    pub kind:      WeightKind,
+    /// Optimizer step counter
     pub step:      u64,
     pub blob_cid:  KotobaCid,
     pub shape:     Vec<u32>,
@@ -54,7 +54,7 @@ impl GradientRef {
         Quad {
             graph:     graph_cid,
             subject:   self.model_cid.clone(),
-            predicate: format!("grad/layer/{}/step/{}", self.layer, self.step),
+            predicate: format!("grad/{}/step/{}", self.kind.path(), self.step),
             object:    QuadObject::TensorCid {
                 cid:   self.blob_cid.clone(),
                 shape: self.shape.clone(),
@@ -64,11 +64,11 @@ impl GradientRef {
     }
 }
 
-/// AdamW first and second moment tensors for one layer (persistent).
+/// AdamW first and second moment tensors for one weight (persistent).
 #[derive(Debug, Clone)]
 pub struct AdamMoments {
     pub model_cid: KotobaCid,
-    pub layer:     u32,
+    pub kind:      WeightKind,
     /// First moment (mean of gradients) — f32
     pub m1_cid:    KotobaCid,
     /// Second moment (uncentered variance) — f32
@@ -97,7 +97,7 @@ impl AdamMoments {
         Quad {
             graph:     graph_cid,
             subject:   self.model_cid.clone(),
-            predicate: format!("train/adam/m1/layer/{}", self.layer),
+            predicate: format!("train/adam/m1/{}", self.kind.path()),
             object:    QuadObject::TensorCid {
                 cid:   self.m1_cid.clone(),
                 shape: self.shape.clone(),
@@ -110,7 +110,7 @@ impl AdamMoments {
         Quad {
             graph:     graph_cid,
             subject:   self.model_cid.clone(),
-            predicate: format!("train/adam/m2/layer/{}", self.layer),
+            predicate: format!("train/adam/m2/{}", self.kind.path()),
             object:    QuadObject::TensorCid {
                 cid:   self.m2_cid.clone(),
                 shape: self.shape.clone(),
@@ -123,27 +123,27 @@ impl AdamMoments {
 /// One complete optimizer step: old weight out, new weight in.
 ///
 /// Produces an atomic Delta pair: retract(old) + assert(new).
-/// The caller applies both to the Arrangement / Journal in sequence.
 #[derive(Debug, Clone)]
 pub struct OptimizerStep {
     pub model_cid:      KotobaCid,
-    pub layer:          u32,
+    pub kind:           WeightKind,
     /// Previous weight (to be retracted)
     pub old_weight_cid: KotobaCid,
     /// Updated weight (to be asserted, stored in Vault as FP8)
     pub new_weight_cid: KotobaCid,
     pub shape:          Vec<u32>,
-    /// AdamW step count (bias-correction denominator: sqrt(1-β2^t)/(1-β1^t))
+    /// AdamW step count (bias-correction denominator)
     pub step:           u64,
 }
 
 impl OptimizerStep {
     /// Atomic weight-swap Delta pair: [retract_old, assert_new].
     pub fn weight_deltas(&self, graph_cid: KotobaCid) -> [Delta; 2] {
+        let predicate = self.kind.predicate();
         let old_quad = Quad {
             graph:     graph_cid.clone(),
             subject:   self.model_cid.clone(),
-            predicate: format!("weight/layer/{}", self.layer),
+            predicate: predicate.clone(),
             object:    QuadObject::TensorCid {
                 cid:   self.old_weight_cid.clone(),
                 shape: self.shape.clone(),
@@ -153,7 +153,7 @@ impl OptimizerStep {
         let new_quad = Quad {
             graph:     graph_cid,
             subject:   self.model_cid.clone(),
-            predicate: format!("weight/layer/{}", self.layer),
+            predicate,
             object:    QuadObject::TensorCid {
                 cid:   self.new_weight_cid.clone(),
                 shape: self.shape.clone(),
@@ -175,62 +175,95 @@ mod tests {
     fn g() -> KotobaCid { cid(b"graph") }
 
     #[test]
-    fn gradient_ref_assert_retract_roundtrip() {
+    fn gradient_ref_embed_predicate() {
         let gr = GradientRef {
             model_cid: cid(b"model"),
-            layer: 0,
-            step: 1,
-            blob_cid: cid(b"grad_blob"),
-            shape: vec![32000, 2048],
+            kind:      WeightKind::Embed,
+            step:      1,
+            blob_cid:  cid(b"grad_blob"),
+            shape:     vec![32000, 2048],
         };
         let assert_d  = gr.to_assert_delta(g());
         let retract_d = gr.to_retract_delta(g());
 
         assert_eq!(assert_d.mult,  Multiplicity::Assert);
         assert_eq!(retract_d.mult, Multiplicity::Retract);
-        assert_eq!(assert_d.quad.predicate,  "grad/layer/0/step/1");
-        assert_eq!(retract_d.quad.predicate, "grad/layer/0/step/1");
+        assert_eq!(assert_d.quad.predicate,  "grad/embed/step/1");
+        assert_eq!(retract_d.quad.predicate, "grad/embed/step/1");
         assert!(matches!(assert_d.quad.object, QuadObject::TensorCid { dtype: TensorDtype::F32, .. }));
     }
 
     #[test]
-    fn adam_moments_assert_retract() {
-        let m = AdamMoments {
+    fn gradient_ref_block_predicate() {
+        let gr = GradientRef {
             model_cid: cid(b"model"),
-            layer: 1,
-            m1_cid: cid(b"m1"),
-            m2_cid: cid(b"m2"),
-            shape: vec![2048, 32000],
+            kind:      WeightKind::BlockAttnQ(3),
+            step:      5,
+            blob_cid:  cid(b"g"),
+            shape:     vec![256, 2048],
         };
-        let [a1, a2] = m.to_assert_deltas(g());
-        let [r1, r2] = m.to_retract_deltas(g());
-
-        assert_eq!(a1.mult, Multiplicity::Assert);
-        assert_eq!(r1.mult, Multiplicity::Retract);
-        assert_eq!(a1.quad.predicate, "train/adam/m1/layer/1");
-        assert_eq!(a2.quad.predicate, "train/adam/m2/layer/1");
-        assert_eq!(r1.quad.predicate, "train/adam/m1/layer/1");
-        assert_eq!(r2.quad.predicate, "train/adam/m2/layer/1");
+        assert_eq!(gr.to_assert_delta(g()).quad.predicate, "grad/block/3/attn/q/step/5");
     }
 
     #[test]
-    fn optimizer_step_weight_deltas_are_retract_then_assert() {
-        let step = OptimizerStep {
+    fn adam_moments_embed_lmhead() {
+        let m_embed = AdamMoments {
             model_cid: cid(b"model"),
-            layer: 0,
+            kind:      WeightKind::Embed,
+            m1_cid:    cid(b"m1"),
+            m2_cid:    cid(b"m2"),
+            shape:     vec![32000, 2048],
+        };
+        let m_lm = AdamMoments {
+            model_cid: cid(b"model"),
+            kind:      WeightKind::LmHead,
+            m1_cid:    cid(b"m1"),
+            m2_cid:    cid(b"m2"),
+            shape:     vec![2048, 32000],
+        };
+        let [a1, a2] = m_embed.to_assert_deltas(g());
+        let [r1, r2] = m_embed.to_retract_deltas(g());
+        assert_eq!(a1.quad.predicate, "train/adam/m1/embed");
+        assert_eq!(a2.quad.predicate, "train/adam/m2/embed");
+        assert_eq!(r1.mult, Multiplicity::Retract);
+        assert_eq!(r2.mult, Multiplicity::Retract);
+
+        let [al1, _] = m_lm.to_assert_deltas(g());
+        assert_eq!(al1.quad.predicate, "train/adam/m1/lm_head");
+    }
+
+    #[test]
+    fn optimizer_step_weight_deltas_embed() {
+        let step = OptimizerStep {
+            model_cid:      cid(b"model"),
+            kind:           WeightKind::Embed,
             old_weight_cid: cid(b"w_old"),
             new_weight_cid: cid(b"w_new"),
-            shape: vec![32000, 2048],
-            step: 5,
+            shape:          vec![32000, 2048],
+            step:           5,
         };
         let [retract, assert_d] = step.weight_deltas(g());
         assert_eq!(retract.mult,  Multiplicity::Retract);
         assert_eq!(assert_d.mult, Multiplicity::Assert);
-        assert_eq!(retract.quad.predicate,  "weight/layer/0");
-        assert_eq!(assert_d.quad.predicate, "weight/layer/0");
-        // old CID in retract, new CID in assert
+        assert_eq!(retract.quad.predicate,  "weight/embed");
+        assert_eq!(assert_d.quad.predicate, "weight/embed");
         if let QuadObject::TensorCid { cid: blob_cid, .. } = &retract.quad.object {
             assert_eq!(*blob_cid, cid(b"w_old"));
         }
+    }
+
+    #[test]
+    fn optimizer_step_weight_deltas_block() {
+        let step = OptimizerStep {
+            model_cid:      cid(b"model"),
+            kind:           WeightKind::BlockAttnQ(2),
+            old_weight_cid: cid(b"w_old"),
+            new_weight_cid: cid(b"w_new"),
+            shape:          vec![256, 2048],
+            step:           1,
+        };
+        let [r, a] = step.weight_deltas(g());
+        assert_eq!(r.quad.predicate, "weight/block/2/attn/q");
+        assert_eq!(a.quad.predicate, "weight/block/2/attn/q");
     }
 }

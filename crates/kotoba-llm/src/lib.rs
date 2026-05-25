@@ -6,16 +6,21 @@ pub mod infer;
 pub mod gemma;
 pub mod http_infer;
 pub mod train;
+pub mod gpu_common;
 
 #[cfg(feature = "webgpu-train")]
 pub mod train_gpu;
 
-pub use weight::{WeightRef, WeightBlob};
+#[cfg(feature = "webgpu-infer")]
+pub mod infer_gpu;
+
+pub use weight::{WeightKind, WeightRef, WeightBlob};
 pub use lora::{LoraAdapter, lora_to_delta};
 pub use kvcache::KvCache;
 pub use embed::{Embedding, embed_to_quad};
 pub use infer::{InferenceRequest, InferenceSession, InferError};
 pub use train::{TrainBatch, GradientRef, AdamMoments, OptimizerStep};
+pub use gpu_common::{dequantize_fp8_e4m3, quantize_f32_to_fp8_e4m3};
 
 #[cfg(feature = "local-inference")]
 pub use gemma::GemmaRunner;
@@ -24,8 +29,14 @@ pub use gemma::GemmaRunner;
 pub use http_infer::HttpInferEngine;
 
 #[cfg(feature = "webgpu-train")]
-pub use train_gpu::{WebGpuTrainer, AdamConfig, TrainStepResult,
-                    dequantize_fp8_e4m3, quantize_f32_to_fp8_e4m3, wgsl_shaders};
+pub use train_gpu::{WebGpuTrainer, AdamConfig, TrainStepResult, wgsl_shaders as train_wgsl_shaders};
+
+#[cfg(feature = "webgpu-infer")]
+pub use infer_gpu::{
+    WebGpuInferConfig, WebGpuInferSession, TransformerWeights, LayerWeights,
+    TransformerBlobRefs, LayerBlobRefs,
+    wgsl_shaders as infer_wgsl_shaders,
+};
 
 #[cfg(test)]
 mod tests {
@@ -38,8 +49,8 @@ mod tests {
     // ── WeightRef ──────────────────────────────────────────────────────────
 
     #[test]
-    fn weight_ref_to_quad_predicate() {
-        use super::weight::WeightRef;
+    fn weight_ref_embed_predicate() {
+        use super::weight::{WeightKind, WeightRef};
         use kotoba_kqe::quad::TensorDtype;
 
         let model = cid(b"model");
@@ -48,15 +59,24 @@ mod tests {
 
         let w = WeightRef {
             model_cid: model.clone(),
-            layer: 3,
-            blob_cid: blob.clone(),
-            shape: vec![4096, 4096],
-            dtype: TensorDtype::F8E4M3,
+            kind:      WeightKind::Embed,
+            blob_cid:  blob.clone(),
+            shape:     vec![32000, 2048],
+            dtype:     TensorDtype::F8E4M3,
         };
         let quad = w.to_quad(graph);
-        assert_eq!(quad.predicate, "weight/layer/3");
+        assert_eq!(quad.predicate, "weight/embed");
         assert!(matches!(quad.object, QuadObject::TensorCid { .. }));
         assert_eq!(quad.subject, model);
+    }
+
+    #[test]
+    fn weight_kind_block_predicate() {
+        use super::weight::WeightKind;
+        assert_eq!(WeightKind::BlockAttnQ(3).predicate(), "weight/block/3/attn/q");
+        assert_eq!(WeightKind::BlockFfnDown(0).predicate(), "weight/block/0/ffn/down");
+        assert_eq!(WeightKind::LmHead.predicate(), "weight/lm_head");
+        assert_eq!(WeightKind::FinalNorm.predicate(), "weight/norm/final");
     }
 
     // ── LoRA ──────────────────────────────────────────────────────────────
@@ -163,5 +183,18 @@ mod tests {
         assert!(sess.output.is_empty());
         assert_eq!(sess.request.max_tokens, 256);
         assert_eq!(sess.request.call_id, 42);
+    }
+
+    // ── FP8 codec (gpu_common) ────────────────────────────────────────────
+
+    #[test]
+    fn fp8_roundtrip_from_lib() {
+        use super::{dequantize_fp8_e4m3, quantize_f32_to_fp8_e4m3};
+        let vals = vec![1.0f32, -2.0, 0.5, 64.0];
+        let enc  = quantize_f32_to_fp8_e4m3(&vals);
+        let dec  = dequantize_fp8_e4m3(&enc);
+        for (o, d) in vals.iter().zip(dec.iter()) {
+            assert!((o - d).abs() / o.abs().max(1e-6) < 0.15);
+        }
     }
 }

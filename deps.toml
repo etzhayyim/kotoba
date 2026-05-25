@@ -16,6 +16,7 @@ depends_on = [
   "90-docs/adr/2605250001-kotoba-selective-sync-storage-budget.md",
   "90-docs/adr/2605250002-kotoba-state-graph-langgraph-api.md",
   "90-docs/adr/2605250004-kotoba-webgpu-training.md",
+  "90-docs/adr/2605250005-kotoba-webgpu-infer.md",
   "90-docs/adr/2605252000-kotoba-persistence-wal-replay.md",
 ]
 
@@ -92,7 +93,7 @@ notes = "atomic revert: out_deltas=[] on StepsExceeded; deterministic BSP: inbox
 [subdirs."crates/kotoba-llm"]
 role = "llm-weight-integration"
 tier = "alpha"
-notes = "Modules: weight (WeightRef/WeightBlob FP8), lora (LoRA as Delta), kvcache (ephemeral Arrangement per session), embed (Embedding Quad), infer (InferenceRequest/Session), gemma (local Metal, feature=local-inference), http_infer (OpenAI-compat, feature=http-inference), train (TrainBatch/GradientRef/AdamMoments/OptimizerStep Datom types), train_gpu (WebGpuTrainer + WGSL shaders + FP8↔f32 codec, feature=webgpu-train). WebGPU training: Vault FP8 → dequantize → f32 GPU (MATMUL/CE_LOSS/MATMUL_AT/ADAMW) → quantize → Vault FP8; scope = embedding (layer 0) + LM head (layer 1); quality-scaled CE loss; AdamW moments persisted as Datom pairs; weight swap = atomic retract(old)+assert(new) Delta pair. ADR: 2605250004."
+notes = "Modules: weight (WeightKind enum + WeightRef/WeightBlob FP8), lora (LoRA as Delta), kvcache (ephemeral Arrangement per session), embed (Embedding Quad), infer (InferenceRequest/Session), gemma (local Metal, feature=local-inference), http_infer (OpenAI-compat, feature=http-inference), train (TrainBatch/GradientRef/AdamMoments/OptimizerStep; WeightKind-predicated Datom types), gpu_common (FP8 codec + MATMUL_WGSL; always compiled), train_gpu (WebGpuTrainer + CE_LOSS/MATMUL_AT/ADAMW WGSL, feature=webgpu-train), infer_gpu (WebGpuInferSession + RMS_NORM/ROPE/ATTENTION/SWIGLU_FFN/SAMPLE WGSL + CPU kernels, feature=webgpu-infer). Unified predicate scheme: weight/embed, weight/lm_head, weight/block/{N}/attn/{q,k,v,o}, weight/block/{N}/ffn/{gate,up,down}, weight/block/{N}/norm/{attn,ffn}, weight/norm/final. WebGPU training: FP8→f32 GPU (MATMUL/CE_LOSS/MATMUL_AT/ADAMW)→FP8; scope=embed+lm_head; quality-scaled CE loss. WebGPU inference: Gemma 4 E2B/E4B (GQA RoPE RMSNorm SwiGLU); KV cache in-memory f32. ADR: 2605250004 (training), 2605250005 (inference)."
 
 [subdirs."crates/kotoba-runtime"]
 role = "wasm-component-runtime"
