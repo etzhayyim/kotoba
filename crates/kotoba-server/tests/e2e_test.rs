@@ -307,7 +307,7 @@ async fn mcp_initialize_returns_protocol_version() {
 }
 
 #[tokio::test]
-async fn mcp_tools_list_returns_six_tools() {
+async fn mcp_tools_list_returns_eight_tools() {
     let s = TestServer::start(false).await;
     let (status, body) = s.post(
         "/mcp",
@@ -315,7 +315,7 @@ async fn mcp_tools_list_returns_six_tools() {
     ).await;
     assert_eq!(status, 200);
     let tools = body["result"]["tools"].as_array().expect("tools");
-    assert_eq!(tools.len(), 6);
+    assert_eq!(tools.len(), 8);
 }
 
 #[tokio::test]

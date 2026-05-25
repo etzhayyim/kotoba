@@ -240,6 +240,15 @@ impl Arrangement {
     pub fn len(&self) -> usize { self.count }
     pub fn is_empty(&self) -> bool { self.count == 0 }
 
+    /// Drop all index data and reset to empty. Used after a batch commit to reclaim RAM.
+    pub fn clear(&mut self) {
+        self.spo.clear();
+        self.pso.clear();
+        self.pos.clear();
+        self.ocp.clear();
+        self.count = 0;
+    }
+
     /// Snapshot all quads as Assert Deltas (seed for Datalog evaluation).
     pub fn to_deltas(&self, graph: &KotobaCid) -> Vec<Delta> {
         self.quads(graph).into_iter().map(Delta::assert).collect()

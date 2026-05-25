@@ -198,6 +198,14 @@ impl QuadStore {
         out
     }
 
+    /// Clear the in-memory Arrangement for `graph_cid`, reclaiming RAM.
+    /// Call after `commit()` in a batch-ingest cycle when working-set > budget.
+    pub async fn reset_arrangement(&self, graph_cid: &KotobaCid) {
+        if let Some(arr) = self.arrangements.write().await.get_mut(&graph_cid.to_multibase()) {
+            arr.clear();
+        }
+    }
+
     /// Return the head Commit for `graph_cid` (if any).
     pub async fn head_commit(&self, graph_cid: &KotobaCid) -> Option<Commit> {
         self.commit_dag.read().await.head(graph_cid).cloned()

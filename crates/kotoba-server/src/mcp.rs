@@ -660,10 +660,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tools_list_contains_all_six() {
+    fn tools_list_contains_all_eight() {
         let list = tools_list();
         let tools = list["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 8);
         let names: Vec<&str> = tools.iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
