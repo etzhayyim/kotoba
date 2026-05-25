@@ -28,7 +28,7 @@ impl S3BlockStore {
         }
     }
 
-    async fn put_async(&self, cid: &KotobaCid, data: &[u8]) -> anyhow::Result<()> {
+    pub async fn put_async(&self, cid: &KotobaCid, data: &[u8]) -> anyhow::Result<()> {
         let path    = self.path(cid);
         let payload = PutPayload::from_bytes(Bytes::copy_from_slice(data));
         self.store.put(&path, payload).await
@@ -36,7 +36,7 @@ impl S3BlockStore {
             .map_err(|e| anyhow::anyhow!("s3 put: {e}"))
     }
 
-    async fn get_async(&self, cid: &KotobaCid) -> anyhow::Result<Option<Bytes>> {
+    pub async fn get_async(&self, cid: &KotobaCid) -> anyhow::Result<Option<Bytes>> {
         match self.store.get(&self.path(cid)).await {
             Ok(r) => {
                 let b = r.bytes().await.map_err(|e| anyhow::anyhow!("s3 get bytes: {e}"))?;
@@ -47,7 +47,7 @@ impl S3BlockStore {
         }
     }
 
-    async fn has_async(&self, cid: &KotobaCid) -> bool {
+    pub async fn has_async(&self, cid: &KotobaCid) -> bool {
         self.store.head(&self.path(cid)).await.is_ok()
     }
 }

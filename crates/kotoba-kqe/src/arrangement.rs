@@ -47,10 +47,19 @@ impl Arrangement {
     }
 
     pub fn remove(&mut self, quad: &Quad) {
+        // SPO cleanup
         if let Some(pmap) = self.spo.get_mut(&quad.subject) {
             if let Some(objs) = pmap.get_mut(&quad.predicate) {
+                let before = objs.len();
                 objs.retain(|o| o != &quad.object);
-                self.count = self.count.saturating_sub(1);
+                self.count = self.count.saturating_sub(before - objs.len());
+            }
+        }
+        // POS cleanup (was previously left stale)
+        let obj_key = object_key(&quad.object);
+        if let Some(omap) = self.pos.get_mut(&quad.predicate) {
+            if let Some(subs) = omap.get_mut(&obj_key) {
+                subs.retain(|s| s != &quad.subject);
             }
         }
     }

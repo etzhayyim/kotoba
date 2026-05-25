@@ -534,6 +534,12 @@ pub async fn commit_store(
         .commit(&req.author, graph_cid, req.seq)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if let Some(pin) = state.ipfs_pin.clone() {
+        let cid_str = cid.to_multibase();
+        tokio::spawn(async move { pin.pin(&cid_str).await });
+    }
+
     Ok(Json(serde_json::json!({ "cid": cid.to_multibase() })))
 }
 

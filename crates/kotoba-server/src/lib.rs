@@ -189,6 +189,10 @@ pub fn build_router(state: Arc<KotobaState>) -> Router {
             &format!("/xrpc/{}", kg::NSID_KG_INGEST),
             post(kg::kg_ingest),
         )
+        .route(
+            &format!("/xrpc/{}", kg::NSID_KG_DELETE),
+            post(kg::kg_delete),
+        )
         .route("/mcp", post(mcp::mcp_handler))
         // ── Signal Protocol E2E (ai.gftd.signal.*) ─────────────────────────
         .route(

@@ -37,6 +37,7 @@ pub const NSID_KG_EMBED:   &str = "ai.gftd.apps.yata.kg.embed";
 pub const NSID_KG_SEARCH:  &str = "ai.gftd.apps.yata.kg.search";
 pub const NSID_KG_QUERY:   &str = "ai.gftd.apps.yata.kg.query";
 pub const NSID_KG_INGEST:  &str = "ai.gftd.apps.yata.kg.ingest";
+pub const NSID_KG_DELETE:  &str = "ai.gftd.apps.yata.kg.delete";
 
 /// All yatabase KG quads are written into this named graph.
 pub fn kg_graph_cid() -> KotobaCid {
@@ -478,6 +479,44 @@ pub async fn kg_ingest(
         subject_cid: subject.to_multibase(),
         quad_count:  count,
     })
+}
+
+// ── kg.delete ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KgDeleteReq {
+    /// Entity nanoid — same as the `id` field used in kg.ingest.
+    pub id: String,
+}
+
+/// POST /xrpc/ai.gftd.apps.yata.kg.delete
+///
+/// Retract all quads for the given entity from the `yatabase-kg-v1` graph.
+/// Publishes a retract event to the Journal for each quad (WAL + GossipSub).
+pub async fn kg_delete(
+    State(state): State<Arc<KotobaState>>,
+    Json(req):    Json<KgDeleteReq>,
+) -> impl IntoResponse {
+    let graph   = kg_graph_cid();
+    let subject = KotobaCid::from_bytes(req.id.as_bytes());
+
+    let quads = state.quad_store
+        .get_entity_quads(Some(&graph), &subject)
+        .await;
+
+    let retracted = quads.len();
+
+    for quad in quads {
+        state.journal_retract(&quad).await;
+        state.quad_store.retract(quad).await;
+    }
+
+    Json(serde_json::json!({
+        "ok":            true,
+        "id":            req.id,
+        "retractedCount": retracted,
+    }))
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {

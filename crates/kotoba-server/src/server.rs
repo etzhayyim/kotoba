@@ -9,7 +9,7 @@ use kotoba_dht::{
 use kotoba_kse::{store::KseStore, sync_window::SyncWindow, Journal, Shelf, Topic, Vault};
 use kotoba_kqe::quad::Quad;
 use kotoba_graph::QuadStore;
-use kotoba_store::{BudgetedBlockStore, IpfsPinClient};
+use kotoba_store::{BudgetedBlockStore, IpfsPinClient, LayeredBlockStore};
 use kotoba_runtime::{host::InferenceFn, UdfExecutor, WasmExecutor};
 use kotoba_vm::{distributed::DistributedPregelRunner, InvokeRouter};
 use kotoba_core::store::BlockStore;
@@ -99,35 +99,64 @@ impl KotobaState {
             .ok()
             .and_then(|s| s.parse().ok());
 
+        let b2_creds = match (
+            std::env::var("KOTOBA_B2_BUCKET"),
+            std::env::var("KOTOBA_B2_KEY_ID"),
+            std::env::var("KOTOBA_B2_APP_KEY"),
+        ) {
+            (Ok(bucket), Ok(key_id), Ok(app_key)) => Some((bucket, key_id, app_key)),
+            _ => None,
+        };
+
         let block_store: Arc<dyn BlockStore + Send + Sync> =
-            if let Ok(path) = std::env::var("KOTOBA_STORE_PATH") {
-                tracing::info!(path, "BlockStore: sled-backed persistence");
-                let inner = kotoba_store::SledBlockStore::open(&path)
-                    .map_err(|e| anyhow::anyhow!("sled open failed: {e}"))?;
-                maybe_wrap(inner, budget_bytes)
-            } else if let (Ok(bucket), Ok(key_id), Ok(app_key)) = (
-                std::env::var("KOTOBA_B2_BUCKET"),
-                std::env::var("KOTOBA_B2_KEY_ID"),
-                std::env::var("KOTOBA_B2_APP_KEY"),
-            ) {
-                let endpoint = std::env::var("KOTOBA_B2_ENDPOINT")
-                    .unwrap_or_else(|_| "https://s3.us-west-001.backblazeb2.com".into());
-                use object_store::aws::AmazonS3Builder;
-                let s3 = AmazonS3Builder::new()
-                    .with_bucket_name(&bucket)
-                    .with_access_key_id(&key_id)
-                    .with_secret_access_key(&app_key)
-                    .with_endpoint(&endpoint)
-                    .build()
-                    .map_err(|e| anyhow::anyhow!("B2 block store build: {e}"))?;
-                tracing::info!(bucket, "BlockStore: B2/S3-backed (kotoba/blocks/)");
-                let inner = kotoba_store::S3BlockStore::new(Arc::new(s3), "kotoba/blocks");
-                maybe_wrap(inner, budget_bytes)
-            } else {
-                tracing::warn!("BlockStore: ephemeral sled (set KOTOBA_STORE_PATH or KOTOBA_B2_* for persistence)");
-                let inner = kotoba_store::SledBlockStore::temporary()
-                    .map_err(|e| anyhow::anyhow!("sled temporary failed: {e}"))?;
-                maybe_wrap(inner, budget_bytes)
+            match (std::env::var("KOTOBA_STORE_PATH"), b2_creds) {
+                (Ok(path), Some((bucket, key_id, app_key))) => {
+                    let endpoint = std::env::var("KOTOBA_B2_ENDPOINT")
+                        .unwrap_or_else(|_| "https://s3.us-west-001.backblazeb2.com".into());
+                    use object_store::aws::AmazonS3Builder;
+                    let s3 = AmazonS3Builder::new()
+                        .with_bucket_name(&bucket)
+                        .with_access_key_id(&key_id)
+                        .with_secret_access_key(&app_key)
+                        .with_endpoint(&endpoint)
+                        .build()
+                        .map_err(|e| anyhow::anyhow!("B2 block store build: {e}"))?;
+                    let sled = kotoba_store::SledBlockStore::open(&path)
+                        .map_err(|e| anyhow::anyhow!("sled open failed: {e}"))?;
+                    tracing::info!(path, bucket, "BlockStore: LayeredBlockStore (sled primary + B2 backup)");
+                    let inner = LayeredBlockStore::new(
+                        Arc::new(sled),
+                        Arc::new(kotoba_store::S3BlockStore::new(Arc::new(s3), "kotoba/blocks")),
+                    );
+                    maybe_wrap(inner, budget_bytes)
+                }
+                (Ok(path), None) => {
+                    tracing::info!(path, "BlockStore: sled-backed persistence (no B2 backup)");
+                    let inner = kotoba_store::SledBlockStore::open(&path)
+                        .map_err(|e| anyhow::anyhow!("sled open failed: {e}"))?;
+                    maybe_wrap(inner, budget_bytes)
+                }
+                (Err(_), Some((bucket, key_id, app_key))) => {
+                    let endpoint = std::env::var("KOTOBA_B2_ENDPOINT")
+                        .unwrap_or_else(|_| "https://s3.us-west-001.backblazeb2.com".into());
+                    use object_store::aws::AmazonS3Builder;
+                    let s3 = AmazonS3Builder::new()
+                        .with_bucket_name(&bucket)
+                        .with_access_key_id(&key_id)
+                        .with_secret_access_key(&app_key)
+                        .with_endpoint(&endpoint)
+                        .build()
+                        .map_err(|e| anyhow::anyhow!("B2 block store build: {e}"))?;
+                    tracing::info!(bucket, "BlockStore: B2/S3-backed (kotoba/blocks/)");
+                    let inner = kotoba_store::S3BlockStore::new(Arc::new(s3), "kotoba/blocks");
+                    maybe_wrap(inner, budget_bytes)
+                }
+                (Err(_), None) => {
+                    tracing::warn!("BlockStore: ephemeral sled (set KOTOBA_STORE_PATH or KOTOBA_B2_* for persistence)");
+                    let inner = kotoba_store::SledBlockStore::temporary()
+                        .map_err(|e| anyhow::anyhow!("sled temporary failed: {e}"))?;
+                    maybe_wrap(inner, budget_bytes)
+                }
             };
 
         // IPFS Pinning Service client (E) — optional, no daemon required
@@ -169,6 +198,15 @@ impl KotobaState {
             ipfs_pin,
             agent_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         })
+    }
+
+    /// Replay Journal WAL into the in-memory QuadStore Arrangement.
+    ///
+    /// Must be called once after `KotobaState::new()` and before serving
+    /// requests.  When the Journal is backed by B2 this recovers all quads
+    /// written in previous runs; with in-memory-only Journal it is a no-op.
+    pub async fn replay_wal(&self) {
+        self.quad_store.replay_from_journal().await;
     }
 
     /// Attach a GossipSub outbound channel after construction.

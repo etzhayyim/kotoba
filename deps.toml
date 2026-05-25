@@ -4,9 +4,9 @@ tier = "alpha"
 role = "infrastructure-db"
 kind = "rust-workspace"
 toolchain = "cargo"
-maturity = "design"
+maturity = "alpha"
 workspace = "standalone"
-execution_profiles = ["build", "test"]
+execution_profiles = ["build", "test", "deploy"]
 description = "Kotoba: Content-Addressed Distributed Datalog Database. Datom/EAVT × Pregel BSP × CIDv1 × Datalog on AT Protocol with LLM/weight + WASM Component Model runtime."
 language = "rust"
 
@@ -17,10 +17,22 @@ depends_on = [
   "90-docs/adr/2605250002-kotoba-state-graph-langgraph-api.md",
 ]
 
+[deployment]
+cluster       = "vultr-vke-sjc-31d5f7dc"
+namespace     = "kotoba"
+image         = "ghcr.io/gftdcojp/kotoba:latest"
+build_script  = "60-apps/ai-gftd-project-kotoba/scripts/build-push.sh"
+k8s_manifest  = "50-infra/k8s/kotoba/kotoba.yaml"
+service       = "LoadBalancer :3000 → pod :8080"
+b2_bucket     = "ai-gftd-nats"
+b2_stores     = ["kotoba/journal/", "kotoba/blocks/", "kotoba/vault/"]
+first_deployed = "2026-05-25"
+notes         = "BlockStore priority: KOTOBA_STORE_PATH (sled) → KOTOBA_B2_* → ephemeral. Dockerfile has no KOTOBA_STORE_PATH ENV; K8s manifest omits it → B2 path active."
+
 [runtime_dependencies.object_storage]
 kind = "blob-store"
 provider = "b2"
-notes = "Journal Segment SST + Vault blob (FP8 weight tensors)"
+notes = "Journal (kotoba/journal/), BlockStore (kotoba/blocks/), Vault (kotoba/vault/) — all in bucket ai-gftd-nats"
 
 [runtime_dependencies.libp2p]
 kind = "p2p-transport"
@@ -86,6 +98,7 @@ notes = "wasmtime 22 Component Model host; WIT world kotoba:kais@0.1.0; WasmExec
 [subdirs."crates/kotoba-server"]
 role = "xrpc-mcp-server"
 tier = "alpha"
+notes = "B2 storage priority: KOTOBA_B2_* env → S3BlockStore (kotoba/blocks/); KSE Journal/Vault independently use KOTOBA_B2_* via build_kse_store(). No KOTOBA_STORE_PATH in Dockerfile or K8s manifest."
 
 [subdirs."crates/kotoba-store"]
 role = "block-store"

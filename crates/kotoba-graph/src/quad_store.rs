@@ -58,6 +58,61 @@ impl QuadStore {
         Delta::retract(quad)
     }
 
+    /// Assert without publishing to Journal — used during WAL replay on startup.
+    pub async fn assert_silent(&self, quad: Quad) {
+        let g = quad.graph.to_multibase();
+        let mut arrs = self.arrangements.write().await;
+        arrs.entry(g).or_insert_with(Arrangement::new).insert(&quad);
+    }
+
+    /// Retract without publishing to Journal — used during WAL replay on startup.
+    pub async fn retract_silent(&self, quad: Quad) {
+        let g = quad.graph.to_multibase();
+        let mut arrs = self.arrangements.write().await;
+        arrs.entry(g).or_insert_with(Arrangement::new).remove(&quad);
+    }
+
+    /// Replay the Journal WAL into the in-memory Arrangement.
+    ///
+    /// Reads all entries from seq=1, filters SPO-assert and retract topics,
+    /// deduplicates by entry CID (same payload bytes → same CID), and applies
+    /// them in seq order.  Called once at startup before serving requests.
+    pub async fn replay_from_journal(&self) {
+        let entries = self.journal.read_since(1).await;
+        if entries.is_empty() { return; }
+
+        let mut seen = std::collections::HashSet::<KotobaCid>::new();
+        // (seq, is_assert, quad)
+        let mut ordered: Vec<(u64, bool, Quad)> = Vec::new();
+
+        for entry in &entries {
+            let t = entry.topic.as_str();
+            // SPO assert topics: "/kotoba/quad/{graph}/..."
+            let is_assert  = t.starts_with("/kotoba/quad/");
+            // Retract topics: "kotoba/retract/..."
+            let is_retract = t.starts_with("kotoba/retract/");
+
+            if (is_assert || is_retract) && seen.insert(entry.cid.clone()) {
+                if let Ok(quad) = serde_json::from_slice::<Quad>(&entry.payload) {
+                    ordered.push((entry.seq, is_assert, quad));
+                }
+            }
+        }
+
+        ordered.sort_unstable_by_key(|(seq, _, _)| *seq);
+        let total = ordered.len();
+
+        for (_, is_assert, quad) in ordered {
+            if is_assert {
+                self.assert_silent(quad).await;
+            } else {
+                self.retract_silent(quad).await;
+            }
+        }
+
+        tracing::info!(entries = total, "QuadStore WAL replay complete");
+    }
+
     pub async fn arrangement(&self, graph_cid: &KotobaCid) -> Option<Arrangement> {
         self.arrangements.read().await.get(&graph_cid.to_multibase()).cloned()
     }

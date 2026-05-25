@@ -71,6 +71,9 @@ async fn main() -> anyhow::Result<()> {
         "KSE Journal + Shelf + KDHT Neighborhood ready"
     );
 
+    // ── 2b. WAL replay — restore QuadStore Arrangement from Journal ────────────
+    state.replay_wal().await;
+
     // ── 3. Distributed Pregel channel pair ────────────────────────────────────
     // Created unconditionally so the runner is always available in KotobaState.
     // The swarm actor bridges the channels to GossipSub when the swarm is running.
