@@ -1,4 +1,5 @@
 pub mod block_store;
+pub mod car_bundle;
 pub mod sled_store;
 pub mod memory_store;
 pub mod s3_store;
@@ -16,6 +17,7 @@ pub use ipfs_pin::IpfsPinClient;
 pub use budgeted_store::BudgetedBlockStore;
 pub use layered_store::LayeredBlockStore;
 pub use tiered_store::TieredBlockStore;
+pub use car_bundle::{CarBundleWriter, CarBlockIndex, parse_index, extract_block};
 
 #[cfg(feature = "iroh-cold")]
 pub use iroh_store::IrohBlockStore;
