@@ -25,7 +25,7 @@ KOTOBA ≝ Datom[CID/T] × EAVT[KSE Topic] × Pregel[BSP] × Datalog[Δ]
 | kotoba-runtime | WASM Component Model host: WasmExecutor + UdfExecutor + WIT bindings |
 | kotoba-ingest | Gmail OAuth2 poll + RFC 2822 parse + E2E encrypt → QuadStore (ADR-2605252400) |
 | kotoba-server | XRPC / MCP endpoints |
-| kotoba-store | BlockStore implementations: Memory, Sled, S3; BudgetedBlockStore<S> LRU eviction; TieredBlockStore<H,C> hot/cold tiering; IrohBlockStore (feature=iroh-cold, iroh-blobs 0.30) |
+| kotoba-store | BlockStore implementations: Memory, Sled, S3; BudgetedBlockStore<S> LRU eviction; TieredBlockStore<H,C> hot/cold tiering; IrohBlockStore (feature=iroh-cold, iroh-blobs 0.30); **CapturingBlockStore** (pass-through + recorder for CAR bundling); **CarBundleWriter / CarBlockIndex** (Hummock SST 相当: N blocks → single S3 PUT, 3.8 GiB/s serialize) |
 | kotoba-store-web | Browser IndexedDB block store (wasm32), AsyncBlockStore trait |
 
 ## 実装順序
@@ -167,7 +167,7 @@ bytemuck = { version = "1",  features = ["derive"], optional = true }
 
 - VAET は `QuadObject::Cid` のみインデックス — Text/Integer/Float 禁止
 - `CommitDag::Commit` に `index_roots: HashMap<String, KotobaCid>` 追加 (`serde(default, skip_serializing_if)` で旧 commit CID 安定)
-- `QuadStore::commit()` は EAVT/AEVT/AVET/VAET の 4 ProllyTree を個別 persist
+- `QuadStore::commit()` は EAVT/AEVT/AVET/VAET を **4 並列 64MB スタックスレッド** で同時ビルド (各スレッドは `CapturingBlockStore` でブロックを記録); 完了後 `CarBundleWriter` で全ブロックを単一 CAR ファイルにパック → ブロックストアに 1 PUT。期待スピードアップ: ~4.7s → ~1.5–2s
 - Journal: 4 トピック SPO + PSO + POS + OSP に publish
 
 ## TieredBlockStore / IrohBlockStore
@@ -296,8 +296,9 @@ entities × 2 quads = 要素数 (throughput = quad/s)
 | 6–10 | ~1440 | ~4760 | ≤513→負 | ~690K | ~142K |
 
 - **insert**: ~620–720K q/s (バッチ単独)
-- **commit (4 ProllyTree × 1M entries)**: **~4.7 s/batch**
-- **combined throughput**: **~142K q/s** (insert + commit)
+- **commit (4 ProllyTree × 1M entries, serial)**: **~4.7 s/batch** (測定値)
+- **commit (4 ProllyTree 並列 + CAR bundle)**: **~1.5–2 s/batch** (期待値、並列 4 スレッド)
+- **combined throughput**: **~142K q/s** (insert + commit、serial 測定値)
 - **peak Phase-2 RSS growth**: ~3 GB (batch 3)。以降 OS がページ回収し減少 (batch 8–10 で負)
 - Phase-2 は 8 GB 上限未達で全 10 バッチ完走
 
