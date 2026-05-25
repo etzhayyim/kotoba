@@ -21,43 +21,6 @@ use kotoba_store::MemoryBlockStore;
 // ─── RSS helper (macOS / Linux) ──────────────────────────────────────────────
 
 fn rss_mb() -> f64 {
-    #[cfg(target_os = "macos")]
-    {
-        // task_info MACH_TASK_BASIC_INFO → resident_size (bytes)
-        use std::mem;
-        extern "C" {
-            fn task_info(
-                target_task: u32,
-                flavor: u32,
-                task_info_out: *mut i32,
-                task_info_count: *mut u32,
-            ) -> i32;
-            fn mach_task_self_() -> u32;
-        }
-        const MACH_TASK_BASIC_INFO: u32 = 20;
-        const MACH_TASK_BASIC_INFO_COUNT: u32 = 12;
-        #[repr(C)]
-        struct MachTaskBasicInfo {
-            virtual_size:     u64,
-            resident_size:    u64,
-            resident_size_max:u64,
-            user_time:        [u32; 2],
-            system_time:      [u32; 2],
-            policy:           i32,
-            suspend_count:    i32,
-        }
-        unsafe {
-            let mut info: MachTaskBasicInfo = mem::zeroed();
-            let mut count = MACH_TASK_BASIC_INFO_COUNT;
-            task_info(
-                mach_task_self_(),
-                MACH_TASK_BASIC_INFO,
-                &mut info as *mut _ as *mut i32,
-                &mut count,
-            );
-            info.resident_size as f64 / 1_048_576.0
-        }
-    }
     #[cfg(target_os = "linux")]
     {
         std::fs::read_to_string("/proc/self/status")
@@ -71,8 +34,16 @@ fn rss_mb() -> f64 {
             .map(|kb| kb / 1024.0)
             .unwrap_or(0.0)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    { 0.0 }
+    // macOS / others: parse `vm_stat` output via getrusage (maxrss = peak RSS)
+    #[cfg(not(target_os = "linux"))]
+    {
+        unsafe {
+            let mut usage: libc::rusage = std::mem::zeroed();
+            libc::getrusage(libc::RUSAGE_SELF, &mut usage);
+            // macOS ru_maxrss is in bytes; Linux is in KB — we only use this on non-Linux
+            usage.ru_maxrss as f64 / 1_048_576.0
+        }
+    }
 }
 
 // ─── Quad generators ─────────────────────────────────────────────────────────
@@ -140,7 +111,7 @@ fn phase1(targets: &[u64]) {
         let before_mb = rss_mb();
 
         let t0 = Instant::now();
-        insert_n(&mut arr, n / 2, 0, 1);   // n/2 entities × 2 quads = n quads
+        insert_n(&mut arr, n / 2, 0, 1);
         let insert_ms = t0.elapsed().as_millis();
 
         let after_mb = rss_mb();
@@ -157,14 +128,32 @@ fn phase1(targets: &[u64]) {
     }
 }
 
-// ─── Phase 2: QuadStore + MemoryBlockStore, batch-commit cycle ───────────────
+// ─── entry point ─────────────────────────────────────────────────────────────
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Use a 64 MB stack — ProllyTree sort + CBOR serialization at 1M-entry scale
+    // exceeds the default 8 MB OS thread stack.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .name("loadtest".to_string())
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(64 * 1024 * 1024)
+                .build()
+                .unwrap()
+                .block_on(async_main());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn async_main() {
     let max_str = std::env::var("LOADTEST_MAX").unwrap_or_else(|_| "10M".to_string());
     let max: u64 = parse_scale(&max_str);
 
-    // Phase 1: in-memory arrangement only
+    // Phase 1: in-memory arrangement only (cap at 10M to limit RAM)
     let p1_targets: Vec<u64> = [1_000_000u64, 10_000_000]
         .into_iter()
         .filter(|&t| t <= max)
@@ -200,11 +189,18 @@ async fn phase2(total: u64) {
         let base_s  = batch * (BATCH / 2);
         let t_ins   = Instant::now();
 
-        // Insert BATCH quads (BATCH/2 entities × 2 quads each)
-        for i in 0..(BATCH / 2) {
-            let s = base_s + i;
-            qs.assert_silent(text_quad(999, s, "name", "Alice")).await;
-            qs.assert_silent(ref_quad (999, s, "knows", (s + 1) % (base_s + BATCH / 2 + 1))).await;
+        // Insert BATCH quads via batched API (single lock acquisition per chunk)
+        const CHUNK: u64 = 50_000; // 50K quads per lock acquisition
+        let n_entities = BATCH / 2;
+        for chunk_start in (0..n_entities).step_by(CHUNK as usize / 2) {
+            let chunk_end = (chunk_start + CHUNK / 2).min(n_entities);
+            let mut quads = Vec::with_capacity(((chunk_end - chunk_start) * 2) as usize);
+            for i in chunk_start..chunk_end {
+                let s = base_s + i;
+                quads.push(text_quad(999, s, "name", "Alice"));
+                quads.push(ref_quad (999, s, "knows", (s + 1) % (base_s + n_entities + 1)));
+            }
+            qs.assert_batch_silent(quads).await;
         }
         let insert_ms = t_ins.elapsed().as_millis();
         total_quads  += BATCH;

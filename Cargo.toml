@@ -82,7 +82,7 @@ thiserror = "1"
 anyhow = "1"
 
 # benchmarks
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 
 # tracing
 tracing = "0.1"

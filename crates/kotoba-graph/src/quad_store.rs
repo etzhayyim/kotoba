@@ -66,6 +66,17 @@ impl QuadStore {
         arrs.entry(g).or_insert_with(Arrangement::new).insert(&quad);
     }
 
+    /// Insert a batch of quads with a single lock acquisition — fast path for bulk ingest.
+    /// Does not publish to Journal.
+    pub async fn assert_batch_silent(&self, quads: Vec<Quad>) {
+        if quads.is_empty() { return; }
+        let mut arrs = self.arrangements.write().await;
+        for quad in &quads {
+            let g = quad.graph.to_multibase();
+            arrs.entry(g).or_insert_with(Arrangement::new).insert(quad);
+        }
+    }
+
     /// Retract without publishing to Journal — used during WAL replay on startup.
     pub async fn retract_silent(&self, quad: Quad) {
         let g = quad.graph.to_multibase();
@@ -321,11 +332,27 @@ impl QuadStore {
             }
         };
 
-        // Build and persist 4 ProllyTrees
-        let root_eavt = ProllyTree::build_tree(eavt_entries, &*self.block_store)?;
-        let root_aevt = ProllyTree::build_tree(aevt_entries, &*self.block_store)?;
-        let root_avet = ProllyTree::build_tree(avet_entries, &*self.block_store)?;
-        let root_vaet = ProllyTree::build_tree(vaet_entries, &*self.block_store)?;
+        // Build 4 ProllyTrees on a dedicated 64 MB stack thread.
+        // tokio::task::spawn_blocking uses the blocking thread pool (default 8 MB stack),
+        // which overflows at 1M+ entry scale.  A manual thread + oneshot channel avoids that.
+        let bs = Arc::clone(&self.block_store);
+        let (tx, rx) = tokio::sync::oneshot::channel::<anyhow::Result<_>>();
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .name("kotoba-prolly-build".to_string())
+            .spawn(move || {
+                let result = (|| -> anyhow::Result<_> {
+                    let re = ProllyTree::build_tree(eavt_entries, &*bs)?;
+                    let ra = ProllyTree::build_tree(aevt_entries, &*bs)?;
+                    let rv = ProllyTree::build_tree(avet_entries, &*bs)?;
+                    let rw = ProllyTree::build_tree(vaet_entries, &*bs)?;
+                    Ok((re, ra, rv, rw))
+                })();
+                let _ = tx.send(result);
+            })
+            .map_err(|e| anyhow::anyhow!("failed to spawn prolly-build thread: {e}"))?;
+        let (root_eavt, root_aevt, root_avet, root_vaet) = rx.await
+            .map_err(|_| anyhow::anyhow!("prolly-build thread dropped sender"))??;
 
         let mut index_roots = std::collections::HashMap::new();
         index_roots.insert("aevt".to_string(), root_aevt);

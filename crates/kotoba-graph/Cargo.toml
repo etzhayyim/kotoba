@@ -6,6 +6,7 @@ license.workspace = true
 description = "Kotoba Graph API: Quad write/read, SPARQL→Datalog, Commit DAG"
 
 [dependencies]
+libc = "0.2"
 kotoba-core.workspace = true
 kotoba-store.workspace = true
 kotoba-kse.workspace = true
@@ -23,3 +24,11 @@ data-encoding.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 spargebra.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[[bench]]
+name = "quad_store"
+harness = false
