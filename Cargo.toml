@@ -16,6 +16,7 @@ members = [
     "crates/kotoba-guest",
     "crates/kotoba-crypto",
     "crates/kotoba-signal",
+    "crates/kotoba-ingest",
 ]
 resolver = "2"
 
@@ -107,6 +108,7 @@ hf-hub              = { version = "0.3", features = ["tokio"] }
 tokenizers          = { version = "0.19", default-features = false, features = ["onig"] }
 
 # internal crates
+kotoba-ingest  = { path = "crates/kotoba-ingest" }
 kotoba-core    = { path = "crates/kotoba-core" }
 kotoba-kse     = { path = "crates/kotoba-kse" }
 kotoba-kqe     = { path = "crates/kotoba-kqe" }

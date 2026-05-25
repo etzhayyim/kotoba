@@ -9,6 +9,7 @@ use kotoba_dht::{
 use kotoba_kse::{store::KseStore, sync_window::SyncWindow, Journal, Shelf, Topic, Vault};
 use kotoba_kqe::quad::Quad;
 use kotoba_graph::QuadStore;
+use kotoba_kse::SecureVault;
 use kotoba_store::{BudgetedBlockStore, IpfsPinClient, LayeredBlockStore};
 use kotoba_runtime::{host::InferenceFn, UdfExecutor, WasmExecutor};
 use kotoba_vm::{distributed::DistributedPregelRunner, InvokeRouter};
@@ -48,6 +49,11 @@ pub struct KotobaState {
     // ── IPFS Pinning ─────────────────────────────────────────────────────────
     /// Optional IPFS Pinning Service client (Pinata/web3.storage/Filebase).
     pub ipfs_pin: Option<Arc<IpfsPinClient>>,
+    // ── Email E2E Storage ────────────────────────────────────────────────────
+    /// AES-256-GCM encrypted vault for email body blobs.
+    pub secure_vault: Arc<SecureVault>,
+    /// 32-byte vault key from KOTOBA_VAULT_KEY (hex).  None = email features disabled.
+    pub vault_key: Option<[u8; 32]>,
     // ── Agent Sessions ───────────────────────────────────────────────────────
     /// Active SyncWindow sessions keyed by session_id.
     pub agent_sessions: Arc<tokio::sync::RwLock<HashMap<String, SyncWindow>>>,
@@ -180,6 +186,31 @@ impl KotobaState {
             }
         });
 
+        // SecureVault — E2E encrypted blob store for email bodies
+        let secure_vault = Arc::new(match build_kse_store("kotoba/email-vault/") {
+            Some(store) => {
+                tracing::info!("SecureVault: B2 persistence enabled (kotoba/email-vault/)");
+                SecureVault::with_vault(Vault::with_store(store))
+            }
+            None => SecureVault::new(),
+        });
+
+        // Vault key — 32 bytes from KOTOBA_VAULT_KEY (64 hex chars)
+        let vault_key: Option<[u8; 32]> = std::env::var("KOTOBA_VAULT_KEY").ok().and_then(|s| {
+            let b = hex::decode(s.trim()).ok()?;
+            if b.len() != 32 {
+                tracing::warn!("KOTOBA_VAULT_KEY must be 64 hex chars (32 bytes); email features disabled");
+                return None;
+            }
+            let mut k = [0u8; 32];
+            k.copy_from_slice(&b);
+            tracing::info!("KOTOBA_VAULT_KEY loaded — email E2E encryption enabled");
+            Some(k)
+        });
+        if vault_key.is_none() {
+            tracing::info!("KOTOBA_VAULT_KEY not set — email features disabled");
+        }
+
         Ok(Self {
             version: env!("CARGO_PKG_VERSION"),
             journal,
@@ -196,6 +227,8 @@ impl KotobaState {
             block_store,
             quad_store,
             ipfs_pin,
+            secure_vault,
+            vault_key,
             agent_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         })
     }

@@ -14,6 +14,7 @@ name = "kotoba"
 path = "src/main.rs"
 
 [dependencies]
+kotoba-ingest.workspace  = true
 kotoba-core.workspace    = true
 kotoba-crypto.workspace  = true
 kotoba-signal.workspace  = true
@@ -38,6 +39,7 @@ axum.workspace           = true
 tower-http.workspace     = true
 base64                   = "0.22"
 hex                      = "0.4"
+reqwest.workspace        = true
 blake3.workspace         = true
 bytes.workspace          = true
 object_store.workspace   = true

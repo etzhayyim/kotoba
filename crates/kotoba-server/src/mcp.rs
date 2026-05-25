@@ -18,6 +18,8 @@ pub const MCP_TOOL_INFER_RUN:    &str = "kotoba_infer_run";
 pub const MCP_TOOL_EMBED_CREATE: &str = "kotoba_embed_create";
 pub const MCP_TOOL_WEIGHT_PUT:   &str = "kotoba_weight_put";
 pub const MCP_TOOL_LORA_APPLY:   &str = "kotoba_lora_apply";
+pub const MCP_TOOL_EMAIL_LIST:   &str = "kotoba_email_list";
+pub const MCP_TOOL_EMAIL_READ:   &str = "kotoba_email_read";
 
 use std::sync::Arc;
 use axum::{
@@ -153,6 +155,31 @@ fn tools_list() -> Value {
                         "graph":     { "type": "string",  "description": "Named graph CID (multibase)" }
                     },
                     "required": ["model_cid", "layer", "data_b64", "shape", "dtype", "graph"]
+                }
+            },
+            {
+                "name": MCP_TOOL_EMAIL_LIST,
+                "description": "List emails stored in the Kotoba encrypted inbox for an owner DID. Returns plaintext date and message_id; encrypted fields (from/subject) are decrypted server-side.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "owner_did": { "type": "string", "description": "DID of the mailbox owner (e.g. did:plc:xxxx)" },
+                        "limit":     { "type": "integer", "description": "Max results (default 50, max 200)" },
+                        "offset":    { "type": "integer", "description": "Pagination offset" }
+                    },
+                    "required": ["owner_did"]
+                }
+            },
+            {
+                "name": MCP_TOOL_EMAIL_READ,
+                "description": "Decrypt and return the full body and metadata of one stored email. Requires KOTOBA_VAULT_KEY to be configured on the server.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "email_cid": { "type": "string", "description": "Email CID (multibase) returned by kotoba_email_list" },
+                        "owner_did": { "type": "string", "description": "DID of the mailbox owner" }
+                    },
+                    "required": ["email_cid", "owner_did"]
                 }
             },
             {
