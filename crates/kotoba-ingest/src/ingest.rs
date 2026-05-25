@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use mail_parser::{HeaderValue, MessageParser};
+use mail_parser::{Address, MessageParser};
 
 use kotoba_core::cid::KotobaCid;
 use kotoba_kqe::quad::{Quad, QuadObject};
@@ -109,15 +109,10 @@ pub fn graph_cid_for(owner_did: &str) -> KotobaCid {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn addr_header(hv: Option<&HeaderValue<'_>>) -> String {
-    match hv {
+fn addr_header(addr: Option<&Address<'_>>) -> String {
+    match addr {
         None => String::new(),
-        Some(HeaderValue::Address(addr)) => format!(
-            "{} <{}>",
-            addr.name.as_deref().unwrap_or(""),
-            addr.address.as_deref().unwrap_or(""),
-        ),
-        Some(HeaderValue::AddressList(list)) => list.iter()
+        Some(Address::List(list)) => list.iter()
             .map(|a| format!(
                 "{} <{}>",
                 a.name.as_deref().unwrap_or(""),
@@ -125,7 +120,15 @@ fn addr_header(hv: Option<&HeaderValue<'_>>) -> String {
             ))
             .collect::<Vec<_>>()
             .join(", "),
-        Some(other) => format!("{other:?}"),
+        Some(Address::Group(groups)) => groups.iter()
+            .flat_map(|g| g.addresses.iter())
+            .map(|a| format!(
+                "{} <{}>",
+                a.name.as_deref().unwrap_or(""),
+                a.address.as_deref().unwrap_or(""),
+            ))
+            .collect::<Vec<_>>()
+            .join(", "),
     }
 }
 
@@ -152,8 +155,7 @@ mod tests {
 
     fn make_ingestor() -> EmailIngestor {
         let journal     = Arc::new(Journal::new());
-        let block_store: Arc<dyn kotoba_graph::BlockStore + Send + Sync> =
-            Arc::new(SledBlockStore::temporary().expect("sled temp"));
+        let block_store = Arc::new(SledBlockStore::temporary().expect("sled temp"));
         let quad_store  = Arc::new(QuadStore::new(journal, block_store));
         let vault       = SecureVault::new();
         EmailIngestor::new(
@@ -193,8 +195,7 @@ mod tests {
         let vault = Arc::new(SecureVault::new());
         let key   = test_key();
         let journal     = Arc::new(Journal::new());
-        let block_store: Arc<dyn kotoba_graph::BlockStore + Send + Sync> =
-            Arc::new(SledBlockStore::temporary().expect("sled temp"));
+        let block_store = Arc::new(SledBlockStore::temporary().expect("sled temp"));
         let quad_store  = Arc::new(QuadStore::new(journal, block_store));
         let ing = EmailIngestor::new(
             Arc::clone(&vault), quad_store, key, "did:plc:test2".to_string()

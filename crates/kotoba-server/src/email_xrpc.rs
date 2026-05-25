@@ -108,7 +108,11 @@ pub async fn email_read(
             None => return (StatusCode::NOT_FOUND,
                 Json(json!({ "error": "email body_cid not found" }))).into_response(),
             Some(cid_str) => {
-                let blob_cid = KotobaCid::from_bytes(cid_str.as_bytes());
+                let blob_cid = match KotobaCid::from_multibase(&cid_str) {
+                    Some(c) => c,
+                    None => return (StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": "invalid body_cid multibase" }))).into_response(),
+                };
                 // SecureVault requires BlobRef; reconstruct from CID
                 let blob_ref = kotoba_kse::BlobRef { cid: blob_cid, size: 0 };
                 match state.secure_vault.get(&vault_key, &blob_ref).await {

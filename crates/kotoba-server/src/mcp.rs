@@ -469,16 +469,17 @@ async fn call_tool(
 
             let vault_key = state.vault_key;
             let emails: Vec<Value> = entries.into_iter().skip(offset).take(limit).map(|(cid_mb, date)| {
-                let email_cid = kotoba_core::cid::KotobaCid::from_bytes(cid_mb.as_bytes());
-                let message_id = arrangement.get_objects(&email_cid, "email/message_id")
-                    .into_iter().find_map(|o| if let QuadObject::Text(t) = o { Some(t) } else { None })
-                    .unwrap_or_default();
-                let subject_enc = arrangement.get_objects(&email_cid, "email/subject")
-                    .into_iter().find_map(|o| if let QuadObject::Text(t) = o { Some(t) } else { None })
-                    .unwrap_or_default();
-                let from_enc = arrangement.get_objects(&email_cid, "email/from")
-                    .into_iter().find_map(|o| if let QuadObject::Text(t) = o { Some(t) } else { None })
-                    .unwrap_or_default();
+                let get_text = |pred: &str| -> String {
+                    if let Some(cid) = kotoba_core::cid::KotobaCid::from_multibase(&cid_mb) {
+                        arrangement.get_objects(&cid, pred)
+                            .into_iter()
+                            .find_map(|o| if let QuadObject::Text(t) = o { Some(t.clone()) } else { None })
+                            .unwrap_or_default()
+                    } else { String::new() }
+                };
+                let message_id  = get_text("email/message_id");
+                let subject_enc = get_text("email/subject");
+                let from_enc    = get_text("email/from");
 
                 let subject = vault_key.as_ref()
                     .and_then(|k| kotoba_crypto::envelope::decrypt_field(k, &subject_enc).ok())
@@ -511,14 +512,23 @@ async fn call_tool(
             let arrangement = state.quad_store.arrangement(&graph_cid).await
                 .ok_or_else(|| (ERR_NOT_FOUND, "no emails found for owner_did".to_string()))?;
 
-            let email_cid = kotoba_core::cid::KotobaCid::from_bytes(email_cid_str.as_bytes());
+            let email_cid = kotoba_core::cid::KotobaCid::from_multibase(&email_cid_str)
+                .ok_or_else(|| (ERR_INTERNAL, "invalid email_cid multibase".to_string()))?;
+
+            let get_text = |pred: &str| -> String {
+                arrangement.get_objects(&email_cid, pred)
+                    .into_iter()
+                    .find_map(|o| if let QuadObject::Text(t) = o { Some(t.clone()) } else { None })
+                    .unwrap_or_default()
+            };
 
             // body_cid → SecureVault decrypt
-            let body_cid_str = arrangement.get_objects(&email_cid, "email/body_cid")
-                .into_iter().find_map(|o| if let QuadObject::Text(t) = o { Some(t) } else { None })
-                .ok_or_else(|| (ERR_NOT_FOUND, "email/body_cid not found".to_string()))?;
-
-            let blob_cid  = kotoba_core::cid::KotobaCid::from_bytes(body_cid_str.as_bytes());
+            let body_cid_str = get_text("email/body_cid");
+            if body_cid_str.is_empty() {
+                return Err((ERR_NOT_FOUND, "email/body_cid not found".to_string()));
+            }
+            let blob_cid = kotoba_core::cid::KotobaCid::from_multibase(&body_cid_str)
+                .ok_or_else(|| (ERR_INTERNAL, "invalid body_cid multibase".to_string()))?;
             let blob_ref  = kotoba_kse::BlobRef { cid: blob_cid, size: 0 };
             let body_bytes = state.secure_vault.get(&vault_key, &blob_ref).await
                 .map_err(|e| (ERR_INTERNAL, format!("vault decrypt: {e}")))?
@@ -526,17 +536,11 @@ async fn call_tool(
             let body = String::from_utf8_lossy(&body_bytes).into_owned();
 
             let dec = |pred: &str| -> String {
-                let enc = arrangement.get_objects(&email_cid, pred)
-                    .into_iter().find_map(|o| if let QuadObject::Text(t) = o { Some(t) } else { None })
-                    .unwrap_or_default();
+                let enc = get_text(pred);
                 kotoba_crypto::envelope::decrypt_field(&vault_key, &enc)
                     .ok().and_then(|b| String::from_utf8(b).ok()).unwrap_or(enc)
             };
-            let plain = |pred: &str| -> String {
-                arrangement.get_objects(&email_cid, pred)
-                    .into_iter().find_map(|o| if let QuadObject::Text(t) = o { Some(t) } else { None })
-                    .unwrap_or_default()
-            };
+            let plain = |pred: &str| -> String { get_text(pred) };
 
             Ok(json!({
                 "email_cid":  email_cid_str,
