@@ -24,7 +24,7 @@ KOTOBA ≝ Datom[CID/T] × EAVT[KSE Topic] × Pregel[BSP] × Datalog[Δ]
 | kotoba-llm | Weight blob (FP8), LoRA Delta, KV-cache, inference, WebGPU training (embed+lm_head), WebGPU inference (full transformer, Gemma 4 E2B/E4B) |
 | kotoba-runtime | WASM Component Model host: WasmExecutor + UdfExecutor + WIT bindings |
 | kotoba-server | XRPC / MCP endpoints |
-| kotoba-store | BlockStore implementations: Memory, Sled, S3; BudgetedBlockStore<S> LRU eviction |
+| kotoba-store | BlockStore implementations: Memory, Sled, S3; BudgetedBlockStore<S> LRU eviction; TieredBlockStore<H,C> hot/cold tiering; IrohBlockStore (feature=iroh-cold, iroh-blobs 0.30) |
 | kotoba-store-web | Browser IndexedDB block store (wasm32), AsyncBlockStore trait |
 
 ## 実装順序
@@ -154,6 +154,36 @@ bytemuck = { version = "1",  features = ["derive"], optional = true }
 - `Delta::retract` なしで旧 WeightRef を放置 (二重 Datom)
 - `quality_scale = NaN / Inf`
 - optimizer step 後に grad テンソルを Arrangement に残す
+
+## 4-Index Arrangement (Datomic EAVT/AEVT/AVET/VAET)
+
+| 名前 | Datomic | 内部構造 | 用途 |
+|---|---|---|---|
+| `spo` | EAVT | `HashMap<S, BTreeMap<P, Vec<O>>>` | エンティティ全属性 |
+| `pso` | AEVT | `BTreeMap<P, HashMap<S, Vec<O>>>` | 属性スキャン (P範囲) |
+| `pos` | AVET | `BTreeMap<P, BTreeMap<okey, Vec<S>>>` | 値引き P+O→S |
+| `ocp` | VAET | `HashMap<O_cid, BTreeMap<P, Vec<S>>>` | 逆参照 (ref型のみ) |
+
+- VAET は `QuadObject::Cid` のみインデックス — Text/Integer/Float 禁止
+- `CommitDag::Commit` に `index_roots: HashMap<String, KotobaCid>` 追加 (`serde(default, skip_serializing_if)` で旧 commit CID 安定)
+- `QuadStore::commit()` は EAVT/AEVT/AVET/VAET の 4 ProllyTree を個別 persist
+- Journal: 4 トピック SPO + PSO + POS + OSP に publish
+
+## TieredBlockStore / IrohBlockStore
+
+- `TieredBlockStore<H, C>`: hot (Sled/Budgeted) + cold (iroh/S3) の 2 層
+  - put: hot に即時書き込み + cold に `tokio::spawn` fire-and-forget
+  - get: hot ヒット → 即返却; hot miss → cold fetch + hot promote
+  - pin/unpin: hot 層に委譲 (SyncWindow compatible)
+- `IrohBlockStore` (feature=`iroh-cold`): iroh-blobs 0.30 の in-process store
+  - `blake3 CIDv1 hash = cid.0[4..36]` → `iroh_blobs::Hash`
+  - daemon 不要、Kubo 不使用
+  - sync BlockStore は `tokio::task::block_in_place` でブリッジ
+
+## criterion ベンチマーク
+
+- `kotoba-kqe/benches/arrangement.rs`: insert (1k/10k/100k), SPO/PSO/POS/OCP lookup, prefix scan
+- `kotoba-store/benches/tiered_store.rs`: hot put/get, cold-promote, budgeted eviction
 
 ## Selective Sync + Storage Budget 設計
 
