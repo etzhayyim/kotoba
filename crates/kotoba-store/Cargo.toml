@@ -28,3 +28,7 @@ tokio             = { workspace = true, features = ["rt-multi-thread"] }
 [[bench]]
 name = "tiered_store"
 harness = false
+
+[[bench]]
+name = "car_flush"
+harness = false
