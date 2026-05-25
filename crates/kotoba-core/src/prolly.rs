@@ -268,6 +268,77 @@ mod tests {
         }
     }
 
+    // ── regression: build_internal_level must use CID not max_key ────────────
+    //
+    // Before the fix, build_internal_level called is_boundary(&child.0) — the
+    // same max_key that fired the boundary at leaf level.  That key would fire
+    // again at every recursive call → unbounded recursion → stack overflow.
+    //
+    // Any test that builds a tree large enough to produce ≥2 leaf chunks will
+    // fail with a stack overflow if the regression is reintroduced.
+
+    /// Regression: build_tree must terminate for 1K entries.
+    /// With BOUNDARY_MASK=0xFF (1/256 rate) and 1K entries, ~4 boundary keys
+    /// appear, producing multiple leaf chunks and triggering build_internal_level.
+    /// Before the fix this overflowed the stack; after the fix it completes.
+    #[test]
+    fn build_tree_1k_terminates_and_get_works() {
+        let store = MemoryBlockStore::new();
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = (0u64..1_000)
+            .map(|i| (i.to_le_bytes().to_vec(), format!("v{i}").into_bytes()))
+            .collect();
+        let root = ProllyTree::build_tree(entries, &store).unwrap();
+
+        // A key in the middle must be found.
+        let key = 500u64.to_le_bytes().to_vec();
+        let val = ProllyTree::get(&root, &key, &store).unwrap();
+        assert_eq!(val.as_deref(), Some(b"v500".as_ref()));
+
+        // First and last key.
+        let v0 = ProllyTree::get(&root, &0u64.to_le_bytes(), &store).unwrap();
+        assert_eq!(v0.as_deref(), Some(b"v0".as_ref()));
+        let v999 = ProllyTree::get(&root, &999u64.to_le_bytes(), &store).unwrap();
+        assert_eq!(v999.as_deref(), Some(b"v999".as_ref()));
+    }
+
+    /// Regression: larger tree (10K entries) must also terminate.
+    #[test]
+    fn build_tree_10k_terminates() {
+        let store = MemoryBlockStore::new();
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = (0u64..10_000)
+            .map(|i| (i.to_le_bytes().to_vec(), format!("v{i}").into_bytes()))
+            .collect();
+        let root = ProllyTree::build_tree(entries, &store).unwrap();
+        let val = ProllyTree::get(&root, &5_000u64.to_le_bytes(), &store).unwrap();
+        assert_eq!(val.as_deref(), Some(b"v5000".as_ref()));
+    }
+
+    /// Missing key returns None (does not panic or recurse).
+    #[test]
+    fn build_tree_get_missing_key() {
+        let store = MemoryBlockStore::new();
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = (0u64..100)
+            .map(|i| (i.to_le_bytes().to_vec(), b"x".to_vec()))
+            .collect();
+        let root = ProllyTree::build_tree(entries, &store).unwrap();
+        let val = ProllyTree::get(&root, &999u64.to_le_bytes(), &store).unwrap();
+        assert!(val.is_none());
+    }
+
+    /// Single entry: tree = just one leaf node; get must still work.
+    #[test]
+    fn build_tree_single_entry() {
+        let store = MemoryBlockStore::new();
+        let entries = vec![(b"only".to_vec(), b"value".to_vec())];
+        let root = ProllyTree::build_tree(entries, &store).unwrap();
+        let val = ProllyTree::get(&root, b"only", &store).unwrap();
+        assert_eq!(val.as_deref(), Some(b"value".as_ref()));
+        let none = ProllyTree::get(&root, b"other", &store).unwrap();
+        assert!(none.is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+
     #[test]
     fn flush_empty_tree_returns_none() {
         let store = MemoryBlockStore::new();

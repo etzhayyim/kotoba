@@ -59,7 +59,7 @@ flags = ["editable"]
 [subdirs."crates/kotoba-core"]
 role = "cid-frame-prolly"
 tier = "alpha"
-notes = "ProllyTree: build_tree(entries, store)→root_cid (commit), get(root, key, store)→Option<Vec<u8>> (cold-path point-query, 1 BlockStore.get per level). Branching factor ~256 entries/node → depth=ceil(log256(N)). Internal boundary check uses child CID (not max_key — max_key triggers infinite recursion since same key fires at every level; fixed 2026-05-25). Measured cold RTT (2026-05-25, 1K entries): iroh LAN ~3.3ms (3 RTTs), S3 same-AZ ~6ms (3 RTTs), iroh WAN ~175ms (~2 RTTs)."
+notes = "ProllyTree: build_tree(entries, store)→root_cid (commit), get(root, key, store)→Option<Vec<u8>> (cold-path point-query, 1 BlockStore.get per level). Branching factor ~256 entries/node → depth=ceil(log256(N)). Internal boundary check uses child CID (not max_key — max_key triggers infinite recursion since same key fires at every level; fixed 2026-05-25). Measured cold RTT (2026-05-25, 1K entries): iroh LAN ~3.3ms (3 RTTs), S3 same-AZ ~6ms (3 RTTs), iroh WAN ~175ms (~2 RTTs). Regression tests (2026-05-25): build_tree_1k_terminates_and_get_works / build_tree_10k_terminates / build_tree_get_missing_key / build_tree_single_entry — all pass; any re-introduction of is_boundary(max_key) at internal level causes immediate stack-overflow failure."
 
 [subdirs."crates/kotoba-kse"]
 role = "stream-engine"
