@@ -277,9 +277,30 @@ entities × 2 quads = 要素数 (throughput = quad/s)
 | 1M | 3.45s | 840 MB | 68µs | 7.4ms | 14ms | 290K | 840 |
 | 10M | 75.9s | 1570 MB | 829µs | 87ms | 136ms | 132K | 157 |
 
+#### loadtest Phase 2 (QuadStore commit cycle + ProllyTree, 2026-05-25)
+
+バッチ 1M quad ずつ insert → `commit()` (4 ProllyTree build) → `reset_arrangement()` を繰り返す。  
+`LOADTEST_MEM_LIMIT_MB=8192` (Phase-2 RSS 成長が 8 GB に達したら打ち切り)。
+
+| batch | insert_ms | commit_ms | MB_growth | ins_q/s | cum_q/s |
+|---|---|---|---|---|---|
+| 1 (1M) | 1620 | 4730 | 2288 | 617K | 142K |
+| 2 (2M) | 1391 | 4725 | 2397 | 719K | 144K |
+| 3 (3M) | 1509 | 4671 | 3013 | 663K | 144K |
+| 4 (4M) | 1426 | 4790 | 993 | 701K | 144K |
+| 5 (5M) | 1440 | 4696 | 361 | 694K | 145K |
+| 6–10 | ~1440 | ~4760 | ≤513→負 | ~690K | ~142K |
+
+- **insert**: ~620–720K q/s (バッチ単独)
+- **commit (4 ProllyTree × 1M entries)**: **~4.7 s/batch**
+- **combined throughput**: **~142K q/s** (insert + commit)
+- **peak Phase-2 RSS growth**: ~3 GB (batch 3)。以降 OS がページ回収し減少 (batch 8–10 で負)
+- Phase-2 は 8 GB 上限未達で全 10 バッチ完走
+
 Run: `cargo bench -p kotoba-kqe --bench arrangement`  
 Run: `cargo bench -p kotoba-graph --bench quad_store`  
-Run: `cargo bench -p kotoba-store --bench tiered_store`
+Run: `cargo bench -p kotoba-store --bench tiered_store`  
+Run: `LOADTEST_MAX=10M LOADTEST_MEM_LIMIT_MB=8192 cargo run --release --example loadtest -p kotoba-graph`
 
 #### 100億 quad スケール ディスク試算
 

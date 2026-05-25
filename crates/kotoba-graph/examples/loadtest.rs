@@ -3,6 +3,7 @@
 /// Usage:
 ///   cargo run --release --example loadtest -p kotoba-graph
 ///   LOADTEST_MAX=100M cargo run --release --example loadtest -p kotoba-graph
+///   LOADTEST_MEM_LIMIT_MB=8192 cargo run --release --example loadtest -p kotoba-graph
 ///
 /// Output format: TSV lines → easy to paste into a spreadsheet.
 use std::{
@@ -20,6 +21,9 @@ use kotoba_store::MemoryBlockStore;
 
 // ─── RSS helper (macOS / Linux) ──────────────────────────────────────────────
 
+/// Current resident set size in MiB.
+/// Linux: reads VmRSS from /proc/self/status (current).
+/// macOS: uses mach_task_basic_info resident_size (current).
 fn rss_mb() -> f64 {
     #[cfg(target_os = "linux")]
     {
@@ -34,13 +38,45 @@ fn rss_mb() -> f64 {
             .map(|kb| kb / 1024.0)
             .unwrap_or(0.0)
     }
-    // macOS / others: parse `vm_stat` output via getrusage (maxrss = peak RSS)
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        // MACH_TASK_BASIC_INFO returns current resident_size (not peak).
+        #[repr(C)]
+        struct MachTaskBasicInfo {
+            virtual_size:       u64,
+            resident_size:      u64,
+            resident_size_max:  u64,
+            user_time_sec:      u32,
+            user_time_usec:     u32,
+            system_time_sec:    u32,
+            system_time_usec:   u32,
+            policy:             u32,
+            suspend_count:      i32,
+        }
+        extern "C" {
+            fn mach_task_self() -> u32;
+            fn task_info(task: u32, flavor: u32, info: *mut u32, cnt: *mut u32) -> i32;
+        }
+        const MACH_TASK_BASIC_INFO: u32 = 20;
+        // struct size in natural_t (4-byte) units
+        const COUNT: u32 = (std::mem::size_of::<MachTaskBasicInfo>() / 4) as u32;
+        unsafe {
+            let mut info: MachTaskBasicInfo = std::mem::zeroed();
+            let mut cnt = COUNT;
+            let ret = task_info(
+                mach_task_self(),
+                MACH_TASK_BASIC_INFO,
+                &mut info as *mut _ as *mut u32,
+                &mut cnt,
+            );
+            if ret == 0 { info.resident_size as f64 / 1_048_576.0 } else { 0.0 }
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         unsafe {
             let mut usage: libc::rusage = std::mem::zeroed();
             libc::getrusage(libc::RUSAGE_SELF, &mut usage);
-            // macOS ru_maxrss is in bytes; Linux is in KB — we only use this on non-Linux
             usage.ru_maxrss as f64 / 1_048_576.0
         }
     }
@@ -153,6 +189,11 @@ async fn async_main() {
     let max_str = std::env::var("LOADTEST_MAX").unwrap_or_else(|_| "10M".to_string());
     let max: u64 = parse_scale(&max_str);
 
+    let mem_limit_mb: f64 = std::env::var("LOADTEST_MEM_LIMIT_MB")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8192.0);
+
     // Phase 1: in-memory arrangement only (cap at 10M to limit RAM)
     let p1_targets: Vec<u64> = [1_000_000u64, 10_000_000]
         .into_iter()
@@ -164,17 +205,18 @@ async fn async_main() {
 
     // Phase 2: QuadStore commit cycle (batch 1M, repeat up to max)
     if max >= 1_000_000 {
-        phase2(max).await;
+        phase2(max, mem_limit_mb).await;
     }
 }
 
-async fn phase2(total: u64) {
+async fn phase2(total: u64, mem_limit_mb: f64) {
     const BATCH: u64 = 1_000_000; // quads per batch (= 500K entities × 2 quads)
     let batches = (total / BATCH).max(1);
 
-    println!("\n=== Phase 2: QuadStore commit cycle (MemoryBlockStore, batch={}) ===", fmt_n(BATCH));
+    println!("\n=== Phase 2: QuadStore commit cycle (MemoryBlockStore, batch={}, mem_limit={:.0} MB) ===",
+        fmt_n(BATCH), mem_limit_mb);
     println!("{:<8}  {:>10}  {:>12}  {:>10}  {:>10}  {:>10}  {:>10}",
-        "batch", "insert_ms", "total_quads", "commit_ms", "MB_rss",
+        "batch", "insert_ms", "total_quads", "commit_ms", "MB_growth",
         "ins_q/s", "cum_q/s");
 
     let journal     = Arc::new(Journal::new());
@@ -184,6 +226,7 @@ async fn phase2(total: u64) {
 
     let mut total_quads = 0u64;
     let run_start = Instant::now();
+    let phase2_base_rss = rss_mb(); // RSS at Phase 2 start (Phase 1 residual excluded)
 
     for batch in 0..batches {
         let base_s  = batch * (BATCH / 2);
@@ -213,13 +256,20 @@ async fn phase2(total: u64) {
         // Clear in-memory arrangement to reclaim RAM for next batch
         qs.reset_arrangement(&graph).await;
 
-        let rss      = rss_mb();
-        let ins_qps  = (BATCH as f64 / (insert_ms as f64 / 1000.0)) as u64;
-        let cum_qps  = (total_quads as f64 / run_start.elapsed().as_secs_f64()) as u64;
+        let rss       = rss_mb();
+        let rss_delta = rss - phase2_base_rss;
+        let ins_qps   = (BATCH as f64 / (insert_ms as f64 / 1000.0)) as u64;
+        let cum_qps   = (total_quads as f64 / run_start.elapsed().as_secs_f64()) as u64;
 
         println!("{:<8}  {:>10}  {:>12}  {:>10}  {:>10.1}  {:>10}  {:>10}",
-            batch + 1, insert_ms, fmt_n(total_quads), commit_ms, rss,
+            batch + 1, insert_ms, fmt_n(total_quads), commit_ms, rss_delta,
             ins_qps, cum_qps);
+
+        if rss_delta >= mem_limit_mb {
+            println!("\n  [STOPPED] Phase-2 RSS growth {:.0} MB >= limit {:.0} MB after batch {}",
+                rss_delta, mem_limit_mb, batch + 1);
+            break;
+        }
     }
 
     println!("\n  total: {} quads in {:.1}s  avg throughput: {} quad/s",
