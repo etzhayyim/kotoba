@@ -23,6 +23,7 @@ KOTOBA ≝ Datom[CID/T] × EAVT[KSE Topic] × Pregel[BSP] × Datalog[Δ]
 | kotoba-vm | Invoke/Result ChainEntry, CALL_FOREIGN bridge (KVM) |
 | kotoba-llm | Weight blob (FP8), LoRA Delta, KV-cache, inference, WebGPU training (embed+lm_head), WebGPU inference (full transformer, Gemma 4 E2B/E4B) |
 | kotoba-runtime | WASM Component Model host: WasmExecutor + UdfExecutor + WIT bindings |
+| kotoba-ingest | Gmail OAuth2 poll + RFC 2822 parse + E2E encrypt → QuadStore (ADR-2605252400) |
 | kotoba-server | XRPC / MCP endpoints |
 | kotoba-store | BlockStore implementations: Memory, Sled, S3; BudgetedBlockStore<S> LRU eviction; TieredBlockStore<H,C> hot/cold tiering; IrohBlockStore (feature=iroh-cold, iroh-blobs 0.30) |
 | kotoba-store-web | Browser IndexedDB block store (wasm32), AsyncBlockStore trait |
