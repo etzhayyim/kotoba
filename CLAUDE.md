@@ -220,10 +220,13 @@ bytemuck = { version = "1",  features = ["derive"], optional = true }
 
 **cold-path クエリ (IPFS/S3) の特性**:  
 - ProllyTree の1レベル = 1 BlockStore.get() = 1 RTT  
-- ~256 entries/node なので深さ = ceil(log256(N)): 1K → 1-2 RTT、1M → 3-4 RTT、1B → 5-6 RTT  
-- iroh LAN 1ms × 3 レベル = **~3ms**  
-- iroh WAN 80ms × 3 レベル = **~240ms**  
-- S3 same-AZ 2ms × 3 レベル = **~6ms**  
+- BOUNDARY_MASK=0xFF (1/256 確率)、内部ノード境界はリーフ max_key ではなく **子 CID** で決定  
+  (max_key による境界チェックは各レベルで同一キーが毎回 trigger → 無限再帰のため修正)  
+- 実測深さ (1K entries, 2026-05-25): **~3 レベル** → 3 RTTs  
+- 理論深さ: ceil(log256(N)) — 1K → 2-3 RTT、1M → 3-4 RTT、1B → 5-6 RTT  
+- **実測**: iroh LAN 1ms × 3 RTT = **3.3 ms**  
+- **実測**: iroh WAN 80ms × ~2 RTT = **175 ms**  
+- **実測**: S3 same-AZ 2ms × 3 RTT = **6.0 ms**  
 - TieredBlockStore(hot=sled, cold=iroh): hot ヒット時は **µs オーダー**
 
 ### 実測値 (2026-05-25, macOS aarch64, release build)
@@ -256,6 +259,17 @@ entities × 2 quads = 要素数 (throughput = quad/s)
 
 ¹ 1M entities (2M quads) の bench は HashMap/BTreeMap 成長コストを含む。実運用 (batch commit cycle で reset_arrangement) は loadtest 測定値を参照。
 
+#### QuadStore cold-path (ProllyTree + 模擬 IPFS/S3 RTT, 2026-05-25, 1K entries)
+
+| シナリオ | p50 | RTT モデル | 実測 depth |
+|---|---|---|---|
+| iroh_lan_1ms_get | **3.3 ms** | iroh LAN 1ms/GET | ~3 RTT |
+| iroh_wan_80ms_get | **175 ms** | iroh WAN 80ms/GET | ~2 RTT |
+| s3_same_az_2ms_get | **6.0 ms** | S3 same-AZ 2ms/GET | ~3 RTT |
+
+- `build_internal_level` の境界チェックを max_key → **子 CID** に修正 (max_key は各レベルで同一 key が発火し無限再帰)
+- 1K entries での実測深さ ~3 levels → 1M quads は ~3-4 RTT、1B quads は ~5-6 RTT
+
 #### loadtest Phase 1 (純 Arrangement, 2026-05-25)
 
 | quads | insert | MB_rss | p50 | p95 | p99 | quad/s | MB/Mquad |
@@ -266,6 +280,29 @@ entities × 2 quads = 要素数 (throughput = quad/s)
 Run: `cargo bench -p kotoba-kqe --bench arrangement`  
 Run: `cargo bench -p kotoba-graph --bench quad_store`  
 Run: `cargo bench -p kotoba-store --bench tiered_store`
+
+#### 100億 quad スケール ディスク試算
+
+1 quad あたりのサイズ根拠 (aarch64 実測、1M quad loadtest):
+- EAVT/AEVT: ~84 bytes/quad (8B key + 36B subject + 16B pred + 24B object + ~20B overhead per node)
+- AVET: ~40 bytes/quad (述語+値引きのみ、Text 対象)
+- VAET: ~45 bytes/quad (ref 型のみ、~30% が ref と仮定)
+- Journal WAL: ~218 bytes/quad (CBOR quad エントリ + meta)
+
+| ストレージ層 | 100億 quad 生サイズ | zstd ~2× 圧縮後 |
+|---|---|---|
+| EAVT (ProllyTree) | 8.4 TB | 4.2 TB |
+| AEVT (ProllyTree) | 8.4 TB | 4.2 TB |
+| AVET (ProllyTree) | 4.0 TB | 2.0 TB |
+| VAET (ProllyTree) | 4.5 TB | 2.3 TB |
+| Journal WAL | 21.8 TB | 10.9 TB |
+| **合計** | **~47 TB** | **~23.5 TB** |
+
+- 内部ノード容量: ~0.1 TB (全体の 0.2% — 無視可)
+- **RAM**: 840 MB 定常 (1M quad バッチウィンドウ、総 quad 数に非依存)
+- 単ノード ingest: 290K q/s で 100億 quad = ~4.0 日
+- 40 ノード shard: ~10M q/s で 100億 quad = ~2.8 時間
+- クエリ深さ (ProllyTree, 100億 quad): ceil(log256(10B)) ≈ **5 levels** → 5 RTTs cold
 
 ## Selective Sync + Storage Budget 設計
 

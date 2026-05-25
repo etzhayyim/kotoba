@@ -205,50 +205,30 @@ impl BlockStore for SimulatedLatencyBlockStore {
 
 /// Build a small ProllyTree (1K entries) with a simulated-latency store, then
 /// do a single-key lookup.  Each ProllyTree level = 1 BlockStore.get() call.
-/// With a branching factor of ~128 entries/node, 1K entries = 2-3 levels.
+/// With a branching factor of ~256 entries/node, 1K entries = 1–2 levels.
 ///
-/// This measures: commit (PUT per node) + point-query (GET per level traversal).
-///
-/// The benchmark runs inside a 64 MiB stack thread to avoid overflowing the
-/// criterion bench binary's default main-thread stack after the hot-path setup.
+/// This measures point-query (GET per level traversal) at realistic IPFS/S3 RTTs.
 fn bench_query_cold_prolly(c: &mut Criterion) {
-    type ScenarioData = (&'static str, Arc<SimulatedLatencyBlockStore>, KotobaCid, Vec<u8>);
+    let entries: Vec<(Vec<u8>, Vec<u8>)> = (0u64..1_000)
+        .map(|i| (i.to_le_bytes().to_vec(), format!("v{i}").into_bytes()))
+        .collect();
+    let lookup_key = 500u64.to_le_bytes().to_vec();
 
-    // Build all tree roots in a thread with a large stack so build_tree
-    // (which may recurse across multiple levels) doesn't overflow.
-    let scenarios: Vec<ScenarioData> = std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .name("prolly-bench-setup".to_string())
-        .spawn(|| -> Vec<ScenarioData> {
-            let entries: Vec<(Vec<u8>, Vec<u8>)> = (0u64..1_000)
-                .map(|i| (i.to_le_bytes().to_vec(), format!("v{i}").into_bytes()))
-                .collect();
-            let lookup_key = 500u64.to_le_bytes().to_vec();
-
-            let spec: &[(&'static str, fn() -> SimulatedLatencyBlockStore)] = &[
-                ("iroh_lan_1ms_get",   SimulatedLatencyBlockStore::iroh_lan),
-                ("iroh_wan_80ms_get",  SimulatedLatencyBlockStore::iroh_wan),
-                ("s3_same_az_2ms_get", SimulatedLatencyBlockStore::s3_same_az),
-            ];
-            spec.iter().map(|(name, make)| {
-                let store = Arc::new(make());
-                let root = ProllyTree::build_tree(entries.clone(), &*store).unwrap();
-                (*name, store, root, lookup_key.clone())
-            }).collect()
-        })
-        .expect("spawn prolly-bench-setup")
-        .join()
-        .expect("prolly-bench-setup panicked");
+    let scenarios: &[(&str, fn() -> SimulatedLatencyBlockStore)] = &[
+        ("iroh_lan_1ms_get",   SimulatedLatencyBlockStore::iroh_lan),
+        ("iroh_wan_80ms_get",  SimulatedLatencyBlockStore::iroh_wan),
+        ("s3_same_az_2ms_get", SimulatedLatencyBlockStore::s3_same_az),
+    ];
 
     let mut group = c.benchmark_group("quad_store/query_cold_prolly_1k");
     group.sample_size(10);
 
-    for (name, store, root, lookup_key) in &scenarios {
-        let store = store.clone();
-        let root  = root.clone();
-        let key   = lookup_key.clone();
-        group.bench_function(*name, move |b| {
-            b.iter(|| ProllyTree::get(&root, &key, &*store));
+    for (name, make_store) in scenarios {
+        let store = Arc::new(make_store());
+        let root = ProllyTree::build_tree(entries.clone(), &*store).unwrap();
+
+        group.bench_function(*name, |b| {
+            b.iter(|| ProllyTree::get(&root, &lookup_key, &*store));
         });
     }
     group.finish();

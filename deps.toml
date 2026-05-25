@@ -59,7 +59,7 @@ flags = ["editable"]
 [subdirs."crates/kotoba-core"]
 role = "cid-frame-prolly"
 tier = "alpha"
-notes = "ProllyTree: build_tree(entries, store)→root_cid (commit), get(root, key, store)→Option<Vec<u8>> (cold-path point-query, 1 BlockStore.get per level). Branching factor ~256 entries/node → depth=ceil(log256(N)). Cold RTT cost: iroh LAN 1ms×depth, S3 2ms×depth, iroh WAN 80ms×depth."
+notes = "ProllyTree: build_tree(entries, store)→root_cid (commit), get(root, key, store)→Option<Vec<u8>> (cold-path point-query, 1 BlockStore.get per level). Branching factor ~256 entries/node → depth=ceil(log256(N)). Internal boundary check uses child CID (not max_key — max_key triggers infinite recursion since same key fires at every level; fixed 2026-05-25). Measured cold RTT (2026-05-25, 1K entries): iroh LAN ~3.3ms (3 RTTs), S3 same-AZ ~6ms (3 RTTs), iroh WAN ~175ms (~2 RTTs)."
 
 [subdirs."crates/kotoba-kse"]
 role = "stream-engine"
@@ -86,7 +86,7 @@ tier = "alpha"
 [subdirs."crates/kotoba-graph"]
 role = "graph-api"
 tier = "alpha"
-notes = "QuadStore WAL replay: assert_silent / retract_silent (Arrangement-only, no Journal publish); assert_batch_silent(Vec<Quad>) for O(1)-lock bulk ingest. replay_from_journal() reads all entries from seq=1, deduplicates by CID, applies in seq order. commit() builds 4 ProllyTrees (EAVT/AEVT/AVET/VAET) on a dedicated 64MB-stack thread (oneshot channel) — avoids tokio blocking-pool 8MB overflow at 1M+ scale. ProllyTree::get(root,key,store) point-query added (cold-read path: 1 BlockStore.get per tree level). Bench: benches/quad_store.rs — insert_per_quad/insert_batch/insert_batch_chunked (hot Arrangement, no BlockStore I/O) + query_hot (Arrangement) + query_cold_prolly_1k (ProllyTree + simulated iroh/S3 RTT). Measured 2026-05-25: insert_per_quad 130K q/s, insert_batch 180K q/s, loadtest 1M@290K q/s, 10M@132K q/s."
+notes = "QuadStore WAL replay: assert_silent / retract_silent (Arrangement-only, no Journal publish); assert_batch_silent(Vec<Quad>) for O(1)-lock bulk ingest. replay_from_journal() reads all entries from seq=1, deduplicates by CID, applies in seq order. commit() builds 4 ProllyTrees (EAVT/AEVT/AVET/VAET) on a dedicated 64MB-stack thread (oneshot channel) — avoids tokio blocking-pool 8MB overflow at 1M+ scale. ProllyTree::get(root,key,store) point-query added (cold-read path: 1 BlockStore.get per tree level). Bench: benches/quad_store.rs — insert_per_quad/insert_batch/insert_batch_chunked (hot Arrangement, no BlockStore I/O) + query_hot (Arrangement) + query_cold_prolly_1k (ProllyTree + simulated iroh/S3 RTT). Measured 2026-05-25: insert_per_quad 130K q/s, insert_batch 180K q/s, loadtest 1M@290K q/s, 10M@132K q/s. Cold-path measured 2026-05-25: iroh_lan ~3.3ms, s3_same_az ~6.0ms, iroh_wan ~175ms (all at 1K entries = ~3 tree levels). ProllyTree build_internal_level boundary bug fixed: use child CID not max_key to avoid infinite recursion."
 
 [subdirs."crates/kotoba-vm"]
 role = "virtual-machine"

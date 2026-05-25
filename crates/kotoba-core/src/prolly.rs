@@ -182,11 +182,16 @@ impl ProllyTree {
         children: Vec<(Vec<u8>, KotobaCid)>,
         store:    &dyn BlockStore,
     ) -> anyhow::Result<KotobaCid> {
-        let mut ptrs: Vec<(Vec<u8>, KotobaCid)>         = Vec::new();
+        let mut ptrs: Vec<(Vec<u8>, KotobaCid)> = Vec::new();
         let mut chunk: Vec<(Vec<u8>, KotobaCid)> = Vec::new();
 
         for child in children {
-            let at_boundary = ProllyNode::is_boundary(&child.0);
+            // Use the child CID (not the max key) to determine internal-level
+            // boundaries.  The key would cause infinite recursion because the
+            // same key keeps triggering the boundary check at every level.
+            // The CID changes at each level (it's the hash of node content), so
+            // the boundary condition will not repeat indefinitely.
+            let at_boundary = ProllyNode::is_boundary(&child.1.0);
             chunk.push(child);
             if at_boundary {
                 let max_key = chunk.last().unwrap().0.clone();
@@ -205,7 +210,8 @@ impl ProllyTree {
         if ptrs.len() == 1 {
             return Ok(ptrs.into_iter().next().unwrap().1);
         }
-        // Another level needed
+        // Another level needed — ptrs.len() >= 2; CID-based boundaries
+        // guarantee convergence because CIDs change each time nodes are rebuilt.
         Self::build_internal_level(ptrs, store)
     }
 }
