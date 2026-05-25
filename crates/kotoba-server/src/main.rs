@@ -72,7 +72,15 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // ── 2b. WAL replay — restore QuadStore Arrangement from Journal ────────────
-    state.replay_wal().await;
+    // Run in a background task so the HTTP server (and readiness/liveness probes)
+    // can start immediately. The QuadStore serves requests with an empty Arrangement
+    // until replay completes (~seconds for small journals, longer when B2 is cold).
+    {
+        let quad_store = Arc::clone(&state.quad_store);
+        tokio::spawn(async move {
+            quad_store.replay_from_journal().await;
+        });
+    }
 
     // ── 3. Distributed Pregel channel pair ────────────────────────────────────
     // Created unconditionally so the runner is always available in KotobaState.
