@@ -23,8 +23,9 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "UNLICENSED"
-authors = ["Gftd Japan <dev@gftd.group>"]
+license = "Apache-2.0"
+authors = ["etzhayyim <dev@etzhayyim.com>"]
+repository = "https://github.com/etzhayyim/kotoba"
 
 [workspace.dependencies]
 # async
