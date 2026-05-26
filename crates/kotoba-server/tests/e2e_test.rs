@@ -2872,6 +2872,46 @@ async fn request_log_query_returns_empty_list() {
     assert_eq!(body["total"].as_u64().unwrap_or(1), 0, "{body}");
 }
 
+#[tokio::test]
+async fn request_log_query_returns_entries_after_requests() {
+    let s = TestServer::start(false).await;
+    // Make a few requests so the fingerprint middleware writes audit quads.
+    s.get("/xrpc/ai.gftd.apps.kotoba.request.log").await;
+    s.get("/xrpc/ai.gftd.apps.kotoba.request.log").await;
+    // Allow the fire-and-forget tokio tasks to complete (in-memory, µs).
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let (status, body) = s.get("/xrpc/ai.gftd.apps.kotoba.request.log").await;
+    assert_eq!(status, 200, "{body}");
+    let entries = body["entries"].as_array().expect("entries must be array");
+    assert!(!entries.is_empty(), "expected audit entries after requests, got: {body}");
+    let entry = &entries[0];
+    assert!(entry["request_cid"].as_str().is_some(), "request_cid missing: {entry}");
+    assert!(entry["method"].as_str().is_some(), "method missing: {entry}");
+    assert!(entry["path"].as_str().is_some(), "path missing: {entry}");
+}
+
+#[tokio::test]
+async fn request_log_query_path_prefix_filter() {
+    let s = TestServer::start(false).await;
+    // Make distinct requests to two different endpoint families.
+    s.get("/xrpc/ai.gftd.apps.kotoba.request.log").await;
+    s.get("/xrpc/ai.gftd.apps.kotoba.attest.query").await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Filter by exact prefix — should return only audit entries matching it.
+    let (status, body) = s
+        .get("/xrpc/ai.gftd.apps.kotoba.request.log?path_prefix=/xrpc/ai.gftd.apps.kotoba.request.log")
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let entries = body["entries"].as_array().expect("entries must be array");
+    for e in entries {
+        let path = e["path"].as_str().unwrap_or("");
+        assert!(
+            path.starts_with("/xrpc/ai.gftd.apps.kotoba.request.log"),
+            "entry path {path:?} does not match filter"
+        );
+    }
+}
+
 // ── signal.distribute.sender.key ─────────────────────────────────────────────
 
 #[tokio::test]

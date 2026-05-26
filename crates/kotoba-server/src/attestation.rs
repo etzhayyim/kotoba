@@ -488,25 +488,61 @@ pub async fn attest_query(
 /// GET `ai.gftd.apps.kotoba.request.log`
 ///
 /// Query the request audit log stored by the fingerprint middleware.
-/// Phase 1: stub response. Phase 2: scan audit graph Arrangement.
+/// Scans the audit graph Arrangement via predicate-prefix lookup.
 pub async fn request_log_query(
-    State(_state): State<Arc<KotobaState>>,
+    State(state): State<Arc<KotobaState>>,
     Query(params): Query<RequestLogQueryParams>,
 ) -> impl IntoResponse {
     let limit = params.limit.unwrap_or(20).min(100);
-    let _graph = audit_graph_cid(); // will be used in Phase 2 Arrangement scan
+    let graph = audit_graph_cid();
 
+    // Fetch all quads in the audit graph whose predicate starts with "request/".
+    // Group by subject CID → hydrate each RequestLogEntry.
+    let all_quads = state.quad_store
+        .quads_by_predicate_prefix(Some(&graph), "request/")
+        .await;
+
+    // Build per-request-cid entry map.
+    let mut map: std::collections::HashMap<String, RequestLogEntry> =
+        std::collections::HashMap::new();
+    for q in &all_quads {
+        let subj_key = q.subject.to_multibase();
+        let entry = map.entry(subj_key.clone()).or_insert_with(|| RequestLogEntry {
+            request_cid: subj_key,
+            method: String::new(),
+            path: String::new(),
+            ts_unix: 0,
+        });
+        match q.predicate.as_str() {
+            "request/method"  => { entry.method  = quad_object_text(&q.object); }
+            "request/path"    => { entry.path     = quad_object_text(&q.object); }
+            "request/ts_unix" => {
+                if let QuadObject::Integer(n) = &q.object {
+                    entry.ts_unix = *n as u64;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Apply optional path_prefix filter, then sort by ts_unix descending (newest first).
+    let mut entries: Vec<RequestLogEntry> = map.into_values()
+        .filter(|e| {
+            params.path_prefix.as_deref()
+                .map_or(true, |pfx| e.path.starts_with(pfx))
+        })
+        .collect();
+    entries.sort_by(|a, b| b.ts_unix.cmp(&a.ts_unix));
+    entries.truncate(limit);
+
+    let total = entries.len();
     tracing::debug!(
         path_prefix = ?params.path_prefix,
         limit,
-        "request.log query called"
+        total,
+        "request.log query result"
     );
-
-    // Phase 1: empty result.
-    Json(RequestLogResp {
-        entries: Vec::new(),
-        total: 0,
-    })
+    Json(RequestLogResp { entries, total })
 }
 
 #[cfg(test)]
