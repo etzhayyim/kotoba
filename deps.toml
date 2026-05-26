@@ -18,22 +18,27 @@ depends_on = [
   "90-docs/adr/2605250004-kotoba-webgpu-training.md",
   "90-docs/adr/2605250005-kotoba-webgpu-infer.md",
   "90-docs/adr/2605252000-kotoba-persistence-wal-replay.md",
+  "90-docs/adr/2605252200-kotoba-token-economy.md",
   "90-docs/adr/2605252400-kotoba-gmail-e2e-ingest.md",
   "90-docs/adr/2605260004-kotoba-distributed-execution-host.md",
   "90-docs/adr/2605260005-kotoba-passkey-root-authenticator.md",
 ]
 
 [deployment]
-cluster       = "vultr-vke-sjc-31d5f7dc"
-namespace     = "kotoba"
-image         = "ghcr.io/gftdcojp/kotoba:latest"
-build_script  = "60-apps/ai-gftd-project-kotoba/scripts/build-push.sh"
-k8s_manifest  = "50-infra/k8s/kotoba/kotoba.yaml"
-service       = "LoadBalancer :3000 → pod :8080"
-b2_bucket     = "ai-gftd-nats"
-b2_stores     = ["kotoba/journal/", "kotoba/blocks/", "kotoba/vault/", "kotoba/email-vault/"]
+cluster        = "vultr-vke-sjc-31d5f7dc"
+namespace      = "kotoba"
+image          = "ghcr.io/gftdcojp/kotoba:latest"
+build_script   = "60-apps/ai-gftd-project-kotoba/scripts/build-push.sh"
+deploy_script  = "60-apps/ai-gftd-project-kotoba/scripts/deploy.sh"
+k8s_manifest   = "60-apps/ai-gftd-project-kotoba/deploy/deployment.yaml"
+external_http  = "149.28.207.62:8080"
+external_p2p   = "45.32.131.41:4001/UDP"
+b2_bucket      = "ai-gftd-nats"
+b2_stores      = ["kotoba/journal/", "kotoba/blocks/", "kotoba/vault/", "kotoba/email-vault/"]
 first_deployed = "2026-05-25"
-notes         = "BlockStore: BudgetedBlockStore<MemoryBlockStore> hot (KOTOBA_HOT_CACHE_BYTES default 256MiB) + optional LayeredBlockStore with B2 cold (KOTOBA_B2_* env). sled removed 2026-05-26. K8s manifest uses emptyDir (no PVC — Vultr block storage subscription limit reached). KG Arrangement persisted via Journal WAL replay on startup; BlockStore blocks persisted via B2 S3 cold tier."
+live_verified  = "2026-05-26"
+mcp_tools      = 15
+notes          = "BlockStore: BudgetedBlockStore<MemoryBlockStore> hot (KOTOBA_HOT_CACHE_BYTES default 256MiB) + optional LayeredBlockStore with B2 cold (KOTOBA_B2_* env). sled removed 2026-05-26. K8s deployment uses PVC kotoba-sled (mountPath /data/sled). KG Arrangement persisted via Journal WAL replay on startup; BlockStore blocks persisted via B2 S3 cold tier. Agent identity: stable Ed25519+X25519 keypair in K8s Secret kotoba-agent-identity (KOTOBA_AGENT_ED25519_HEX / KOTOBA_AGENT_X25519_HEX / KOTOBA_AGENT_DID); ephemeral fallback if Secret absent. Live verification 2026-05-26: /health ok, 15 MCP tools, kotoba_wasm_run (Rust guest 163KB, assert_quads=1, gas_used=30), kotoba_datalog_run (derived=3 citations=3 royalty_quads=6), stable DID ephemeral=false."
 
 [runtime_dependencies.object_storage]
 kind = "blob-store"
@@ -105,7 +110,7 @@ notes = "Modules: weight (WeightKind enum + WeightRef/WeightBlob FP8), lora (LoR
 [subdirs."crates/kotoba-runtime"]
 role = "wasm-component-runtime"
 tier = "alpha"
-notes = "wasmtime 22 Component Model host; WIT world kotoba:kais@0.1.0; WasmExecutor + UdfExecutor"
+notes = "wasmtime 22 Component Model host; WIT world kotoba:kais@0.1.0; WasmExecutor + UdfExecutor. KNOWN BLOCKER: componentize-py 0.23 emits extended-const expressions (i32.add in global initializers); wasmtime 22 disables EXTENDED_CONST by default and has no public Config API to re-enable it — Python WASM guests fail with CompileFailed('constant expression required: non-constant operator: i32.add'). Rust guest (cargo-component) works correctly. Fix: upgrade wasmtime pin in Cargo.toml to '24' and add config.wasm_extended_const(true) in host.rs KotobaEngine::new() — tracked as TODO comment in that function. Rust guest live-verified on Vultr SJC 2026-05-26: assert_quads=1, total_gas_used=30, status=ok."
 
 [subdirs."crates/kotoba-ingest"]
 role = "email-ingest"
@@ -132,4 +137,11 @@ notes = "wasm32-only; IdbBlockStore over IndexedDB 2-store schema (blocks/meta);
 kind = "wasm-runtime"
 version = "22"
 features = ["component-model"]
-notes = "Cranelift JIT + WIT Component Model for multi-language node programs"
+notes = "Cranelift JIT + WIT Component Model for multi-language node programs. Upgrade blocker: extended-const proposal disabled by default in wasmtime 22 (no public API to re-enable); needed for componentize-py 0.23 Python WASM guests. Target upgrade: wasmtime 24 + config.wasm_extended_const(true)."
+
+[runtime_dependencies.agent_identity]
+kind = "k8s-secret"
+name = "kotoba-agent-identity"
+cluster = "vultr-vke-sjc-31d5f7dc"
+keys = ["KOTOBA_AGENT_ED25519_HEX", "KOTOBA_AGENT_X25519_HEX", "KOTOBA_AGENT_DID"]
+notes = "Stable Ed25519+X25519 keypair for agent DID; prevents ephemeral DID rotation on pod restarts. Created 2026-05-26. All three keys optional in deployment.yaml — falls back to ephemeral did:key if Secret absent."
