@@ -435,4 +435,48 @@ mod tests {
         let result = SqlMvCompiler::compile("SELECT * FROM knows", "output");
         assert!(result.is_err());
     }
+
+    // ── Additional edge-case tests ─────────────────────────────────────────────
+
+    #[test]
+    fn where_and_conjunction() {
+        // WHERE with AND: both conditions must apply simultaneously
+        let mv = SqlMvCompiler::compile(
+            "SELECT a.s, b.o FROM parent a JOIN parent b ON a.o = b.s WHERE a.s = 'alice' AND b.o = 'carol'",
+            "filtered",
+        )
+        .unwrap();
+        let input = vec![
+            fact("parent", "alice", "bob"),
+            fact("parent", "bob",   "carol"),
+            fact("parent", "alice", "bob2"),
+            fact("parent", "bob2",  "dave"),
+        ];
+        let derived = mv.program.evaluate_delta(&input);
+        // Only alice→carol path satisfies both conditions
+        assert!(has(&derived, "filtered", "alice", "carol"));
+        assert!(!has(&derived, "filtered", "alice", "dave"),
+            "dave path should be filtered by b.o = 'carol'");
+    }
+
+    #[test]
+    fn where_number_literal() {
+        // WHERE with a numeric constant (sqlparser parses it as Value::Number)
+        let result = SqlMvCompiler::compile(
+            "SELECT a.s, a.o FROM knows a WHERE a.s = 42",
+            "output",
+        );
+        // Should compile without error — number literal becomes a constant Term
+        assert!(result.is_ok(), "numeric WHERE literal should compile");
+    }
+
+    #[test]
+    fn non_select_statement_error() {
+        // INSERT is not a SELECT — the compiler must reject it
+        let result = SqlMvCompiler::compile(
+            "INSERT INTO knows (s, o) VALUES ('alice', 'bob')",
+            "output",
+        );
+        assert!(result.is_err(), "INSERT statement should be rejected");
+    }
 }

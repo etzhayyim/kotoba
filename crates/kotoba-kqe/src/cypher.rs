@@ -682,4 +682,74 @@ mod tests {
         assert!(!has(&derived, "output", "alice", "eve"),
             "mallory path should be filtered since WHERE b.name='bob' applies to b");
     }
+
+    // ── Mutation keyword rejection tests ─────────────────────────────────────
+
+    #[test]
+    fn create_keyword_rejected() {
+        // The parser expects MATCH first; a query starting with CREATE must fail
+        let result = CypherCompiler::compile(
+            "CREATE (a)-[:knows]->(b) RETURN a, b",
+            "output",
+        );
+        assert!(result.is_err(), "CREATE query should be rejected");
+    }
+
+    #[test]
+    fn delete_keyword_rejected() {
+        let result = CypherCompiler::compile(
+            "MATCH (a)-[:knows]->(b) DELETE a",
+            "output",
+        );
+        // Either parse error or missing RETURN with arity != 2
+        assert!(result.is_err(), "DELETE query should be rejected");
+    }
+
+    #[test]
+    fn merge_keyword_rejected() {
+        let result = CypherCompiler::compile(
+            "MERGE (a)-[:knows]->(b) RETURN a, b",
+            "output",
+        );
+        assert!(result.is_err(), "MERGE query should be rejected");
+    }
+
+    // ── Anonymous arrow `-->` ─────────────────────────────────────────────────
+
+    #[test]
+    fn anonymous_arrow_compiles_as_wildcard() {
+        // `-->` should compile using relation `"*"` as the predicate
+        let mv = CypherCompiler::compile(
+            "MATCH (a)-->(b) RETURN a, b",
+            "output",
+        )
+        .unwrap();
+        let rule = &mv.program.rules[0];
+        if let BodyLiteral::Positive(atom) = &rule.body[0] {
+            assert_eq!(atom.relation, "*",
+                "anonymous --> should produce relation '*'");
+        } else {
+            panic!("expected positive body literal for anonymous arrow");
+        }
+    }
+
+    // ── Single-quoted WHERE value ─────────────────────────────────────────────
+
+    #[test]
+    fn single_quoted_where_value() {
+        // WHERE with single-quoted string literal must compile and filter correctly
+        let mv = CypherCompiler::compile(
+            "MATCH (a)-[:knows]->(b) WHERE a.name = 'alice' RETURN a, b",
+            "output",
+        )
+        .unwrap();
+        let input = vec![
+            fact("knows", "alice", "bob"),
+            fact("knows", "carol", "dave"),
+        ];
+        let derived = mv.program.evaluate_delta(&input);
+        assert!(has(&derived, "output", "alice", "bob"));
+        assert!(!has(&derived, "output", "carol", "dave"),
+            "carol->dave must be filtered by single-quoted WHERE");
+    }
 }

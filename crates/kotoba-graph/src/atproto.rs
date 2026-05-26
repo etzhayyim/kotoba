@@ -397,4 +397,109 @@ mod tests {
         assert_eq!(quad.predicate, "active");
         assert!(matches!(quad.object, QuadObject::Bool(true)));
     }
+
+    // ── at_cid_str_to_kotoba edge cases ───────────────────────────────────────
+
+    #[test]
+    fn at_cid_empty_string_returns_none() {
+        assert!(at_cid_str_to_kotoba("").is_none());
+    }
+
+    #[test]
+    fn at_cid_wrong_length_base32_returns_none() {
+        // Encode fewer than 36 bytes with 'b' prefix — should fail length check
+        let short = [1u8; 10];
+        let encoded = format!("b{}", data_encoding::BASE32_NOPAD.encode(&short).to_lowercase());
+        assert!(at_cid_str_to_kotoba(&encoded).is_none());
+    }
+
+    #[test]
+    fn at_cid_wrong_codec_returns_none() {
+        // bytes[1] = 0x55 (raw) instead of 0x71 (dag-cbor)
+        let mut cid_bytes = [0u8; 36];
+        cid_bytes[0] = 1;     // CIDv1
+        cid_bytes[1] = 0x55;  // NOT dag-cbor
+        cid_bytes[2] = KotobaCid::MH_BLAKE3;
+        cid_bytes[3] = 32;
+        let encoded = multibase::encode(multibase::Base::Base58Btc, &cid_bytes);
+        assert!(at_cid_str_to_kotoba(&encoded).is_none());
+    }
+
+    #[test]
+    fn at_cid_wrong_multihash_returns_none() {
+        // bytes[2] = 0x13 — neither sha2-256 (0x12) nor blake3 (0x1e)
+        let mut cid_bytes = [0u8; 36];
+        cid_bytes[0] = 1;
+        cid_bytes[1] = KotobaCid::CODEC_DAG_CBOR;
+        cid_bytes[2] = 0x13;  // unsupported multihash
+        cid_bytes[3] = 32;
+        let encoded = multibase::encode(multibase::Base::Base58Btc, &cid_bytes);
+        assert!(at_cid_str_to_kotoba(&encoded).is_none());
+    }
+
+    // ── Jetstream edge cases ──────────────────────────────────────────────────
+
+    #[test]
+    fn jetstream_unknown_kind_returns_none() {
+        let json = br#"{
+            "did": "did:plc:test",
+            "time_us": 1000,
+            "kind": "unknown_kind"
+        }"#;
+        assert!(jetstream_event_to_quad(json).is_none());
+    }
+
+    #[test]
+    fn jetstream_malformed_json_returns_none() {
+        assert!(jetstream_event_to_quad(b"not json").is_none());
+    }
+
+    #[test]
+    fn jetstream_account_inactive() {
+        // active: false → QuadObject::Bool(false)
+        let json = br#"{
+            "did": "did:plc:test",
+            "time_us": 2000,
+            "kind": "account",
+            "account": { "did": "did:plc:test", "active": false }
+        }"#;
+        let (topic, quad) = jetstream_event_to_quad(json).unwrap();
+        assert_eq!(topic.0, "jetstream/account");
+        assert!(matches!(quad.object, QuadObject::Bool(false)));
+    }
+
+    // ── AtUri edge cases ──────────────────────────────────────────────────────
+
+    #[test]
+    fn at_uri_parse_collection_only() {
+        // No rkey component
+        let uri = AtUri::parse("at://did:plc:abc/app.bsky.feed.post").unwrap();
+        assert_eq!(uri.authority, "did:plc:abc");
+        assert_eq!(uri.collection, "app.bsky.feed.post");
+        assert_eq!(uri.rkey, "");
+    }
+
+    #[test]
+    fn at_uri_parse_missing_prefix_returns_none() {
+        assert!(AtUri::parse("did:plc:abc/app.bsky.feed.post").is_none());
+    }
+
+    #[test]
+    fn at_uri_parse_empty_authority_returns_none() {
+        // `at:///collection` — authority segment is empty
+        assert!(AtUri::parse("at:///app.bsky.feed.post").is_none());
+    }
+
+    #[test]
+    fn at_uri_to_quad_with_record_cid() {
+        let uri = AtUri {
+            authority:  "did:plc:abc".to_string(),
+            collection: "app.bsky.feed.post".to_string(),
+            rkey:       "3xyz".to_string(),
+        };
+        let record_cid = KotobaCid::from_bytes(b"some-record");
+        let quad = uri.to_quad(Some(record_cid.clone()));
+        assert!(matches!(quad.object, QuadObject::Cid(ref c) if *c == record_cid));
+        assert_eq!(quad.predicate, "3xyz");
+    }
 }

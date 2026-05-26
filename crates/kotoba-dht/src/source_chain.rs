@@ -305,4 +305,67 @@ mod tests {
         assert!(matches!(result, Err(ChainError::InvalidSignature)));
         assert_eq!(chain.len(), 0); // chain must not have grown
     }
+
+    // ── SourceChain::append error paths ──────────────────────────────────────
+
+    #[test]
+    fn append_seq_mismatch_rejected() {
+        let mut chain = SourceChain::new("did:plc:alice");
+        // Send seq=1 when chain is empty (expects seq=0)
+        let entry = ChainEntry::new(None, "did:plc:alice".into(), 1, dummy_content(), vec![0u8; 64]);
+        let result = chain.append(entry);
+        assert!(
+            matches!(result, Err(ChainError::SeqMismatch { expected: 0, got: 1 })),
+            "wrong seq must produce SeqMismatch"
+        );
+        assert_eq!(chain.len(), 0);
+    }
+
+    #[test]
+    fn append_prev_mismatch_rejected() {
+        let sk = test_keypair();
+        let mut chain = SourceChain::new("did:plc:alice");
+        // First entry appended successfully
+        let e0 = make_signed_entry(&sk, None, "did:plc:alice", 0, dummy_content());
+        chain.append(e0).unwrap();
+
+        // Second entry references a wrong prev CID
+        let wrong_prev = KotobaCid::from_bytes(b"wrong-prev");
+        let e1 = ChainEntry::new(Some(wrong_prev), "did:plc:alice".into(), 1, dummy_content(), vec![0u8; 64]);
+        let result = chain.append(e1);
+        assert!(
+            matches!(result, Err(ChainError::PrevMismatch)),
+            "wrong prev CID must produce PrevMismatch"
+        );
+        assert_eq!(chain.len(), 1, "chain must not grow on PrevMismatch");
+    }
+
+    // ── SourceChain state tests ───────────────────────────────────────────────
+
+    #[test]
+    fn source_chain_head_empty_is_none() {
+        let chain = SourceChain::new("did:plc:nobody");
+        assert!(chain.head().is_none(), "empty chain head() must be None");
+    }
+
+    #[test]
+    fn source_chain_is_empty_flips_after_append() {
+        let mut chain = SourceChain::new("did:plc:alice");
+        assert!(chain.is_empty(), "fresh chain must be empty");
+
+        let entry = ChainEntry::new(None, "did:plc:alice".into(), 0, dummy_content(), vec![0u8; 64]);
+        chain.append(entry).unwrap();
+        assert!(!chain.is_empty(), "chain must not be empty after append");
+    }
+
+    // ── ChainEntry::new default policy ───────────────────────────────────────
+
+    #[test]
+    fn chain_entry_new_default_policy_is_open() {
+        let entry = ChainEntry::new(None, "did:plc:alice".into(), 0, dummy_content(), vec![0u8; 64]);
+        assert!(
+            matches!(entry.policy, kotoba_core::DataPolicy::Open),
+            "ChainEntry::new must default to DataPolicy::Open"
+        );
+    }
 }

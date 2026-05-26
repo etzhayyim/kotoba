@@ -286,4 +286,53 @@ mod tests {
         // Commits 3 (recent) and 4 (HEAD) survive.
         assert_eq!(dag.commit_count(), 2);
     }
+
+    #[test]
+    fn commit_load_missing_returns_none() {
+        let store = MemoryBlockStore::new();
+        let missing = KotobaCid::from_bytes(b"does-not-exist");
+        let result = Commit::load(&missing, &store).unwrap();
+        assert!(result.is_none(), "loading an absent CID should return Ok(None)");
+    }
+
+    #[test]
+    fn commit_dag_get_non_head_by_cid() {
+        let graph = KotobaCid::from_bytes(b"g-get");
+        let mut dag = CommitDag::new();
+
+        let c0 = Commit::seal(graph.clone(), KotobaCid::from_bytes(b"root0"), None, "did:x".into(), 0, HashMap::new());
+        let cid0 = c0.cid.clone();
+        let c1 = Commit::seal(graph.clone(), KotobaCid::from_bytes(b"root1"), None, "did:x".into(), 1, HashMap::new());
+        dag.add(c0);
+        dag.add(c1);
+
+        // c0 is no longer HEAD but should still be retrievable by CID
+        let found = dag.get(&cid0);
+        assert!(found.is_some(), "get() must return non-HEAD commits by CID");
+        assert_eq!(found.unwrap().seq, 0);
+    }
+
+    #[test]
+    fn commit_dag_heads_as_map_shape() {
+        let g1 = KotobaCid::from_bytes(b"graph-a");
+        let g2 = KotobaCid::from_bytes(b"graph-b");
+        let mut dag = CommitDag::new();
+
+        dag.add(Commit::seal(g1.clone(), KotobaCid::from_bytes(b"r1"), None, "did:a".into(), 0, HashMap::new()));
+        dag.add(Commit::seal(g2.clone(), KotobaCid::from_bytes(b"r2"), None, "did:b".into(), 0, HashMap::new()));
+
+        let map = dag.heads_as_map();
+        assert_eq!(map.len(), 2, "heads_as_map should have one entry per graph");
+        // Keys are multibase strings
+        assert!(map.contains_key(&g1.to_multibase()));
+        assert!(map.contains_key(&g2.to_multibase()));
+    }
+
+    #[test]
+    fn commit_dag_default_is_empty() {
+        let dag = CommitDag::default();
+        assert_eq!(dag.commit_count(), 0);
+        let heads = dag.heads_as_map();
+        assert!(heads.is_empty(), "default CommitDag should have no heads");
+    }
 }

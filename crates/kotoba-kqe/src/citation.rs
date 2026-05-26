@@ -323,4 +323,97 @@ mod tests {
         assert_eq!(ledger.total_citations(), 0);
         assert_eq!(ledger.epoch(), 2, "epoch should increment on each flush");
     }
+
+    // ── DatomKey pure-function tests ──────────────────────────────────────────
+
+    #[test]
+    fn datom_key_from_quad_is_deterministic() {
+        let q = make_quad("entity-x");
+        let k1 = DatomKey::from_quad(&q);
+        let k2 = DatomKey::from_quad(&q);
+        assert_eq!(k1, k2, "DatomKey::from_quad must be deterministic for equal inputs");
+    }
+
+    #[test]
+    fn datom_key_from_quad_differs_by_predicate() {
+        // Same graph + subject, different predicate → different key
+        let mut q1 = make_quad("entity-y");
+        let mut q2 = make_quad("entity-y");
+        q2.predicate = "other/predicate".to_string();
+        let k1 = DatomKey::from_quad(&q1);
+        let k2 = DatomKey::from_quad(&q2);
+        assert_ne!(k1, k2, "different predicate must produce different DatomKey");
+
+        // And also differs by subject
+        q1.subject = KotobaCid::from_bytes(b"sub-a");
+        q2.subject = KotobaCid::from_bytes(b"sub-b");
+        q2.predicate = q1.predicate.clone();
+        let k3 = DatomKey::from_quad(&q1);
+        let k4 = DatomKey::from_quad(&q2);
+        assert_ne!(k3, k4, "different subject must produce different DatomKey");
+    }
+
+    #[test]
+    fn datom_key_from_cid_preserves_bytes() {
+        let cid = KotobaCid::from_bytes(b"some-block");
+        let key = DatomKey::from_cid(&cid);
+        assert_eq!(key.0, cid.0, "DatomKey::from_cid must preserve the CID bytes exactly");
+    }
+
+    // ── citation_weight edge cases ────────────────────────────────────────────
+
+    #[test]
+    fn citation_weight_unseen_key_returns_zero() {
+        let mut ledger = CitationLedger::new();
+        ledger.cite_quad(&make_quad("known"));
+        let unknown_key = DatomKey::from_quad(&make_quad("unknown-entity"));
+        let w = ledger.citation_weight(&unknown_key);
+        assert_eq!(w, 0.0, "unseen key must have weight 0.0");
+    }
+
+    #[test]
+    fn citation_weight_empty_ledger_returns_zero() {
+        let ledger = CitationLedger::new();
+        let key = DatomKey::from_quad(&make_quad("any"));
+        assert_eq!(ledger.citation_weight(&key), 0.0, "empty ledger total=0 → weight 0.0");
+    }
+
+    // ── Default ↔ new equivalence ─────────────────────────────────────────────
+
+    #[test]
+    fn ledger_default_is_equivalent_to_new() {
+        let l1 = CitationLedger::new();
+        let l2 = CitationLedger::default();
+        // Both should start at epoch 0 with no citations
+        assert_eq!(l1.epoch(), l2.epoch());
+        assert_eq!(l1.total_citations(), l2.total_citations());
+    }
+
+    // ── royalty_quads edge cases ──────────────────────────────────────────────
+
+    #[test]
+    fn royalty_quads_empty_entries_returns_empty_vec() {
+        let quads = CitationLedger::royalty_quads(&[], 0);
+        assert!(quads.is_empty(), "royalty_quads([]) must return an empty vec");
+    }
+
+    #[test]
+    fn royalty_quads_graph_cid_stable_per_epoch() {
+        // The graph CID for a given epoch must be identical across two calls
+        let entry = {
+            let q = make_quad("e");
+            let mut ledger = CitationLedger::new();
+            ledger.cite_quad(&q);
+            let epoch = ledger.epoch();
+            let entries = ledger.flush_epoch(1_000_000);
+            (entries, epoch)
+        };
+        let (entries, epoch) = entry;
+        let quads1 = CitationLedger::royalty_quads(&entries, epoch);
+        let quads2 = CitationLedger::royalty_quads(&entries, epoch);
+        // All graph CIDs should be identical
+        for (q1, q2) in quads1.iter().zip(quads2.iter()) {
+            assert_eq!(q1.graph, q2.graph, "graph CID must be stable for the same epoch");
+        }
+    }
 }
