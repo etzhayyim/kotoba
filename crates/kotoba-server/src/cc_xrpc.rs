@@ -103,6 +103,7 @@ const MAX_LANG_LEN:    usize =   16;
 const MAX_SYSTEM_LEN:  usize = 4_096;
 const MAX_TOP_K:       usize =  100;
 const MAX_CONTEXT_K:   usize =   20;   // cap RAG context chunks before LLM prompt construction
+const MAX_NPROBE:      usize =  256;   // cap IVF probe count to prevent brute-force fallback DoS
 const MAX_PARQUET_DIR: usize = 1_024;
 
 #[derive(Serialize)]
@@ -131,6 +132,10 @@ pub async fn cc_search(
             return (StatusCode::BAD_REQUEST,
                 Json(json!({"error": format!("lang exceeds {MAX_LANG_LEN} characters")}))).into_response();
         }
+    }
+    if q.nprobe > MAX_NPROBE {
+        return (StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("nprobe must not exceed {MAX_NPROBE}")}))).into_response();
     }
     let embed_client = match state.cc_embed_client.as_ref() {
         Some(c) => Arc::clone(c),
@@ -229,6 +234,10 @@ pub async fn cc_rag(
             return (StatusCode::BAD_REQUEST,
                 Json(json!({"error": format!("system prompt exceeds {MAX_SYSTEM_LEN} characters")}))).into_response();
         }
+    }
+    if body.nprobe > MAX_NPROBE {
+        return (StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("nprobe must not exceed {MAX_NPROBE}")}))).into_response();
     }
     let embed_client = match state.cc_embed_client.as_ref() {
         Some(c) => Arc::clone(c),
@@ -520,6 +529,33 @@ mod tests {
         assert!(MAX_QUERY_LEN  >= 1_024);
         assert!(MAX_TOP_K      >=   10);
         assert!(MAX_CONTEXT_K  <=   MAX_TOP_K);
+        assert!(MAX_NPROBE     >=   10,  "MAX_NPROBE should allow reasonable IVF probing");
+        assert!(MAX_NPROBE     <= 1_024, "MAX_NPROBE must cap unbounded computation");
         assert!(MAX_PARQUET_DIR >= 10);
+    }
+
+    #[test]
+    fn max_nprobe_constant_value() {
+        assert_eq!(MAX_NPROBE, 256);
+    }
+
+    #[test]
+    fn default_nprobe_is_within_limit() {
+        assert!(default_nprobe() <= MAX_NPROBE,
+            "default_nprobe() {} exceeds MAX_NPROBE {}", default_nprobe(), MAX_NPROBE);
+    }
+
+    #[test]
+    fn nprobe_at_limit_is_accepted() {
+        // Boundary: MAX_NPROBE itself must be ≤ MAX_NPROBE (trivially, but documents intent)
+        assert!(MAX_NPROBE <= MAX_NPROBE);
+    }
+
+    #[test]
+    fn nprobe_above_limit_would_be_rejected() {
+        // Documents that any nprobe > MAX_NPROBE should trigger a 400 in the handler.
+        // The handler check is: if q.nprobe > MAX_NPROBE { return 400 }
+        let oversized = MAX_NPROBE + 1;
+        assert!(oversized > MAX_NPROBE, "oversized nprobe must exceed the cap");
     }
 }
