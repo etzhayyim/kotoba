@@ -738,6 +738,11 @@ pub async fn block_get(
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     use kotoba_core::cid::KotobaCid;
 
+    const MAX_CID_LEN: usize = 512;
+    if req.cid.len() > MAX_CID_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("cid too long ({} bytes, limit {MAX_CID_LEN})", req.cid.len())));
+    }
     let cid = KotobaCid::from_multibase(&req.cid)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid CID".into()))?;
     match state.block_store.get(&cid)
@@ -776,6 +781,11 @@ pub async fn commit_get(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     use kotoba_core::cid::KotobaCid;
 
+    const MAX_GRAPH_LEN: usize = 512;
+    if req.graph.len() > MAX_GRAPH_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("graph too long ({} bytes, limit {MAX_GRAPH_LEN})", req.graph.len())));
+    }
     let graph_cid = KotobaCid::from_multibase(&req.graph)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid graph CID".into()))?;
     match state.quad_store.head_commit(&graph_cid).await {
@@ -1218,6 +1228,11 @@ pub async fn weight_get(
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     use kotoba_core::cid::KotobaCid;
 
+    const MAX_CID_LEN: usize = 512;
+    if req.cid.len() > MAX_CID_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("cid too long ({} bytes, limit {MAX_CID_LEN})", req.cid.len())));
+    }
     let cid = KotobaCid::from_multibase(&req.cid)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid CID".into()))?;
     match state.block_store.get(&cid)
