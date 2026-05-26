@@ -1143,8 +1143,10 @@ async fn quad_create_cacao_cbor_parse_error_returns_400() {
 
 // ── kotobase input validation tests ──────────────────────────────────────────
 
-const KOTOBASE_ACCOUNT_CREATE: &str = "/xrpc/ai.gftd.apps.kotobase.accountCreate";
+const KOTOBASE_ACCOUNT_CREATE:  &str = "/xrpc/ai.gftd.apps.kotobase.accountCreate";
+const KOTOBASE_ACCOUNT_STATUS:  &str = "/xrpc/ai.gftd.apps.kotobase.accountStatus";
 const KOTOBASE_PIN_CREATE:      &str = "/xrpc/ai.gftd.apps.kotobase.pinCreate";
+const KOTOBASE_PIN_DELETE:      &str = "/xrpc/ai.gftd.apps.kotobase.pinDelete";
 const KOTOBASE_PIN_LIST:        &str = "/xrpc/ai.gftd.apps.kotobase.pinList";
 const KOTOBASE_USAGE_GET:       &str = "/xrpc/ai.gftd.apps.kotobase.usageGet";
 
@@ -1259,6 +1261,59 @@ async fn kotobase_account_and_pin_lifecycle() {
     })).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["pin_count"], 1, "{body}");
+}
+
+#[tokio::test]
+async fn kotobase_account_status_returns_tier_and_quota() {
+    let s   = TestServer::start(false).await;
+    let did = "did:key:zStatus1";
+
+    // account must exist first
+    let (status, _) = s.post(KOTOBASE_ACCOUNT_CREATE, json!({ "tenant_did": did })).await;
+    assert_eq!(status, 200);
+
+    let (status, body) = s.post(KOTOBASE_ACCOUNT_STATUS, json!({ "tenant_did": did })).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["ok"].as_bool().unwrap_or(false), "{body}");
+    assert_eq!(body["tenant_did"], did, "{body}");
+    assert!(body["tier"].is_string(), "tier missing: {body}");
+    assert!(body["quota_pins"].is_number(), "quota_pins missing: {body}");
+    assert!(body["quota_bytes"].is_number(), "quota_bytes missing: {body}");
+    assert!(body["used_pins"].is_number(), "used_pins missing: {body}");
+    assert!(body["used_bytes"].is_number(), "used_bytes missing: {body}");
+}
+
+#[tokio::test]
+async fn kotobase_pin_delete_removes_pin() {
+    let s   = TestServer::start(false).await;
+    let did = "did:key:zDelete1";
+
+    // create account
+    let (status, _) = s.post(KOTOBASE_ACCOUNT_CREATE, json!({ "tenant_did": did })).await;
+    assert_eq!(status, 200);
+
+    // pin a CID
+    let (status, body) = s.post(KOTOBASE_PIN_CREATE, json!({
+        "tenant_did": did,
+        "name": "del-test",
+        "cid": "bafybeiczsscdsbs7ffqz55asqdf3smv6klcw3gofszvwlyarci47bgf354",
+        "size_hint_bytes": 512_i64,
+    })).await;
+    assert_eq!(status, 200, "{body}");
+    let pin_id = body["pin_id"].as_str().expect("pin_id").to_string();
+
+    // delete the pin
+    let (status, body) = s.post(KOTOBASE_PIN_DELETE, json!({
+        "tenant_did": did,
+        "pin_id": pin_id,
+    })).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["ok"].as_bool().unwrap_or(false), "{body}");
+
+    // list should now be empty
+    let (status, body) = s.post(KOTOBASE_PIN_LIST, json!({ "tenant_did": did })).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["total"], 0, "expected 0 pins after delete: {body}");
 }
 
 #[tokio::test]
