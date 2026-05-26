@@ -69,7 +69,7 @@ impl QuadStore {
 
     /// CACAO-gated quad assert.
     ///
-    /// Verifies that `chain` grants `"quad:write"` on the quad's subject CID before
+    /// Verifies that `chain` grants `"quad:write"` on the quad's **graph** CID before
     /// delegating to `assert()`. Compute functions should call this instead of `assert()`
     /// whenever the write originates from an actor rather than the server itself.
     pub async fn assert_authed(
@@ -77,8 +77,8 @@ impl QuadStore {
         quad: Quad,
         chain: &DelegationChain,
     ) -> Result<Delta, AccessError> {
-        let subject_mb = quad.subject.to_multibase();
-        chain.verify(&subject_mb, "quad:write")?;
+        let graph_mb = quad.graph.to_multibase();
+        chain.verify(&graph_mb, "quad:write")?;
         Ok(self.assert(quad).await)
     }
 

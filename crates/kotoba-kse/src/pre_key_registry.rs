@@ -17,6 +17,7 @@ use kotoba_crypto::key_wrap::{wrap_key, unwrap_key};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use zeroize::Zeroizing;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PreKeyError {
@@ -65,13 +66,14 @@ impl PreKeyRegistry {
     /// Verify CACAO then return the raw re-key for the (owner, accessor) pair.
     ///
     /// `chain` must grant `"quad:read"` on `owner_did` to `accessor_did`.
+    /// Returns `Zeroizing<Vec<u8>>` so the key material is wiped on drop.
     pub async fn get_rekey_authed(
         &self,
         chain: &DelegationChain,
         owner_did: &str,
         accessor_did: &str,
         owner_enc_key: &[u8; 32],
-    ) -> Result<Vec<u8>, PreKeyError> {
+    ) -> Result<Zeroizing<Vec<u8>>, PreKeyError> {
         chain.verify(owner_did, "quad:read")?;
         self.unwrap_rekey(owner_did, accessor_did, owner_enc_key).await
     }
@@ -101,7 +103,7 @@ impl PreKeyRegistry {
         owner_did: &str,
         accessor_did: &str,
         owner_enc_key: &[u8; 32],
-    ) -> Result<Vec<u8>, PreKeyError> {
+    ) -> Result<Zeroizing<Vec<u8>>, PreKeyError> {
         let cid = self.index.read().await
             .get(&(owner_did.to_string(), accessor_did.to_string()))
             .cloned()
@@ -143,7 +145,7 @@ mod tests {
         // (Real CACAO sig verification is exercised in kotoba-auth tests.)
         // Here we test only the storage layer — use the internal helper directly.
         let recovered = reg.unwrap_rekey("did:owner", "did:accessor", &enc_key).await.unwrap();
-        assert_eq!(recovered, re_key);
+        assert_eq!(recovered.as_slice(), re_key);
     }
 
     #[tokio::test]

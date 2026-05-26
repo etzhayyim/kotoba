@@ -18,8 +18,17 @@ impl DelegationChain {
     }
 
     /// Verify the delegation chain.
+    ///
+    /// Checks (in order):
+    ///   1. Expiry — rejects expired CACAOs.
+    ///   2. Capability — `kotoba://can/{cap}` resource must match `required_cap`
+    ///      (or be absent, which is treated as "all caps granted").
+    ///   3. Graph scope — `kotoba://graph/{cid}` resource must match `graph_cid`
+    ///      (or be absent, which means "all graphs").
+    ///   4. Cryptographic signature — Ed25519 / EIP-191 sig over SIWE message.
+    ///
     /// Returns the issuer DID (ERC-725) on success.
-    pub fn verify(&self, _graph_cid: &str, _required_cap: &str) -> Result<String, DelegationError> {
+    pub fn verify(&self, graph_cid: &str, required_cap: &str) -> Result<String, DelegationError> {
         if self.chain.is_empty() {
             return Err(DelegationError::EmptyChain);
         }
@@ -31,15 +40,33 @@ impl DelegationChain {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            // Parse ISO-8601 (simple: chrono not available, use basic string comparison)
-            // exp format: "2025-01-01T00:00:00Z" — lexicographic comparison suffices for UTC
+            // exp format: "2025-01-01T00:00:00Z" — lexicographic comparison is correct for UTC
             let now_iso = format_iso8601(now_secs);
             if now_iso > *exp {
                 return Err(DelegationError::Expired);
             }
         }
 
-        // 2. Verify cryptographic signature
+        // 2. Capability check — kotoba://can/{cap} must match required_cap (if present)
+        if let Some(granted_cap) = cacao.p.capability() {
+            if granted_cap != required_cap {
+                return Err(DelegationError::CapabilityDenied(
+                    format!("need '{required_cap}', CACAO grants '{granted_cap}'"),
+                ));
+            }
+        }
+
+        // 3. Graph-CID scope check — kotoba://graph/{cid} must match (if present)
+        if let Some(granted_graph) = cacao.p.graph_cid() {
+            if granted_graph != graph_cid {
+                return Err(DelegationError::GraphMismatch {
+                    expected: granted_graph.to_string(),
+                    got:      graph_cid.to_string(),
+                });
+            }
+        }
+
+        // 4. Verify cryptographic signature
         let issuer_did = cacao.verify_signature().map_err(DelegationError::Cacao)?;
 
         Ok(issuer_did)
@@ -100,4 +127,6 @@ pub enum DelegationError {
     Expired,
     #[error("root issuer mismatch")]
     RootMismatch,
+    #[error("graph scope mismatch: expected '{expected}', got '{got}'")]
+    GraphMismatch { expected: String, got: String },
 }

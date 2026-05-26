@@ -63,6 +63,8 @@ pub struct ChainEntry {
 
 /// Subset of ChainEntry fields that are covered by the Ed25519 signature.
 /// `cid` is excluded (it is derived); `sig` is excluded (it is the signature itself).
+/// `policy` is included so that downgrading `Encrypted → Open` without re-signing is
+/// cryptographically detectable.
 #[derive(Serialize)]
 struct SigningPayload<'a> {
     prev:    &'a Option<KotobaCid>,
@@ -70,6 +72,7 @@ struct SigningPayload<'a> {
     seq:     u64,
     content: &'a ChainContent,
     ts:      u64,
+    policy:  &'a kotoba_core::DataPolicy,
 }
 
 impl ChainEntry {
@@ -109,6 +112,7 @@ impl ChainEntry {
             seq:     self.seq,
             content: &self.content,
             ts:      self.ts,
+            policy:  &self.policy,
         };
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&payload, &mut buf)
@@ -259,6 +263,18 @@ mod tests {
         let mut entry = make_signed_entry(&sk, None, "did:plc:alice", 0, dummy_content());
         // Tamper the agent field after signing
         entry.agent = "did:plc:eve".to_string();
+        assert!(entry.verify_sig(sk.verifying_key().as_bytes()).is_err());
+    }
+
+    #[test]
+    fn verify_sig_tampered_policy_fails() {
+        let sk = test_keypair();
+        let mut entry = make_signed_entry(&sk, None, "did:plc:alice", 0, dummy_content());
+        // Sign with Open policy, then flip to Encrypted — signature must not verify.
+        entry.policy = kotoba_core::DataPolicy::Encrypted {
+            ct_cid:     kotoba_core::cid::KotobaCid::from_bytes(b"fake-ct"),
+            policy_cid: kotoba_core::cid::KotobaCid::from_bytes(b"fake-pol"),
+        };
         assert!(entry.verify_sig(sk.verifying_key().as_bytes()).is_err());
     }
 

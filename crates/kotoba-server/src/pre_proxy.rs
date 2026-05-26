@@ -48,6 +48,7 @@ impl PreProxy {
         owner_enc_key: &[u8; 32],
         requester_pk: &[u8; 32],
     ) -> Result<Vec<u8>, PreProxyError> {
+        // `data_key` is Zeroizing — wiped automatically when this scope exits.
         let data_key = self.registry
             .get_rekey_authed(chain, owner_did, accessor_did, owner_enc_key)
             .await?;
