@@ -53,3 +53,69 @@ impl BlockStore for CapturingBlockStore {
     fn unpin(&self, cid: &KotobaCid) { self.inner.unpin(cid) }
     fn is_pinned(&self, cid: &KotobaCid) -> bool { self.inner.is_pinned(cid) }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MemoryBlockStore;
+
+    fn make_cid(tag: &[u8]) -> KotobaCid { KotobaCid::from_bytes(tag) }
+
+    #[test]
+    fn put_is_captured_and_forwarded() {
+        let inner = Arc::new(MemoryBlockStore::default());
+        let cs    = CapturingBlockStore::new(Arc::clone(&inner) as _);
+
+        let cid  = make_cid(b"block-a");
+        let data = b"hello";
+        cs.put(&cid, data).unwrap();
+
+        // Inner store received the block.
+        assert_eq!(inner.get(&cid).unwrap().as_deref(), Some(data.as_slice()));
+        // Captured buffer has exactly one entry.
+        assert_eq!(cs.len(), 1);
+        assert!(!cs.is_empty());
+    }
+
+    #[test]
+    fn drain_returns_and_clears_captured() {
+        let inner = Arc::new(MemoryBlockStore::default());
+        let cs    = CapturingBlockStore::new(Arc::clone(&inner) as _);
+
+        let c1 = make_cid(b"block-1");
+        let c2 = make_cid(b"block-2");
+        cs.put(&c1, b"data1").unwrap();
+        cs.put(&c2, b"data2").unwrap();
+
+        let drained = cs.drain();
+        assert_eq!(drained.len(), 2);
+        assert!(cs.is_empty(), "drain must empty the buffer");
+        // Inner store still has both blocks.
+        assert!(inner.has(&c1));
+        assert!(inner.has(&c2));
+    }
+
+    #[test]
+    fn get_and_has_delegate_to_inner() {
+        let inner = Arc::new(MemoryBlockStore::default());
+        let cid   = make_cid(b"get-test");
+        inner.put(&cid, b"value").unwrap();
+
+        let cs = CapturingBlockStore::new(Arc::clone(&inner) as _);
+        assert!(cs.has(&cid));
+        assert_eq!(cs.get(&cid).unwrap().as_deref(), Some(b"value".as_slice()));
+        // A put-via-inner is NOT captured (only CapturingBlockStore::put is tracked).
+        assert_eq!(cs.len(), 0);
+    }
+
+    #[test]
+    fn delete_delegates_to_inner() {
+        let inner = Arc::new(MemoryBlockStore::default());
+        let cid   = make_cid(b"del-test");
+        let cs    = CapturingBlockStore::new(Arc::clone(&inner) as _);
+
+        cs.put(&cid, b"will-be-deleted").unwrap();
+        cs.delete(&cid).unwrap();
+        assert!(!inner.has(&cid));
+    }
+}
