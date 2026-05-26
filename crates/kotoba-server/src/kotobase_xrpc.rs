@@ -205,12 +205,17 @@ fn now_unix_str() -> String {
 }
 
 fn new_pin_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
-    let ms = SystemTime::now()
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let ms  = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    format!("pin_{ms:016x}")
+    // Combine timestamp (ms) with a monotonic seq so concurrent calls never collide.
+    let combined = ms.wrapping_shl(20) ^ seq;
+    format!("pin_{combined:016x}")
 }
 
 // ── Request / Response types ───────────────────────────────────────────────

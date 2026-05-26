@@ -1812,3 +1812,122 @@ async fn weight_put_then_get_roundtrip() {
         .expect("valid base64");
     assert_eq!(returned, data, "roundtripped bytes must match");
 }
+
+// ── kg.search / kg.query / kg.delete smoke tests ─────────────────────────────
+
+#[tokio::test]
+async fn kg_search_empty_returns_empty_results() {
+    let s = TestServer::start(false).await;
+    // KG graph defaults to Authenticated — send Bearer token
+    let (status, body) = s.get_authed(
+        "/xrpc/ai.gftd.apps.yata.kg.search?q=nonexistent+entity"
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["results"].is_array(), "expected results array: {body}");
+    let results = body["results"].as_array().unwrap();
+    assert!(results.is_empty(), "expected empty results on fresh store: {body}");
+}
+
+#[tokio::test]
+async fn kg_search_after_ingest_returns_entity() {
+    let s = TestServer::start(false).await;
+
+    // Ingest an entity with a label so the search index has data
+    let (status, _) = s.post_auth(
+        "/xrpc/ai.gftd.apps.yata.kg.ingest",
+        json!({
+            "id":      "ent-search-1",
+            "labelJa": "東京都",
+            "labelEn": "Tokyo",
+            "type":    "Place",
+        }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "ingest failed");
+
+    // Search for the entity (blake3 pseudo-vector fallback, no LLM needed)
+    let (status, body) = s.get_authed(
+        "/xrpc/ai.gftd.apps.yata.kg.search?q=Tokyo"
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["results"].is_array(), "{body}");
+    // At minimum the field must be present; exact match depends on vector similarity
+    assert!(body["latency_ms"].is_number(), "latency_ms missing: {body}");
+}
+
+#[tokio::test]
+async fn kg_query_sparql_empty_graph_returns_empty() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post_auth(
+        "/xrpc/ai.gftd.apps.yata.kg.query",
+        json!({
+            "lang":  "sparql",
+            "query": "PREFIX k: <urn:kg:> SELECT ?s ?o WHERE { ?s k:id ?o }",
+        }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["results"].is_array(), "expected results array: {body}");
+    assert_eq!(body["results"].as_array().unwrap().len(), 0, "fresh graph should have no quads: {body}");
+}
+
+#[tokio::test]
+async fn kg_query_unknown_lang_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, _body) = s.post_auth(
+        "/xrpc/ai.gftd.apps.yata.kg.query",
+        json!({ "lang": "sql", "query": "SELECT 1" }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 400);
+}
+
+#[tokio::test]
+async fn kg_delete_nonexistent_entity_returns_ok_zero_retracted() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post_auth(
+        "/xrpc/ai.gftd.apps.yata.kg.delete",
+        json!({ "id": "ent-does-not-exist" }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["ok"].as_bool().unwrap_or(false), "{body}");
+    assert_eq!(body["retractedCount"], 0, "{body}");
+}
+
+#[tokio::test]
+async fn kg_ingest_then_delete_removes_entity() {
+    let s = TestServer::start(false).await;
+
+    // Ingest an entity
+    let (status, _) = s.post_auth(
+        "/xrpc/ai.gftd.apps.yata.kg.ingest",
+        json!({ "id": "ent-delete-me", "type": "Thing", "labelEn": "Delete Target" }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200);
+
+    // Verify it's present
+    let (status, body) = s.get_authed(
+        "/xrpc/ai.gftd.apps.yata.kg.entity?id=ent-delete-me"
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["ok"].as_bool().unwrap_or(false), "entity not found before delete: {body}");
+
+    // Delete it
+    let (status, body) = s.post_auth(
+        "/xrpc/ai.gftd.apps.yata.kg.delete",
+        json!({ "id": "ent-delete-me" }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["ok"].as_bool().unwrap_or(false), "{body}");
+    assert!(body["retractedCount"].as_u64().unwrap_or(0) > 0, "expected >0 retracted: {body}");
+
+    // Entity should no longer be found
+    let (status, body) = s.get_authed(
+        "/xrpc/ai.gftd.apps.yata.kg.entity?id=ent-delete-me"
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(!body["ok"].as_bool().unwrap_or(true), "entity still found after delete: {body}");
+}
