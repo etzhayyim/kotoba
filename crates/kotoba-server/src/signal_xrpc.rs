@@ -95,18 +95,15 @@ pub async fn register_prekeys(
     }
     require_signal_auth(&headers, &req.did, &state.operator_did)?;
 
+    let bundle_bytes = serde_json::to_vec(&req.prekey_bundle)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("prekey_bundle serialize: {e}")))?;
+    let ik_bytes = serde_json::to_vec(&req.identity_key)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("identity_key serialize: {e}")))?;
+
     let key = format!("signal/bundle/{}/{}", req.did, req.device_id);
-    state.shelf.put(
-        "KOTOBA_SIGNAL",
-        key,
-        bytes::Bytes::from(serde_json::to_vec(&req.prekey_bundle).unwrap_or_default()),
-    ).await;
+    state.shelf.put("KOTOBA_SIGNAL", key, bytes::Bytes::from(bundle_bytes)).await;
     let ik_key = format!("signal/identity/{}/{}", req.did, req.device_id);
-    state.shelf.put(
-        "KOTOBA_SIGNAL",
-        ik_key,
-        bytes::Bytes::from(serde_json::to_vec(&req.identity_key).unwrap_or_default()),
-    ).await;
+    state.shelf.put("KOTOBA_SIGNAL", ik_key, bytes::Bytes::from(ik_bytes)).await;
     Ok(Json(RegisterPrekeysResp { status: "ok", did: req.did }))
 }
 
