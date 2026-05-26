@@ -227,6 +227,14 @@ pub fn check_read_access(
             //    the CACAO itself could be valid.
             if let Some(store) = nonce_store {
                 let nonce = chain.chain[0].p.nonce.clone();
+                // An empty nonce cannot be used for replay prevention — every CACAO
+                // without a nonce would collide in the store after the first request.
+                // Reject rather than silently bypass the guard.
+                if nonce.is_empty() {
+                    return Err(AccessDenied::DelegationError(
+                        "CACAO nonce must not be empty".into()
+                    ));
+                }
                 // Conservative upper-bound: keep nonce until max possible expiry.
                 const MAX_CACAO_AGE_SECS: u64 = 7 * 24 * 3600;
                 let expiry_unix = std::time::SystemTime::now()
@@ -334,6 +342,42 @@ mod tests {
     fn jwt_sub_returns_none_for_malformed() {
         assert!(jwt_sub("notajwt").is_none());
         assert!(jwt_sub("a.b").is_none()); // no sig segment but 2 parts
+    }
+
+    #[test]
+    fn nonce_store_empty_nonce_rejected() {
+        use crate::nonce_store::NonceStore;
+        use kotoba_auth::{Cacao, CacaoHeader, CacaoPayload, CacaoSignature};
+        use kotoba_core::named_graph::GraphVisibility;
+
+        let store = NonceStore::new();
+        let vis = GraphVisibility::Private { owner_did: "did:key:alice".into() };
+
+        // Build a minimal CACAO with an empty nonce
+        let cacao = Cacao {
+            h: CacaoHeader { t: "eip4361".into() },
+            p: CacaoPayload {
+                iss: "did:key:alice".into(),
+                aud: String::new(),
+                issued_at: "2024-01-01T00:00:00Z".into(),
+                expiry: None,
+                nonce: String::new(), // empty nonce
+                domain: "test".into(),
+                statement: None,
+                version: "1".into(),
+                resources: vec![],
+            },
+            s: CacaoSignature { t: "ed25519".into(), s: String::new() },
+        };
+        // Serialize the CACAO to b64 so we can pass it to check_read_access
+        let cbor = cacao.to_cbor().unwrap();
+        use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+        let b64 = B64.encode(&cbor);
+
+        // The function should fail before reaching the nonce store (DelegationError from verify)
+        // OR at the empty-nonce guard. Either way it must not return Ok(()).
+        let result = check_read_access(&vis, &HeaderMap::new(), Some(&b64), None, Some(&store));
+        assert!(result.is_err(), "empty nonce should be rejected");
     }
 
     #[test]
