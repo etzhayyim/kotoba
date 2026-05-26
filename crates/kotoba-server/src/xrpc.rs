@@ -150,6 +150,26 @@ fn map_delegation_error(e: kotoba_auth::DelegationError) -> (StatusCode, String)
     }
 }
 
+/// Returns `true` if the host portion of a `did:web:` suffix is an IP literal.
+///
+/// The did:web spec mandates domain names. IP literals are rejected to prevent
+/// SSRF attacks (e.g. `did:web:169.254.169.254` → AWS metadata endpoint).
+fn is_did_web_ip_host(suffix: &str) -> bool {
+    let host = suffix.split(':').next().unwrap_or(suffix);
+    // Empty host means suffix starts with ':' — not a valid domain name.
+    // IPv6 literals like "::1" produce an empty first segment here.
+    if host.is_empty() {
+        return true;
+    }
+    // IPv4: first segment parses as an IP address.
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    // IPv6: the full suffix (no `:path` appended yet) may parse as an IP.
+    // e.g. "fe80::1" — first segment is "fe80" but the full string is IPv6.
+    suffix.parse::<std::net::IpAddr>().is_ok()
+}
+
 /// Resolve a `did:web:` DID document over HTTPS, extract the Ed25519 public key,
 /// verify the CACAO signature, and check expiry + graph scope.
 ///
@@ -203,8 +223,19 @@ async fn resolve_and_verify_did_web(
         }
     }
 
-    // Build did:web fetch URL
+    // Build did:web fetch URL.
+    // The did:web spec requires a domain name — reject IP literals outright.
+    // Hostname-based SSRF (DNS pointing to internal IPs) is out-of-scope here;
+    // document in ADR §23 if DNS-SSRF protection is needed in future.
     let suffix = cacao.p.iss.strip_prefix("did:web:").unwrap_or(&cacao.p.iss);
+    if is_did_web_ip_host(suffix) {
+        let host = suffix.split(':').next().unwrap_or(suffix);
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            format!("did:web: IP address literals are not allowed (got '{host}'); did:web requires a domain name"),
+        ));
+    }
+
     let url = if suffix.contains(':') {
         format!("https://{}/did.json", suffix.replace(':', "/"))
     } else {
@@ -285,6 +316,30 @@ pub async fn quad_create(
 
     tracing::info!(issuer = %issuer_did, graph = %req.graph, "quad.create: CACAO verified");
 
+    // ── SPO + graph field bounds ─────────────────────────────────────────────
+    // Reject oversized fields before they enter the graph index or WAL.
+    // graph/subject/predicate are used as BTreeMap keys; object is freeform text.
+    const MAX_GRAPH_LEN:     usize = 512;
+    const MAX_SUBJECT_LEN:   usize = 512;
+    const MAX_PREDICATE_LEN: usize = 512;
+    const MAX_OBJECT_LEN:    usize = 8 * 1024; // 8 KiB
+    if req.graph.len() > MAX_GRAPH_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("graph field too long ({} bytes, limit {MAX_GRAPH_LEN})", req.graph.len())));
+    }
+    if req.subject.len() > MAX_SUBJECT_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("subject field too long ({} bytes, limit {MAX_SUBJECT_LEN})", req.subject.len())));
+    }
+    if req.predicate.len() > MAX_PREDICATE_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("predicate field too long ({} bytes, limit {MAX_PREDICATE_LEN})", req.predicate.len())));
+    }
+    if req.object.len() > MAX_OBJECT_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("object field too long ({} bytes, limit {MAX_OBJECT_LEN})", req.object.len())));
+    }
+
     let quad = Quad {
         graph:     KotobaCid::from_bytes(req.graph.as_bytes()),
         subject:   KotobaCid::from_bytes(req.subject.as_bytes()),
@@ -331,6 +386,14 @@ pub async fn vault_put(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     use bytes::Bytes;
+
+    // 10 MiB base64 cap (decodes to ~7.5 MiB raw). Vault blobs are content-addressed
+    // chunks; oversized payloads should be split by the chunker, not sent raw.
+    const MAX_VAULT_B64_LEN: usize = 10 * 1024 * 1024;
+    if req.data_b64.len() > MAX_VAULT_B64_LEN {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE,
+            format!("data_b64 too large ({} bytes, limit {MAX_VAULT_B64_LEN})", req.data_b64.len())));
+    }
 
     let data = B64.decode(&req.data_b64)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("data_b64 decode: {e}")))?;
@@ -395,8 +458,19 @@ pub async fn invoke_run(
         other => return Err((StatusCode::BAD_REQUEST, format!("unknown program_type: {other}"))),
     };
 
+    // 50 MiB wasm cap (a full WASM module rarely exceeds a few MiB; 50 MiB is generous).
+    const MAX_WASM_B64_LEN: usize = 50 * 1024 * 1024;
+    // 1 MiB ctx cap — context CBOR should be small structured data, not a data dump.
+    const MAX_CTX_B64_LEN:  usize = 1 * 1024 * 1024;
+
     let wasm_bytes: Vec<u8> = match &req.wasm_b64 {
-        Some(b64) => B64.decode(b64).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?,
+        Some(b64) => {
+            if b64.len() > MAX_WASM_B64_LEN {
+                return Err((StatusCode::PAYLOAD_TOO_LARGE,
+                    format!("wasm_b64 too large ({} bytes, limit {MAX_WASM_B64_LEN})", b64.len())));
+            }
+            B64.decode(b64).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
+        }
         None if program_type != ProgramType::Datalog => {
             return Err((StatusCode::BAD_REQUEST, "wasm_b64 required for wasm programs".into()));
         }
@@ -404,7 +478,13 @@ pub async fn invoke_run(
     };
 
     let ctx_cbor: Vec<u8> = match &req.ctx_b64 {
-        Some(b64) => B64.decode(b64).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?,
+        Some(b64) => {
+            if b64.len() > MAX_CTX_B64_LEN {
+                return Err((StatusCode::PAYLOAD_TOO_LARGE,
+                    format!("ctx_b64 too large ({} bytes, limit {MAX_CTX_B64_LEN})", b64.len())));
+            }
+            B64.decode(b64).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
+        }
         None => vec![],
     };
 
@@ -699,7 +779,7 @@ pub async fn graph_query(
 
     // ── Read-access gate ─────────────────────────────────────────────────────
     let visibility = state.graph_visibility(&graph_cid).await;
-    check_read_access(&visibility, &headers, req.cacao_b64.as_deref(), Some(state.operator_did.as_str()))
+    check_read_access(&visibility, &headers, req.cacao_b64.as_deref(), Some(state.operator_did.as_str()), None)
         .map_err(AccessDenied::into_response)?;
 
     let arrangement = match state.quad_store.arrangement(&graph_cid).await {
@@ -832,6 +912,8 @@ pub struct QuadRetractReq {
     pub subject:   String,
     pub predicate: String,
     pub object:    String,
+    /// CACAO delegation chain (DAG-CBOR, base64-standard encoded). Required.
+    pub cacao_b64: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -841,12 +923,64 @@ pub struct QuadRetractResp {
 }
 
 /// POST /xrpc/ai.gftd.apps.kotoba.quad.retract
+///
+/// `cacao_b64` is required. The CACAO is verified before the delete:
+/// - Signature must be valid (EdDSA or eip191)
+/// - `cacao.p.graph_cid()` must match the requested `graph` field when present
 pub async fn quad_retract(
     State(state): State<Arc<KotobaState>>,
     Json(req):    Json<QuadRetractReq>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
     use kotoba_core::cid::KotobaCid;
     use kotoba_kqe::quad::{Quad, QuadObject};
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+
+    // ── CACAO verification (required) ────────────────────────────────────
+    let b64 = req.cacao_b64.as_deref()
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "cacao_b64 is required for quad.retract".to_string()))?;
+
+    const MAX_CACAO_B64_LEN: usize = 8 * 1024;
+    if b64.len() > MAX_CACAO_B64_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("cacao_b64 too large ({} bytes, limit {MAX_CACAO_B64_LEN})", b64.len())));
+    }
+
+    let cbor = B64.decode(b64)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("cacao_b64 decode: {e}")))?;
+    let cacao = kotoba_auth::Cacao::from_cbor(&cbor)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("cacao parse: {e}")))?;
+
+    let issuer_did = if cacao.p.iss.starts_with("did:web:") {
+        resolve_and_verify_did_web(&cacao, &req.graph, &state.http_client).await?
+    } else {
+        kotoba_auth::DelegationChain::new(cacao)
+            .verify(&req.graph, "quad:write")
+            .map_err(map_delegation_error)?
+    };
+
+    tracing::info!(issuer = %issuer_did, graph = %req.graph, "quad.retract: CACAO verified");
+
+    // ── SPO + graph field bounds (mirrors quad_create) ────────────────────
+    const MAX_GRAPH_LEN:     usize = 512;
+    const MAX_SUBJECT_LEN:   usize = 512;
+    const MAX_PREDICATE_LEN: usize = 512;
+    const MAX_OBJECT_LEN:    usize = 8 * 1024;
+    if req.graph.len() > MAX_GRAPH_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("graph field too long ({} bytes, limit {MAX_GRAPH_LEN})", req.graph.len())));
+    }
+    if req.subject.len() > MAX_SUBJECT_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("subject field too long ({} bytes, limit {MAX_SUBJECT_LEN})", req.subject.len())));
+    }
+    if req.predicate.len() > MAX_PREDICATE_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("predicate field too long ({} bytes, limit {MAX_PREDICATE_LEN})", req.predicate.len())));
+    }
+    if req.object.len() > MAX_OBJECT_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("object field too long ({} bytes, limit {MAX_OBJECT_LEN})", req.object.len())));
+    }
 
     let quad = Quad {
         graph:     KotobaCid::from_bytes(req.graph.as_bytes()),
@@ -866,7 +1000,7 @@ pub async fn quad_retract(
         "quad.retract → Journal + QuadStore"
     );
 
-    (StatusCode::OK, Json(QuadRetractResp { status: "ok", journal_cid }))
+    Ok((StatusCode::OK, Json(QuadRetractResp { status: "ok", journal_cid })))
 }
 
 // ── Weight get (E) ────────────────────────────────────────────────────────
@@ -1349,4 +1483,45 @@ pub async fn agent_sync_close(
     tracing::info!(session_id = %req.session_id, "agent.syncclose");
 
     Ok(Json(AgentSyncCloseResp { status: "ok", session_id: req.session_id }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_did_web_ip_host;
+
+    #[test]
+    fn ip_literal_v4_rejected() {
+        // AWS metadata endpoint and link-local
+        assert!(is_did_web_ip_host("169.254.169.254"));
+        // Localhost
+        assert!(is_did_web_ip_host("127.0.0.1"));
+        // RFC-1918 private
+        assert!(is_did_web_ip_host("10.0.0.1"));
+        assert!(is_did_web_ip_host("192.168.1.1"));
+        assert!(is_did_web_ip_host("172.16.0.1"));
+        // did:web with port
+        assert!(is_did_web_ip_host("10.0.0.1:8080"));
+    }
+
+    #[test]
+    fn ip_literal_v6_rejected() {
+        assert!(is_did_web_ip_host("::1"));
+        assert!(is_did_web_ip_host("fe80::1"));
+    }
+
+    #[test]
+    fn domain_names_allowed() {
+        // Normal domain names must NOT be flagged
+        assert!(!is_did_web_ip_host("example.com"));
+        assert!(!is_did_web_ip_host("gftd.ai"));
+        assert!(!is_did_web_ip_host("example.com:path"));
+        assert!(!is_did_web_ip_host("sub.domain.example.org"));
+    }
+
+    #[test]
+    fn localhost_name_allowed_by_spec_check_is_done_elsewhere() {
+        // "localhost" is a hostname, not an IP literal — our check is literal-only.
+        // Blocking hostname-based SSRF requires DNS resolution (out of scope here).
+        assert!(!is_did_web_ip_host("localhost"));
+    }
 }

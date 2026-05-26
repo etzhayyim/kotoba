@@ -197,12 +197,47 @@ async fn graph_query_after_create_returns_quad() {
 #[tokio::test]
 async fn quad_retract_returns_ok() {
     let s = TestServer::start(false).await;
+    let (_, cacao_b64) = build_ed25519_cacao("e2e");
     let (status, body) = s.post(
         "/xrpc/ai.gftd.apps.kotoba.quad.retract",
-        json!({ "graph": "e2e", "subject": "alice", "predicate": "knows", "object": "bob" }),
+        json!({
+            "graph":     "e2e",
+            "subject":   "alice",
+            "predicate": "knows",
+            "object":    "bob",
+            "cacao_b64": cacao_b64,
+        }),
     ).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["status"], "ok");
+}
+
+#[tokio::test]
+async fn quad_retract_without_cacao_returns_401() {
+    let s = TestServer::start(false).await;
+    let (status, _body) = s.post(
+        "/xrpc/ai.gftd.apps.kotoba.quad.retract",
+        json!({ "graph": "e2e", "subject": "alice", "predicate": "knows", "object": "bob" }),
+    ).await;
+    assert_eq!(status, 401);
+}
+
+#[tokio::test]
+async fn quad_retract_cacao_graph_mismatch_returns_401() {
+    let s = TestServer::start(false).await;
+    // CACAO signed for "other-graph" but request targets "e2e"
+    let (_, cacao_b64) = build_ed25519_cacao("other-graph");
+    let (status, _body) = s.post(
+        "/xrpc/ai.gftd.apps.kotoba.quad.retract",
+        json!({
+            "graph":     "e2e",
+            "subject":   "alice",
+            "predicate": "knows",
+            "object":    "bob",
+            "cacao_b64": cacao_b64,
+        }),
+    ).await;
+    assert_eq!(status, 401);
 }
 
 #[tokio::test]
@@ -1381,4 +1416,45 @@ async fn mcp_graph_gc_returns_deleted_count() {
     let content: serde_json::Value = serde_json::from_str(content_str).expect("json");
     assert_eq!(content["status"], "ok", "{content}");
     assert!(content["deleted_blocks"].is_number(), "missing deleted_blocks: {content}");
+}
+
+// ── XRPC route smoke tests (KG / CC / email) ──────────────────────────────────
+
+#[tokio::test]
+async fn kg_catalog_empty_returns_zero_stats() {
+    let s = TestServer::start(false).await;
+    // KG graph defaults to Authenticated visibility — opaque Bearer token suffices
+    let (status, body) = s
+        .get_authed("/xrpc/ai.gftd.apps.yata.kg.catalog")
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["ok"].as_bool().unwrap_or(false), "{body}");
+    let stats = &body["stats"];
+    assert_eq!(stats["totalEntities"], 0, "{body}");
+    assert_eq!(stats["totalClaims"], 0, "{body}");
+    assert_eq!(stats["totalRelations"], 0, "{body}");
+}
+
+#[tokio::test]
+async fn cc_status_returns_index_counts() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.get("/xrpc/ai.gftd.apps.kotoba.cc.status").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["chunks_indexed"].is_number(), "{body}");
+    assert!(body["pages_indexed"].is_number(), "{body}");
+    assert!(body["ivf_centroids"].is_number(), "{body}");
+}
+
+#[tokio::test]
+async fn email_list_xrpc_unknown_owner_returns_empty() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s
+        .get("/xrpc/ai.gftd.apps.kotoba.email.list?owner_did=did:key:zEmailXrpc1")
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["total"], 0, "{body}");
+    assert!(
+        body["emails"].as_array().map(|a| a.is_empty()).unwrap_or(false),
+        "{body}"
+    );
 }
