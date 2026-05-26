@@ -7,7 +7,6 @@ description = "Kotoba Query Engine: Datalog, Arrangement, Delta, MV"
 
 [dependencies]
 kotoba-core.workspace = true
-kotoba-kse.workspace = true
 tokio.workspace = true
 serde.workspace = true
 thiserror.workspace = true

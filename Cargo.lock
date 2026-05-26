@@ -4316,6 +4316,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
@@ -4325,7 +4326,6 @@ dependencies = [
  "anyhow",
  "criterion",
  "kotoba-core",
- "kotoba-kse",
  "serde",
  "sqlparser",
  "thiserror 1.0.69",
@@ -4344,6 +4344,7 @@ dependencies = [
  "ciborium",
  "ed25519-dalek",
  "hex",
+ "kotoba-auth",
  "kotoba-core",
  "kotoba-crypto",
  "kotoba-store",
