@@ -1,3 +1,4 @@
+pub mod chunker;
 pub mod topic;
 pub mod journal;
 pub mod shelf;
