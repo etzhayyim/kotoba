@@ -830,11 +830,15 @@ async fn call_tool(
                 use kotoba_kqe::quad::{Quad, QuadObject};
                 let gas_graph = KotobaCid::from_bytes(b"kotoba/gas/ledger");
                 let agent_cid = KotobaCid::from_bytes(agent_did.as_bytes());
+                // Safe cast: gas_limit is 10M per superstep and MAX_SUPERSTEPS is 256, so
+                // total_gas_used can reach at most ~2.56B — well below i64::MAX (9.2e18).
+                // Use try_from guard to prevent silent data corruption if limits ever change.
+                let gas_i64 = i64::try_from(result.total_gas_used).unwrap_or(i64::MAX);
                 let gas_quad  = Quad {
                     graph:     gas_graph.clone(),
                     subject:   agent_cid.clone(),
                     predicate: "gas/consumed_mkoto".to_string(),
-                    object:    QuadObject::Integer(result.total_gas_used as i64),
+                    object:    QuadObject::Integer(gas_i64),
                 };
                 state.journal_assert(&gas_quad).await;
                 state.quad_store.assert(gas_quad).await;
@@ -1580,6 +1584,18 @@ mod tests {
         let (code, msg) = result.unwrap_err();
         assert_eq!(code, ERR_INVALID_PARAMS);
         assert!(msg.contains("wasm_b64"), "expected 'wasm_b64' in: {msg}");
+    }
+
+    #[test]
+    fn total_gas_used_u64_to_i64_cast_is_safe_within_limits() {
+        // gas_limit = 10_000_000 per WasmExecutor, MAX_SUPERSTEPS = 256
+        let max_possible: u64 = 10_000_000 * 256;
+        assert!(max_possible <= i64::MAX as u64,
+            "total_gas_used cannot exceed i64::MAX at current limits");
+        // The try_from guard preserves correctness if limits ever change.
+        assert_eq!(i64::try_from(max_possible).unwrap(), max_possible as i64);
+        // Saturate to i64::MAX for absurdly large values (defense-in-depth).
+        assert_eq!(i64::try_from(u64::MAX).unwrap_or(i64::MAX), i64::MAX);
     }
 
     // ── kotoba_datalog_run ───────────────────────────────────────────────────
