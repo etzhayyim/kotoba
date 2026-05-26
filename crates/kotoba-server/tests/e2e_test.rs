@@ -3204,3 +3204,59 @@ async fn weight_put_oversized_shape_returns_400() {
     ).await;
     assert_eq!(status, 400, "{body}");
 }
+
+// ── email.read tests ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn email_read_without_auth_returns_401() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s
+        .get("/xrpc/ai.gftd.apps.kotoba.email.read?owner_did=did:key:zReader&email_cid=fakecid")
+        .await;
+    assert_eq!(status, 401, "{body}");
+}
+
+#[tokio::test]
+async fn email_read_invalid_did_returns_400() {
+    let s = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zReader");
+    let (status, body) = s
+        .get_with_auth(
+            "/xrpc/ai.gftd.apps.kotoba.email.read?owner_did=not-a-did&email_cid=fakecid",
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn email_read_empty_cid_returns_400() {
+    let s = TestServer::start(false).await;
+    let did = "did:key:zReader2";
+    let tok = tenant_jwt(did);
+    let (status, body) = s
+        .get_with_auth(
+            &format!("/xrpc/ai.gftd.apps.kotoba.email.read?owner_did={did}&email_cid="),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn email_read_without_crypto_returns_503() {
+    // The test server does not call init_crypto(), so crypto = None.
+    let s = TestServer::start(false).await;
+    let did = "did:key:zReader3";
+    let tok = tenant_jwt(did);
+    let (status, body) = s
+        .get_with_auth(
+            &format!(
+                "/xrpc/ai.gftd.apps.kotoba.email.read?owner_did={did}&email_cid=fakecid"
+            ),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 503, "{body}");
+    assert!(body["error"].as_str().is_some(), "expected error field: {body}");
+}
