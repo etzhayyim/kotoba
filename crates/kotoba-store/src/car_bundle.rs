@@ -32,6 +32,9 @@ use bytes::Bytes;
 use anyhow::{bail, Result};
 use kotoba_core::cid::KotobaCid;
 
+/// `(cid, absolute_byte_offset, data_length)` triple returned by `parse_index`.
+type IndexEntry = (KotobaCid, u64, u32);
+
 const MAGIC: &[u8; 4]  = b"KCAR";
 const VERSION: u32      = 1;
 const HEADER_LEN: usize = 72;
@@ -118,7 +121,7 @@ impl CarBundleWriter {
 
 /// Parse the index section from a complete CAR byte buffer.
 /// Returns `(root_cid, Vec<(cid, abs_offset, data_len)>)`.
-pub fn parse_index(car: &[u8]) -> Result<(KotobaCid, Vec<(KotobaCid, u64, u32)>)> {
+pub fn parse_index(car: &[u8]) -> Result<(KotobaCid, Vec<IndexEntry>)> {
     if car.len() < HEADER_LEN {
         bail!("car too short: {} bytes", car.len());
     }

@@ -1,11 +1,11 @@
-/// File-type–aware chunking strategies for blob storage.
-///
-/// Three strategies are supported:
-/// - `FixedLen(n)` — fixed-size slices (video/audio/opaque binary).
-/// - `ContentDefined` — gear-hash CDC, ~256 KB avg (text/JSON/CBOR/code).
-/// - `CodecAware` — CBOR top-level item boundaries (dag-cbor/cbor).
-///
-/// Blobs smaller than `SINGLE_THRESHOLD` are never split regardless of strategy.
+//! File-type–aware chunking strategies for blob storage.
+//!
+//! Three strategies are supported:
+//! - `FixedLen(n)` — fixed-size slices (video/audio/opaque binary).
+//! - `ContentDefined` — gear-hash CDC, ~256 KB avg (text/JSON/CBOR/code).
+//! - `CodecAware` — CBOR top-level item boundaries (dag-cbor/cbor).
+//!
+//! Blobs smaller than `SINGLE_THRESHOLD` are never split regardless of strategy.
 
 use bytes::Bytes;
 

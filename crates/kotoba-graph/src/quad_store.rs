@@ -1,5 +1,10 @@
 use kotoba_core::cid::KotobaCid;
 use kotoba_core::store::BlockStore;
+
+/// `(label, kv-pairs)` input for one ProllyTree build thread.
+type TreeInput = (&'static str, Vec<(Vec<u8>, Vec<u8>)>);
+/// Result from one ProllyTree build thread: `(root_cid, captured_blocks)`.
+type TreeResult = anyhow::Result<(KotobaCid, Vec<(KotobaCid, Vec<u8>)>)>;
 use kotoba_core::prolly::ProllyTree;
 use kotoba_store::{CapturingBlockStore, CarBundleWriter};
 use kotoba_kqe::quad::Quad;
@@ -479,7 +484,7 @@ impl QuadStore {
         // Each thread gets a CapturingBlockStore that writes through to the shared hot store
         // and simultaneously records every block written — used below for CAR bundling.
         let bs = Arc::clone(&self.block_store);
-        let tree_inputs: Vec<(&'static str, Vec<(Vec<u8>, Vec<u8>)>)> = vec![
+        let tree_inputs: Vec<TreeInput> = vec![
             ("eavt", eavt_entries),
             ("aevt", aevt_entries),
             ("avet", avet_entries),
@@ -492,7 +497,7 @@ impl QuadStore {
             let handle = std::thread::Builder::new()
                 .stack_size(64 * 1024 * 1024)
                 .name(format!("kotoba-prolly-{name}"))
-                .spawn(move || -> anyhow::Result<(KotobaCid, Vec<(KotobaCid, Vec<u8>)>)> {
+                .spawn(move || -> TreeResult {
                     let cap = Arc::new(CapturingBlockStore::new(inner));
                     let root = ProllyTree::build_tree(entries, &*cap)?;
                     let blocks = cap.drain();
