@@ -313,6 +313,11 @@ impl KotobaState {
         Ok(self)
     }
 
+    /// Returns true when the agent is running with an ephemeral (non-persisted) identity.
+    pub fn is_ephemeral(&self) -> bool {
+        self.identity.ephemeral
+    }
+
     /// Returns a reference to the crypto engine, or errors if not initialised.
     pub fn crypto_required(&self) -> anyhow::Result<Arc<dyn AgentCrypto>> {
         self.crypto.clone()
@@ -463,3 +468,79 @@ impl KotobaState {
 }
 
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_role_from_env_defaults_to_both() {
+        std::env::remove_var("KOTOBA_NODE_ROLES");
+        let roles = NodeRole::from_env();
+        assert!(roles.contains(&NodeRole::Pin));
+        assert!(roles.contains(&NodeRole::Compute));
+    }
+
+    #[test]
+    fn node_role_from_env_pin_only() {
+        std::env::set_var("KOTOBA_NODE_ROLES", "pin");
+        let roles = NodeRole::from_env();
+        assert_eq!(roles, vec![NodeRole::Pin]);
+        std::env::remove_var("KOTOBA_NODE_ROLES");
+    }
+
+    #[test]
+    fn node_role_from_env_compute_only() {
+        std::env::set_var("KOTOBA_NODE_ROLES", "compute");
+        let roles = NodeRole::from_env();
+        assert_eq!(roles, vec![NodeRole::Compute]);
+        std::env::remove_var("KOTOBA_NODE_ROLES");
+    }
+
+    #[test]
+    fn node_role_as_str_roundtrips() {
+        assert_eq!(NodeRole::Pin.as_str(), "pin");
+        assert_eq!(NodeRole::Compute.as_str(), "compute");
+    }
+
+    #[test]
+    fn kotoba_state_new_populates_operator_did() {
+        let state = KotobaState::new(None).expect("new");
+        assert!(!state.operator_did.is_empty(), "operator_did must not be empty");
+        assert!(
+            state.operator_did.starts_with("did:"),
+            "operator_did must be a DID: {}", state.operator_did
+        );
+    }
+
+    #[test]
+    fn kotoba_state_new_node_id_deterministic_in_ephemeral_mode() {
+        // Two states created without env vars both derive NodeId from a freshly
+        // generated ephemeral key — they should differ (each is random).
+        std::env::remove_var("KOTOBA_AGENT_ED25519_HEX");
+        std::env::remove_var("KOTOBA_AGENT_X25519_HEX");
+        std::env::remove_var("KOTOBA_AGENT_DID");
+        let a = KotobaState::new(None).expect("a");
+        let b = KotobaState::new(None).expect("b");
+        // ephemeral → each call generates a fresh key → different NodeIds
+        assert_ne!(a.local_node_id.0, b.local_node_id.0,
+            "ephemeral NodeIds must differ across restarts");
+    }
+
+    #[tokio::test]
+    async fn register_node_writes_quads() {
+        let state = KotobaState::new(None).expect("new");
+        state.register_node().await;
+
+        use kotoba_core::cid::KotobaCid;
+        let graph_cid = KotobaCid::from_bytes(b"kotoba/network/nodes");
+        let arrangement = state.quad_store.arrangement(&graph_cid).await
+            .expect("kotoba/network/nodes graph should exist after register_node");
+
+        let subject_cid = KotobaCid::from_bytes(state.operator_did.as_bytes());
+        let objects = arrangement.get_objects(&subject_cid, "node/did");
+        assert!(!objects.is_empty(), "node/did quad should exist");
+        let objects_ts = arrangement.get_objects(&subject_cid, "node/registered_at");
+        assert!(!objects_ts.is_empty(), "node/registered_at quad should exist");
+    }
+}

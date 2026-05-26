@@ -346,6 +346,68 @@ async fn mcp_ping_returns_empty_result() {
 }
 
 #[tokio::test]
+async fn mcp_node_info_returns_did_and_roles() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post_auth(
+        "/mcp",
+        json!({
+            "jsonrpc": "2.0", "id": 10, "method": "tools/call",
+            "params": { "name": "kotoba_node_info", "arguments": {} }
+        }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.get("error").is_none(), "unexpected error: {body}");
+    let content_str = body["result"]["content"][0]["text"].as_str().expect("text");
+    let content: serde_json::Value = serde_json::from_str(content_str).expect("json");
+    assert!(content["did"].as_str().unwrap_or("").starts_with("did:"),
+        "expected DID, got: {}", content["did"]);
+    assert!(!content["node_id_hex"].as_str().unwrap_or("").is_empty());
+    assert!(content["roles"].is_array());
+    assert!(content.get("ephemeral").is_some());
+}
+
+#[tokio::test]
+async fn mcp_node_register_returns_ok() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post_auth(
+        "/mcp",
+        json!({
+            "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+            "params": { "name": "kotoba_node_register", "arguments": {} }
+        }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.get("error").is_none(), "unexpected error: {body}");
+    let content_str = body["result"]["content"][0]["text"].as_str().expect("text");
+    let content: serde_json::Value = serde_json::from_str(content_str).expect("json");
+    assert_eq!(content["status"], "ok");
+    assert!(content["operator_did"].as_str().unwrap_or("").starts_with("did:"));
+}
+
+#[tokio::test]
+async fn mcp_network_peers_returns_local_node_id() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post_auth(
+        "/mcp",
+        json!({
+            "jsonrpc": "2.0", "id": 12, "method": "tools/call",
+            "params": { "name": "kotoba_network_peers", "arguments": {} }
+        }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.get("error").is_none(), "unexpected error: {body}");
+    let content_str = body["result"]["content"][0]["text"].as_str().expect("text");
+    let content: serde_json::Value = serde_json::from_str(content_str).expect("json");
+    assert!(!content["local_node_id_hex"].as_str().unwrap_or("").is_empty());
+    assert!(content["peers"].is_array());
+    assert_eq!(content["peer_count"].as_u64().unwrap_or(99), 0,
+        "fresh node has no peers");
+}
+
+#[tokio::test]
 async fn mcp_tools_call_quad_create_ok() {
     let s = TestServer::start(false).await;
     let (status, body) = s.post_auth(

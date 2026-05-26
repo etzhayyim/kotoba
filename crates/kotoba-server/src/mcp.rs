@@ -812,7 +812,7 @@ async fn call_tool(
                 "node_id_hex":  node_id_hex,
                 "version":      state.version,
                 "roles":        roles,
-                "ephemeral":    !state.node_roles.is_empty(), // always false when env vars set
+                "ephemeral":    state.is_ephemeral(),
                 "peer_count":   peer_count,
             }))
         }
