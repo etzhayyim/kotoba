@@ -42,3 +42,51 @@ pub enum SignalError {
     #[error("store error: {0}")]
     Store(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_session_display() {
+        let e = SignalError::NoSession("did:key:zAlice".to_string());
+        assert_eq!(e.to_string(), "no session for did:key:zAlice");
+    }
+
+    #[test]
+    fn no_prekey_display() {
+        let e = SignalError::NoPreKey(42);
+        assert_eq!(e.to_string(), "no pre-key 42");
+    }
+
+    #[test]
+    fn no_signed_prekey_display() {
+        let e = SignalError::NoSignedPreKey(7);
+        assert_eq!(e.to_string(), "no signed pre-key 7");
+    }
+
+    #[test]
+    fn bad_signature_display() {
+        let e = SignalError::BadSignature;
+        assert_eq!(e.to_string(), "signature verification failed");
+    }
+
+    #[test]
+    fn counter_mismatch_display() {
+        let e = SignalError::CounterMismatch;
+        assert_eq!(e.to_string(), "message counter mismatch");
+    }
+
+    #[test]
+    fn store_error_display() {
+        let e = SignalError::Store("disk full".to_string());
+        assert_eq!(e.to_string(), "store error: disk full");
+    }
+
+    #[test]
+    fn serde_error_from() {
+        let json_err: serde_json::Error = serde_json::from_str::<i32>("bad").unwrap_err();
+        let e = SignalError::from(json_err);
+        assert!(e.to_string().starts_with("serialization: "));
+    }
+}
