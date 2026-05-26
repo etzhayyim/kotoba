@@ -59,6 +59,25 @@ spec:
                   name: kotoba-vault
                   key: KOTOBA_VAULT_KEY
                   optional: true
+            # Stable agent identity (prevents ephemeral DID rotation on restarts)
+            - name: KOTOBA_AGENT_ED25519_HEX
+              valueFrom:
+                secretKeyRef:
+                  name: kotoba-agent-identity
+                  key: KOTOBA_AGENT_ED25519_HEX
+                  optional: true
+            - name: KOTOBA_AGENT_X25519_HEX
+              valueFrom:
+                secretKeyRef:
+                  name: kotoba-agent-identity
+                  key: KOTOBA_AGENT_X25519_HEX
+                  optional: true
+            - name: KOTOBA_AGENT_DID
+              valueFrom:
+                secretKeyRef:
+                  name: kotoba-agent-identity
+                  key: KOTOBA_AGENT_DID
+                  optional: true
 
           ports:
             - name: http

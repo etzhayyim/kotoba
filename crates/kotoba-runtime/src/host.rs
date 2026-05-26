@@ -194,7 +194,11 @@ impl KotobaEngine {
     pub fn new() -> Result<Self> {
         let mut config = Config::new();
         config.wasm_component_model(true);
-        // Cranelift optimizing compiler (default)
+        // TODO(wasmtime-upgrade): componentize-py 0.23 emits extended-const expressions
+        // (i32.add in global initializers). wasmtime 22 disables this proposal by default
+        // and has no public Config API to re-enable it. Upgrade the wasmtime pin in
+        // Cargo.toml to "24" or later and add `config.wasm_extended_const(true)` here.
+        // Until then, Python-compiled WASM agents fail with CompileFailed on first load.
         let engine = Engine::new(&config)?;
         Ok(Self(engine))
     }

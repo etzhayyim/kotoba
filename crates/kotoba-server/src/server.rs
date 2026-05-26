@@ -591,6 +591,35 @@ mod tests {
             "distinct states have distinct ephemeral DIDs");
     }
 
+    #[test]
+    fn require_operator_auth_accepts_tenant_jwt_with_operator_did() {
+        // Simulate what tenant_jwt(&s.operator_did) produces in e2e tests.
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        use axum::http::HeaderMap;
+
+        std::env::remove_var("KOTOBA_AGENT_ED25519_HEX");
+        std::env::remove_var("KOTOBA_AGENT_X25519_HEX");
+        std::env::remove_var("KOTOBA_AGENT_DID");
+        let state = KotobaState::new(None).expect("new");
+        let did = &state.operator_did;
+
+        let header  = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(
+            format!(r#"{{"sub":"{did}","exp":9999999999}}"#).as_bytes()
+        );
+        let tok = format!("{header}.{payload}.fakesig");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {tok}").parse().unwrap(),
+        );
+
+        let result = crate::graph_auth::require_operator_auth(&headers, did);
+        assert!(result.is_ok(),
+            "require_operator_auth must accept tenant_jwt with operator_did; got err: {result:?}");
+    }
+
     #[tokio::test]
     async fn init_crypto_preserves_operator_did() {
         // Guard against the double-generation bug: init_crypto() must not call

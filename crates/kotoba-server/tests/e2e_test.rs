@@ -386,9 +386,11 @@ async fn embed_create_empty_text_returns_400() {
 #[tokio::test]
 async fn infer_run_with_stub_engine() {
     let s = TestServer::start(true).await;
-    let (status, body) = s.post(
+    let tok = tenant_jwt(&s.operator_did);
+    let (status, body) = s.post_auth(
         "/xrpc/ai.gftd.apps.kotoba.infer.run",
         json!({ "prompt": "what is kotoba?", "max_new_tokens": 32 }),
+        &tok,
     ).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["status"], "ok");
@@ -396,11 +398,23 @@ async fn infer_run_with_stub_engine() {
 }
 
 #[tokio::test]
-async fn infer_run_without_engine_returns_503() {
-    let s = TestServer::start(false).await;
-    let (status, _) = s.post(
+async fn infer_run_without_auth_returns_401() {
+    let s = TestServer::start(true).await;
+    let (status, body) = s.post(
         "/xrpc/ai.gftd.apps.kotoba.infer.run",
         json!({ "prompt": "hello" }),
+    ).await;
+    assert_eq!(status, 401, "{body}");
+}
+
+#[tokio::test]
+async fn infer_run_without_engine_returns_503() {
+    let s = TestServer::start(false).await;
+    let tok = tenant_jwt(&s.operator_did);
+    let (status, _) = s.post_auth(
+        "/xrpc/ai.gftd.apps.kotoba.infer.run",
+        json!({ "prompt": "hello" }),
+        &tok,
     ).await;
     assert_eq!(status, 503);
 }
@@ -807,7 +821,8 @@ async fn invoke_run_wasm_guest_via_xrpc() {
     }
 
     let s = TestServer::start(false).await;
-    let (status, body) = s.post(
+    let tok = tenant_jwt(&s.operator_did);
+    let (status, body) = s.post_auth(
         "/xrpc/ai.gftd.apps.kotoba.invoke.run",
         json!({
             "program_cid":  "be2e_wasm_invoke",
@@ -816,6 +831,7 @@ async fn invoke_run_wasm_guest_via_xrpc() {
             "wasm_b64":     B64.encode(&wasm_bytes),
             "ctx_b64":      B64.encode(&ctx),
         }),
+        &tok,
     ).await;
 
     assert_eq!(status, 200, "{body}");
@@ -833,6 +849,17 @@ async fn invoke_run_wasm_guest_via_xrpc() {
     } else {
         panic!("output CBOR not a map");
     }
+}
+
+#[tokio::test]
+async fn invoke_run_without_auth_returns_401() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post(
+        "/xrpc/ai.gftd.apps.kotoba.invoke.run",
+        json!({ "program_cid": "x", "program_type": "datalog", "agent_did": "did:plc:x" }),
+    ).await;
+    assert_eq!(status, 401, "{body}");
+    assert!(body["error"].as_str().is_some(), "{body}");
 }
 
 // ── SyncWindow session lifecycle ──────────────────────────────────────────────
@@ -2609,4 +2636,117 @@ async fn kg_delete_with_auth_on_missing_entity_returns_ok_zero() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["ok"], true, "{body}");
     assert_eq!(body["retractedCount"], 0, "{body}");
+}
+
+// ── attest_challenge happy path ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn attest_challenge_roundtrip() {
+    let s   = TestServer::start(false).await;
+    let did = "did:key:zChallenger3";
+    let tok = tenant_jwt(did);
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotoba.attest.challenge", json!({
+        "claim_cid":      "bafybeifake000000000000000000000000000",
+        "challenger_did": did,
+        "reason":         "counter-evidence",
+    }), &tok).await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["status"], "challenged", "{body}");
+    assert!(body["challenge_cid"].as_str().is_some(), "{body}");
+}
+
+#[tokio::test]
+async fn attest_challenge_empty_claim_cid_returns_400() {
+    let s   = TestServer::start(false).await;
+    let did = "did:key:zChallenger4";
+    let tok = tenant_jwt(did);
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotoba.attest.challenge", json!({
+        "claim_cid":      "",
+        "challenger_did": did,
+        "reason":         "some reason",
+    }), &tok).await;
+    assert_eq!(status, 400, "{body}");
+}
+
+// ── attest_query ─────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn attest_query_returns_empty_list() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.get(
+        "/xrpc/ai.gftd.apps.kotoba.attest.query?entity_did=did:key:zNobody"
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["claims"].as_array().is_some(), "claims must be array: {body}");
+    assert_eq!(body["total"].as_u64().unwrap_or(1), 0, "{body}");
+}
+
+#[tokio::test]
+async fn attest_query_oversized_entity_did_returns_400() {
+    let s = TestServer::start(false).await;
+    let big_did = "x".repeat(600);
+    let (status, body) = s.get(
+        &format!("/xrpc/ai.gftd.apps.kotoba.attest.query?entity_did={big_did}")
+    ).await;
+    assert_eq!(status, 400, "{body}");
+}
+
+// ── request_log_query ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn request_log_query_returns_empty_list() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.get("/xrpc/ai.gftd.apps.kotoba.request.log").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["entries"].as_array().is_some(), "entries must be array: {body}");
+    assert_eq!(body["total"].as_u64().unwrap_or(1), 0, "{body}");
+}
+
+// ── signal.distribute.sender.key ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn signal_distribute_sender_key_ok() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post("/xrpc/ai.gftd.signal.distribute.sender.key", json!({
+        "recipientDid":    "did:key:zRecipient1",
+        "recipientDevice": "device-1",
+        "signalMessage":   { "ciphertext": "AAAA", "messageType": 3 },
+    })).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["status"], "ok", "{body}");
+    assert!(body["messageId"].as_str().is_some(), "{body}");
+}
+
+#[tokio::test]
+async fn signal_distribute_sender_key_empty_recipient_did_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post("/xrpc/ai.gftd.signal.distribute.sender.key", json!({
+        "recipientDid":    "",
+        "recipientDevice": "device-1",
+        "signalMessage":   {},
+    })).await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn signal_distribute_sender_key_empty_device_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post("/xrpc/ai.gftd.signal.distribute.sender.key", json!({
+        "recipientDid":    "did:key:zRecipient2",
+        "recipientDevice": "",
+        "signalMessage":   {},
+    })).await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn signal_distribute_sender_key_oversized_payload_returns_413() {
+    let s = TestServer::start(false).await;
+    let large = "x".repeat(300 * 1024);
+    let (status, body) = s.post("/xrpc/ai.gftd.signal.distribute.sender.key", json!({
+        "recipientDid":    "did:key:zRecipient3",
+        "recipientDevice": "device-1",
+        "signalMessage":   { "ciphertext": large },
+    })).await;
+    assert_eq!(status, 413, "{body}");
 }

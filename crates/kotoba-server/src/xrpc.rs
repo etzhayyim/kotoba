@@ -448,8 +448,10 @@ pub async fn node_status(State(state): State<Arc<KotobaState>>) -> impl IntoResp
 /// Execute a WASM component or Datalog program, then publish resulting quads to Journal.
 pub async fn invoke_run(
     State(state): State<Arc<KotobaState>>,
+    headers:      axum::http::HeaderMap,
     Json(req):    Json<InvokeRunReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    crate::graph_auth::require_operator_auth(&headers, &state.operator_did)?;
     use kotoba_dht::source_chain::ProgramType;
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 
@@ -1345,8 +1347,10 @@ pub struct InferRunResp {
 /// POST /xrpc/ai.gftd.apps.kotoba.infer.run
 pub async fn infer_run(
     State(state): State<Arc<KotobaState>>,
+    headers:      axum::http::HeaderMap,
     Json(req):    Json<InferRunReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    crate::graph_auth::require_operator_auth(&headers, &state.operator_did)?;
     let engine = state.inference_engine.clone()
         .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "no inference engine loaded".into()))?;
 
