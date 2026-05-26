@@ -143,7 +143,8 @@ pub fn build_router(state: Arc<KotobaState>) -> Router {
         )
         .route(
             &format!("/xrpc/{}", xrpc::NSID_BLOCK_PUT),
-            post(xrpc::block_put),
+            // 32 MiB base64 + JSON framing overhead
+            post(xrpc::block_put).layer(DefaultBodyLimit::max(34 * 1024 * 1024)),
         )
         .route(
             &format!("/xrpc/{}", xrpc::NSID_BLOCK_GET),
@@ -163,7 +164,8 @@ pub fn build_router(state: Arc<KotobaState>) -> Router {
         )
         .route(
             &format!("/xrpc/{}", xrpc::NSID_WEIGHT_PUT),
-            post(xrpc::weight_put),
+            // 512 MiB base64 tensor + JSON framing overhead
+            post(xrpc::weight_put).layer(DefaultBodyLimit::max(530 * 1024 * 1024)),
         )
         .route(
             &format!("/xrpc/{}", xrpc::NSID_QUAD_RETRACT),
@@ -175,7 +177,8 @@ pub fn build_router(state: Arc<KotobaState>) -> Router {
         )
         .route(
             &format!("/xrpc/{}", xrpc::NSID_LORA_APPLY),
-            post(xrpc::lora_apply),
+            // 128 MiB LoRA adapter base64 + JSON framing overhead
+            post(xrpc::lora_apply).layer(DefaultBodyLimit::max(136 * 1024 * 1024)),
         )
         .route(
             &format!("/xrpc/{}", xrpc::NSID_EMBED_CREATE),
@@ -292,7 +295,8 @@ pub fn build_router(state: Arc<KotobaState>) -> Router {
         )
         .route(
             &format!("/xrpc/{}", email_xrpc::NSID_EMAIL_INGEST),
-            post(email_xrpc::email_ingest),
+            // 33 MiB raw email base64 + JSON framing overhead
+            post(email_xrpc::email_ingest).layer(DefaultBodyLimit::max(36 * 1024 * 1024)),
         )
         // ── Signal Protocol E2E (ai.gftd.signal.*) ─────────────────────────
         .route(
