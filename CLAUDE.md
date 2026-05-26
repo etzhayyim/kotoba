@@ -14,7 +14,7 @@ KOTOBA ≝ Datom[CID/T] × EAVT[KSE Topic] × Pregel[BSP] × Datalog[Δ]
 | crate | 役割 |
 |---|---|
 | kotoba-core | CIDv1 blake3, KAIS 8-bit frame, Prolly Tree |
-| kotoba-kse | Journal, Topic, Shelf, Vault (KSE) |
+| kotoba-kse | Journal (Merkle WAL on Arc<dyn BlockStore>, head JSON, Merkle chain cold-path), Vault (file-type chunking: Single/FixedLen 512KB/CDC gear-hash/CodecAware CBOR-item; BlobManifest CID; flush_as_car() CAR v1 batch), SecureVault, Topic, Shelf, chunker.rs **[IPLD-only 2026-05-26]** |
 | kotoba-kqe | Datalog engine, Arrangement, Delta, MV (KQE) |
 | kotoba-dht | Source Chain, Warrant, Neighborhood (KDHT) |
 | kotoba-net | libp2p QUIC/Noise/GossipSub |

@@ -64,6 +64,7 @@ notes = "ProllyTree: build_tree(entries, store)→root_cid (commit), get(root, k
 [subdirs."crates/kotoba-kse"]
 role = "stream-engine"
 tier = "alpha"
+notes = "Full IPLD migration 2026-05-26: Journal (Merkle WAL blocks on Arc<dyn BlockStore>, head JSON file, traverse_chain() cold-path), Vault (file-type chunking: Single<128KB / FixedLen 512KB for video/audio/binary / gear-hash CDC ~256KB for text/JSON / CBOR-item-boundary for dag-cbor; BlobManifest CID for multi-chunk blobs; Vault::flush_as_car() → CAR v1 Bytes), SecureVault (backed via Vault::with_block_store). sled named trees 'journal'/'vault'/'email-vault' removed from server.rs — all KSE shares single block_store. 38 tests pass (chunker + journal + vault + secure_vault + store + sync_window + shelf)."
 
 [subdirs."crates/kotoba-kqe"]
 role = "query-engine"

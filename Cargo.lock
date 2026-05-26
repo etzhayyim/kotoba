@@ -4349,6 +4349,7 @@ dependencies = [
  "ciborium",
  "kotoba-core",
  "kotoba-crypto",
+ "kotoba-store",
  "object_store",
  "rand 0.8.6",
  "serde",
