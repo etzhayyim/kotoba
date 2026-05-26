@@ -116,8 +116,12 @@ pub struct CcSearchResult {
 
 pub async fn cc_search(
     State(state): State<Arc<KotobaState>>,
+    headers: HeaderMap,
     Query(q): Query<CcSearchQuery>,
 ) -> impl IntoResponse {
+    if let Err((code, msg)) = crate::graph_auth::require_operator_auth(&headers, &state.operator_did) {
+        return (code, Json(json!({"error": msg}))).into_response();
+    }
     if q.q.is_empty() || q.q.len() > MAX_QUERY_LEN {
         return (StatusCode::BAD_REQUEST,
             Json(json!({"error": format!("q must be 1–{MAX_QUERY_LEN} bytes")}))).into_response();
@@ -210,8 +214,12 @@ fn default_rag_k() -> usize { 5 }
 
 pub async fn cc_rag(
     State(state): State<Arc<KotobaState>>,
+    headers: HeaderMap,
     Json(body): Json<CcRagBody>,
 ) -> impl IntoResponse {
+    if let Err((code, msg)) = crate::graph_auth::require_operator_auth(&headers, &state.operator_did) {
+        return (code, Json(json!({"error": msg}))).into_response();
+    }
     if body.query.is_empty() || body.query.len() > MAX_QUERY_LEN {
         return (StatusCode::BAD_REQUEST,
             Json(json!({"error": format!("query must be 1–{MAX_QUERY_LEN} bytes")}))).into_response();
@@ -368,7 +376,11 @@ pub async fn cc_ingest(
 
 pub async fn cc_status(
     State(state): State<Arc<KotobaState>>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    if let Err((code, msg)) = crate::graph_auth::require_operator_auth(&headers, &state.operator_did) {
+        return (code, Json(json!({"error": msg}))).into_response();
+    }
     let chunks_graph = cc_chunks_graph();
     let pages_graph  = cc_pages_graph();
 
@@ -391,5 +403,5 @@ pub async fn cc_status(
         "embed_configured": state.cc_embed_client.is_some(),
         "chunks_graph_cid": chunks_graph.to_multibase(),
         "pages_graph_cid":  pages_graph.to_multibase(),
-    }))
+    })).into_response()
 }

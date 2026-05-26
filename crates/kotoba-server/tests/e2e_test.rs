@@ -1870,9 +1870,17 @@ async fn kg_catalog_empty_returns_zero_stats() {
 }
 
 #[tokio::test]
+async fn cc_status_without_auth_returns_401() {
+    let s = TestServer::start(false).await;
+    let (status, _body) = s.get("/xrpc/ai.gftd.apps.kotoba.cc.status").await;
+    assert_eq!(status, 401, "cc_status must reject unauthenticated requests");
+}
+
+#[tokio::test]
 async fn cc_status_returns_index_counts() {
     let s = TestServer::start(false).await;
-    let (status, body) = s.get("/xrpc/ai.gftd.apps.kotoba.cc.status").await;
+    let tok = tenant_jwt(&s.operator_did);
+    let (status, body) = s.get_with_auth("/xrpc/ai.gftd.apps.kotoba.cc.status", &tok).await;
     assert_eq!(status, 200, "{body}");
     assert!(body["chunks_indexed"].is_number(), "{body}");
     assert!(body["pages_indexed"].is_number(), "{body}");
@@ -2364,11 +2372,33 @@ async fn kotobase_pin_list_offset_pagination() {
 // ── cc.search / cc.rag / cc.ingest smoke tests ───────────────────────────────
 
 #[tokio::test]
+async fn cc_search_without_auth_returns_401() {
+    // Regression guard: cc_search calls the embed service per request — exposing
+    // it without auth enables resource-exhaustion attacks on the embed backend.
+    let s = TestServer::start(false).await;
+    let (status, _body) = s.get("/xrpc/ai.gftd.apps.kotoba.cc.search?q=test").await;
+    assert_eq!(status, 401, "cc_search must reject unauthenticated requests");
+}
+
+#[tokio::test]
+async fn cc_rag_without_auth_returns_401() {
+    // Regression guard: cc_rag calls embed service + LLM inference — highest-cost
+    // endpoint; must be operator-gated to prevent resource exhaustion.
+    let s = TestServer::start(false).await;
+    let (status, _body) = s.post(
+        "/xrpc/ai.gftd.apps.kotoba.cc.rag",
+        json!({ "query": "what is Rust?" }),
+    ).await;
+    assert_eq!(status, 401, "cc_rag must reject unauthenticated requests");
+}
+
+#[tokio::test]
 async fn cc_search_without_real_embed_endpoint_returns_error() {
     let s = TestServer::start(false).await;
+    let tok = tenant_jwt(&s.operator_did);
     // The embed client initializes with default localhost:11434 but no server is running.
     // The request should return an error response (500 or 503) — not 200 with data.
-    let (status, body) = s.get("/xrpc/ai.gftd.apps.kotoba.cc.search?q=test").await;
+    let (status, body) = s.get_with_auth("/xrpc/ai.gftd.apps.kotoba.cc.search?q=test", &tok).await;
     assert!(status == 500 || status == 503, "expected 500 or 503, got {status}: {body}");
     assert!(body["error"].as_str().is_some(), "expected error field: {body}");
 }
@@ -2376,9 +2406,11 @@ async fn cc_search_without_real_embed_endpoint_returns_error() {
 #[tokio::test]
 async fn cc_rag_without_real_embed_endpoint_returns_error() {
     let s = TestServer::start(false).await;
-    let (status, body) = s.post(
+    let tok = tenant_jwt(&s.operator_did);
+    let (status, body) = s.post_auth(
         "/xrpc/ai.gftd.apps.kotoba.cc.rag",
         json!({ "query": "what is Rust?" }),
+        &tok,
     ).await;
     assert!(status == 500 || status == 503, "expected 500 or 503, got {status}: {body}");
     assert!(body["error"].as_str().is_some(), "expected error field: {body}");
@@ -2427,7 +2459,8 @@ async fn cc_ingest_with_non_operator_did_returns_401() {
 #[tokio::test]
 async fn cc_search_empty_query_returns_400() {
     let s = TestServer::start(false).await;
-    let (status, body) = s.get("/xrpc/ai.gftd.apps.kotoba.cc.search?q=").await;
+    let tok = tenant_jwt(&s.operator_did);
+    let (status, body) = s.get_with_auth("/xrpc/ai.gftd.apps.kotoba.cc.search?q=", &tok).await;
     assert_eq!(status, 400, "{body}");
     assert!(body["error"].as_str().is_some(), "{body}");
 }
@@ -2448,9 +2481,11 @@ async fn cc_ingest_invalid_mode_returns_400() {
 #[tokio::test]
 async fn cc_rag_empty_query_returns_400() {
     let s = TestServer::start(false).await;
-    let (status, body) = s.post(
+    let tok = tenant_jwt(&s.operator_did);
+    let (status, body) = s.post_auth(
         "/xrpc/ai.gftd.apps.kotoba.cc.rag",
         json!({ "query": "" }),
+        &tok,
     ).await;
     assert_eq!(status, 400, "{body}");
     assert!(body["error"].as_str().is_some(), "{body}");
