@@ -2,11 +2,13 @@ pub mod did_document;
 pub mod cacao;
 pub mod delegation;
 pub mod eth;
+pub mod did_key;
 
 pub use did_document::{DidDocument, VerificationMethod, ServiceEndpoint};
 pub use cacao::{Cacao, CacaoHeader, CacaoPayload, CacaoSig, CacaoError};
 pub use delegation::{DelegationChain, DelegationError};
 pub use eth::{eth_address_to_erc725_did, personal_sign_hash, recover_eth_address};
+pub use did_key::{parse_ed25519_did_key, ed25519_pubkey_to_did_key};
 
 #[cfg(test)]
 mod tests {
@@ -162,7 +164,7 @@ mod tests {
         let cacao = Cacao {
             h: CacaoHeader { t: "eip4361".into() },
             p: test_payload(vec![]),
-            s: CacaoSig { t: "EdDSA".into(), s: "deaddead".into() },
+            s: CacaoSig { t: "secp256r1".into(), s: "deaddead".into() },
         };
         let err = cacao.verify_signature().unwrap_err();
         assert!(matches!(err, CacaoError::UnsupportedSigType(_)));
@@ -235,6 +237,43 @@ mod tests {
 
         let result = cacao.verify_signature();
         assert!(result.is_ok(), "verify_signature failed: {:?}", result.err());
+    }
+
+    // ── Cacao::verify_signature — EdDSA roundtrip ─────────────────────────
+
+    #[test]
+    fn verify_signature_eddsa_roundtrip() {
+        use ed25519_dalek::{Signer, SigningKey};
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+
+        let sk = SigningKey::from_bytes(&[13u8; 32]);
+        let pk = sk.verifying_key();
+        let did = did_key::ed25519_pubkey_to_did_key(pk.as_bytes());
+
+        let payload = CacaoPayload {
+            iss: did.clone(),
+            aud: "kotoba://test".into(),
+            issued_at: "2026-05-26T00:00:00Z".into(),
+            expiry: None,
+            nonce: "eddsa-nonce".into(),
+            domain: "kotoba.test".into(),
+            statement: None,
+            version: "1".into(),
+            resources: vec!["kotoba://can/quad:write".into()],
+        };
+        let mut cacao = Cacao {
+            h: CacaoHeader { t: "caip122".into() },
+            p: payload,
+            s: CacaoSig { t: "EdDSA".into(), s: String::new() },
+        };
+
+        let msg = cacao.siwe_message();
+        let sig = sk.sign(msg.as_bytes());
+        cacao.s.s = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+
+        let result = cacao.verify_signature();
+        assert!(result.is_ok(), "EdDSA verify failed: {:?}", result.err());
+        assert_eq!(result.unwrap(), did);
     }
 
     // ── DelegationChain ────────────────────────────────────────────────────

@@ -106,6 +106,21 @@ impl TestServer {
         let body: Value = r.json().await.unwrap_or(Value::Null);
         (status, body)
     }
+
+    /// POST quad.create with a freshly-signed Ed25519 CACAO for the given graph.
+    async fn post_quad(&self, graph: &str, subject: &str, predicate: &str, object: &str) -> (u16, Value) {
+        let (_, cacao_b64) = build_ed25519_cacao(graph);
+        self.post(
+            "/xrpc/ai.gftd.apps.kotoba.quad.create",
+            json!({
+                "graph":     graph,
+                "subject":   subject,
+                "predicate": predicate,
+                "object":    object,
+                "cacao_b64": cacao_b64,
+            }),
+        ).await
+    }
 }
 
 impl Drop for TestServer {
@@ -144,10 +159,7 @@ async fn node_status_returns_node_id() {
 #[tokio::test]
 async fn quad_create_returns_journal_cid() {
     let s = TestServer::start(false).await;
-    let (status, body) = s.post(
-        "/xrpc/ai.gftd.apps.kotoba.quad.create",
-        json!({ "graph": "e2e", "subject": "alice", "predicate": "knows", "object": "bob" }),
-    ).await;
+    let (status, body) = s.post_quad("e2e", "alice", "knows", "bob").await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["status"], "ok");
     assert!(body["journal_cid"].as_str().is_some());
@@ -171,10 +183,7 @@ async fn graph_query_after_create_returns_quad() {
     use kotoba_core::cid::KotobaCid;
     let s = TestServer::start(false).await;
 
-    s.post(
-        "/xrpc/ai.gftd.apps.kotoba.quad.create",
-        json!({ "graph": "qtest", "subject": "x", "predicate": "rel", "object": "y" }),
-    ).await;
+    s.post_quad("qtest", "x", "rel", "y").await;
 
     let graph_cid = KotobaCid::from_bytes(b"qtest").to_multibase();
     // Unknown graphs default to Authenticated tier — send a Bearer token.
@@ -223,10 +232,7 @@ async fn commit_store_and_get_roundtrip() {
     let s = TestServer::start(false).await;
     let graph_cid = KotobaCid::from_bytes(b"commit-e2e").to_multibase();
 
-    s.post(
-        "/xrpc/ai.gftd.apps.kotoba.quad.create",
-        json!({ "graph": "commit-e2e", "subject": "s", "predicate": "p", "object": "o" }),
-    ).await;
+    s.post_quad("commit-e2e", "s", "p", "o").await;
 
     let (status, store) = s.post(
         "/xrpc/ai.gftd.apps.kotoba.commit.store",
@@ -721,18 +727,12 @@ async fn kg_entity_lookup_by_id_after_quad_create() {
         ("kg/label/en", "Test Taro"),
         ("kg/qid",      "Q99901"),
     ] {
-        let (st, b) = s.post(
-            "/xrpc/ai.gftd.apps.kotoba.quad.create",
-            json!({ "graph": g, "subject": subj, "predicate": pred, "object": obj }),
-        ).await;
+        let (st, b) = s.post_quad(g, subj, pred, obj).await;
         assert_eq!(st, 200, "seed failed for {pred}: {b}");
     }
 
     // Seed one claim
-    let (st, _) = s.post(
-        "/xrpc/ai.gftd.apps.kotoba.quad.create",
-        json!({ "graph": g, "subject": subj, "predicate": "kg/claim/birthYear", "object": "1990" }),
-    ).await;
+    let (st, _) = s.post_quad(g, subj, "kg/claim/birthYear", "1990").await;
     assert_eq!(st, 200);
 
     // Query by id — kg graph defaults to Authenticated tier.
@@ -767,10 +767,7 @@ async fn kg_entity_lookup_by_qid() {
         ("kg/qid", "Q42"),
         ("kg/type","Human"),
     ] {
-        s.post(
-            "/xrpc/ai.gftd.apps.kotoba.quad.create",
-            json!({ "graph": g, "subject": subj, "predicate": pred, "object": obj }),
-        ).await;
+        s.post_quad(g, subj, pred, obj).await;
     }
 
     let (status, body) = s.get_authed("/xrpc/ai.gftd.apps.yata.kg.entity?qid=Q42").await;
@@ -902,21 +899,112 @@ async fn kg_catalog_reflects_ingested_entities() {
 
 // ── quad.create CACAO auth tests ─────────────────────────────────────────────
 
+/// Build a signed Ed25519 CACAO granting `quad:write` on `graph`. Returns `(issuer_did, cacao_b64)`.
+fn build_ed25519_cacao(graph: &str) -> (String, String) {
+    use base64::{Engine as _, engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD}};
+    use ed25519_dalek::{SigningKey, Signer};
+    use kotoba_auth::did_key::ed25519_pubkey_to_did_key;
+
+    let sk = SigningKey::from_bytes(&[42u8; 32]);
+    let pk = sk.verifying_key();
+    let did = ed25519_pubkey_to_did_key(pk.as_bytes());
+
+    let mut cacao = kotoba_auth::Cacao {
+        h: kotoba_auth::CacaoHeader { t: "caip122".into() },
+        p: kotoba_auth::CacaoPayload {
+            iss:       did.clone(),
+            aud:       "kotoba://node/test".into(),
+            issued_at: "2026-01-01T00:00:00Z".into(),
+            expiry:    None,
+            nonce:     "nonce-42".into(),
+            domain:    "kotoba.test".into(),
+            statement: Some("Authorize quad write".into()),
+            version:   "1".into(),
+            resources: vec![
+                format!("kotoba://graph/{graph}"),
+                "kotoba://can/quad:write".into(),
+            ],
+        },
+        s: kotoba_auth::CacaoSig { t: "EdDSA".into(), s: String::new() },
+    };
+
+    let msg = cacao.siwe_message();
+    let sig: ed25519_dalek::Signature = sk.sign(msg.as_bytes());
+    cacao.s.s = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+
+    let mut cbor_buf = Vec::new();
+    ciborium::into_writer(&cacao, &mut cbor_buf).expect("cbor encode");
+    (did, B64.encode(&cbor_buf))
+}
+
 #[tokio::test]
-async fn quad_create_without_cacao_still_works() {
+async fn quad_create_without_cacao_returns_401() {
     let s = TestServer::start(false).await;
-    let (status, body) = s.post(
+    let (status, _body) = s.post(
         "/xrpc/ai.gftd.apps.kotoba.quad.create",
         json!({ "graph": "public", "subject": "alice", "predicate": "knows", "object": "bob" }),
     ).await;
+    assert_eq!(status, 401);
+}
+
+#[tokio::test]
+async fn quad_create_with_valid_ed25519_cacao_stores_author_did() {
+    let s = TestServer::start(false).await;
+    let graph = "cacao-test-graph";
+    let (issuer_did, cacao_b64) = build_ed25519_cacao(graph);
+
+    let (status, body) = s.post(
+        "/xrpc/ai.gftd.apps.kotoba.quad.create",
+        json!({
+            "graph":     graph,
+            "subject":   "alice",
+            "predicate": "knows",
+            "object":    "bob",
+            "cacao_b64": cacao_b64,
+        }),
+    ).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["status"], "ok");
+    let journal_cid = body["journal_cid"].as_str().expect("journal_cid").to_string();
+
+    // Verify meta/author quad was stored with the journal CID as subject
+    let graph_cid = kotoba_core::cid::KotobaCid::from_bytes(graph.as_bytes()).to_multibase();
+    let url = format!(
+        "/xrpc/ai.gftd.apps.kotoba.graph.query?graph={graph_cid}&subject={journal_cid}&predicate=meta%2Fauthor"
+    );
+    let (qstatus, qbody) = s.get_authed(&url).await;
+    assert_eq!(qstatus, 200, "{qbody}");
+
+    let quads = qbody["quads"].as_array().expect("quads array");
+    assert!(!quads.is_empty(), "meta/author quad must exist: {qbody}");
+    let author_quad = quads.iter()
+        .find(|q| q["predicate"] == "meta/author")
+        .expect("meta/author quad not found");
+    assert_eq!(author_quad["object"], issuer_did, "author DID must match CACAO issuer");
+}
+
+#[tokio::test]
+async fn quad_create_cacao_graph_mismatch_returns_401() {
+    let s = TestServer::start(false).await;
+    let (_, cacao_b64) = build_ed25519_cacao("other-graph");
+    // CACAO covers "other-graph" but request targets "my-graph"
+    let (status, _body) = s.post(
+        "/xrpc/ai.gftd.apps.kotoba.quad.create",
+        json!({
+            "graph":     "my-graph",
+            "subject":   "s",
+            "predicate": "p",
+            "object":    "o",
+            "cacao_b64": cacao_b64,
+        }),
+    ).await;
+    assert_eq!(status, 401);
 }
 
 #[tokio::test]
 async fn quad_create_invalid_cacao_b64_returns_400() {
     let s = TestServer::start(false).await;
-    let (status, body) = s.post(
+    let (status, _body) = s.post(
         "/xrpc/ai.gftd.apps.kotoba.quad.create",
         json!({
             "graph": "private-graph",
@@ -926,7 +1014,7 @@ async fn quad_create_invalid_cacao_b64_returns_400() {
             "cacao_b64": "not-valid-base64!!!"
         }),
     ).await;
-    assert_eq!(status, 400, "{body}");
+    assert_eq!(status, 400);
 }
 
 #[tokio::test]
@@ -934,7 +1022,7 @@ async fn quad_create_cacao_cbor_parse_error_returns_400() {
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     let s = TestServer::start(false).await;
     // Valid base64 but not valid DAG-CBOR
-    let (status, body) = s.post(
+    let (status, _body) = s.post(
         "/xrpc/ai.gftd.apps.kotoba.quad.create",
         json!({
             "graph": "private-graph",
@@ -944,5 +1032,5 @@ async fn quad_create_cacao_cbor_parse_error_returns_400() {
             "cacao_b64": B64.encode(b"this is not cbor")
         }),
     ).await;
-    assert_eq!(status, 400, "{body}");
+    assert_eq!(status, 400);
 }

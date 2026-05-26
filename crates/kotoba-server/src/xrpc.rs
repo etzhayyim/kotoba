@@ -141,9 +141,10 @@ pub async fn health(State(state): State<Arc<KotobaState>>) -> impl IntoResponse 
 /// POST /xrpc/ai.gftd.apps.kotoba.quad.create
 /// Publish a Quad assert to the KSE Journal (SPO topic).
 ///
-/// When `cacao_b64` is present, the CACAO is verified before the write.
-/// The CACAO's `graph_cid` resource must match the requested `graph` field,
-/// and the signature must recover to the declared issuer DID.
+/// `cacao_b64` is required. The CACAO is verified before the write:
+/// - Signature must be valid (EdDSA or eip191)
+/// - `cacao.p.graph_cid()` must match the requested `graph` field when present
+/// - Issuer DID is stored as a `meta/author` quad on the same graph for provenance
 pub async fn quad_create(
     State(state): State<Arc<KotobaState>>,
     Json(req):    Json<QuadCreateReq>,
@@ -152,29 +153,30 @@ pub async fn quad_create(
     use kotoba_kqe::quad::{Quad, QuadObject};
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 
-    // ── CACAO verification (when warrant is present) ──────────────────────
-    if let Some(b64) = &req.cacao_b64 {
-        let cbor = B64.decode(b64)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("cacao_b64 decode: {e}")))?;
-        let cacao = kotoba_auth::Cacao::from_cbor(&cbor)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("cacao parse: {e}")))?;
+    // ── CACAO verification (required) ────────────────────────────────────
+    let b64 = req.cacao_b64.as_deref()
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "cacao_b64 is required for quad.create".to_string()))?;
 
-        // Signature must be valid
-        let issuer_did = cacao.verify_signature()
-            .map_err(|e| (StatusCode::UNAUTHORIZED, format!("cacao sig: {e}")))?;
+    let cbor = B64.decode(b64)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("cacao_b64 decode: {e}")))?;
+    let cacao = kotoba_auth::Cacao::from_cbor(&cbor)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("cacao parse: {e}")))?;
 
-        // The CACAO's graph resource must match the requested graph
-        if let Some(cacao_graph) = cacao.p.graph_cid() {
-            if cacao_graph != req.graph {
-                return Err((
-                    StatusCode::UNAUTHORIZED,
-                    format!("cacao graph mismatch: warrant covers {cacao_graph}, request targets {}", req.graph),
-                ));
-            }
+    // Signature must be valid
+    let issuer_did = cacao.verify_signature()
+        .map_err(|e| (StatusCode::UNAUTHORIZED, format!("cacao sig: {e}")))?;
+
+    // The CACAO's graph resource must match the requested graph
+    if let Some(cacao_graph) = cacao.p.graph_cid() {
+        if cacao_graph != req.graph {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                format!("cacao graph mismatch: warrant covers {cacao_graph}, request targets {}", req.graph),
+            ));
         }
-
-        tracing::info!(issuer = %issuer_did, graph = %req.graph, "quad.create: CACAO verified");
     }
+
+    tracing::info!(issuer = %issuer_did, graph = %req.graph, "quad.create: CACAO verified");
 
     let quad = Quad {
         graph:     KotobaCid::from_bytes(req.graph.as_bytes()),
@@ -187,11 +189,26 @@ pub async fn quad_create(
     let journal_cid = state.journal_assert(&quad).await;
     state.quad_store.assert(quad).await;
 
+    // ── Store author provenance ───────────────────────────────────────────
+    // Subject = journal CID of the write so (graph, journal_cid, meta/author) is
+    // globally unique and references the exact write event.
+    // Use from_multibase so the subject CID matches what graph.query decodes.
+    let author_subject = KotobaCid::from_multibase(&journal_cid)
+        .unwrap_or_else(|| KotobaCid::from_bytes(journal_cid.as_bytes()));
+    let author_quad = Quad {
+        graph:     KotobaCid::from_bytes(req.graph.as_bytes()),
+        subject:   author_subject,
+        predicate: "meta/author".to_string(),
+        object:    QuadObject::Text(issuer_did.clone()),
+    };
+    state.quad_store.assert(author_quad).await;
+
     tracing::info!(
         graph     = %req.graph,
         subject   = %req.subject,
         predicate = %req.predicate,
         cid       = %journal_cid,
+        author    = %issuer_did,
         "quad.create → Journal + QuadStore"
     );
 

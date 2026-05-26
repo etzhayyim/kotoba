@@ -4,12 +4,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-pub const BUCKET_BLOCKS:   &str = "KOTOBA_BLOCKS";
-pub const BUCKET_GRAPHS:   &str = "KOTOBA_GRAPHS";
-pub const BUCKET_HEADS:    &str = "KOTOBA_HEADS";
-pub const BUCKET_UCANS:    &str = "KOTOBA_UCANS";
-pub const BUCKET_WARRANTS: &str = "KOTOBA_WARRANTS";
-pub const BUCKET_WEIGHTS:  &str = "KOTOBA_WEIGHTS";  // FP8 weight blob CIDs
+pub const BUCKET_BLOCKS:    &str = "KOTOBA_BLOCKS";
+pub const BUCKET_GRAPHS:    &str = "KOTOBA_GRAPHS";
+pub const BUCKET_HEADS:     &str = "KOTOBA_HEADS";
+pub const BUCKET_UCANS:     &str = "KOTOBA_UCANS";
+pub const BUCKET_WARRANTS:  &str = "KOTOBA_WARRANTS";
+pub const BUCKET_WEIGHTS:   &str = "KOTOBA_WEIGHTS";   // FP8 weight blob CIDs
+pub const BUCKET_PRE_KEYS:  &str = "KOTOBA_PRE_KEYS";  // PRE grant index
 
 /// Shelf — CID-keyed KV, built on Journal (clean room, inspired by NATS KV)
 pub struct Shelf {

@@ -3,7 +3,12 @@
 /// The `signal:v1:` envelope is used for the wire format.
 ///
 /// This satisfies the Vault zero-knowledge invariant: the store only ever holds ciphertext.
+///
+/// `put_with_policy()` additionally returns a `DataPolicy::Encrypted` so that callers can
+/// attach the policy directly to `ChainEntry` / `QuadObject::Encrypted` without having to
+/// re-derive the CID.
 use crate::vault::{Vault, BlobRef};
+use kotoba_core::DataPolicy;
 use bytes::Bytes;
 
 /// AEAD-encrypted Vault.  Callers must supply the 32-byte vault key.
@@ -29,6 +34,27 @@ impl SecureVault {
     ) -> Result<BlobRef, kotoba_crypto::aead::CryptoError> {
         let ct = kotoba_crypto::aead::seal(key, &plaintext)?;
         Ok(self.inner.put(Bytes::from(ct)).await)
+    }
+
+    /// Encrypt `plaintext`, store it, and return both the `BlobRef` and a
+    /// `DataPolicy::Encrypted` that can be attached to a `ChainEntry` or
+    /// `QuadObject::Encrypted`.
+    ///
+    /// `policy_cid`: CID of the PRE key-registry entry that controls who can
+    /// decrypt (e.g. the CID returned by `PreKeyRegistry::grant()`).
+    /// Pass `blob_ref.cid` as `policy_cid` for single-key blobs (no PRE delegation).
+    pub async fn put_with_policy(
+        &self,
+        key: &[u8; 32],
+        plaintext: Bytes,
+        policy_cid: kotoba_core::cid::KotobaCid,
+    ) -> Result<(BlobRef, DataPolicy), kotoba_crypto::aead::CryptoError> {
+        let blob_ref = self.put(key, plaintext).await?;
+        let policy = DataPolicy::Encrypted {
+            ct_cid:     blob_ref.cid.clone(),
+            policy_cid,
+        };
+        Ok((blob_ref, policy))
     }
 
     /// Retrieve ciphertext by CID and decrypt with `key`.
@@ -79,6 +105,29 @@ mod tests {
         let wrong = random_key();
         let blob_ref = sv.put(&key, Bytes::from_static(b"top secret")).await.unwrap();
         assert!(sv.get(&wrong, &blob_ref).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn put_with_policy_returns_encrypted_data_policy() {
+        use kotoba_core::{cid::KotobaCid, DataPolicy};
+        let sv  = SecureVault::new();
+        let key = random_key();
+        let plaintext = Bytes::from_static(b"policy test");
+        let policy_cid = KotobaCid::from_bytes(b"fake-pre-key-registry-entry");
+        let (blob_ref, policy) = sv
+            .put_with_policy(&key, plaintext.clone(), policy_cid.clone())
+            .await
+            .unwrap();
+        match policy {
+            DataPolicy::Encrypted { ct_cid, policy_cid: pcid } => {
+                assert_eq!(ct_cid, blob_ref.cid);
+                assert_eq!(pcid, policy_cid);
+            }
+            DataPolicy::Open => panic!("expected Encrypted policy"),
+        }
+        // Decrypt must still work via the existing get() path.
+        let got = sv.get(&key, &blob_ref).await.unwrap().unwrap();
+        assert_eq!(got, plaintext);
     }
 
     #[tokio::test]

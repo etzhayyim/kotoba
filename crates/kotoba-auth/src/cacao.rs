@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use super::eth;
+use super::did_key;
 
 #[derive(Debug, Error)]
 pub enum CacaoError {
@@ -14,6 +15,10 @@ pub enum CacaoError {
     Hex(#[from] hex::FromHexError),
     #[error("address mismatch: expected {expected}, got {got}")]
     AddressMismatch { expected: String, got: String },
+    #[error("did:key parse error: {0}")]
+    DidKeyParse(String),
+    #[error("ed25519 verification error: {0}")]
+    Ed25519(String),
 }
 
 /// CACAO — Chain Agnostic Capability Authorization Object (CAIP-74)
@@ -110,7 +115,11 @@ impl Cacao {
     }
 
     /// Verify the CACAO signature.
-    /// Returns the recovered ETH address as `did:erc725:gftd:260425:0x{hex}`.
+    ///
+    /// - `"eip191"` — EIP-191 personal_sign + secp256k1 recovery.
+    ///   Returns `did:erc725:gftd:260425:0x{addr}`.
+    /// - `"EdDSA"` — Ed25519 signature over the SIWE plaintext.
+    ///   Issuer must be `did:key:z6Mk...`. Returns the issuer DID unchanged.
     pub fn verify_signature(&self) -> Result<String, CacaoError> {
         match self.s.t.as_str() {
             "eip191" => {
@@ -128,9 +137,47 @@ impl Cacao {
                 }
                 Ok(eth::eth_address_to_erc725_did(&recovered))
             }
+            "EdDSA" => {
+                use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+                let pubkey_bytes = did_key::parse_ed25519_did_key(&self.p.iss)
+                    .map_err(|e| CacaoError::DidKeyParse(e.to_string()))?;
+                let verifying_key = VerifyingKey::from_bytes(&pubkey_bytes)
+                    .map_err(|e| CacaoError::Ed25519(e.to_string()))?;
+
+                let msg = self.siwe_message();
+                let sig_bytes = decode_sig_bytes(&self.s.s)?;
+
+                let sig_arr: [u8; 64] = sig_bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| CacaoError::Ed25519(format!(
+                        "expected 64-byte signature, got {}", sig_bytes.len()
+                    )))?;
+                let signature = Signature::from_bytes(&sig_arr);
+
+                verifying_key
+                    .verify(msg.as_bytes(), &signature)
+                    .map_err(|e| CacaoError::Ed25519(e.to_string()))?;
+
+                Ok(self.p.iss.clone())
+            }
             other => Err(CacaoError::UnsupportedSigType(other.to_string())),
         }
     }
+}
+
+/// Decode a signature string — tries base64url (no-pad) first, then hex.
+fn decode_sig_bytes(s: &str) -> Result<Vec<u8>, CacaoError> {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    // base64url (no padding) — typical for did:key / EdDSA CACAO
+    if let Ok(bytes) = URL_SAFE_NO_PAD.decode(s) {
+        return Ok(bytes);
+    }
+    // hex fallback (with or without 0x prefix)
+    let s = s.trim_start_matches("0x");
+    hex::decode(s).map_err(CacaoError::Hex)
 }
 
 impl CacaoPayload {

@@ -51,4 +51,7 @@ reqwest.workspace         = true
 kotoba-core.workspace     = true
 kotoba-kqe.workspace      = true
 kotoba-graph              = { path = "../kotoba-graph" }
+kotoba-auth               = { path = "../kotoba-auth" }
+ed25519-dalek.workspace   = true
+multibase.workspace       = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

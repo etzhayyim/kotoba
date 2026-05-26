@@ -543,4 +543,83 @@ mod tests {
             .count();
         assert_eq!(count, 1, "path(a,c) should be derived exactly once");
     }
+
+    // ── Citation tracking (evaluate_delta_cited) ──────────────────────────────
+
+    #[test]
+    fn evaluate_delta_cited_records_join_hits() {
+        // path(X, Z) :- edge(X, Y), edge(Y, Z).
+        // Two join hits (a→b, b→c) should produce ≥2 citations.
+        use crate::citation::CitationLedger;
+
+        let mut prog = DatalogProgram::new();
+        prog.add_rule(DatalogRule {
+            head: head_atom("path", &["X", "Z"]),
+            body: vec![pos("edge", &["X", "Y"]), pos("edge", &["Y", "Z"])],
+        });
+
+        let input = vec![fact("edge", &["a", "b"]), fact("edge", &["b", "c"])];
+        let mut ledger = CitationLedger::new();
+        let derived = prog.evaluate_delta_cited(&input, &mut ledger);
+
+        assert!(!derived.is_empty(), "should derive path(a,c)");
+        assert!(ledger.total_citations() > 0,
+            "at least one citation must be recorded for join hits");
+    }
+
+    #[test]
+    fn evaluate_delta_cited_no_derivation_but_citations_for_partial_joins() {
+        // With a 2-hop rule and only one edge, no derivation is produced BUT
+        // citations ARE recorded for each positive literal that successfully
+        // unifies — the data was accessed, even if the join didn't complete.
+        use crate::citation::CitationLedger;
+
+        let mut prog = DatalogProgram::new();
+        prog.add_rule(DatalogRule {
+            head: head_atom("reachable", &["X", "Z"]),
+            body: vec![pos("edge", &["X", "Y"]), pos("edge", &["Y", "Z"])],
+        });
+
+        let input = vec![fact("edge", &["x", "y"])]; // no transitive pair
+        let mut ledger = CitationLedger::new();
+        let derived = prog.evaluate_delta_cited(&input, &mut ledger);
+
+        assert!(derived.is_empty(), "no derivation expected for single edge");
+        // x is cited once per delta position (2 positive literals → 2 access events).
+        assert!(ledger.total_citations() > 0,
+            "data accessed during join attempts must be cited even without derivation");
+    }
+
+    #[test]
+    fn evaluate_delta_cited_flush_epoch_produces_royalty_quads() {
+        // Verify the full gap 1+3 pipeline: join hits → citations → royalty Quads.
+        use crate::citation::CitationLedger;
+
+        let mut prog = DatalogProgram::new();
+        prog.add_rule(DatalogRule {
+            head: head_atom("knows", &["X", "Z"]),
+            body: vec![pos("friend", &["X", "Y"]), pos("friend", &["Y", "Z"])],
+        });
+
+        let input = vec![
+            fact("friend", &["alice", "bob"]),
+            fact("friend", &["bob",   "carol"]),
+        ];
+        let mut ledger = CitationLedger::new();
+        let _derived = prog.evaluate_delta_cited(&input, &mut ledger);
+
+        assert!(ledger.total_citations() > 0, "citations expected");
+        let epoch = ledger.epoch();
+        let entries = ledger.flush_epoch(1_000_000);
+        assert!(!entries.is_empty(), "flush must yield royalty entries");
+
+        let quads = CitationLedger::royalty_quads(&entries, epoch);
+        assert!(!quads.is_empty(), "royalty quads must be non-empty after join hits");
+        // royalty_quads emits 2 quads per entry: citation/count + citation/royalty_mkoto.
+        let predicates: Vec<&str> = quads.iter().map(|q| q.predicate.as_str()).collect();
+        assert!(predicates.contains(&"citation/royalty_mkoto"),
+            "must include citation/royalty_mkoto predicate");
+        assert!(predicates.contains(&"citation/count"),
+            "must include citation/count predicate");
+    }
 }

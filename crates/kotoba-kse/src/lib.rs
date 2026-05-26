@@ -19,4 +19,4 @@ pub use sync_window::SyncWindow;
 pub use secure_vault::SecureVault;
 pub use agent_identity::AgentIdentity;
 pub use sovereign_key::SovereignCrypto;
-pub use pre_key_registry::{PreKeyRegistry, PreKeyError};
+pub use pre_key_registry::{PreKeyRegistry, PreKeyError, RekeyRevocationRecord, RULE_REKEY_REVOKED};

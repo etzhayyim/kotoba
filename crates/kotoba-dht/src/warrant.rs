@@ -21,4 +21,6 @@ pub enum ValidationRule {
     CacaoInvalid       = 4,
     ProllyInconsistent = 5,
     MaxStepsExceeded   = 6,
+    /// PRE re-key grant revoked by owner — peers must drop cached grant.
+    RekeyRevoked       = 7,
 }
