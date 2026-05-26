@@ -555,6 +555,8 @@ pub struct GraphQueryReq {
     pub predicate: Option<String>,
     /// Datalog rules reserved for invoke.run; graph.query returns SPO matches only
     pub rules:     Option<String>,
+    /// CACAO delegation chain for private graphs (DAG-CBOR, base64-standard encoded).
+    pub cacao_b64: Option<String>,
 }
 
 /// GET /xrpc/ai.gftd.apps.kotoba.graph.query
@@ -562,12 +564,19 @@ pub struct GraphQueryReq {
 /// Full Datalog evaluation: use invoke.run with program_type=datalog.
 pub async fn graph_query(
     State(state): State<Arc<KotobaState>>,
+    headers: axum::http::HeaderMap,
     axum::extract::Query(req): axum::extract::Query<GraphQueryReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     use kotoba_core::cid::KotobaCid;
+    use crate::graph_auth::{AccessDenied, check_read_access};
 
     let graph_cid = KotobaCid::from_multibase(&req.graph)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid graph CID".into()))?;
+
+    // ── Read-access gate ─────────────────────────────────────────────────────
+    let visibility = state.graph_visibility(&graph_cid).await;
+    check_read_access(&visibility, &headers, req.cacao_b64.as_deref())
+        .map_err(AccessDenied::into_response)?;
 
     let arrangement = match state.quad_store.arrangement(&graph_cid).await {
         None => {

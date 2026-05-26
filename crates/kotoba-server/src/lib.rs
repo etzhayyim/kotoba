@@ -2,6 +2,7 @@ pub mod attestation;
 pub mod cc_xrpc;
 pub mod email_xrpc;
 pub mod fingerprint;
+pub mod graph_auth;
 pub mod kg;
 pub mod kotobase_xrpc;
 pub mod mcp;

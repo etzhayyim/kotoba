@@ -23,13 +23,14 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
 use kotoba_core::cid::KotobaCid;
 use kotoba_kqe::quad::QuadObject;
 use crate::server::KotobaState;
+use crate::graph_auth::{AccessDenied, check_read_access};
 
 pub const NSID_KG_ENTITY:  &str = "ai.gftd.apps.yata.kg.entity";
 pub const NSID_KG_CATALOG: &str = "ai.gftd.apps.yata.kg.catalog";
@@ -55,6 +56,8 @@ pub struct KgEntityQuery {
     pub include_relations: bool,
     #[serde(default = "default_max_relations")]
     pub max_relations: usize,
+    /// CACAO delegation chain for private graphs (DAG-CBOR, base64-standard encoded).
+    pub cacao_b64: Option<String>,
 }
 
 fn default_true()         -> bool  { true }
@@ -75,11 +78,17 @@ pub struct KgEntityResp {
 /// GET /xrpc/ai.gftd.apps.yata.kg.entity?qid=Q42
 pub async fn kg_entity(
     State(state): State<Arc<KotobaState>>,
+    headers:      HeaderMap,
     Query(q):     Query<KgEntityQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     use std::time::Instant;
     let t0        = Instant::now();
     let graph_cid = kg_graph_cid();
+
+    // ── Read-access gate ─────────────────────────────────────────────────────
+    let visibility = state.graph_visibility(&graph_cid).await;
+    check_read_access(&visibility, &headers, q.cacao_b64.as_deref())
+        .map_err(AccessDenied::into_response)?;
 
     let (lookup_pred, lookup_val) = match (&q.id, &q.qid) {
         (Some(id), _)  => ("kg/id",  id.as_str()),
@@ -173,14 +182,28 @@ fn obj_to_json(obj: &QuadObject) -> serde_json::Value {
 
 // ── kg.catalog ────────────────────────────────────────────────────────────────
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KgCatalogQuery {
+    /// CACAO delegation chain for private graphs (DAG-CBOR, base64-standard encoded).
+    pub cacao_b64: Option<String>,
+}
+
 /// GET /xrpc/ai.gftd.apps.yata.kg.catalog
 /// Returns aggregate stats and source breakdown from the QuadStore.
 pub async fn kg_catalog(
     State(state): State<Arc<KotobaState>>,
-) -> impl IntoResponse {
+    headers:      HeaderMap,
+    Query(q):     Query<KgCatalogQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
     use std::time::Instant;
     let t0        = Instant::now();
     let graph_cid = kg_graph_cid();
+
+    // ── Read-access gate ─────────────────────────────────────────────────────
+    let visibility = state.graph_visibility(&graph_cid).await;
+    check_read_access(&visibility, &headers, q.cacao_b64.as_deref())
+        .map_err(AccessDenied::into_response)?;
 
     let entity_count   = state.quad_store.count_by_predicate_prefix(&graph_cid, "kg/id").await;
     let claim_count    = state.quad_store.count_by_predicate_prefix(&graph_cid, "kg/claim/").await;
@@ -202,7 +225,7 @@ pub async fn kg_catalog(
         .map(|(id, count)| serde_json::json!({ "id": id, "entityCount": count }))
         .collect();
 
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "ok": true,
         "stats": {
             "totalEntities":  entity_count,
@@ -211,7 +234,7 @@ pub async fn kg_catalog(
         },
         "sources":    sources,
         "elapsedMs":  t0.elapsed().as_millis(),
-    }))
+    })))
 }
 
 // ── kg.embed ──────────────────────────────────────────────────────────────────
@@ -293,6 +316,8 @@ pub struct KgSearchQuery {
     pub q:     String,
     #[serde(default = "default_limit")]
     pub limit: usize,
+    /// CACAO delegation chain for private graphs (DAG-CBOR, base64-standard encoded).
+    pub cacao_b64: Option<String>,
 }
 fn default_limit() -> usize { 10 }
 
@@ -300,12 +325,18 @@ fn default_limit() -> usize { 10 }
 /// Cosine similarity search over `kg/label_vec` VectorF32 quads.
 pub async fn kg_search(
     State(state): State<Arc<KotobaState>>,
+    headers:      HeaderMap,
     Query(q):     Query<KgSearchQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     use std::time::Instant;
     let t0        = Instant::now();
     let graph_cid = kg_graph_cid();
     let limit     = q.limit.min(100);
+
+    // ── Read-access gate ─────────────────────────────────────────────────────
+    let visibility = state.graph_visibility(&graph_cid).await;
+    check_read_access(&visibility, &headers, q.cacao_b64.as_deref())
+        .map_err(AccessDenied::into_response)?;
 
     // Use inference engine for query embedding when available, matching kg_embed semantics.
     // Falls back to blake3 pseudo-vector so search works without an LLM.
@@ -551,6 +582,8 @@ pub struct KgQueryReq {
     pub lang:  String,
     /// Query string
     pub query: String,
+    /// CACAO delegation chain for private graphs (DAG-CBOR, base64-standard encoded).
+    pub cacao_b64: Option<String>,
 }
 
 /// POST /xrpc/ai.gftd.apps.yata.kg.query
@@ -561,6 +594,7 @@ pub struct KgQueryReq {
 /// the variable names come from the compiled output_relation.
 pub async fn kg_query(
     State(state): State<Arc<KotobaState>>,
+    headers:      HeaderMap,
     Json(req):    Json<KgQueryReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     use std::time::Instant;
@@ -569,6 +603,11 @@ pub async fn kg_query(
 
     let t0        = Instant::now();
     let graph_cid = kg_graph_cid();
+
+    // ── Read-access gate ─────────────────────────────────────────────────────
+    let visibility = state.graph_visibility(&graph_cid).await;
+    check_read_access(&visibility, &headers, req.cacao_b64.as_deref())
+        .map_err(AccessDenied::into_response)?;
 
     // Compile query to DatalogProgram
     let (program, output_relation) = match req.lang.as_str() {
