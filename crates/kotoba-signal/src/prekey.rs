@@ -81,4 +81,74 @@ mod tests {
         let pub_bytes = spk.public_bytes();
         assert!(ik.public_key().verify(&pub_bytes, &spk.signature));
     }
+
+    #[test]
+    fn prekey_generate_has_correct_id() {
+        let pk = PreKey::generate(42);
+        assert_eq!(pk.id, 42);
+    }
+
+    #[test]
+    fn prekey_public_bytes_is_32_bytes() {
+        let pk = PreKey::generate(1);
+        let pub_bytes = pk.public_bytes();
+        assert_eq!(pub_bytes.len(), 32);
+    }
+
+    #[test]
+    fn signed_prekey_has_correct_id() {
+        let ik = IdentityKeyPair::generate();
+        let spk = SignedPreKey::generate(99, &ik);
+        assert_eq!(spk.id, 99);
+    }
+
+    #[test]
+    fn signed_prekey_public_bytes_is_32_bytes() {
+        let ik = IdentityKeyPair::generate();
+        let spk = SignedPreKey::generate(1, &ik);
+        let pub_bytes = spk.public_bytes();
+        assert_eq!(pub_bytes.len(), 32);
+    }
+
+    #[test]
+    fn signed_prekey_signature_is_non_empty() {
+        let ik = IdentityKeyPair::generate();
+        let spk = SignedPreKey::generate(1, &ik);
+        assert!(!spk.signature.is_empty());
+    }
+
+    #[test]
+    fn prekey_dh_produces_32_byte_secret() {
+        let pk_a = PreKey::generate(1);
+        let pk_b = PreKey::generate(2);
+        let shared = pk_a.dh(&pk_b.public_bytes());
+        assert_eq!(shared.len(), 32);
+    }
+
+    #[test]
+    fn prekey_dh_is_symmetric() {
+        let pk_a = PreKey::generate(1);
+        let pk_b = PreKey::generate(2);
+        let shared_ab = pk_a.dh(&pk_b.public_bytes());
+        let shared_ba = pk_b.dh(&pk_a.public_bytes());
+        assert_eq!(shared_ab, shared_ba, "Diffie-Hellman must be symmetric");
+    }
+
+    #[test]
+    fn prekey_bundle_fields_round_trip() {
+        let ik = IdentityKeyPair::generate();
+        let bundle = PreKeyBundle {
+            did:               "did:test:abc".to_string(),
+            device_id:         "device-1".to_string(),
+            identity_key:      ik.public_key(),
+            signed_prekey:     vec![1u8; 32],
+            signed_prekey_id:  5,
+            signed_prekey_sig: vec![0u8; 64],
+            one_time_prekey:     None,
+            one_time_prekey_id:  None,
+        };
+        assert_eq!(bundle.did, "did:test:abc");
+        assert_eq!(bundle.signed_prekey_id, 5);
+        assert!(bundle.one_time_prekey.is_none());
+    }
 }

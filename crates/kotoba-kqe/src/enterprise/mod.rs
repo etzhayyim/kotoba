@@ -153,4 +153,79 @@ mod tests {
         let g = f.clone();
         assert_eq!(f, g);
     }
+
+    #[test]
+    fn enterprise_feature_sampling_eq_and_debug() {
+        let f = EnterpriseFeature::Sampling;
+        assert_eq!(f.clone(), EnterpriseFeature::Sampling);
+        assert!(format!("{f:?}").contains("Sampling"));
+    }
+
+    #[test]
+    fn enterprise_feature_semi_structured_eq_and_debug() {
+        let f = EnterpriseFeature::SemiStructured;
+        assert_eq!(f.clone(), EnterpriseFeature::SemiStructured);
+        assert!(format!("{f:?}").contains("SemiStructured"));
+    }
+
+    #[test]
+    fn enterprise_feature_lateral_eq_and_debug() {
+        let f = EnterpriseFeature::Lateral;
+        assert_eq!(f.clone(), EnterpriseFeature::Lateral);
+        assert!(format!("{f:?}").contains("Lateral"));
+    }
+
+    #[test]
+    fn enterprise_feature_macro_expansion_eq_and_debug() {
+        let f = EnterpriseFeature::MacroExpansion;
+        assert_eq!(f.clone(), EnterpriseFeature::MacroExpansion);
+        assert!(format!("{f:?}").contains("MacroExpansion"));
+    }
+
+    #[test]
+    fn enterprise_feature_olap_window_ne_hierarchical() {
+        assert_ne!(EnterpriseFeature::OlapWindow, EnterpriseFeature::HierarchicalQuery);
+    }
+
+    #[test]
+    fn post_process_percent_and_sample_n() {
+        let pp = PostProcess {
+            limit:    None,
+            offset:   None,
+            percent:  Some(25.0),
+            order_by: vec![],
+            sample_n: Some(500),
+        };
+        assert_eq!(pp.percent, Some(25.0));
+        assert_eq!(pp.sample_n, Some(500));
+    }
+
+    #[test]
+    fn post_process_clone() {
+        let pp = PostProcess {
+            limit:    Some(10),
+            offset:   Some(5),
+            percent:  Some(50.0),
+            order_by: vec!["col".to_string()],
+            sample_n: Some(100),
+        };
+        let pp2 = pp.clone();
+        assert_eq!(pp2.limit, Some(10));
+        assert_eq!(pp2.offset, Some(5));
+        assert_eq!(pp2.sample_n, Some(100));
+        assert_eq!(pp2.order_by, vec!["col"]);
+    }
+
+    #[test]
+    fn post_process_order_by_multiple_columns() {
+        let pp = PostProcess {
+            limit:    None,
+            offset:   None,
+            percent:  None,
+            order_by: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            sample_n: None,
+        };
+        assert_eq!(pp.order_by.len(), 3);
+        assert_eq!(pp.order_by[1], "b");
+    }
 }

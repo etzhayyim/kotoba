@@ -300,4 +300,111 @@ mod tests {
         let result: std::io::Result<BitswapRequest> = read_cbor(&mut &*stream.as_slice()).await;
         assert!(result.is_ok(), "valid small request must be accepted: {result:?}");
     }
+
+    #[test]
+    fn bitswap_protocol_constant_value() {
+        assert_eq!(BITSWAP_PROTOCOL, "/kotoba/bitswap/1.0.0");
+    }
+
+    #[test]
+    fn max_bitswap_msg_bytes_is_32_mib() {
+        assert_eq!(MAX_BITSWAP_MSG_BYTES, 32 * 1024 * 1024);
+    }
+
+    #[test]
+    fn want_since_cbor_roundtrip_no_head() {
+        let ws = WantSince {
+            graph_cid: [1u8; 36],
+            since_seq: 42,
+            head_cid: None,
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&ws, &mut buf).unwrap();
+        let decoded: WantSince = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(decoded.graph_cid, [1u8; 36]);
+        assert_eq!(decoded.since_seq, 42);
+        assert!(decoded.head_cid.is_none());
+    }
+
+    #[test]
+    fn want_since_cbor_roundtrip_with_head() {
+        let ws = WantSince {
+            graph_cid: [2u8; 36],
+            since_seq: 100,
+            head_cid: Some([3u8; 36]),
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&ws, &mut buf).unwrap();
+        let decoded: WantSince = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(decoded.graph_cid, [2u8; 36]);
+        assert_eq!(decoded.since_seq, 100);
+        assert_eq!(decoded.head_cid, Some([3u8; 36]));
+    }
+
+    #[test]
+    fn bitswap_request_empty_cbor_roundtrip() {
+        let req = BitswapRequest {
+            want_have:  vec![],
+            want_block: vec![],
+            want_since: vec![],
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&req, &mut buf).unwrap();
+        let decoded: BitswapRequest = ciborium::from_reader(&buf[..]).unwrap();
+        assert!(decoded.want_have.is_empty());
+        assert!(decoded.want_block.is_empty());
+        assert!(decoded.want_since.is_empty());
+    }
+
+    #[test]
+    fn bitswap_response_empty_cbor_roundtrip() {
+        let resp = BitswapResponse {
+            have:          vec![],
+            dont_have:     vec![],
+            blocks:        vec![],
+            delta_commits: vec![],
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&resp, &mut buf).unwrap();
+        let decoded: BitswapResponse = ciborium::from_reader(&buf[..]).unwrap();
+        assert!(decoded.have.is_empty());
+        assert!(decoded.dont_have.is_empty());
+        assert!(decoded.blocks.is_empty());
+        assert!(decoded.delta_commits.is_empty());
+    }
+
+    #[test]
+    fn bitswap_request_with_cids_roundtrip() {
+        let cid_a = [0xAAu8; 36];
+        let cid_b = [0xBBu8; 36];
+        let req = BitswapRequest {
+            want_have:  vec![cid_a],
+            want_block: vec![cid_b],
+            want_since: vec![],
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&req, &mut buf).unwrap();
+        let decoded: BitswapRequest = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(decoded.want_have, vec![cid_a]);
+        assert_eq!(decoded.want_block, vec![cid_b]);
+    }
+
+    #[test]
+    fn bitswap_response_with_block_entry_roundtrip() {
+        let cid  = [0xCCu8; 36];
+        let data = b"block-data".to_vec();
+        let resp = BitswapResponse {
+            have:          vec![cid],
+            dont_have:     vec![],
+            blocks:        vec![(cid, data.clone())],
+            delta_commits: vec![],
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&resp, &mut buf).unwrap();
+        let decoded: BitswapResponse = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(decoded.have, vec![cid]);
+        assert_eq!(decoded.blocks.len(), 1);
+        assert_eq!(decoded.blocks[0].0, cid);
+        assert_eq!(decoded.blocks[0].1, data);
+    }
 }

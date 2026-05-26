@@ -1892,4 +1892,101 @@ mod tests {
         // Default of 10 passes through unchanged.
         assert_eq!(10_u32.min(MAX_STEPS_LIMIT), 10);
     }
+
+    // ── NSID constants ───────────────────────────────────────────────────────
+
+    const NSID_PREFIX: &str = "ai.gftd.apps.kotoba.";
+
+    #[test]
+    fn all_nsid_constants_have_kotoba_prefix() {
+        let nsids = [
+            super::NSID_QUAD_CREATE,
+            super::NSID_QUAD_RETRACT,
+            super::NSID_GRAPH_QUERY,
+            super::NSID_COMMIT_GET,
+            super::NSID_INVOKE_RUN,
+            super::NSID_INFER_RUN,
+            super::NSID_WEIGHT_PUT,
+            super::NSID_LORA_APPLY,
+            super::NSID_EMBED_CREATE,
+            super::NSID_NODE_STATUS,
+            super::NSID_BLOCK_PUT,
+            super::NSID_BLOCK_GET,
+            super::NSID_COMMIT_STORE,
+            super::NSID_AGENT_RUN,
+            super::NSID_AGENT_SYNC_OPEN,
+            super::NSID_AGENT_SYNC_ADV,
+            super::NSID_AGENT_SYNC_CLOSE,
+            super::NSID_VAULT_PUT,
+            super::NSID_VAULT_GET,
+        ];
+        for nsid in nsids {
+            assert!(
+                nsid.starts_with(NSID_PREFIX),
+                "NSID {nsid:?} does not start with {NSID_PREFIX:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_nsid_constants_are_unique() {
+        let mut nsids = vec![
+            super::NSID_QUAD_CREATE,
+            super::NSID_QUAD_RETRACT,
+            super::NSID_GRAPH_QUERY,
+            super::NSID_COMMIT_GET,
+            super::NSID_INVOKE_RUN,
+            super::NSID_INFER_RUN,
+            super::NSID_WEIGHT_PUT,
+            super::NSID_LORA_APPLY,
+            super::NSID_EMBED_CREATE,
+            super::NSID_NODE_STATUS,
+            super::NSID_BLOCK_PUT,
+            super::NSID_BLOCK_GET,
+            super::NSID_COMMIT_STORE,
+            super::NSID_AGENT_RUN,
+            super::NSID_AGENT_SYNC_OPEN,
+            super::NSID_AGENT_SYNC_ADV,
+            super::NSID_AGENT_SYNC_CLOSE,
+            super::NSID_VAULT_PUT,
+            super::NSID_VAULT_GET,
+        ];
+        let original_len = nsids.len();
+        nsids.sort_unstable();
+        nsids.dedup();
+        assert_eq!(nsids.len(), original_len, "NSID constants are not all unique");
+    }
+
+    #[test]
+    fn nsid_quad_create_exact_value() {
+        assert_eq!(super::NSID_QUAD_CREATE, "ai.gftd.apps.kotoba.quad.create");
+    }
+
+    #[test]
+    fn nsid_graph_query_exact_value() {
+        assert_eq!(super::NSID_GRAPH_QUERY, "ai.gftd.apps.kotoba.graph.query");
+    }
+
+    #[test]
+    fn nsid_invoke_run_exact_value() {
+        assert_eq!(super::NSID_INVOKE_RUN, "ai.gftd.apps.kotoba.invoke.run");
+    }
+
+    #[test]
+    fn nsid_vault_put_and_get_exact_values() {
+        assert_eq!(super::NSID_VAULT_PUT, "ai.gftd.apps.kotoba.vault.put");
+        assert_eq!(super::NSID_VAULT_GET, "ai.gftd.apps.kotoba.vault.get");
+    }
+
+    #[test]
+    fn nsid_agent_sync_variants_exact_values() {
+        assert_eq!(super::NSID_AGENT_SYNC_OPEN,  "ai.gftd.apps.kotoba.agent.syncopen");
+        assert_eq!(super::NSID_AGENT_SYNC_ADV,   "ai.gftd.apps.kotoba.agent.syncadvance");
+        assert_eq!(super::NSID_AGENT_SYNC_CLOSE, "ai.gftd.apps.kotoba.agent.syncclose");
+    }
+
+    #[test]
+    fn max_cacao_b64_len_is_8kib() {
+        assert_eq!(super::MAX_CACAO_B64_LEN, 8 * 1024);
+    }
 }

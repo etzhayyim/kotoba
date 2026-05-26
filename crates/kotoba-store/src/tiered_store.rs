@@ -153,4 +153,35 @@ mod tests {
         assert!(store.has(&ch));
         assert!(!store.has(&cid(b"missing")));
     }
+
+    #[test]
+    fn delete_removes_from_hot() {
+        let store = tiered();
+        let data  = b"to be deleted";
+        let c     = cid(data);
+        store.hot.put(&c, data).unwrap();
+        assert!(store.hot.has(&c));
+        store.delete(&c).unwrap();
+        assert!(!store.hot.has(&c));
+    }
+
+    #[test]
+    fn pin_and_is_pinned_delegates_to_hot() {
+        let store = tiered();
+        let data  = b"pin test";
+        let c     = cid(data);
+        store.hot.put(&c, data).unwrap();
+        assert!(!store.is_pinned(&c));
+        store.pin(&c);
+        assert!(store.is_pinned(&c));
+        store.unpin(&c);
+        assert!(!store.is_pinned(&c));
+    }
+
+    #[test]
+    fn get_missing_from_both_tiers_returns_none() {
+        let store = tiered();
+        let c     = cid(b"definitely not stored");
+        assert!(store.get(&c).unwrap().is_none());
+    }
 }

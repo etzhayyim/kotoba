@@ -205,4 +205,39 @@ mod tests {
         );
         assert!(matches!(result, Err(RouterError::MissingWasmBytes)));
     }
+
+    #[test]
+    fn error_display_datalog_error() {
+        let msg = RouterError::DatalogError.to_string();
+        assert!(msg.contains("datalog"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_wasm_from_runtime_error() {
+        let re = kotoba_runtime::RuntimeError::GasExceeded { limit: 42 };
+        let re_msg = re.to_string();
+        let router_err = RouterError::Wasm(kotoba_runtime::RuntimeError::GasExceeded { limit: 42 });
+        let msg = router_err.to_string();
+        assert!(msg.contains("wasm") || msg.contains(&re_msg), "got: {msg}");
+    }
+
+    #[test]
+    fn dispatch_result_datalog_debug() {
+        let r    = router();
+        let prog = DatalogProgram::new();
+        let arr  = Arrangement::default();
+        let result = r.dispatch(
+            "prog-cid", ProgramType::Datalog, "did:test:agent",
+            1, None, vec![], Some(&prog), Some(&arr), &[], 10,
+        ).unwrap();
+        let dbg = format!("{result:?}");
+        assert!(dbg.contains("Datalog"), "debug output should contain 'Datalog': {dbg}");
+    }
+
+    #[test]
+    fn router_new_with_zero_gas_fails() {
+        // WasmExecutor::new requires gas_limit > 0; passing 0 should fail
+        let result = InvokeRouter::new(0, "http://localhost:9999");
+        assert!(result.is_err(), "gas_limit=0 should fail InvokeRouter::new");
+    }
 }
