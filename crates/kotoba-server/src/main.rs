@@ -71,10 +71,14 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         version  = state.version,
         node_id  = %hex::encode(state.local_node_id.0),
+        did      = %state.operator_did,
         "KSE Journal + Shelf + KDHT Neighborhood ready"
     );
 
-    // ── 2b. WAL replay — restore QuadStore Arrangement from Journal ────────────
+    // ── 2b. Node registration — write identity + role Quads at startup ────────
+    state.register_node().await;
+
+    // ── 2c. WAL replay — restore QuadStore Arrangement from Journal ────────────
     // Run in a background task so the HTTP server (and readiness/liveness probes)
     // can start immediately. The QuadStore serves requests with an empty Arrangement
     // until replay completes (~seconds for small journals, longer when B2 is cold).

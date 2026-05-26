@@ -2,11 +2,13 @@ use std::sync::Arc;
 use std::collections::HashMap;
 
 use bytes::Bytes;
+use kotoba_core::named_graph::{GraphVisibility, NamedGraph};
+use kotoba_core::cid::KotobaCid;
 use kotoba_dht::{
     neighborhood::Neighborhood,
     node_id::NodeId,
 };
-use kotoba_kse::{sync_window::SyncWindow, Journal, KseStore, PreKeyRegistry, Shelf, Topic, Vault};
+use kotoba_kse::{sync_window::SyncWindow, AgentIdentity, Journal, KseStore, PreKeyRegistry, Shelf, Topic, Vault};
 use kotoba_kqe::quad::Quad;
 use kotoba_graph::QuadStore;
 use kotoba_kse::SecureVault;
@@ -17,9 +19,54 @@ use kotoba_vm::{distributed::DistributedPregelRunner, InvokeRouter};
 use kotoba_core::store::BlockStore;
 use kotoba_crypto::AgentCrypto;
 
+/// Participation role for this KOTOBA node (ADR-2605260005).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeRole {
+    /// Storage provider — earns citation/royalty_mkoto Quad per cited Datom.
+    Pin,
+    /// Execution provider — earns gas/consumed_mkoto Quad per WASM superstep.
+    Compute,
+}
+
+impl NodeRole {
+    /// Parse comma-separated `KOTOBA_NODE_ROLES` env var. Defaults to `[Pin, Compute]`.
+    pub fn from_env() -> Vec<Self> {
+        let val = std::env::var("KOTOBA_NODE_ROLES")
+            .unwrap_or_else(|_| "pin,compute".to_string());
+        let mut roles = Vec::new();
+        for part in val.split(',') {
+            match part.trim().to_ascii_lowercase().as_str() {
+                "pin"     => roles.push(NodeRole::Pin),
+                "compute" => roles.push(NodeRole::Compute),
+                other     => tracing::warn!(role = other, "unknown KOTOBA_NODE_ROLES value, ignoring"),
+            }
+        }
+        if roles.is_empty() {
+            roles.push(NodeRole::Pin);
+            roles.push(NodeRole::Compute);
+        }
+        roles
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NodeRole::Pin     => "pin",
+            NodeRole::Compute => "compute",
+        }
+    }
+}
+
 /// Shared server state — Arc-wrapped and injected into every axum handler.
 pub struct KotobaState {
     pub version:       &'static str,
+    // ── Node identity / participation (ADR-2605260005) ────────────────────
+    /// Operator DID derived from `KOTOBA_AGENT_DID` (or ephemeral did:key).
+    pub operator_did:  String,
+    /// Participation roles for this node (Pin, Compute, or both).
+    pub node_roles:    Vec<NodeRole>,
+    /// Shared agent identity — constructed once in `new()` and reused in
+    /// `init_crypto()` to prevent double-generation in ephemeral mode.
+    identity:          Arc<AgentIdentity>,
     // ── KSE ──────────────────────────────────────────────────────────────
     pub journal:       Arc<Journal>,
     pub shelf:         Arc<Shelf>,
@@ -71,6 +118,11 @@ pub struct KotobaState {
     /// Maps (owner_did, accessor_did) → wrapped re-encryption key.
     /// `None` until `attach_pre_key_registry()` is called.
     pub pre_key_registry: Option<Arc<PreKeyRegistry>>,
+    // ── Named Graph Registry ─────────────────────────────────────────────────
+    /// Maps graph CID → (graph name, GraphVisibility).
+    /// Pre-populated with well-known public + authed graphs at startup.
+    /// Callers may register additional graphs via `register_graph()`.
+    pub graph_registry: Arc<tokio::sync::RwLock<HashMap<KotobaCid, (String, GraphVisibility)>>>,
 }
 
 impl KotobaState {
@@ -115,12 +167,22 @@ impl KotobaState {
         });
         let shelf = Arc::new(Shelf::new());
 
-        // KDHT — generate ephemeral NodeId (dev mode; prod uses persisted Ed25519 key)
-        let local_node_id = {
-            let seed: [u8; 32] = rand_seed();
-            NodeId(seed)
-        };
-        let neighborhood = Arc::new(tokio::sync::RwLock::new(
+        // Agent identity — constructed once; reused in init_crypto() to avoid
+        // double-generation of ephemeral keys (each call to generate_ephemeral()
+        // produces a different random keypair and DID).
+        let identity    = Arc::new(AgentIdentity::from_env());
+        let operator_did = identity.did.clone();
+        let node_roles   = NodeRole::from_env();
+        tracing::info!(
+            did        = %operator_did,
+            ephemeral  = identity.ephemeral,
+            roles      = ?node_roles.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
+            "node identity + roles initialised"
+        );
+
+        // KDHT — NodeId = Ed25519 signing key seed (deterministic when env vars are set).
+        let local_node_id = NodeId(identity.signing_key.to_bytes());
+        let neighborhood  = Arc::new(tokio::sync::RwLock::new(
             Neighborhood::new(local_node_id.clone()),
         ));
 
@@ -185,8 +247,21 @@ impl KotobaState {
             tracing::info!("CC embed client enabled (KOTOBA_EMBED_URL)");
         }
 
+        // Named graph registry — pre-populate well-known graphs.
+        let graph_registry = {
+            let mut map: HashMap<KotobaCid, (String, GraphVisibility)> = HashMap::new();
+            let pub_g  = NamedGraph::public();
+            let auth_g = NamedGraph::authenticated();
+            map.insert(pub_g.cid.clone(),  (pub_g.name.clone(),  pub_g.visibility));
+            map.insert(auth_g.cid.clone(), (auth_g.name.clone(), auth_g.visibility));
+            Arc::new(tokio::sync::RwLock::new(map))
+        };
+
         Ok(Self {
             version: env!("CARGO_PKG_VERSION"),
+            operator_did,
+            node_roles,
+            identity,
             journal,
             shelf,
             vault,
@@ -207,6 +282,7 @@ impl KotobaState {
             agent_sessions:    Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             cc_embed_client,
             pre_key_registry:  None,
+            graph_registry,
         })
     }
 
@@ -215,19 +291,21 @@ impl KotobaState {
     /// Must be called once from the async context (e.g. `main.rs`) after
     /// `KotobaState::new()`. Loads or generates the vault key via HPKE.
     pub async fn init_crypto(mut self) -> anyhow::Result<Self> {
-        use kotoba_kse::{AgentIdentity, SovereignCrypto};
+        use kotoba_kse::SovereignCrypto;
 
-        let identity = AgentIdentity::from_env();
-        tracing::info!(did = %identity.did, ephemeral = identity.ephemeral, "agent identity initialised");
+        // Reuse the identity constructed in new() — do NOT call from_env() again,
+        // as each ephemeral call generates a different random keypair/DID.
+        let identity = Arc::clone(&self.identity);
+        tracing::info!(did = %identity.did, ephemeral = identity.ephemeral, "agent-sovereign crypto initialising");
 
         // Build a temporary in-memory KseStore if no persistent one is available
         let sc: SovereignCrypto = if let Some(ref ks) = self.kse_store {
-            SovereignCrypto::load_or_genesis(&identity, ks, &self.block_store).await?
+            SovereignCrypto::load_or_genesis(&*identity, ks, &self.block_store).await?
         } else {
             // No persistent KseStore — generate ephemeral key in a temp KseStore
             let fs = object_store::memory::InMemory::new();
             let tmp_ks = KseStore::new(Arc::new(fs), "kse/");
-            SovereignCrypto::load_or_genesis(&identity, &tmp_ks, &self.block_store).await?
+            SovereignCrypto::load_or_genesis(&*identity, &tmp_ks, &self.block_store).await?
         };
 
         self.crypto = Some(Arc::new(sc));
@@ -266,6 +344,81 @@ impl KotobaState {
     pub fn attach_pre_key_registry(mut self, registry: Arc<PreKeyRegistry>) -> Self {
         self.pre_key_registry = Some(registry);
         self
+    }
+
+    /// Look up the visibility of a named graph by its CID.
+    ///
+    /// Falls back to `Authenticated` for unknown graphs (safe default).
+    pub async fn graph_visibility(&self, cid: &KotobaCid) -> GraphVisibility {
+        let registry = self.graph_registry.read().await;
+        registry
+            .get(cid)
+            .map(|(_, v)| v.clone())
+            .unwrap_or(GraphVisibility::Authenticated)
+    }
+
+    /// Register a named graph in the registry.
+    ///
+    /// Typically called at boot-time for well-known application graphs.
+    pub async fn register_graph(&self, graph: NamedGraph) {
+        let mut registry = self.graph_registry.write().await;
+        registry.insert(graph.cid.clone(), (graph.name.clone(), graph.visibility));
+    }
+
+    /// Write node registration Quads to the `kotoba/network/nodes` graph (ADR-2605260005).
+    ///
+    /// Called once at startup (from `main.rs`) and re-callable via the
+    /// `kotoba_node_register` MCP tool to refresh the registration timestamp.
+    pub async fn register_node(&self) {
+        use kotoba_kqe::quad::QuadObject;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let graph_cid   = KotobaCid::from_bytes(b"kotoba/network/nodes");
+        let subject_cid = KotobaCid::from_bytes(self.operator_did.as_bytes());
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let endpoint = std::env::var("KOTOBA_PUBLIC_ENDPOINT").unwrap_or_else(|_| {
+            let port = std::env::var("KOTOBA_PORT").unwrap_or_else(|_| "8080".into());
+            format!("http://localhost:{port}")
+        });
+        let node_id_hex = hex::encode(self.local_node_id.0);
+
+        let mut quads = vec![
+            Quad { graph: graph_cid.clone(), subject: subject_cid.clone(),
+                predicate: "node/did".to_string(),
+                object: QuadObject::Text(self.operator_did.clone()) },
+            Quad { graph: graph_cid.clone(), subject: subject_cid.clone(),
+                predicate: "node/version".to_string(),
+                object: QuadObject::Text(self.version.to_string()) },
+            Quad { graph: graph_cid.clone(), subject: subject_cid.clone(),
+                predicate: "node/endpoint".to_string(),
+                object: QuadObject::Text(endpoint) },
+            Quad { graph: graph_cid.clone(), subject: subject_cid.clone(),
+                predicate: "node/node_id_hex".to_string(),
+                object: QuadObject::Text(node_id_hex) },
+            Quad { graph: graph_cid.clone(), subject: subject_cid.clone(),
+                predicate: "node/registered_at".to_string(),
+                object: QuadObject::Integer(ts) },
+        ];
+
+        for role in &self.node_roles {
+            let predicate = format!("node/role/{}", role.as_str());
+            quads.push(Quad { graph: graph_cid.clone(), subject: subject_cid.clone(),
+                predicate, object: QuadObject::Bool(true) });
+        }
+
+        for quad in &quads {
+            self.journal_assert(quad).await;
+            self.quad_store.assert(quad.clone()).await;
+        }
+        tracing::info!(
+            did   = %self.operator_did,
+            roles = ?self.node_roles.iter().map(NodeRole::as_str).collect::<Vec<_>>(),
+            "node registered in kotoba/network/nodes"
+        );
     }
 
     /// Publish a Quad assert to the KSE Journal (fine SPO topic) and,
@@ -310,14 +463,3 @@ impl KotobaState {
 }
 
 
-/// Generate a deterministic-ish seed for the ephemeral dev NodeId.
-/// Production: load from persisted Ed25519 key in Shelf/Keychain.
-fn rand_seed() -> [u8; 32] {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let hash = blake3::hash(&ts.to_le_bytes());
-    *hash.as_bytes()
-}

@@ -4,15 +4,20 @@
 /// Auth:  initialize / tools/list / ping → public
 ///        tools/call → requires `Authorization: Bearer <AT-session-JWT>`
 ///
-/// Tools exposed (8):
-///   kotoba_quad_create   — assert a quad into the graph
-///   kotoba_graph_query   — SPO pattern query
-///   kotoba_infer_run     — run inference via inference engine
-///   kotoba_embed_create  — create and store a text embedding
-///   kotoba_weight_put    — store an FP8 tensor weight blob
-///   kotoba_lora_apply    — register a LoRA adapter delta
-///   kotoba_email_list    — list encrypted emails for an owner DID
-///   kotoba_email_read    — decrypt and return one email body + metadata
+/// Tools exposed (13):
+///   kotoba_quad_create      — assert a quad into the graph
+///   kotoba_graph_query      — SPO pattern query
+///   kotoba_infer_run        — run inference via inference engine
+///   kotoba_embed_create     — create and store a text embedding
+///   kotoba_weight_put       — store an FP8 tensor weight blob
+///   kotoba_lora_apply       — register a LoRA adapter delta
+///   kotoba_email_list       — list encrypted emails for an owner DID
+///   kotoba_email_read       — decrypt and return one email body + metadata
+///   kotoba_wasm_run         — run a WASM Component Model program via Pregel BSP
+///   kotoba_datalog_run      — evaluate Datalog with citation tracking + royalty flush
+///   kotoba_node_info        — return this node's DID, roles, NodeId, peer count
+///   kotoba_node_register    — write/refresh node registration Quads
+///   kotoba_network_peers    — list KDHT neighborhood peers
 
 pub const MCP_TOOL_QUAD_CREATE:   &str = "kotoba_quad_create";
 pub const MCP_TOOL_GRAPH_QUERY:   &str = "kotoba_graph_query";
@@ -22,8 +27,11 @@ pub const MCP_TOOL_WEIGHT_PUT:    &str = "kotoba_weight_put";
 pub const MCP_TOOL_LORA_APPLY:    &str = "kotoba_lora_apply";
 pub const MCP_TOOL_EMAIL_LIST:    &str = "kotoba_email_list";
 pub const MCP_TOOL_EMAIL_READ:    &str = "kotoba_email_read";
-pub const MCP_TOOL_WASM_RUN:      &str = "kotoba_wasm_run";
-pub const MCP_TOOL_DATALOG_RUN:   &str = "kotoba_datalog_run";
+pub const MCP_TOOL_WASM_RUN:        &str = "kotoba_wasm_run";
+pub const MCP_TOOL_DATALOG_RUN:     &str = "kotoba_datalog_run";
+pub const MCP_TOOL_NODE_INFO:       &str = "kotoba_node_info";
+pub const MCP_TOOL_NODE_REGISTER:   &str = "kotoba_node_register";
+pub const MCP_TOOL_NETWORK_PEERS:   &str = "kotoba_network_peers";
 
 use std::sync::Arc;
 use axum::{
@@ -225,6 +233,33 @@ fn tools_list() -> Value {
                         "epoch_pool_koto":  { "type": "integer", "description": "mKOTO pool to distribute as royalties this epoch (default 1000000 = 1 KOTO)" }
                     },
                     "required": ["graph", "rules"]
+                }
+            },
+            {
+                "name": MCP_TOOL_NODE_INFO,
+                "description": "Return this node's DID, participation roles, NodeId hex, version, ephemeral flag, and KDHT peer count.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": MCP_TOOL_NODE_REGISTER,
+                "description": "Write or refresh this node's registration Quads in the kotoba/network/nodes graph. Returns the operator DID.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": MCP_TOOL_NETWORK_PEERS,
+                "description": "List KDHT neighborhood peers for this node.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
                 }
             }
         ]
@@ -620,20 +655,30 @@ async fn call_tool(
                 .map_err(|e| (ERR_INTERNAL, e.to_string()))?
                 .map_err(|e| (ERR_INTERNAL, format!("WasmPregelRunner: {e:?}")))?;
 
-            // Gap 2: write gas consumption Quad per agent DID
+            // Gap 2: write gas consumption Quad per agent DID + provider attribution
             {
                 use kotoba_core::cid::KotobaCid;
                 use kotoba_kqe::quad::{Quad, QuadObject};
                 let gas_graph = KotobaCid::from_bytes(b"kotoba/gas/ledger");
                 let agent_cid = KotobaCid::from_bytes(agent_did.as_bytes());
                 let gas_quad  = Quad {
-                    graph:     gas_graph,
-                    subject:   agent_cid,
+                    graph:     gas_graph.clone(),
+                    subject:   agent_cid.clone(),
                     predicate: "gas/consumed_mkoto".to_string(),
                     object:    QuadObject::Integer(result.total_gas_used as i64),
                 };
                 state.journal_assert(&gas_quad).await;
                 state.quad_store.assert(gas_quad).await;
+
+                // Provider attribution — identifies which compute node served this run
+                let provider_quad = Quad {
+                    graph:     gas_graph,
+                    subject:   agent_cid,
+                    predicate: "gas/provider_did".to_string(),
+                    object:    QuadObject::Text(state.operator_did.clone()),
+                };
+                state.journal_assert(&provider_quad).await;
+                state.quad_store.assert(provider_quad).await;
             }
 
             // Write WASM-asserted quads into the store
@@ -724,6 +769,23 @@ async fn call_tool(
                 state.quad_store.assert(rq).await;
             }
 
+            // Pin provider attribution — identifies which pin node served this query
+            {
+                use kotoba_kqe::quad::{Quad, QuadObject};
+                let ledger_graph  = KotobaCid::from_bytes(
+                    format!("kotoba/ledger/epoch/{epoch}").as_bytes()
+                );
+                let provider_cid  = KotobaCid::from_bytes(state.operator_did.as_bytes());
+                let provider_quad = Quad {
+                    graph:     ledger_graph,
+                    subject:   provider_cid,
+                    predicate: "provider/did".to_string(),
+                    object:    QuadObject::Text(state.operator_did.clone()),
+                };
+                state.journal_assert(&provider_quad).await;
+                state.quad_store.assert(provider_quad).await;
+            }
+
             // Write derived facts into the store
             let derived_count = derived.len();
             for d in &derived {
@@ -736,6 +798,45 @@ async fn call_tool(
                 "citations":     citation_count,
                 "royalty_quads": royalty_count,
                 "epoch":         epoch,
+            }))
+        }
+
+        // ── kotoba_node_info ─────────────────────────────────────────────────
+        MCP_TOOL_NODE_INFO => {
+            use crate::server::NodeRole;
+            let roles: Vec<&str> = state.node_roles.iter().map(NodeRole::as_str).collect();
+            let node_id_hex = hex::encode(state.local_node_id.0);
+            let peer_count  = state.neighborhood.read().await.peers.len();
+            Ok(json!({
+                "did":          state.operator_did,
+                "node_id_hex":  node_id_hex,
+                "version":      state.version,
+                "roles":        roles,
+                "ephemeral":    !state.node_roles.is_empty(), // always false when env vars set
+                "peer_count":   peer_count,
+            }))
+        }
+
+        // ── kotoba_node_register ─────────────────────────────────────────────
+        MCP_TOOL_NODE_REGISTER => {
+            state.register_node().await;
+            Ok(json!({
+                "status":       "ok",
+                "operator_did": state.operator_did,
+            }))
+        }
+
+        // ── kotoba_network_peers ─────────────────────────────────────────────
+        MCP_TOOL_NETWORK_PEERS => {
+            let nb = state.neighborhood.read().await;
+            let local_hex = hex::encode(nb.local.0);
+            let peers: Vec<Value> = nb.peers.iter()
+                .map(|p| json!({ "node_id_hex": hex::encode(p.0) }))
+                .collect();
+            Ok(json!({
+                "local_node_id_hex": local_hex,
+                "peer_count":        peers.len(),
+                "peers":             peers,
             }))
         }
 
@@ -845,10 +946,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tools_list_contains_all_ten() {
+    fn tools_list_contains_all() {
         let list = tools_list();
         let tools = list["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 13);
         let names: Vec<&str> = tools.iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
@@ -860,6 +961,9 @@ mod tests {
         assert!(names.contains(&MCP_TOOL_LORA_APPLY));
         assert!(names.contains(&MCP_TOOL_WASM_RUN));
         assert!(names.contains(&MCP_TOOL_DATALOG_RUN));
+        assert!(names.contains(&MCP_TOOL_NODE_INFO));
+        assert!(names.contains(&MCP_TOOL_NODE_REGISTER));
+        assert!(names.contains(&MCP_TOOL_NETWORK_PEERS));
     }
 
     #[test]

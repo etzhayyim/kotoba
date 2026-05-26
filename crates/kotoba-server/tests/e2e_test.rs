@@ -93,6 +93,19 @@ impl TestServer {
         let resp: Value = r.json().await.unwrap_or(Value::Null);
         (status, resp)
     }
+
+    /// GET with `Authorization: Bearer <token>` for authenticated-tier graphs.
+    async fn get_authed(&self, path: &str) -> (u16, Value) {
+        let r = self.client
+            .get(format!("{}{}", self.base_url, path))
+            .header("Authorization", "Bearer test-e2e-token")
+            .send()
+            .await
+            .expect("GET authed");
+        let status = r.status().as_u16();
+        let body: Value = r.json().await.unwrap_or(Value::Null);
+        (status, body)
+    }
 }
 
 impl Drop for TestServer {
@@ -145,7 +158,8 @@ async fn graph_query_empty_graph_returns_zero() {
     use kotoba_core::cid::KotobaCid;
     let s = TestServer::start(false).await;
     let cid = KotobaCid::from_bytes(b"nonexistent-graph-xyz").to_multibase();
-    let (status, body) = s.get(
+    // Unknown graphs default to Authenticated tier — send a Bearer token.
+    let (status, body) = s.get_authed(
         &format!("/xrpc/ai.gftd.apps.kotoba.graph.query?graph={cid}")
     ).await;
     assert_eq!(status, 200, "{body}");
@@ -163,7 +177,8 @@ async fn graph_query_after_create_returns_quad() {
     ).await;
 
     let graph_cid = KotobaCid::from_bytes(b"qtest").to_multibase();
-    let (status, body) = s.get(
+    // Unknown graphs default to Authenticated tier — send a Bearer token.
+    let (status, body) = s.get_authed(
         &format!("/xrpc/ai.gftd.apps.kotoba.graph.query?graph={graph_cid}")
     ).await;
     assert_eq!(status, 200, "{body}");
@@ -307,7 +322,7 @@ async fn mcp_initialize_returns_protocol_version() {
 }
 
 #[tokio::test]
-async fn mcp_tools_list_returns_eight_tools() {
+async fn mcp_tools_list_returns_expected_count() {
     let s = TestServer::start(false).await;
     let (status, body) = s.post(
         "/mcp",
@@ -315,7 +330,7 @@ async fn mcp_tools_list_returns_eight_tools() {
     ).await;
     assert_eq!(status, 200);
     let tools = body["result"]["tools"].as_array().expect("tools");
-    assert_eq!(tools.len(), 10);
+    assert_eq!(tools.len(), 13);
 }
 
 #[tokio::test]
@@ -658,8 +673,8 @@ async fn kg_entity_lookup_by_id_after_quad_create() {
     ).await;
     assert_eq!(st, 200);
 
-    // Query by id
-    let (status, body) = s.get(
+    // Query by id — kg graph defaults to Authenticated tier.
+    let (status, body) = s.get_authed(
         &format!("/xrpc/ai.gftd.apps.yata.kg.entity?id={subj}")
     ).await;
     assert_eq!(status, 200, "{body}");
@@ -696,7 +711,7 @@ async fn kg_entity_lookup_by_qid() {
         ).await;
     }
 
-    let (status, body) = s.get("/xrpc/ai.gftd.apps.yata.kg.entity?qid=Q42").await;
+    let (status, body) = s.get_authed("/xrpc/ai.gftd.apps.yata.kg.entity?qid=Q42").await;
     assert_eq!(status, 200, "{body}");
     assert!(body["ok"].as_bool().unwrap_or(false));
     assert_eq!(body["entity"]["qid"], "Q42");
@@ -706,7 +721,7 @@ async fn kg_entity_lookup_by_qid() {
 #[tokio::test]
 async fn kg_entity_not_found_returns_ok_false() {
     let s = TestServer::start(false).await;
-    let (status, body) = s.get("/xrpc/ai.gftd.apps.yata.kg.entity?id=no-such-entity").await;
+    let (status, body) = s.get_authed("/xrpc/ai.gftd.apps.yata.kg.entity?id=no-such-entity").await;
     assert_eq!(status, 200, "{body}");
     assert!(!body["ok"].as_bool().unwrap_or(true), "expected ok:false: {body}");
     assert!(body["error"].as_str().is_some(), "error missing: {body}");
@@ -715,7 +730,8 @@ async fn kg_entity_not_found_returns_ok_false() {
 #[tokio::test]
 async fn kg_entity_missing_param_returns_400() {
     let s = TestServer::start(false).await;
-    let (status, _) = s.get("/xrpc/ai.gftd.apps.yata.kg.entity").await;
+    // Must pass auth first (authenticated tier), then the missing-param check fires.
+    let (status, _) = s.get_authed("/xrpc/ai.gftd.apps.yata.kg.entity").await;
     assert_eq!(status, 400);
 }
 
@@ -747,8 +763,8 @@ async fn kg_ingest_and_entity_roundtrip() {
     // kg/id + optional fields + 2 claims
     assert!(put["quadCount"].as_u64().unwrap_or(0) >= 3, "quadCount low: {put}");
 
-    // Lookup via kg.entity
-    let (status, body) = s.get("/xrpc/ai.gftd.apps.yata.kg.entity?id=ingest-e2e-001").await;
+    // Lookup via kg.entity — kg graph defaults to Authenticated tier.
+    let (status, body) = s.get_authed("/xrpc/ai.gftd.apps.yata.kg.entity?id=ingest-e2e-001").await;
     assert_eq!(status, 200, "{body}");
     assert!(body["ok"].as_bool().unwrap_or(false), "entity not found: {body}");
 
@@ -792,8 +808,8 @@ async fn kg_ingest_with_relations() {
     assert_eq!(status, 200, "{put}");
     assert!(put["ok"].as_bool().unwrap_or(false));
 
-    // Query source entity
-    let (st, body) = s.get("/xrpc/ai.gftd.apps.yata.kg.entity?id=rel-src-001").await;
+    // Query source entity — kg graph defaults to Authenticated tier.
+    let (st, body) = s.get_authed("/xrpc/ai.gftd.apps.yata.kg.entity?id=rel-src-001").await;
     assert_eq!(st, 200, "{body}");
 
     let rels = body["entity"]["relations"].as_array().expect("relations");
@@ -815,7 +831,8 @@ async fn kg_catalog_reflects_ingested_entities() {
         assert_eq!(st, 200);
     }
 
-    let (status, body) = s.get("/xrpc/ai.gftd.apps.yata.kg.catalog").await;
+    // kg graph defaults to Authenticated tier — send a Bearer token.
+    let (status, body) = s.get_authed("/xrpc/ai.gftd.apps.yata.kg.catalog").await;
     assert_eq!(status, 200, "{body}");
     assert!(body["ok"].as_bool().unwrap_or(false));
     assert!(body["stats"]["totalEntities"].as_u64().unwrap_or(0) >= 2, "{body}");
