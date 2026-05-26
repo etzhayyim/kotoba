@@ -39,9 +39,18 @@ impl NonceStore {
 
         let mut map = self.inner.write().unwrap_or_else(|e| e.into_inner());
 
-        // Purge expired entries when near capacity to keep memory bounded.
+        // Purge expired entries when at capacity to keep memory bounded.
         if map.len() >= MAX_NONCES {
             map.retain(|_, &mut exp| exp > now);
+        }
+        // Hard cap: if purge freed nothing (all nonces still live), reject to prevent
+        // unbounded growth beyond MAX_NONCES.  The caller treats this as a failed
+        // check, which is the safe fail-closed behaviour.
+        if map.len() >= MAX_NONCES {
+            tracing::warn!(
+                "nonce store at capacity ({MAX_NONCES}) after purge; rejecting new nonce"
+            );
+            return false;
         }
 
         match map.get(nonce) {
@@ -117,5 +126,26 @@ mod tests {
             !store.check_and_register("brand-new-nonce", future),
             "replay of just-registered nonce must be rejected"
         );
+    }
+
+    #[test]
+    fn hard_cap_rejects_when_all_live() {
+        // Fill the store to MAX_NONCES with future-expiry nonces (none will be purged).
+        // The next insertion attempt must be rejected by the hard-cap guard, and the
+        // store must not grow beyond MAX_NONCES.
+        let store = NonceStore::new();
+        let future = now_secs() + 3600;
+        for i in 0..MAX_NONCES {
+            assert!(
+                store.check_and_register(&format!("live-{i}"), future),
+                "initial fill should succeed"
+            );
+        }
+        // All nonces are live — purge removes nothing.  Hard cap must fire.
+        let accepted = store.check_and_register("overflow-nonce", future);
+        assert!(!accepted, "hard cap must reject when all stored nonces are still live");
+        // Verify the store did not grow beyond MAX_NONCES.
+        let len = store.inner.read().unwrap().len();
+        assert_eq!(len, MAX_NONCES, "map must not exceed MAX_NONCES after hard-cap rejection");
     }
 }
