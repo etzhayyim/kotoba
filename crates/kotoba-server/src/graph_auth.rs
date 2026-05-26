@@ -199,8 +199,20 @@ pub(crate) fn validate_did(did: &str, field: &str, max_len: usize) -> Result<(),
     if did.is_empty() {
         return Err((StatusCode::BAD_REQUEST, format!("{field} must not be empty")));
     }
-    if !did.starts_with("did:") {
-        return Err((StatusCode::BAD_REQUEST, format!("{field} is not a valid DID (must start with 'did:')")));
+    if did.contains(char::is_whitespace) {
+        return Err((StatusCode::BAD_REQUEST, format!("{field} must not contain whitespace")));
+    }
+    // DID spec requires did:{method}:{identifier} — at minimum two colons and
+    // non-empty method + identifier segments.
+    let after_did = did.strip_prefix("did:").ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, format!("{field} is not a valid DID (must start with 'did:')"))
+    })?;
+    let colon = after_did.find(':').ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, format!("{field} is not a valid DID (missing method:identifier segments)"))
+    })?;
+    if colon == 0 || colon + 1 >= after_did.len() {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("{field} is not a valid DID (method or identifier segment is empty)")));
     }
     if did.len() > max_len {
         return Err((StatusCode::BAD_REQUEST, format!("{field} exceeds {max_len} bytes")));
@@ -543,6 +555,41 @@ mod tests {
     #[test]
     fn validate_did_accepts_valid_did_plc() {
         assert!(validate_did("did:plc:abcdefghijklmnopqrstuvwxy", "did", 512).is_ok());
+    }
+
+    #[test]
+    fn validate_did_rejects_missing_method_segment() {
+        // "did:" has no method or identifier
+        let err = validate_did("did:", "entity_did", 512).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn validate_did_rejects_missing_identifier_segment() {
+        // "did:plc" has method but no identifier
+        let err = validate_did("did:plc", "entity_did", 512).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn validate_did_rejects_empty_identifier_segment() {
+        // "did:plc:" has empty identifier
+        let err = validate_did("did:plc:", "entity_did", 512).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn validate_did_rejects_whitespace() {
+        // Whitespace in DID would bypass equality checks
+        let err = validate_did("did:plc: abc", "entity_did", 512).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("whitespace"), "got: {}", err.1);
+    }
+
+    #[test]
+    fn validate_did_rejects_tab_whitespace() {
+        let err = validate_did("did:plc:\tabc", "entity_did", 512).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
     }
 
     // ── require_any_bearer_auth ───────────────────────────────────────────────

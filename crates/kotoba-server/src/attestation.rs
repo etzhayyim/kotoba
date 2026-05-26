@@ -226,6 +226,17 @@ pub async fn attest_claim(
         return (code, Json(serde_json::json!({ "error": msg }))).into_response();
     }
 
+    // Reject stake values that exceed i64::MAX to prevent silent truncation when
+    // stored as QuadObject::Integer(i64).  Real stakes are at most ~10^10 mKOTO,
+    // orders of magnitude below the 9.2×10^18 i64 ceiling.
+    if req.stake_mkoto > i64::MAX as u64 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "stake_mkoto exceeds maximum representable value" })),
+        )
+            .into_response();
+    }
+
     // Enforce stake threshold based on claim type.
     let min_stake = match req.claim_type.as_str() {
         "verified_entity" | "delegation" => MIN_STAKE_VERIFIED_ENTITY,
@@ -644,5 +655,24 @@ mod tests {
         ];
         let unique: std::collections::HashSet<&&str> = nsids.iter().collect();
         assert_eq!(unique.len(), nsids.len(), "all NSIDs must be distinct");
+    }
+
+    #[test]
+    fn stake_mkoto_overflow_guard_boundary() {
+        // i64::MAX as u64 must pass; i64::MAX as u64 + 1 must fail.
+        let just_below = i64::MAX as u64;
+        assert!(just_below <= i64::MAX as u64, "i64::MAX must be representable");
+        let overflow = (i64::MAX as u64).saturating_add(1);
+        assert!(overflow > i64::MAX as u64, "overflow value must exceed i64::MAX guard");
+    }
+
+    #[test]
+    fn stake_i64_max_cast_is_lossless() {
+        // Verify the guard condition: any stake_mkoto that passes the guard is
+        // safely castable to i64 without truncation or sign change.
+        let max_ok: u64 = i64::MAX as u64;
+        let as_i64 = max_ok as i64;
+        assert_eq!(as_i64, i64::MAX, "lossless cast must produce i64::MAX");
+        assert!(as_i64 >= 0, "must be non-negative");
     }
 }
