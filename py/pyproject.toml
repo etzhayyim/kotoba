@@ -25,3 +25,11 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["kotoba_langgraph"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
