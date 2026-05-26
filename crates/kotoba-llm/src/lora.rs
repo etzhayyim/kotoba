@@ -103,4 +103,65 @@ mod tests {
         assert_eq!(da.quad.subject,   dr.quad.subject);
         assert_eq!(da.quad.predicate, dr.quad.predicate);
     }
+
+    // ── additional LoraAdapter tests ──────────────────────────────────────────
+
+    #[test]
+    fn lora_adapter_scale_field_accessible() {
+        let a = adapter();
+        assert!((a.scale - 0.5_f32).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn lora_adapter_rank_field_is_16() {
+        let a = adapter();
+        assert_eq!(a.rank, 16);
+    }
+
+    #[test]
+    fn lora_to_delta_graph_cid_is_stored_correctly() {
+        let a = adapter();
+        let g = KotobaCid::from_bytes(b"my-graph");
+        let d = lora_to_delta(&a, g.clone());
+        assert_eq!(d.quad.graph, g);
+    }
+
+    #[test]
+    fn lora_retract_graph_cid_is_stored_correctly() {
+        let a = adapter();
+        let g = KotobaCid::from_bytes(b"my-graph");
+        let d = lora_retract_delta(&a, g.clone());
+        assert_eq!(d.quad.graph, g);
+    }
+
+    #[test]
+    fn lora_to_delta_tensor_dtype_is_f8e4m3() {
+        let a = adapter();
+        let d = lora_to_delta(&a, KotobaCid::from_bytes(b"g"));
+        if let QuadObject::TensorCid { dtype, .. } = d.quad.object {
+            assert!(matches!(dtype, kotoba_kqe::quad::TensorDtype::F8E4M3));
+        } else {
+            panic!("expected TensorCid object");
+        }
+    }
+
+    #[test]
+    fn lora_adapter_clone_has_same_fields() {
+        let a = adapter();
+        let b = a.clone();
+        assert_eq!(a.base_cid, b.base_cid);
+        assert_eq!(a.adapter_cid, b.adapter_cid);
+        assert_eq!(a.rank, b.rank);
+    }
+
+    #[test]
+    fn lora_to_delta_adapter_cid_in_object() {
+        let a = adapter();
+        let d = lora_to_delta(&a, KotobaCid::from_bytes(b"g"));
+        if let QuadObject::TensorCid { cid, .. } = d.quad.object {
+            assert_eq!(cid, a.adapter_cid);
+        } else {
+            panic!("expected TensorCid object");
+        }
+    }
 }

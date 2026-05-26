@@ -835,4 +835,108 @@ mod tests {
             assert!(nsid.starts_with("ai.gftd.apps.kotobase."), "bad nsid: {nsid}");
         }
     }
+
+    // ── Additional constant / quota tests ─────────────────────────────────────
+
+    #[test]
+    fn nsid_account_create_exact_value() {
+        assert_eq!(NSID_ACCOUNT_CREATE, "ai.gftd.apps.kotobase.accountCreate");
+    }
+
+    #[test]
+    fn nsid_account_status_exact_value() {
+        assert_eq!(NSID_ACCOUNT_STATUS, "ai.gftd.apps.kotobase.accountStatus");
+    }
+
+    #[test]
+    fn nsid_pin_create_exact_value() {
+        assert_eq!(NSID_PIN_CREATE, "ai.gftd.apps.kotobase.pinCreate");
+    }
+
+    #[test]
+    fn nsid_pin_list_exact_value() {
+        assert_eq!(NSID_PIN_LIST, "ai.gftd.apps.kotobase.pinList");
+    }
+
+    #[test]
+    fn nsid_pin_delete_exact_value() {
+        assert_eq!(NSID_PIN_DELETE, "ai.gftd.apps.kotobase.pinDelete");
+    }
+
+    #[test]
+    fn nsid_usage_get_exact_value() {
+        assert_eq!(NSID_USAGE_GET, "ai.gftd.apps.kotobase.usageGet");
+    }
+
+    #[test]
+    fn all_nsids_count_is_six() {
+        assert_eq!(ALL_NSIDS.len(), 6, "expected 6 NSID constants in ALL_NSIDS");
+    }
+
+    #[test]
+    fn all_nsids_unique() {
+        let mut set = std::collections::HashSet::new();
+        for nsid in ALL_NSIDS {
+            assert!(set.insert(*nsid), "duplicate NSID: {nsid}");
+        }
+    }
+
+    #[test]
+    fn quota_free_pins_is_three() {
+        let (pins, _bytes) = quota_for_tier("free");
+        assert_eq!(pins, QUOTA_FREE_PINS);
+    }
+
+    #[test]
+    fn quota_free_bytes_is_100_mib() {
+        let (_pins, bytes) = quota_for_tier("free");
+        assert_eq!(bytes, 100 * 1024 * 1024);
+    }
+
+    #[test]
+    fn quota_starter_pins_and_bytes() {
+        let (pins, bytes) = quota_for_tier("starter");
+        assert_eq!(pins, QUOTA_STARTER_PINS);
+        assert_eq!(bytes, QUOTA_STARTER_BYTES);
+    }
+
+    #[test]
+    fn quota_pro_pins_and_bytes() {
+        let (pins, bytes) = quota_for_tier("pro");
+        assert_eq!(pins, QUOTA_PRO_PINS);
+        assert_eq!(bytes, QUOTA_PRO_BYTES);
+    }
+
+    #[test]
+    fn quota_tiers_ordered_ascending() {
+        let (free_pins, _) = quota_for_tier("free");
+        let (starter_pins, _) = quota_for_tier("starter");
+        let (pro_pins, _) = quota_for_tier("pro");
+        assert!(free_pins < starter_pins, "free should have fewer pins than starter");
+        assert!(starter_pins < pro_pins, "starter should have fewer pins than pro");
+    }
+
+    #[test]
+    fn max_object_len_is_64_kib() {
+        assert_eq!(MAX_OBJECT_LEN, 65_536);
+    }
+
+    #[test]
+    fn max_triples_per_pin_is_1024() {
+        assert_eq!(MAX_TRIPLES_PER_PIN, 1_024);
+    }
+
+    #[test]
+    fn validate_triple_accepts_max_object_len() {
+        let long_object = "x".repeat(MAX_OBJECT_LEN);
+        let t = triple("did:key:zSub", "pred/path", &long_object);
+        assert!(validate_triple(&t).is_ok());
+    }
+
+    #[test]
+    fn validate_triple_rejects_over_max_object_len() {
+        let too_long = "x".repeat(MAX_OBJECT_LEN + 1);
+        let t = triple("did:key:zSub", "pred/path", &too_long);
+        assert!(validate_triple(&t).is_err());
+    }
 }

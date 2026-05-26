@@ -106,4 +106,63 @@ mod tests {
         let e = InferError::ContextExceeded;
         assert_eq!(e.to_string(), "context length exceeded");
     }
+
+    // ── additional InferenceSession / InferenceRequest tests ──────────────────
+
+    #[test]
+    fn new_session_kvcache_is_empty() {
+        let session_cid = KotobaCid::from_bytes(b"session");
+        let session = InferenceSession::new(make_request(), session_cid);
+        // KvCache starts with an empty Arrangement (no quads stored)
+        let quads = session.kv_cache.arrangement.get_by_predicate("kv/layer/0/seq/0");
+        assert!(quads.is_empty(), "new session KV cache should be empty");
+    }
+
+    #[test]
+    fn inference_request_with_adapter_cid() {
+        let req = InferenceRequest {
+            model_cid:    KotobaCid::from_bytes(b"model"),
+            adapter_cid:  Some(KotobaCid::from_bytes(b"lora")),
+            input_tokens: vec![10, 20],
+            max_tokens:   32,
+            call_id:      99,
+            ucan_cid:     KotobaCid::from_bytes(b"ucan"),
+        };
+        assert!(req.adapter_cid.is_some());
+        assert_eq!(req.adapter_cid.unwrap(), KotobaCid::from_bytes(b"lora"));
+    }
+
+    #[test]
+    fn inference_request_model_cid_stable() {
+        let cid = KotobaCid::from_bytes(b"gemma4-2b");
+        let req = InferenceRequest {
+            model_cid:    cid.clone(),
+            adapter_cid:  None,
+            input_tokens: vec![],
+            max_tokens:   0,
+            call_id:      0,
+            ucan_cid:     KotobaCid::from_bytes(b"u"),
+        };
+        assert_eq!(req.model_cid, cid);
+    }
+
+    #[test]
+    fn infer_error_bridge_with_empty_message() {
+        let e = InferError::Bridge(String::new());
+        assert_eq!(e.to_string(), "bridge error: ");
+    }
+
+    #[test]
+    fn infer_error_bridge_with_long_message() {
+        let msg = "timeout after 120s while waiting for GPU response";
+        let e = InferError::Bridge(msg.to_string());
+        assert!(e.to_string().contains("timeout"));
+    }
+
+    #[test]
+    fn two_sessions_with_different_cids_have_different_kvcache_cids() {
+        let s1 = InferenceSession::new(make_request(), KotobaCid::from_bytes(b"session-a"));
+        let s2 = InferenceSession::new(make_request(), KotobaCid::from_bytes(b"session-b"));
+        assert_ne!(s1.kv_cache.session_cid, s2.kv_cache.session_cid);
+    }
 }

@@ -429,4 +429,74 @@ mod tests {
         assert!(MAX_BUNDLE_BYTES < MAX_PAYLOAD_BYTES,
             "bundle cap should be tighter than general payload cap");
     }
+
+    // ── additional constant / boundary tests ─────────────────────────────────
+
+    #[test]
+    fn nsid_register_prekeys_exact_value() {
+        assert_eq!(NSID_SIGNAL_REGISTER_PREKEYS, "ai.gftd.signal.register.prekeys");
+    }
+
+    #[test]
+    fn nsid_get_prekey_bundle_exact_value() {
+        assert_eq!(NSID_SIGNAL_GET_PREKEY_BUNDLE, "ai.gftd.signal.get.prekey.bundle");
+    }
+
+    #[test]
+    fn nsid_send_message_exact_value() {
+        assert_eq!(NSID_SIGNAL_SEND_MESSAGE, "ai.gftd.signal.send.message");
+    }
+
+    #[test]
+    fn nsid_send_group_message_exact_value() {
+        assert_eq!(NSID_SIGNAL_SEND_GROUP_MESSAGE, "ai.gftd.signal.send.group.message");
+    }
+
+    #[test]
+    fn nsid_distribute_sender_key_exact_value() {
+        assert_eq!(NSID_SIGNAL_DISTRIBUTE_SENDER_KEY, "ai.gftd.signal.distribute.sender.key");
+    }
+
+    #[test]
+    fn max_did_len_is_512() {
+        assert_eq!(MAX_DID_LEN, 512);
+    }
+
+    #[test]
+    fn max_device_id_len_is_128() {
+        assert_eq!(MAX_DEVICE_ID_LEN, 128);
+    }
+
+    #[test]
+    fn max_group_id_len_is_128() {
+        assert_eq!(MAX_GROUP_ID_LEN, 128);
+    }
+
+    #[test]
+    fn max_payload_bytes_is_256_kib() {
+        assert_eq!(MAX_PAYLOAD_BYTES, 256 * 1024);
+    }
+
+    #[test]
+    fn max_bundle_bytes_is_64_kib() {
+        assert_eq!(MAX_BUNDLE_BYTES, 64 * 1024);
+    }
+
+    #[test]
+    fn path_component_accepts_exactly_max_len() {
+        let exactly_max = "a".repeat(MAX_DEVICE_ID_LEN);
+        assert!(validate_path_component(&exactly_max, "device_id", MAX_DEVICE_ID_LEN).is_ok());
+    }
+
+    #[test]
+    fn path_component_accepts_single_char() {
+        assert!(validate_path_component("x", "device_id", MAX_DEVICE_ID_LEN).is_ok());
+    }
+
+    #[test]
+    fn path_component_rejects_tilde() {
+        let err = validate_path_component("foo~bar", "device_id", MAX_DEVICE_ID_LEN).unwrap_err();
+        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("[A-Za-z0-9._-]"));
+    }
 }

@@ -148,4 +148,59 @@ mod tests {
         assert!(url.contains("wantedCollections=app.bsky.feed.post"), "got: {url}");
         assert!(!url.contains("wantedCollections= "), "should strip spaces, got: {url}");
     }
+
+    // ── additional build_subscribe_url_with tests ─────────────────────────────
+
+    #[test]
+    fn empty_csv_with_whitespace_only_returns_base_url() {
+        let url = build_subscribe_url_with("wss://example.com/subscribe", "   ");
+        assert_eq!(url, "wss://example.com/subscribe",
+            "whitespace-only csv should produce base URL: {url}");
+    }
+
+    #[test]
+    fn three_collections_appends_three_params() {
+        let url = build_subscribe_url_with(
+            "wss://example.com/subscribe",
+            "app.bsky.feed.post,app.bsky.graph.follow,app.bsky.feed.like",
+        );
+        assert!(url.contains("wantedCollections=app.bsky.feed.post"), "got: {url}");
+        assert!(url.contains("wantedCollections=app.bsky.graph.follow"), "got: {url}");
+        assert!(url.contains("wantedCollections=app.bsky.feed.like"), "got: {url}");
+    }
+
+    #[test]
+    fn base_url_with_no_trailing_slash_is_preserved() {
+        let url = build_subscribe_url_with("wss://example.com/subscribe", "");
+        assert_eq!(url, "wss://example.com/subscribe");
+    }
+
+    #[test]
+    fn question_mark_separator_used_before_first_param() {
+        let url = build_subscribe_url_with("wss://example.com/sub", "col.one");
+        assert!(url.starts_with("wss://example.com/sub?"), "got: {url}");
+    }
+
+    #[test]
+    fn ampersand_separator_used_between_params() {
+        let url = build_subscribe_url_with("wss://example.com/sub", "col.one,col.two");
+        // The two params must be separated by '&'
+        assert!(url.contains("wantedCollections=col.one&wantedCollections=col.two")
+            || url.contains("wantedCollections=col.two&wantedCollections=col.one"),
+            "expected & separator between params, got: {url}");
+    }
+
+    #[test]
+    fn single_collection_no_trailing_ampersand() {
+        let url = build_subscribe_url_with("wss://example.com/sub", "col.one");
+        assert!(!url.ends_with('&'), "no trailing ampersand expected, got: {url}");
+    }
+
+    #[test]
+    fn comma_only_csv_returns_base_url() {
+        // A CSV that is all separators with no real tokens should behave like empty
+        let url = build_subscribe_url_with("wss://example.com/subscribe", ",,,");
+        assert_eq!(url, "wss://example.com/subscribe",
+            "commas-only csv should produce base URL, got: {url}");
+    }
 }

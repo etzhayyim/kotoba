@@ -300,6 +300,112 @@ mod tests {
         assert!(MAX_EMAIL_CID_LEN >= 32);
         assert!(MAX_RAW_B64_LEN >= 1024);
     }
+
+    #[test]
+    fn nsid_email_list_exact_value() {
+        assert_eq!(NSID_EMAIL_LIST, "ai.gftd.apps.kotoba.email.list");
+    }
+
+    #[test]
+    fn nsid_email_read_exact_value() {
+        assert_eq!(NSID_EMAIL_READ, "ai.gftd.apps.kotoba.email.read");
+    }
+
+    #[test]
+    fn nsid_email_ingest_exact_value() {
+        assert_eq!(NSID_EMAIL_INGEST, "ai.gftd.apps.kotoba.email.ingest");
+    }
+
+    #[test]
+    fn nsid_email_constants_are_unique() {
+        let mut set = std::collections::HashSet::new();
+        assert!(set.insert(NSID_EMAIL_LIST));
+        assert!(set.insert(NSID_EMAIL_READ));
+        assert!(set.insert(NSID_EMAIL_INGEST));
+    }
+
+    #[test]
+    fn max_raw_b64_len_is_34_mib() {
+        assert_eq!(MAX_RAW_B64_LEN, 34 * 1024 * 1024);
+    }
+
+    #[test]
+    fn email_cid_len_cap_smaller_than_did_len_cap() {
+        assert!(MAX_EMAIL_CID_LEN < MAX_OWNER_DID_LEN,
+            "email CID length cap should be tighter than DID length cap");
+    }
+
+    #[test]
+    fn max_owner_did_len_is_512() {
+        assert_eq!(MAX_OWNER_DID_LEN, 512);
+    }
+
+    #[test]
+    fn max_email_cid_len_is_256() {
+        assert_eq!(MAX_EMAIL_CID_LEN, 256);
+    }
+
+    // ── open_field_safe ───────────────────────────────────────────────────────
+    //
+    // open_field_safe branches:
+    //   1. empty envelope → passthrough (no crypto call)
+    //   2. no "signal:v1:" prefix → passthrough (legacy plaintext)
+    //   3. "signal:v1:" prefix + valid ciphertext → decrypted plaintext
+    //   4. "signal:v1:" prefix + bad ciphertext → original envelope returned
+
+    #[tokio::test]
+    async fn open_field_safe_empty_returns_empty() {
+        use kotoba_crypto::{AgentCrypto, VaultKeyedCrypto};
+        use zeroize::Zeroizing;
+        let crypto = VaultKeyedCrypto::new(Zeroizing::new([0xAAu8; 32]));
+        let result = open_field_safe(&crypto, b"scope", "").await;
+        assert_eq!(result, "");
+    }
+
+    #[tokio::test]
+    async fn open_field_safe_plaintext_returns_unchanged() {
+        use kotoba_crypto::{AgentCrypto, VaultKeyedCrypto};
+        use zeroize::Zeroizing;
+        let crypto = VaultKeyedCrypto::new(Zeroizing::new([0xAAu8; 32]));
+        let result = open_field_safe(&crypto, b"scope", "alice@example.com").await;
+        assert_eq!(result, "alice@example.com");
+    }
+
+    #[tokio::test]
+    async fn open_field_safe_signal_roundtrip_with_real_crypto() {
+        use kotoba_crypto::{AgentCrypto, VaultKeyedCrypto};
+        use zeroize::Zeroizing;
+        let crypto = VaultKeyedCrypto::new(Zeroizing::new([0x11u8; 32]));
+        let scope = b"email/from";
+        let plaintext = "test@example.com";
+        // seal_field produces a signal:v1: envelope
+        let envelope = crypto.seal_field(scope, plaintext).await.unwrap();
+        assert!(envelope.starts_with("signal:v1:"));
+        // open_field_safe should decrypt it correctly
+        let recovered = open_field_safe(&crypto, scope, &envelope).await;
+        assert_eq!(recovered, plaintext);
+    }
+
+    #[tokio::test]
+    async fn open_field_safe_bad_ciphertext_returns_original() {
+        use kotoba_crypto::{AgentCrypto, VaultKeyedCrypto};
+        use zeroize::Zeroizing;
+        let crypto = VaultKeyedCrypto::new(Zeroizing::new([0x11u8; 32]));
+        // "signal:v1:" prefix but not valid ciphertext → decrypt will fail → fallback
+        let envelope = "signal:v1:not-valid-ciphertext";
+        let result = open_field_safe(&crypto, b"scope", envelope).await;
+        assert_eq!(result, envelope);
+    }
+
+    #[tokio::test]
+    async fn open_field_safe_non_signal_prefix_with_colon_passthrough() {
+        use kotoba_crypto::{AgentCrypto, VaultKeyedCrypto};
+        use zeroize::Zeroizing;
+        let crypto = VaultKeyedCrypto::new(Zeroizing::new([0xAAu8; 32]));
+        // A string that has a colon but not the signal:v1: prefix
+        let result = open_field_safe(&crypto, b"scope", "mailto:user@example.com").await;
+        assert_eq!(result, "mailto:user@example.com");
+    }
 }
 
 /// Open a `signal:v1:` envelope using AgentCrypto; returns ciphertext on failure
