@@ -312,4 +312,55 @@ mod tests {
             panic!("expected Text for body_cid");
         }
     }
+
+    // ── Bounds tests ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn oversized_email_is_rejected() {
+        let ing = make_ingestor();
+        // One byte over the limit
+        let huge = vec![b'X'; EmailIngestor::MAX_EMAIL_BYTES + 1];
+        let err = ing.ingest_raw(&huge, "t").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("too large"), "expected 'too large' in: {msg}");
+    }
+
+    #[tokio::test]
+    async fn exactly_max_email_size_is_accepted() {
+        let ing = make_ingestor();
+        // A raw buffer of exactly MAX_EMAIL_BYTES may not be a valid RFC 2822 message,
+        // but the size guard must pass and the parse error is different.
+        let at_limit = vec![b'A'; EmailIngestor::MAX_EMAIL_BYTES];
+        let result = ing.ingest_raw(&at_limit, "t").await;
+        // Either parse failure or success — neither should be "too large".
+        if let Err(e) = result {
+            assert!(!e.to_string().contains("too large"), "should not be 'too large': {e}");
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_thread_id_is_rejected() {
+        let ing = make_ingestor();
+        let long_thread = "x".repeat(257);
+        let err = ing.ingest_raw(SAMPLE_EMAIL, &long_thread).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("too long"), "expected 'too long' in: {msg}");
+    }
+
+    #[test]
+    fn truncate_str_at_boundary() {
+        let s = "hello world";
+        assert_eq!(truncate_str(s, 5), "hello");
+        assert_eq!(truncate_str(s, 100), "hello world"); // no truncation needed
+        assert_eq!(truncate_str(s, 0), "");
+    }
+
+    #[test]
+    fn truncate_str_respects_utf8_boundary() {
+        let s = "日本語"; // 3 chars × 3 bytes each = 9 bytes
+        // max_bytes = 4 → can't split inside a 3-byte char, steps back to boundary 3
+        let r = truncate_str(s, 4);
+        assert!(s.is_char_boundary(r.len()), "result must end on a char boundary");
+        assert_eq!(r, "日"); // 3 bytes, fits in 4
+    }
 }
