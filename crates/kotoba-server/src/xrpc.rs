@@ -436,8 +436,10 @@ pub async fn vault_put(
 /// Retrieve a blob from the Vault by CID.  Returns 404 if not found.
 pub async fn vault_get(
     State(state): State<Arc<KotobaState>>,
+    headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    crate::graph_auth::require_operator_auth(&headers, &state.operator_did)?;
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     use kotoba_core::cid::KotobaCid;
 

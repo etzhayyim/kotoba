@@ -1127,8 +1127,9 @@ async fn vault_put_then_get_roundtrip() {
     assert_eq!(status, 200, "{put_body}");
     let cid = put_body["cid"].as_str().expect("cid");
 
-    let (status, get_body) = s.get(
+    let (status, get_body) = s.get_with_auth(
         &format!("/xrpc/ai.gftd.apps.kotoba.vault.get?cid={cid}"),
+        &tok,
     ).await;
     assert_eq!(status, 200, "{get_body}");
     assert_eq!(get_body["cid"].as_str(), Some(cid), "cid mismatch");
@@ -1136,14 +1137,28 @@ async fn vault_put_then_get_roundtrip() {
 }
 
 #[tokio::test]
+async fn vault_get_without_auth_returns_401() {
+    // Regression guard: vault_get must require operator auth — unauthenticated
+    // reads would expose private encrypted blobs to any caller.
+    let s = TestServer::start(false).await;
+    let zero_cid = format!("b{}", "a".repeat(58));
+    let (status, _body) = s.get(
+        &format!("/xrpc/ai.gftd.apps.kotoba.vault.get?cid={zero_cid}"),
+    ).await;
+    assert_eq!(status, 401, "vault_get must reject unauthenticated requests");
+}
+
+#[tokio::test]
 async fn vault_get_unknown_cid_returns_404() {
     let s = TestServer::start(false).await;
+    let tok = tenant_jwt(&s.operator_did);
     // KotobaCid multibase = 'b' + base32-nopad of 36 bytes (lowercase).
     // 36 zero-bytes → 58 'a' chars. blake3 of any real content won't produce all-zeros,
     // so this CID is valid format but never stored.
     let zero_cid = format!("b{}", "a".repeat(58));
-    let (status, _body) = s.get(
+    let (status, _body) = s.get_with_auth(
         &format!("/xrpc/ai.gftd.apps.kotoba.vault.get?cid={zero_cid}"),
+        &tok,
     ).await;
     assert_eq!(status, 404);
 }
@@ -1151,7 +1166,8 @@ async fn vault_get_unknown_cid_returns_404() {
 #[tokio::test]
 async fn vault_get_missing_cid_param_returns_400() {
     let s = TestServer::start(false).await;
-    let (status, _body) = s.get("/xrpc/ai.gftd.apps.kotoba.vault.get").await;
+    let tok = tenant_jwt(&s.operator_did);
+    let (status, _body) = s.get_with_auth("/xrpc/ai.gftd.apps.kotoba.vault.get", &tok).await;
     assert_eq!(status, 400);
 }
 
