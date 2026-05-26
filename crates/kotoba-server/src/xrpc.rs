@@ -468,7 +468,7 @@ pub async fn invoke_run(
     // 50 MiB wasm cap (a full WASM module rarely exceeds a few MiB; 50 MiB is generous).
     const MAX_WASM_B64_LEN: usize = 50 * 1024 * 1024;
     // 1 MiB ctx cap — context CBOR should be small structured data, not a data dump.
-    const MAX_CTX_B64_LEN:  usize = 1 * 1024 * 1024;
+    const MAX_CTX_B64_LEN:  usize = 1024 * 1024;
 
     let wasm_bytes: Vec<u8> = match &req.wasm_b64 {
         Some(b64) => {

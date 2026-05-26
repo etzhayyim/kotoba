@@ -96,7 +96,7 @@ pub async fn fingerprint_middleware(
     let node_id  = state.local_node_id.0;
     let req_cid  = request_cid(&method, &path, ts, &node_id);
     let graph    = audit_graph_cid();
-    let node_hex = hex::encode(&node_id);
+    let node_hex = hex::encode(node_id);
 
     // Fire-and-forget: clone what we need into the background task.
     let quad_store = Arc::clone(&state.quad_store);

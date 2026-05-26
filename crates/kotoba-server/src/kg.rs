@@ -547,16 +547,14 @@ pub async fn kg_ingest(
                 format!("labelVec exceeds {MAX_KG_VEC_DIMS} dimensions")}))).into_response();
     }
     // Validate per-field lengths to prevent oversized individual quads
-    for f in [&req.qid, &req.kind, &req.label_ja, &req.label_en, &req.license,
-              &req.extractor, &req.valid_from, &req.valid_to, &req.ingested_at, &req.source_id] {
-        if let Some(v) = f {
-            if v.len() > MAX_KG_FIELD_LEN {
-                return (StatusCode::BAD_REQUEST,
-                    AxumJson(serde_json::json!({"ok": false, "error":
-                        format!("field value exceeds {MAX_KG_FIELD_LEN} bytes")}))).into_response();
-            }
-        }
-    }
+    for v in [&req.qid, &req.kind, &req.label_ja, &req.label_en, &req.license,
+              &req.extractor, &req.valid_from, &req.valid_to, &req.ingested_at, &req.source_id].into_iter().flatten() {
+                  if v.len() > MAX_KG_FIELD_LEN {
+                      return (StatusCode::BAD_REQUEST,
+                          AxumJson(serde_json::json!({"ok": false, "error":
+                              format!("field value exceeds {MAX_KG_FIELD_LEN} bytes")}))).into_response();
+                  }
+              }
     use kotoba_kqe::quad::Quad;
 
     let graph   = kg_graph_cid();

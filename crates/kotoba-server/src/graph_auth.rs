@@ -91,7 +91,7 @@ impl AccessDenied {
 /// The signature is NOT verified — the edge BFF is the trust boundary.
 pub(crate) fn jwt_sub(token: &str) -> Option<String> {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-    let payload_b64 = token.splitn(3, '.').nth(1)?;
+    let payload_b64 = token.split('.').nth(1)?;
     let bytes = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
     let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     json.get("sub").and_then(|v| v.as_str()).map(str::to_owned)
@@ -104,7 +104,7 @@ pub(crate) fn jwt_exp_elapsed(token: &str) -> bool {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
     // A JWT has three dot-separated segments: header.payload.signature
-    let payload_b64 = match token.splitn(3, '.').nth(1) {
+    let payload_b64 = match token.split('.').nth(1) {
         Some(p) => p,
         None => return false,
     };

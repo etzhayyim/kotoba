@@ -314,12 +314,12 @@ impl KotobaState {
 
         // Build a temporary in-memory KseStore if no persistent one is available
         let sc: SovereignCrypto = if let Some(ref ks) = self.kse_store {
-            SovereignCrypto::load_or_genesis(&*identity, ks, &self.block_store).await?
+            SovereignCrypto::load_or_genesis(&identity, ks, &self.block_store).await?
         } else {
             // No persistent KseStore — generate ephemeral key in a temp KseStore
             let fs = object_store::memory::InMemory::new();
             let tmp_ks = KseStore::new(Arc::new(fs), "kse/");
-            SovereignCrypto::load_or_genesis(&*identity, &tmp_ks, &self.block_store).await?
+            SovereignCrypto::load_or_genesis(&identity, &tmp_ks, &self.block_store).await?
         };
 
         self.crypto = Some(Arc::new(sc));

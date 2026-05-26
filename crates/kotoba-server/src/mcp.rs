@@ -742,7 +742,7 @@ async fn call_tool(
             let ctx_b64      = get_str("ctx_cbor_b64")?;
             const MAX_SUPERSTEPS: u64 = 256;
             const MAX_WASM_B64_LEN: usize = 50 * 1024 * 1024;
-            const MAX_CTX_B64_LEN:  usize = 1 * 1024 * 1024;
+            const MAX_CTX_B64_LEN:  usize = 1024 * 1024;
             let max_ss       = args.get("max_supersteps")
                 .and_then(Value::as_u64)
                 .unwrap_or(32)

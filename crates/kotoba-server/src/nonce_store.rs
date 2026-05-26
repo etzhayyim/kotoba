@@ -14,6 +14,12 @@ pub struct NonceStore {
     inner: RwLock<HashMap<String, u64>>, // nonce → expiry_unix
 }
 
+impl Default for NonceStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NonceStore {
     pub fn new() -> Self {
         Self { inner: RwLock::new(HashMap::new()) }
