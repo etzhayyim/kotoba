@@ -3,12 +3,14 @@ pub mod cacao;
 pub mod delegation;
 pub mod eth;
 pub mod did_key;
+pub mod resolver;
 
 pub use did_document::{DidDocument, VerificationMethod, ServiceEndpoint};
 pub use cacao::{Cacao, CacaoHeader, CacaoPayload, CacaoSig, CacaoError};
 pub use delegation::{DelegationChain, DelegationError};
 pub use eth::{eth_address_to_erc725_did, personal_sign_hash, recover_eth_address};
 pub use did_key::{parse_ed25519_did_key, ed25519_pubkey_to_did_key};
+pub use resolver::{DidDocumentResolver, DidResolverError, InMemoryDidResolver};
 
 #[cfg(test)]
 mod tests {

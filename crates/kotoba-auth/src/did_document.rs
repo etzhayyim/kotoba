@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+const X25519_KEY_TYPE: &str = "X25519KeyAgreementKey2020";
+
 /// DID Document — Kotoba Vertex declaration
 /// capabilityInvocation key → Source Chain write right
 /// capabilityDelegation key → CACAO delegation issuance
@@ -66,5 +68,23 @@ impl DidDocument {
                 _ => None,
             })
             .unwrap_or_default()
+    }
+
+    /// Extract the X25519 key agreement public key from `verificationMethod`.
+    ///
+    /// Returns `None` if no `X25519KeyAgreementKey2020` entry is present or
+    /// if the multibase-encoded key cannot be decoded to exactly 32 bytes.
+    pub fn x25519_public_key(&self) -> Option<[u8; 32]> {
+        let vm = self.verification_method
+            .iter()
+            .find(|vm| vm.key_type == X25519_KEY_TYPE)?;
+
+        let (_base, raw) = multibase::decode(&vm.public_key_multibase).ok()?;
+        if raw.len() != 32 {
+            return None;
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&raw);
+        Some(key)
     }
 }

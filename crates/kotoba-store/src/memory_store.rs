@@ -48,4 +48,8 @@ impl BlockStore for MemoryBlockStore {
     fn is_pinned(&self, cid: &KotobaCid) -> bool {
         self.pinned.read().unwrap().contains(&cid.0)
     }
+
+    fn all_cids(&self) -> Vec<KotobaCid> {
+        self.blocks.read().unwrap().keys().map(|k| KotobaCid(*k)).collect()
+    }
 }

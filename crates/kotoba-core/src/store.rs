@@ -25,4 +25,8 @@ pub trait BlockStore: Send + Sync {
 
     /// Returns true if this CID is currently pinned.
     fn is_pinned(&self, cid: &KotobaCid) -> bool { let _ = cid; false }
+
+    /// Enumerate all CIDs stored in this store.  Default returns empty vec for
+    /// stores that don't support listing (S3, iroh).  Used by `QuadStore::gc_dead_blocks`.
+    fn all_cids(&self) -> Vec<KotobaCid> { vec![] }
 }

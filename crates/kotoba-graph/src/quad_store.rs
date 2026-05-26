@@ -573,6 +573,38 @@ impl QuadStore {
         tracing::info!(%cid, author, seq, "QuadStore committed (4-index)");
         Ok(cid)
     }
+
+    /// Mark-sweep GC: delete blocks in the store not reachable from any commit in the DAG.
+    ///
+    /// Walk strategy: every commit stored in the in-memory CommitDag is treated as a GC root.
+    /// Each commit's 4 ProllyTree roots are recursively walked to collect all live block CIDs.
+    /// Blocks returned by `block_store.all_cids()` but absent from the live set are deleted.
+    ///
+    /// Stores that don't implement `all_cids()` (S3, iroh) return an empty vec — in that case
+    /// this function safely returns 0 without modifying anything.
+    ///
+    /// Returns the count of deleted blocks.
+    pub async fn gc_dead_blocks(&self) -> anyhow::Result<usize> {
+        let live = {
+            let dag = self.commit_dag.read().await;
+            dag.all_live_cids(&*self.block_store)?
+        };
+        let all = self.block_store.all_cids();
+        let mut deleted = 0usize;
+        for cid in all {
+            if !live.contains(&cid) {
+                if let Err(e) = self.block_store.delete(&cid) {
+                    tracing::warn!("gc_dead_blocks: delete failed for {}: {e}", cid.to_multibase());
+                } else {
+                    deleted += 1;
+                }
+            }
+        }
+        if deleted > 0 {
+            tracing::info!(deleted, "gc_dead_blocks: collected {deleted} unreachable blocks");
+        }
+        Ok(deleted)
+    }
 }
 
 #[cfg(test)]
@@ -712,5 +744,44 @@ mod tests {
             quads.iter().map(|q| q.predicate.as_str()).collect();
         assert!(predicates.contains("name"),  "name predicate expected");
         assert!(predicates.contains("knows"), "knows predicate expected");
+    }
+
+    #[tokio::test]
+    async fn gc_dead_blocks_removes_orphaned_blocks_and_keeps_live() {
+        let journal     = Arc::new(Journal::new());
+        let block_store = Arc::new(MemoryBlockStore::new());
+        let qs = QuadStore::new(Arc::clone(&journal), Arc::clone(&block_store) as _);
+        let graph = KotobaCid::from_bytes(b"gc-graph");
+
+        // Commit 1 — writes ProllyTree blocks + 1 CAR bundle per commit
+        qs.assert(make_quad("gc-graph", "a", "p", "v1")).await;
+        qs.commit("did:test", graph.clone(), 1).await.unwrap();
+
+        // Commit 2 — writes another set of ProllyTree blocks + CAR bundle
+        qs.assert(make_quad("gc-graph", "b", "p", "v2")).await;
+        qs.commit("did:test", graph.clone(), 2).await.unwrap();
+
+        // Record the live-only count: all_cids minus CAR bundles
+        // (CAR bundles stored per commit are fire-and-forget and not reachable via DAG traversal)
+        let count_before_orphan = block_store.block_count();
+
+        // Inject a truly orphaned block — not referenced by any commit or tree
+        let orphan_cid = KotobaCid::from_bytes(b"orphan-data");
+        block_store.put(&orphan_cid, b"orphan payload").unwrap();
+        assert_eq!(block_store.block_count(), count_before_orphan + 1);
+
+        // GC: deletes our explicit orphan + the per-commit CAR bundles (also unreachable)
+        let deleted = qs.gc_dead_blocks().await.unwrap();
+        assert!(deleted >= 1, "at least the explicit orphan should be deleted");
+        assert!(!block_store.has(&orphan_cid), "explicit orphan must be gone");
+
+        // ProllyTree blocks + commit blocks must remain (all in CommitDag live set)
+        let remaining = block_store.block_count();
+        // We deleted CAR bundles (2 commits × 1 CAR each) + 1 explicit orphan = ≥3 removed
+        // Exact count depends on how many tree blocks commit() builds — just assert invariants.
+        assert!(remaining > 0, "live blocks must survive GC");
+        // Running GC a second time on an already-clean store is idempotent
+        let deleted2 = qs.gc_dead_blocks().await.unwrap();
+        assert_eq!(deleted2, 0, "second GC pass on clean store removes nothing");
     }
 }

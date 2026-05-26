@@ -117,6 +117,29 @@ impl CommitDag {
             .collect()
     }
 
+    /// Compute the set of all live block CIDs referenced by every commit in the DAG.
+    ///
+    /// Includes: commit blocks + all ProllyTree block CIDs reachable from each commit's
+    /// 4 index roots (eavt, aevt, avet, vaet).  Used by `QuadStore::gc_dead_blocks`.
+    pub fn all_live_cids(
+        &self,
+        store: &dyn BlockStore,
+    ) -> anyhow::Result<std::collections::HashSet<KotobaCid>> {
+        use kotoba_core::prolly::ProllyTree;
+        let mut live = std::collections::HashSet::new();
+        for commit in self.commits.values() {
+            live.insert(commit.cid.clone());
+            let roots = std::iter::once(&commit.root)
+                .chain(commit.index_roots.values());
+            for root in roots {
+                for cid in ProllyTree::walk_all_cids(root, store)? {
+                    live.insert(cid);
+                }
+            }
+        }
+        Ok(live)
+    }
+
     /// Persist the head commit for `graph_cid` to the block store.
     pub fn persist_head(
         &self,
