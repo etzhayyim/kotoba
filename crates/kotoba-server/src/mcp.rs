@@ -442,6 +442,12 @@ async fn call_tool(
             let model_cid = get_str("model_cid")?;
             let graph     = get_str("graph")?;
 
+            const MAX_EMBED_TEXT_LEN: usize = 64 * 1024;
+            if text.len() > MAX_EMBED_TEXT_LEN {
+                return Err((ERR_INVALID_PARAMS,
+                    format!("text too large ({} bytes, limit {MAX_EMBED_TEXT_LEN})", text.len())));
+            }
+
             let doc_cid   = KotobaCid::from_bytes(doc_cid.as_bytes());
             let model_cid = KotobaCid::from_bytes(model_cid.as_bytes());
             let graph_cid = KotobaCid::from_bytes(graph.as_bytes());
@@ -488,6 +494,11 @@ async fn call_tool(
                 .map(|a| a.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect())
                 .unwrap_or_default();
 
+            const MAX_WEIGHT_B64_LEN: usize = 512 * 1024 * 1024;
+            if data_b64.len() > MAX_WEIGHT_B64_LEN {
+                return Err((ERR_INVALID_PARAMS,
+                    format!("data_b64 too large ({} bytes, limit {MAX_WEIGHT_B64_LEN})", data_b64.len())));
+            }
             let bytes = B64.decode(&data_b64)
                 .map_err(|e| (ERR_INVALID_PARAMS, e.to_string()))?;
 
@@ -536,6 +547,11 @@ async fn call_tool(
                 .and_then(Value::as_u64)
                 .ok_or_else(|| (ERR_INVALID_PARAMS, "missing required field: rank".into()))? as u32;
 
+            const MAX_ADAPTER_B64_LEN: usize = 128 * 1024 * 1024;
+            if adapter_b64.len() > MAX_ADAPTER_B64_LEN {
+                return Err((ERR_INVALID_PARAMS,
+                    format!("adapter_b64 too large ({} bytes, limit {MAX_ADAPTER_B64_LEN})", adapter_b64.len())));
+            }
             let bytes = B64.decode(&adapter_b64)
                 .map_err(|e| (ERR_INVALID_PARAMS, e.to_string()))?;
 
@@ -692,10 +708,22 @@ async fn call_tool(
             let wasm_b64     = get_str("wasm_b64")?;
             let agent_did    = get_str("agent_did")?;
             let ctx_b64      = get_str("ctx_cbor_b64")?;
+            const MAX_SUPERSTEPS: u64 = 256;
+            const MAX_WASM_B64_LEN: usize = 50 * 1024 * 1024;
+            const MAX_CTX_B64_LEN:  usize = 1 * 1024 * 1024;
             let max_ss       = args.get("max_supersteps")
                 .and_then(Value::as_u64)
-                .unwrap_or(32) as u32;
+                .unwrap_or(32)
+                .min(MAX_SUPERSTEPS) as u32;
 
+            if wasm_b64.len() > MAX_WASM_B64_LEN {
+                return Err((ERR_INVALID_PARAMS,
+                    format!("wasm_b64 too large ({} bytes, limit {MAX_WASM_B64_LEN})", wasm_b64.len())));
+            }
+            if ctx_b64.len() > MAX_CTX_B64_LEN {
+                return Err((ERR_INVALID_PARAMS,
+                    format!("ctx_cbor_b64 too large ({} bytes, limit {MAX_CTX_B64_LEN})", ctx_b64.len())));
+            }
             let wasm_bytes = B64.decode(&wasm_b64)
                 .map_err(|e| (ERR_INVALID_PARAMS, format!("invalid wasm_b64: {e}")))?;
             let ctx_cbor = B64.decode(&ctx_b64)
