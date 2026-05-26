@@ -85,6 +85,18 @@ impl AccessDenied {
 
 /// Decode the JWT payload segment and return `true` if the `exp` claim is in the past.
 ///
+/// Extract the `sub` claim from an unsigned (or pre-verified) JWT.
+///
+/// Returns `None` if the token is malformed or has no `sub` claim.
+/// The signature is NOT verified — the edge BFF is the trust boundary.
+pub(crate) fn jwt_sub(token: &str) -> Option<String> {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    let payload_b64 = token.splitn(3, '.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    json.get("sub").and_then(|v| v.as_str()).map(str::to_owned)
+}
+
 /// This is a defense-in-depth check only — the JWT signature is NOT verified here.
 /// The edge BFF (AT Protocol PDS / CF Worker) is the trust boundary for signatures.
 /// Returns `false` for any token that cannot be decoded or has no `exp` claim.
@@ -307,5 +319,29 @@ mod tests {
         let payload = URL_SAFE_NO_PAD.encode(r#"{"sub":"alice"}"#);
         let token   = format!("{header}.{payload}.sig");
         assert!(!jwt_exp_elapsed(&token));
+    }
+
+    #[test]
+    fn jwt_sub_extracts_sub_claim() {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        let header  = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(r#"{"sub":"did:key:zAlice","exp":9999999999}"#);
+        let token   = format!("{header}.{payload}.sig");
+        assert_eq!(jwt_sub(&token).as_deref(), Some("did:key:zAlice"));
+    }
+
+    #[test]
+    fn jwt_sub_returns_none_for_malformed() {
+        assert!(jwt_sub("notajwt").is_none());
+        assert!(jwt_sub("a.b").is_none()); // no sig segment but 2 parts
+    }
+
+    #[test]
+    fn jwt_sub_returns_none_when_sub_absent() {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        let header  = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(r#"{"exp":9999999999}"#);
+        let token   = format!("{header}.{payload}.sig");
+        assert!(jwt_sub(&token).is_none());
     }
 }

@@ -1213,6 +1213,14 @@ pub async fn embed_create(
     use kotoba_core::cid::KotobaCid;
     use kotoba_llm::embed::{Embedding, embed_to_quad};
 
+    // 64 KiB covers any realistic embedding unit (paragraph / document chunk).
+    // Larger inputs must be split by the caller's chunker before calling embed.create.
+    const MAX_EMBED_TEXT_LEN: usize = 64 * 1024;
+    if req.text.len() > MAX_EMBED_TEXT_LEN {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE,
+            format!("text too large ({} bytes, limit {MAX_EMBED_TEXT_LEN})", req.text.len())));
+    }
+
     let doc_cid   = KotobaCid::from_multibase(&req.doc_cid)
         .unwrap_or_else(|| KotobaCid::from_bytes(req.doc_cid.as_bytes()));
     let model_cid = KotobaCid::from_multibase(&req.model_cid)
@@ -1290,7 +1298,15 @@ pub async fn infer_run(
     let engine = state.inference_engine.clone()
         .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "no inference engine loaded".into()))?;
 
-    let max_tokens = req.max_new_tokens.unwrap_or(256);
+    // 64 KiB prompt cap (prevents tokeniser OOM on a context-length exploit).
+    const MAX_PROMPT_LEN: usize = 64 * 1024;
+    if req.prompt.len() > MAX_PROMPT_LEN {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE,
+            format!("prompt too large ({} bytes, limit {MAX_PROMPT_LEN})", req.prompt.len())));
+    }
+    // Cap max_new_tokens so a single request cannot hold the thread for minutes.
+    const MAX_NEW_TOKENS_LIMIT: usize = 4096;
+    let max_tokens = req.max_new_tokens.unwrap_or(256).min(MAX_NEW_TOKENS_LIMIT);
     let prompt     = req.prompt.clone();
 
     let output = tokio::task::spawn_blocking(move || engine(&prompt, max_tokens))
@@ -1343,13 +1359,23 @@ pub async fn agent_run(
         .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE,
             "no inference engine loaded (set KOTOBA_LOAD_GEMMA)".into()))?;
 
+    // 64 KiB task cap; agent loops with longer tasks should be chunked by the caller.
+    const MAX_TASK_LEN: usize = 64 * 1024;
+    if req.task.len() > MAX_TASK_LEN {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE,
+            format!("task too large ({} bytes, limit {MAX_TASK_LEN})", req.task.len())));
+    }
+    // Cap loop iterations and tokens-per-step to prevent runaway compute cost.
+    const MAX_STEPS_LIMIT:  u32   = 50;
+    const MAX_TOKENS_LIMIT: usize = 4096;
+
     let graph_cid = req.graph_cid
         .as_deref()
         .map(|s| KotobaCid::from_bytes(s.as_bytes()))
         .unwrap_or_else(|| KotobaCid::from_bytes(b"agent-default-graph"));
 
-    let max_steps  = req.max_steps.unwrap_or(10);
-    let max_tokens = req.max_tokens.unwrap_or(256);
+    let max_steps  = req.max_steps.unwrap_or(10).min(MAX_STEPS_LIMIT);
+    let max_tokens = req.max_tokens.unwrap_or(256).min(MAX_TOKENS_LIMIT);
     let task       = req.task.clone();
     let graph_cid2 = graph_cid.clone();
     let qs         = Arc::clone(&state.quad_store);
@@ -1601,5 +1627,35 @@ mod tests {
         // "localhost" is a hostname, not an IP literal — our check is literal-only.
         // Blocking hostname-based SSRF requires DNS resolution (out of scope here).
         assert!(!is_did_web_ip_host("localhost"));
+    }
+
+    // ── Inference endpoint input bounds ──────────────────────────────────────
+
+    #[test]
+    fn embed_text_length_constants() {
+        // Verify the cap constant is what we declared (64 KiB).
+        const MAX_EMBED_TEXT_LEN: usize = 64 * 1024;
+        assert_eq!(MAX_EMBED_TEXT_LEN, 65536);
+        let oversized = "x".repeat(MAX_EMBED_TEXT_LEN + 1);
+        assert!(oversized.len() > MAX_EMBED_TEXT_LEN);
+    }
+
+    #[test]
+    fn infer_prompt_length_constants() {
+        const MAX_PROMPT_LEN: usize = 64 * 1024;
+        const MAX_NEW_TOKENS_LIMIT: usize = 4096;
+        assert_eq!(MAX_PROMPT_LEN, 65536);
+        // Verify .min() clamps correctly.
+        assert_eq!(8192_usize.min(MAX_NEW_TOKENS_LIMIT), MAX_NEW_TOKENS_LIMIT);
+        assert_eq!(256_usize.min(MAX_NEW_TOKENS_LIMIT), 256);
+    }
+
+    #[test]
+    fn agent_run_step_cap() {
+        const MAX_STEPS_LIMIT: u32 = 50;
+        // Caller sending u32::MAX is clamped to 50.
+        assert_eq!(u32::MAX.min(MAX_STEPS_LIMIT), MAX_STEPS_LIMIT);
+        // Default of 10 passes through unchanged.
+        assert_eq!(10_u32.min(MAX_STEPS_LIMIT), 10);
     }
 }

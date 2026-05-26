@@ -19,20 +19,54 @@ pub const NSID_PIN_DELETE:     &str = "ai.gftd.apps.kotobase.pinDelete";
 pub const NSID_USAGE_GET:      &str = "ai.gftd.apps.kotobase.usageGet";
 
 use std::sync::Arc;
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{Json, extract::State, http::{HeaderMap, StatusCode}, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 use crate::server::KotobaState;
 use kotoba_kqe::quad::{Quad, QuadObject};
 use kotoba_core::cid::KotobaCid;
 
+/// Extract Bearer token string from `Authorization: Bearer <token>` header.
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let v = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
+    v.strip_prefix("Bearer ")
+}
+
+/// Verify that the caller's JWT `sub` matches `tenant_did` OR `operator_did`.
+///
+/// Returns `Err(401)` when:
+/// - No `Authorization: Bearer <token>` header is present.
+/// - The token has no `sub` claim.
+/// - `sub` is neither `tenant_did` nor `operator_did`.
+///
+/// Signature is NOT verified here — the edge BFF is the trust boundary.
+fn require_did_ownership(
+    headers: &HeaderMap,
+    tenant_did: &str,
+    operator_did: &str,
+) -> Result<(), (StatusCode, String)> {
+    let token = bearer_token(headers)
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED,
+            "Authorization: Bearer <token> required".to_string()))?;
+    let sub = crate::graph_auth::jwt_sub(token)
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED,
+            "Bearer token missing sub claim".to_string()))?;
+    if sub == tenant_did || sub == operator_did {
+        Ok(())
+    } else {
+        Err((StatusCode::UNAUTHORIZED,
+            format!("Bearer sub {sub:?} does not match tenant_did {tenant_did:?}")))
+    }
+}
+
 // ── Input validation ──────────────────────────────────────────────────────
 
-const MAX_DID_LEN:     usize = 512;
-const MAX_NAME_LEN:    usize = 256;
-const MAX_TIER_LEN:    usize =  32;
-const MAX_SUBJECT_LEN: usize = 512;
+const MAX_DID_LEN:       usize = 512;
+const MAX_NAME_LEN:      usize = 256;
+const MAX_TIER_LEN:      usize =  32;
+const MAX_SUBJECT_LEN:   usize = 512;
 const MAX_PREDICATE_LEN: usize = 256;
-const MAX_OBJECT_LEN:  usize = 65_536; // 64 KiB per triple value
+const MAX_OBJECT_LEN:    usize = 65_536; // 64 KiB per triple value
+const MAX_TRIPLES_PER_PIN: usize = 1_024; // prevent DoS via unbounded triple arrays
 
 fn validate_did(did: &str) -> Result<(), (StatusCode, String)> {
     if did.is_empty() {
@@ -315,9 +349,11 @@ pub struct UsageGetResp {
 
 pub async fn handle_account_create(
     State(state): State<Arc<KotobaState>>,
+    headers: HeaderMap,
     Json(req): Json<AccountCreateReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     validate_did(&req.tenant_did)?;
+    require_did_ownership(&headers, &req.tenant_did, &state.operator_did)?;
 
     let tier_raw = req.tier.as_deref().unwrap_or("free");
     if tier_raw.len() > MAX_TIER_LEN {
@@ -372,10 +408,18 @@ pub async fn handle_account_status(
 
 pub async fn handle_pin_create(
     State(state): State<Arc<KotobaState>>,
+    headers: HeaderMap,
     Json(req): Json<PinCreateReq>,
 ) -> impl IntoResponse {
     // Input validation
     if let Err((status, msg)) = validate_did(&req.tenant_did) {
+        return (status, Json(PinCreateResp {
+            ok: false, pin_id: String::new(), cid: String::new(),
+            status: "failed".into(), size_bytes: 0,
+            error: Some(msg),
+        }));
+    }
+    if let Err((status, msg)) = require_did_ownership(&headers, &req.tenant_did, &state.operator_did) {
         return (status, Json(PinCreateResp {
             ok: false, pin_id: String::new(), cid: String::new(),
             status: "failed".into(), size_bytes: 0,
@@ -406,7 +450,15 @@ pub async fn handle_pin_create(
                 error: Some(format!("quads.graph must be 1-{MAX_SUBJECT_LEN} bytes")),
             }));
         }
-        for t in qi.triples.as_deref().unwrap_or(&[]) {
+        let triples = qi.triples.as_deref().unwrap_or(&[]);
+        if triples.len() > MAX_TRIPLES_PER_PIN {
+            return (StatusCode::BAD_REQUEST, Json(PinCreateResp {
+                ok: false, pin_id: String::new(), cid: String::new(),
+                status: "failed".into(), size_bytes: 0,
+                error: Some(format!("quads.triples exceeds limit of {MAX_TRIPLES_PER_PIN}")),
+            }));
+        }
+        for t in triples {
             if let Err((status, msg)) = validate_triple(t) {
                 return (status, Json(PinCreateResp {
                     ok: false, pin_id: String::new(), cid: String::new(),
@@ -438,7 +490,7 @@ pub async fn handle_pin_create(
             error: Some(format!("QuotaExceeded: tier={tier} pins={used_pins}/{quota_pins}")),
         }));
     }
-    if quota_bytes >= 0 && size > 0 && size <= quota_bytes && used_bytes + size > quota_bytes {
+    if quota_bytes >= 0 && size > 0 && used_bytes + size > quota_bytes {
         return (StatusCode::TOO_MANY_REQUESTS, Json(PinCreateResp {
             ok: false, pin_id: String::new(), cid: String::new(),
             status: "failed".into(), size_bytes: 0,
@@ -557,9 +609,11 @@ pub async fn handle_pin_list(
 
 pub async fn handle_pin_delete(
     State(state): State<Arc<KotobaState>>,
+    headers: HeaderMap,
     Json(req): Json<PinDeleteReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     validate_did(&req.tenant_did)?;
+    require_did_ownership(&headers, &req.tenant_did, &state.operator_did)?;
     let g     = format!("kotobase/pins/{}", req.tenant_did);
     let gc    = cid(&g);
     let subj  = cid(&req.pin_id);

@@ -371,7 +371,7 @@ async fn mcp_tools_list_returns_expected_count() {
     ).await;
     assert_eq!(status, 200);
     let tools = body["result"]["tools"].as_array().expect("tools");
-    assert_eq!(tools.len(), 14);
+    assert_eq!(tools.len(), 15);
 }
 
 #[tokio::test]
@@ -1243,17 +1243,29 @@ const KOTOBASE_PIN_DELETE:      &str = "/xrpc/ai.gftd.apps.kotobase.pinDelete";
 const KOTOBASE_PIN_LIST:        &str = "/xrpc/ai.gftd.apps.kotobase.pinList";
 const KOTOBASE_USAGE_GET:       &str = "/xrpc/ai.gftd.apps.kotobase.usageGet";
 
+/// Build a minimal JWT with `sub = did` and a far-future `exp`.
+/// Signature is intentionally fake — the server does not verify JWT signatures.
+fn tenant_jwt(did: &str) -> String {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    let header  = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+    let payload = URL_SAFE_NO_PAD.encode(
+        format!(r#"{{"sub":"{did}","exp":9999999999}}"#).as_bytes()
+    );
+    format!("{header}.{payload}.fakesig")
+}
+
 #[tokio::test]
 async fn kotobase_account_create_roundtrip() {
-    let s = TestServer::start(false).await;
-    let (status, body) = s.post(KOTOBASE_ACCOUNT_CREATE, json!({
-        "tenant_did": "did:key:zAlice",
+    let s   = TestServer::start(false).await;
+    let did = "did:key:zAlice";
+    let (status, body) = s.post_auth(KOTOBASE_ACCOUNT_CREATE, json!({
+        "tenant_did": did,
         "tier": "free",
-    })).await;
+    }), &tenant_jwt(did)).await;
     assert_eq!(status, 200, "{body}");
     assert!(body["ok"].as_bool().unwrap_or(false), "{body}");
     assert_eq!(body["tier"], "free");
-    assert_eq!(body["tenant_did"], "did:key:zAlice");
+    assert_eq!(body["tenant_did"], did);
 }
 
 #[tokio::test]
@@ -1276,36 +1288,59 @@ async fn kotobase_account_create_empty_did_returns_400() {
 
 #[tokio::test]
 async fn kotobase_account_create_unknown_tier_returns_400() {
-    let s = TestServer::start(false).await;
-    let (status, _body) = s.post(KOTOBASE_ACCOUNT_CREATE, json!({
-        "tenant_did": "did:key:zAlice2",
+    let s   = TestServer::start(false).await;
+    let did = "did:key:zAlice2";
+    let (status, _body) = s.post_auth(KOTOBASE_ACCOUNT_CREATE, json!({
+        "tenant_did": did,
         "tier": "enterprise_ultra",
-    })).await;
+    }), &tenant_jwt(did)).await;
     assert_eq!(status, 400);
 }
 
 #[tokio::test]
 async fn kotobase_pin_create_negative_size_returns_400() {
-    let s = TestServer::start(false).await;
-    let (status, body) = s.post(KOTOBASE_PIN_CREATE, json!({
-        "tenant_did": "did:key:zAlice3",
+    let s   = TestServer::start(false).await;
+    let did = "did:key:zAlice3";
+    let (status, body) = s.post_auth(KOTOBASE_PIN_CREATE, json!({
+        "tenant_did": did,
         "name": "my-pin",
         "cid": "bafytest",
         "size_hint_bytes": -1_i64,
-    })).await;
+    }), &tenant_jwt(did)).await;
     assert_eq!(status, 400, "{body}");
 }
 
 #[tokio::test]
 async fn kotobase_pin_create_name_too_long_returns_400() {
-    let s = TestServer::start(false).await;
+    let s         = TestServer::start(false).await;
+    let did       = "did:key:zAlice4";
     let long_name = "x".repeat(300);
-    let (status, body) = s.post(KOTOBASE_PIN_CREATE, json!({
-        "tenant_did": "did:key:zAlice4",
+    let (status, body) = s.post_auth(KOTOBASE_PIN_CREATE, json!({
+        "tenant_did": did,
         "name": long_name,
         "cid": "bafytest",
-    })).await;
+    }), &tenant_jwt(did)).await;
     assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn kotobase_pin_create_too_many_triples_returns_400() {
+    let s   = TestServer::start(false).await;
+    let did = "did:key:zAlice5";
+    // 1025 triples exceeds MAX_TRIPLES_PER_PIN = 1024
+    let triples: Vec<serde_json::Value> = (0..1025u32).map(|i| json!({
+        "subject":   format!("s{i}"),
+        "predicate": "p",
+        "object":    "o",
+    })).collect();
+    let (status, body) = s.post_auth(KOTOBASE_PIN_CREATE, json!({
+        "tenant_did": did,
+        "name": "big-triples",
+        "quads": { "graph": "test-graph", "triples": triples },
+    }), &tenant_jwt(did)).await;
+    assert_eq!(status, 400, "{body}");
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(err.contains("1024"), "error should mention limit: {body}");
 }
 
 #[tokio::test]
@@ -1328,27 +1363,28 @@ async fn kotobase_usage_get_empty_did_returns_400() {
 
 #[tokio::test]
 async fn kotobase_account_and_pin_lifecycle() {
-    let s = TestServer::start(false).await;
+    let s   = TestServer::start(false).await;
     let did = "did:key:zLifecycle1";
+    let tok = tenant_jwt(did);
 
     // Create account
-    let (status, body) = s.post(KOTOBASE_ACCOUNT_CREATE, json!({
+    let (status, body) = s.post_auth(KOTOBASE_ACCOUNT_CREATE, json!({
         "tenant_did": did,
-    })).await;
+    }), &tok).await;
     assert_eq!(status, 200, "{body}");
 
     // Pin a CID
-    let (status, body) = s.post(KOTOBASE_PIN_CREATE, json!({
+    let (status, body) = s.post_auth(KOTOBASE_PIN_CREATE, json!({
         "tenant_did": did,
         "name": "test-pin",
         "cid": "bafybeiczsscdsbs7ffqz55asqdf3smv6klcw3gofszvwlyarci47bgf354",
         "size_hint_bytes": 1024_i64,
-    })).await;
+    }), &tok).await;
     assert_eq!(status, 200, "{body}");
     assert!(body["ok"].as_bool().unwrap_or(false), "{body}");
     assert!(!body["pin_id"].as_str().unwrap_or("").is_empty(), "{body}");
 
-    // Check usage
+    // Check usage (read-only, no auth required)
     let (status, body) = s.post(KOTOBASE_USAGE_GET, json!({
         "tenant_did": did,
     })).await;
@@ -1360,11 +1396,13 @@ async fn kotobase_account_and_pin_lifecycle() {
 async fn kotobase_account_status_returns_tier_and_quota() {
     let s   = TestServer::start(false).await;
     let did = "did:key:zStatus1";
+    let tok = tenant_jwt(did);
 
     // account must exist first
-    let (status, _) = s.post(KOTOBASE_ACCOUNT_CREATE, json!({ "tenant_did": did })).await;
+    let (status, _) = s.post_auth(KOTOBASE_ACCOUNT_CREATE, json!({ "tenant_did": did }), &tok).await;
     assert_eq!(status, 200);
 
+    // account_status is read-only — no auth required
     let (status, body) = s.post(KOTOBASE_ACCOUNT_STATUS, json!({ "tenant_did": did })).await;
     assert_eq!(status, 200, "{body}");
     assert!(body["ok"].as_bool().unwrap_or(false), "{body}");
@@ -1380,30 +1418,31 @@ async fn kotobase_account_status_returns_tier_and_quota() {
 async fn kotobase_pin_delete_removes_pin() {
     let s   = TestServer::start(false).await;
     let did = "did:key:zDelete1";
+    let tok = tenant_jwt(did);
 
     // create account
-    let (status, _) = s.post(KOTOBASE_ACCOUNT_CREATE, json!({ "tenant_did": did })).await;
+    let (status, _) = s.post_auth(KOTOBASE_ACCOUNT_CREATE, json!({ "tenant_did": did }), &tok).await;
     assert_eq!(status, 200);
 
     // pin a CID
-    let (status, body) = s.post(KOTOBASE_PIN_CREATE, json!({
+    let (status, body) = s.post_auth(KOTOBASE_PIN_CREATE, json!({
         "tenant_did": did,
         "name": "del-test",
         "cid": "bafybeiczsscdsbs7ffqz55asqdf3smv6klcw3gofszvwlyarci47bgf354",
         "size_hint_bytes": 512_i64,
-    })).await;
+    }), &tok).await;
     assert_eq!(status, 200, "{body}");
     let pin_id = body["pin_id"].as_str().expect("pin_id").to_string();
 
     // delete the pin
-    let (status, body) = s.post(KOTOBASE_PIN_DELETE, json!({
+    let (status, body) = s.post_auth(KOTOBASE_PIN_DELETE, json!({
         "tenant_did": did,
         "pin_id": pin_id,
-    })).await;
+    }), &tok).await;
     assert_eq!(status, 200, "{body}");
     assert!(body["ok"].as_bool().unwrap_or(false), "{body}");
 
-    // list should now be empty
+    // list should now be empty (read-only, no auth required)
     let (status, body) = s.post(KOTOBASE_PIN_LIST, json!({ "tenant_did": did })).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["total"], 0, "expected 0 pins after delete: {body}");
@@ -1605,4 +1644,108 @@ async fn lora_apply_without_cacao_returns_401() {
         }),
     ).await;
     assert_eq!(status, 401, "{body}");
+}
+
+// ── kotobase quota enforcement tests ─────────────────────────────────────────
+
+// Free tier allows QUOTA_FREE_PINS=3 pins. The 4th pin must be rejected with QuotaExceeded.
+#[tokio::test]
+async fn kotobase_pin_quota_exceeded_returns_429() {
+    let s   = TestServer::start(false).await;
+    let did = "did:key:zQuotaPin1";
+    let tok = tenant_jwt(did);
+
+    let (status, _) = s.post_auth(KOTOBASE_ACCOUNT_CREATE, json!({ "tenant_did": did }), &tok).await;
+    assert_eq!(status, 200);
+
+    // Pin up to the free-tier limit (3 pins)
+    for i in 0..3u32 {
+        let cid_str = format!("bafybeiquota{i:04}abcdefghijklmnopqrstuvwxyz12345678");
+        let (status, body) = s.post_auth(KOTOBASE_PIN_CREATE, json!({
+            "tenant_did": did,
+            "name":       format!("quota-pin-{i}"),
+            "cid":        cid_str,
+            "size_hint_bytes": 100_i64,
+        }), &tok).await;
+        assert_eq!(status, 200, "pin {i} should succeed: {body}");
+    }
+
+    // 4th pin must be rejected
+    let (status, body) = s.post_auth(KOTOBASE_PIN_CREATE, json!({
+        "tenant_did": did,
+        "name":       "quota-overflow",
+        "cid":        "bafybeiquotaoverflow000000000000000000000000000000",
+        "size_hint_bytes": 100_i64,
+    }), &tok).await;
+    assert_eq!(status, 429, "expected QuotaExceeded 429: {body}");
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(err.contains("QuotaExceeded"), "error should mention QuotaExceeded: {body}");
+}
+
+// Free tier allows QUOTA_FREE_BYTES=100 MiB. A single pin that exceeds the byte quota is rejected.
+#[tokio::test]
+async fn kotobase_byte_quota_exceeded_returns_429() {
+    let s   = TestServer::start(false).await;
+    let did = "did:key:zQuotaByte1";
+    let tok = tenant_jwt(did);
+
+    let (status, _) = s.post_auth(KOTOBASE_ACCOUNT_CREATE, json!({ "tenant_did": did }), &tok).await;
+    assert_eq!(status, 200);
+
+    // Attempt to pin something bigger than the free-tier byte quota (100 MiB = 104857600 bytes)
+    let over_quota_bytes: i64 = 105_000_000; // ~100.1 MiB
+    let (status, body) = s.post_auth(KOTOBASE_PIN_CREATE, json!({
+        "tenant_did":      did,
+        "name":            "byte-overflow",
+        "cid":             "bafybeibytequotaoverflow00000000000000000000000000",
+        "size_hint_bytes": over_quota_bytes,
+    }), &tok).await;
+    assert_eq!(status, 429, "expected QuotaExceeded 429: {body}");
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(err.contains("QuotaExceeded"), "error should mention QuotaExceeded: {body}");
+}
+
+// ── kotobase DID ownership auth tests ────────────────────────────────────────
+
+#[tokio::test]
+async fn kotobase_account_create_without_auth_returns_401() {
+    let s = TestServer::start(false).await;
+    let (status, _) = s.post(KOTOBASE_ACCOUNT_CREATE, json!({
+        "tenant_did": "did:key:zNoAuth1",
+    })).await;
+    assert_eq!(status, 401);
+}
+
+#[tokio::test]
+async fn kotobase_pin_create_without_auth_returns_401() {
+    let s = TestServer::start(false).await;
+    let (status, _) = s.post(KOTOBASE_PIN_CREATE, json!({
+        "tenant_did": "did:key:zNoAuth2",
+        "name": "my-pin",
+        "cid": "bafytest",
+    })).await;
+    assert_eq!(status, 401);
+}
+
+#[tokio::test]
+async fn kotobase_pin_delete_without_auth_returns_401() {
+    let s = TestServer::start(false).await;
+    let (status, _) = s.post(KOTOBASE_PIN_DELETE, json!({
+        "tenant_did": "did:key:zNoAuth3",
+        "pin_id": "some-pin-id",
+    })).await;
+    assert_eq!(status, 401);
+}
+
+#[tokio::test]
+async fn kotobase_pin_create_wrong_sub_returns_401() {
+    let s = TestServer::start(false).await;
+    let victim_did = "did:key:zVictim1";
+    let attacker_jwt = tenant_jwt("did:key:zAttacker1");
+    let (status, _) = s.post_auth(KOTOBASE_PIN_CREATE, json!({
+        "tenant_did": victim_did,
+        "name": "stolen-pin",
+        "cid": "bafytest",
+    }), &attacker_jwt).await;
+    assert_eq!(status, 401);
 }
