@@ -17,6 +17,7 @@ In-memory dict when running outside a WASM component (dev/test).
 
 from __future__ import annotations
 
+import copy
 import json
 from typing import Optional
 
@@ -58,7 +59,7 @@ class KotobaCheckpointer:
 
     def save(self, thread_id: str, state: dict) -> None:
         """Persist ``state`` for ``thread_id``."""
-        self._memory[thread_id] = dict(state)
+        self._memory[thread_id] = copy.deepcopy(state)
 
         kqe, in_wasm = _try_kqe()
         if not (in_wasm and kqe is not None):
