@@ -360,7 +360,8 @@ fn read_cid_v1(buf: &[u8]) -> Option<(&[u8], usize)> {
     let (_, n) = read_uvarint(&buf[pos..])?; // hash function code
     pos += n;
     let (dlen, n) = read_uvarint(&buf[pos..])?; // digest length
-    pos += n + dlen as usize;
+    let dlen_usize = usize::try_from(dlen).ok()?;
+    pos = pos.checked_add(n)?.checked_add(dlen_usize)?;
     if buf.len() < pos { return None; }
     Some((&buf[..pos], pos))
 }
@@ -372,13 +373,27 @@ fn parse_car(data: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
 
     // Skip CAR header: uvarint(len) + CBOR header map
     let Some((hlen, n)) = read_uvarint(&data[pos..]) else { return result };
-    pos += n + hlen as usize;
+    let hlen_usize = match usize::try_from(hlen) {
+        Ok(v) => v,
+        Err(_) => return result,
+    };
+    pos = match pos.checked_add(n).and_then(|p| p.checked_add(hlen_usize)) {
+        Some(p) => p,
+        None => return result,
+    };
 
     while pos < data.len() {
         let Some((section_len, n)) = read_uvarint(&data[pos..]) else { break };
-        pos += n;
+        pos = match pos.checked_add(n) { Some(p) => p, None => break };
         if section_len == 0 { break; }
-        let section_end = pos + section_len as usize;
+        let section_len_usize = match usize::try_from(section_len) {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        let section_end = match pos.checked_add(section_len_usize) {
+            Some(e) => e,
+            None => break,
+        };
         if section_end > data.len() { break; }
 
         let Some((cid_bytes, cid_len)) = read_cid_v1(&data[pos..section_end]) else { break };
@@ -498,5 +513,37 @@ mod tests {
     fn cbor_cid_bytes_rejects_wrong_length() {
         let val = ciborium::value::Value::Tag(42, Box::new(ciborium::value::Value::Bytes(vec![0u8; 20])));
         assert!(cbor_cid_bytes(&val).is_none());
+    }
+
+    #[test]
+    fn parse_car_crafted_overflow_section_len_does_not_panic() {
+        // CAR header: varint(0) = 0x00 (zero-length header)
+        // Section: varint(u64::MAX) encoded as 9-byte LEB128 + continuation
+        // A valid uvarint for u64::MAX is 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF 0x01
+        let mut data = vec![0x00u8]; // header len = 0
+        // u64::MAX = 0xFFFF_FFFF_FFFF_FFFF — 10-byte LEB128
+        data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]);
+        // Must return empty without panicking
+        let result = parse_car(&data);
+        assert!(result.is_empty(), "crafted overflow section_len must yield empty result, not panic");
+    }
+
+    #[test]
+    fn parse_car_empty_input_returns_empty() {
+        assert!(parse_car(&[]).is_empty());
+    }
+
+    #[test]
+    fn read_cid_v1_crafted_overflow_dlen_returns_none() {
+        // CIDv1 prefix bytes: version=1, codec=dag-cbor(0x71), hash=blake3(0x1e), then dlen=u64::MAX
+        let mut buf = vec![
+            0x01, // version = 1
+            0x71, // codec = dag-cbor
+            0x1e, // hash function = blake3
+        ];
+        // dlen = u64::MAX as LEB128 (10 bytes)
+        buf.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]);
+        // Must return None without panicking
+        assert!(read_cid_v1(&buf).is_none());
     }
 }
