@@ -546,6 +546,11 @@ pub async fn kg_ingest(
             AxumJson(serde_json::json!({"ok": false, "error":
                 format!("labelVec exceeds {MAX_KG_VEC_DIMS} dimensions")}))).into_response();
     }
+    if req.label_vec.iter().any(|f| !f.is_finite()) {
+        return (StatusCode::BAD_REQUEST,
+            AxumJson(serde_json::json!({"ok": false, "error":
+                "labelVec contains non-finite values (NaN/Inf)"}))).into_response();
+    }
     // Validate per-field lengths to prevent oversized individual quads
     for v in [&req.qid, &req.kind, &req.label_ja, &req.label_en, &req.license,
               &req.extractor, &req.valid_from, &req.valid_to, &req.ingested_at, &req.source_id].into_iter().flatten() {
@@ -555,6 +560,31 @@ pub async fn kg_ingest(
                               format!("field value exceeds {MAX_KG_FIELD_LEN} bytes")}))).into_response();
                   }
               }
+    // Validate per-item predicate/value lengths within claims and relations
+    for claim in &req.claims {
+        if claim.pred.is_empty() || claim.pred.len() > MAX_KG_ID_LEN {
+            return (StatusCode::BAD_REQUEST,
+                AxumJson(serde_json::json!({"ok": false, "error":
+                    format!("claim.pred must be 1–{MAX_KG_ID_LEN} bytes")}))).into_response();
+        }
+        if claim.value.len() > MAX_KG_FIELD_LEN {
+            return (StatusCode::BAD_REQUEST,
+                AxumJson(serde_json::json!({"ok": false, "error":
+                    format!("claim.value must be ≤{MAX_KG_FIELD_LEN} bytes")}))).into_response();
+        }
+    }
+    for rel in &req.relations {
+        if rel.pred.is_empty() || rel.pred.len() > MAX_KG_ID_LEN {
+            return (StatusCode::BAD_REQUEST,
+                AxumJson(serde_json::json!({"ok": false, "error":
+                    format!("relation.pred must be 1–{MAX_KG_ID_LEN} bytes")}))).into_response();
+        }
+        if rel.dst_id.is_empty() || rel.dst_id.len() > MAX_KG_ID_LEN {
+            return (StatusCode::BAD_REQUEST,
+                AxumJson(serde_json::json!({"ok": false, "error":
+                    format!("relation.dstId must be 1–{MAX_KG_ID_LEN} bytes")}))).into_response();
+        }
+    }
     use kotoba_kqe::quad::Quad;
 
     let graph   = kg_graph_cid();
@@ -639,7 +669,10 @@ pub async fn kg_delete(
     headers:      HeaderMap,
     Json(req):    Json<KgDeleteReq>,
 ) -> impl IntoResponse {
-    if let Err((code, msg)) = require_kg_write_auth(&headers) {
+    // Delete is irreversible and there is no per-entity ownership model, so
+    // restrict to the operator DID to prevent any authenticated user from
+    // wiping arbitrary entities.
+    if let Err((code, msg)) = crate::graph_auth::require_operator_auth(&headers, &state.operator_did) {
         return (code, Json(serde_json::json!({"ok": false, "error": msg}))).into_response();
     }
     if req.id.is_empty() || req.id.len() > MAX_KG_ID_LEN {

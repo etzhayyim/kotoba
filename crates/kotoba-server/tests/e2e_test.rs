@@ -2283,7 +2283,7 @@ async fn kg_query_unknown_lang_returns_400() {
 #[tokio::test]
 async fn kg_delete_nonexistent_entity_returns_ok_zero_retracted() {
     let s   = TestServer::start(false).await;
-    let tok = tenant_jwt("did:key:zKgDel1");
+    let tok = tenant_jwt(&s.operator_did);
     let (status, body) = s.post_auth(
         "/xrpc/ai.gftd.apps.yata.kg.delete",
         json!({ "id": "ent-does-not-exist" }),
@@ -2296,14 +2296,15 @@ async fn kg_delete_nonexistent_entity_returns_ok_zero_retracted() {
 
 #[tokio::test]
 async fn kg_ingest_then_delete_removes_entity() {
-    let s   = TestServer::start(false).await;
-    let tok = tenant_jwt("did:key:zKgDel2");
+    let s        = TestServer::start(false).await;
+    let write_tok = tenant_jwt("did:key:zKgDel2");
+    let op_tok   = tenant_jwt(&s.operator_did);
 
-    // Ingest an entity
+    // Ingest an entity (any bearer allowed)
     let (status, _) = s.post_auth(
         "/xrpc/ai.gftd.apps.yata.kg.ingest",
         json!({ "id": "ent-delete-me", "type": "Thing", "labelEn": "Delete Target" }),
-        &tok,
+        &write_tok,
     ).await;
     assert_eq!(status, 200);
 
@@ -2314,11 +2315,11 @@ async fn kg_ingest_then_delete_removes_entity() {
     assert_eq!(status, 200, "{body}");
     assert!(body["ok"].as_bool().unwrap_or(false), "entity not found before delete: {body}");
 
-    // Delete it
+    // Delete requires operator auth
     let (status, body) = s.post_auth(
         "/xrpc/ai.gftd.apps.yata.kg.delete",
         json!({ "id": "ent-delete-me" }),
-        &tok,
+        &op_tok,
     ).await;
     assert_eq!(status, 200, "{body}");
     assert!(body["ok"].as_bool().unwrap_or(false), "{body}");
@@ -2581,7 +2582,7 @@ async fn kg_search_empty_query_returns_400() {
 #[tokio::test]
 async fn kg_delete_empty_id_returns_400() {
     let s   = TestServer::start(false).await;
-    let tok = tenant_jwt("did:key:zKgVal3");
+    let tok = tenant_jwt(&s.operator_did);
     let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.delete", json!({
         "id": "",
     }), &tok).await;
@@ -2814,13 +2815,64 @@ async fn kg_ingest_with_auth_succeeds() {
 #[tokio::test]
 async fn kg_delete_with_auth_on_missing_entity_returns_ok_zero() {
     let s   = TestServer::start(false).await;
-    let tok = tenant_jwt("did:key:zKgWriter2");
+    let tok = tenant_jwt(&s.operator_did);
     let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.delete", json!({
         "id": "ent-does-not-exist-auth",
     }), &tok).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["ok"], true, "{body}");
     assert_eq!(body["retractedCount"], 0, "{body}");
+}
+
+#[tokio::test]
+async fn kg_delete_non_operator_returns_401() {
+    let s   = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zNonOperatorDeleter");
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.delete", json!({
+        "id": "ent-non-op-del",
+    }), &tok).await;
+    assert_eq!(status, 401, "{body}");
+    assert_eq!(body["ok"], false, "{body}");
+}
+
+#[tokio::test]
+async fn kg_ingest_claim_pred_too_long_returns_400() {
+    let s   = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zKgClaimLen");
+    let long_pred = "x".repeat(300); // exceeds MAX_KG_ID_LEN=256
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.ingest", json!({
+        "id":     "ent-claim-pred-len",
+        "claims": [{ "pred": long_pred, "value": "v" }],
+    }), &tok).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["ok"], false, "{body}");
+}
+
+#[tokio::test]
+async fn kg_ingest_relation_pred_too_long_returns_400() {
+    let s   = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zKgRelLen");
+    let long_pred = "r".repeat(300);
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.ingest", json!({
+        "id":        "ent-rel-pred-len",
+        "relations": [{ "pred": long_pred, "dstId": "dst-ok" }],
+    }), &tok).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["ok"], false, "{body}");
+}
+
+#[tokio::test]
+async fn kg_ingest_label_vec_inf_returns_400() {
+    // 1e40 as f64 is valid JSON but overflows to f32::INFINITY when serde deserializes it
+    // as Vec<f32>.  The is_finite() guard should reject it with 400.
+    let s   = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zKgVecInf");
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.ingest", json!({
+        "id":       "ent-vec-inf",
+        "labelVec": [1.0_f64, 1e40_f64],
+    }), &tok).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["ok"], false, "{body}");
 }
 
 // ── attest_challenge happy path ───────────────────────────────────────────────
