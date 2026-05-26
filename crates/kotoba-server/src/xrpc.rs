@@ -542,8 +542,17 @@ pub async fn invoke_run(
 
     match result {
         DispatchResult::Wasm(r) => {
+            // Reject if WASM produced an unreasonably large assert batch.
+            // At 10 gas/assert and 10M gas limit the theoretical max is 1M quads;
+            // storing and returning 1M CIDs would be a multi-MB response DoS.
+            const MAX_ASSERT_QUADS: usize = 10_000;
+            if r.assert_quads.len() > MAX_ASSERT_QUADS {
+                return Err((StatusCode::PAYLOAD_TOO_LARGE,
+                    format!("WASM produced {} assert quads (limit {MAX_ASSERT_QUADS})", r.assert_quads.len())));
+            }
+
             // Publish each asserted quad to KSE Journal
-            let mut journal_cids = Vec::with_capacity(r.assert_quads.len());
+            let mut journal_cids = Vec::with_capacity(r.assert_quads.len().min(MAX_ASSERT_QUADS));
             for sq in &r.assert_quads {
                 let quad = Quad {
                     graph:     KotobaCid::from_bytes(sq.graph.as_bytes()),
@@ -1250,6 +1259,9 @@ pub async fn embed_create(
     // 64 KiB covers any realistic embedding unit (paragraph / document chunk).
     // Larger inputs must be split by the caller's chunker before calling embed.create.
     const MAX_EMBED_TEXT_LEN: usize = 64 * 1024;
+    if req.text.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "text must not be empty".into()));
+    }
     if req.text.len() > MAX_EMBED_TEXT_LEN {
         return Err((StatusCode::PAYLOAD_TOO_LARGE,
             format!("text too large ({} bytes, limit {MAX_EMBED_TEXT_LEN})", req.text.len())));
