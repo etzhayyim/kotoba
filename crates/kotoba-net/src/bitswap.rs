@@ -265,3 +265,39 @@ async fn write_cbor<T: AsyncWrite + Unpin + Send, S: Serialize>(
     io.write_all(&buf).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn read_cbor_rejects_oversized_length_prefix() {
+        // Simulate a peer sending 0xFFFFFFFF (4 GiB) as the 4-byte length prefix.
+        // Without the size guard this would cause an immediate OOM allocation.
+        let oversized_len: u32 = u32::MAX;
+        let fake_stream: &[u8] = &oversized_len.to_be_bytes();
+
+        let result: std::io::Result<BitswapRequest> = read_cbor(&mut &*fake_stream).await;
+        assert!(result.is_err(), "oversized length prefix must be rejected");
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("too large"), "error should mention size: {err}");
+    }
+
+    #[tokio::test]
+    async fn read_cbor_accepts_valid_size() {
+        // A small valid CBOR-encoded BitswapRequest should pass through cleanly.
+        let req = BitswapRequest {
+            want_have:  vec![],
+            want_block: vec![],
+            want_since: vec![],
+        };
+        let mut encoded: Vec<u8> = Vec::new();
+        ciborium::into_writer(&req, &mut encoded).unwrap();
+        let len_prefix = (encoded.len() as u32).to_be_bytes();
+        let stream: Vec<u8> = [&len_prefix[..], &encoded].concat();
+
+        let result: std::io::Result<BitswapRequest> = read_cbor(&mut &*stream.as_slice()).await;
+        assert!(result.is_ok(), "valid small request must be accepted: {result:?}");
+    }
+}
