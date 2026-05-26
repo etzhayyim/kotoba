@@ -14,3 +14,4 @@ pub use datalog::{DatalogProgram, DatalogRule};
 pub use mv::MaterializedView;
 pub use sql::{SqlMvCompiler, CompiledSqlMv};
 pub use cypher::{CypherCompiler, CompiledCypherMv};
+pub use citation::{CitationLedger, DatomKey};

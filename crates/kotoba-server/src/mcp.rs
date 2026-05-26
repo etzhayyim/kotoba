@@ -14,14 +14,16 @@
 ///   kotoba_email_list    — list encrypted emails for an owner DID
 ///   kotoba_email_read    — decrypt and return one email body + metadata
 
-pub const MCP_TOOL_QUAD_CREATE:  &str = "kotoba_quad_create";
-pub const MCP_TOOL_GRAPH_QUERY:  &str = "kotoba_graph_query";
-pub const MCP_TOOL_INFER_RUN:    &str = "kotoba_infer_run";
-pub const MCP_TOOL_EMBED_CREATE: &str = "kotoba_embed_create";
-pub const MCP_TOOL_WEIGHT_PUT:   &str = "kotoba_weight_put";
-pub const MCP_TOOL_LORA_APPLY:   &str = "kotoba_lora_apply";
-pub const MCP_TOOL_EMAIL_LIST:   &str = "kotoba_email_list";
-pub const MCP_TOOL_EMAIL_READ:   &str = "kotoba_email_read";
+pub const MCP_TOOL_QUAD_CREATE:   &str = "kotoba_quad_create";
+pub const MCP_TOOL_GRAPH_QUERY:   &str = "kotoba_graph_query";
+pub const MCP_TOOL_INFER_RUN:     &str = "kotoba_infer_run";
+pub const MCP_TOOL_EMBED_CREATE:  &str = "kotoba_embed_create";
+pub const MCP_TOOL_WEIGHT_PUT:    &str = "kotoba_weight_put";
+pub const MCP_TOOL_LORA_APPLY:    &str = "kotoba_lora_apply";
+pub const MCP_TOOL_EMAIL_LIST:    &str = "kotoba_email_list";
+pub const MCP_TOOL_EMAIL_READ:    &str = "kotoba_email_read";
+pub const MCP_TOOL_WASM_RUN:      &str = "kotoba_wasm_run";
+pub const MCP_TOOL_DATALOG_RUN:   &str = "kotoba_datalog_run";
 
 use std::sync::Arc;
 use axum::{
@@ -196,6 +198,33 @@ fn tools_list() -> Value {
                         "adapter_b64": { "type": "string",  "description": "Raw LoRA bytes, base64-encoded" }
                     },
                     "required": ["model_cid", "rank", "graph", "adapter_b64"]
+                }
+            },
+            {
+                "name": MCP_TOOL_WASM_RUN,
+                "description": "Run a WASM Component Model program via the Pregel BSP engine. The guest controls continuation via output CBOR {\"status\":\"continue\"}. Gas consumed is billed as a mKOTO Quad per agent DID.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "wasm_b64":       { "type": "string",  "description": "Compiled WASM Component Model binary, base64-encoded" },
+                        "agent_did":      { "type": "string",  "description": "DID of the agent invoking the program (billed for gas)" },
+                        "ctx_cbor_b64":   { "type": "string",  "description": "Initial context CBOR map, base64-encoded (passed as first superstep inbox payload)" },
+                        "max_supersteps": { "type": "integer", "description": "Max BSP supersteps (default 32)" }
+                    },
+                    "required": ["wasm_b64", "agent_did", "ctx_cbor_b64"]
+                }
+            },
+            {
+                "name": MCP_TOOL_DATALOG_RUN,
+                "description": "Evaluate a Datalog program against a named graph arrangement. Citations are tracked per join hit; royalty Quads are written to the ledger graph at epoch flush.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "graph":            { "type": "string",  "description": "Named graph CID (multibase) to evaluate against" },
+                        "rules":            { "type": "array",   "description": "Array of DatalogRule objects ({head, body})" },
+                        "epoch_pool_koto":  { "type": "integer", "description": "mKOTO pool to distribute as royalties this epoch (default 1000000 = 1 KOTO)" }
+                    },
+                    "required": ["graph", "rules"]
                 }
             }
         ]
@@ -557,6 +586,159 @@ async fn call_tool(
             }))
         }
 
+        // ── kotoba_wasm_run ──────────────────────────────────────────────────
+        MCP_TOOL_WASM_RUN => {
+            use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+            use kotoba_vm::WasmPregelRunner;
+
+            let wasm_b64     = get_str("wasm_b64")?;
+            let agent_did    = get_str("agent_did")?;
+            let ctx_b64      = get_str("ctx_cbor_b64")?;
+            let max_ss       = args.get("max_supersteps")
+                .and_then(Value::as_u64)
+                .unwrap_or(32) as u32;
+
+            let wasm_bytes = B64.decode(&wasm_b64)
+                .map_err(|e| (ERR_INVALID_PARAMS, format!("invalid wasm_b64: {e}")))?;
+            let ctx_cbor = B64.decode(&ctx_b64)
+                .map_err(|e| (ERR_INVALID_PARAMS, format!("invalid ctx_cbor_b64: {e}")))?;
+
+            let executor = Arc::clone(&state.executor);
+            let program_cid = format!("did/wasm/{agent_did}");
+
+            let runner = WasmPregelRunner::new(
+                executor,
+                &program_cid,
+                wasm_bytes,
+                &agent_did,
+                max_ss,
+            );
+
+            // Run in blocking thread (wasmtime JIT is CPU-bound)
+            let result = tokio::task::spawn_blocking(move || runner.run(ctx_cbor))
+                .await
+                .map_err(|e| (ERR_INTERNAL, e.to_string()))?
+                .map_err(|e| (ERR_INTERNAL, format!("WasmPregelRunner: {e:?}")))?;
+
+            // Gap 2: write gas consumption Quad per agent DID
+            {
+                use kotoba_core::cid::KotobaCid;
+                use kotoba_kqe::quad::{Quad, QuadObject};
+                let gas_graph = KotobaCid::from_bytes(b"kotoba/gas/ledger");
+                let agent_cid = KotobaCid::from_bytes(agent_did.as_bytes());
+                let gas_quad  = Quad {
+                    graph:     gas_graph,
+                    subject:   agent_cid,
+                    predicate: "gas/consumed_mkoto".to_string(),
+                    object:    QuadObject::Integer(result.total_gas_used as i64),
+                };
+                state.journal_assert(&gas_quad).await;
+                state.quad_store.assert(gas_quad).await;
+            }
+
+            // Write WASM-asserted quads into the store
+            {
+                use kotoba_core::cid::KotobaCid;
+                use kotoba_kqe::quad::{Quad, QuadObject};
+                for sq in &result.assert_quads {
+                    let quad = Quad {
+                        graph:     KotobaCid::from_bytes(sq.graph.as_bytes()),
+                        subject:   KotobaCid::from_bytes(sq.subject.as_bytes()),
+                        predicate: sq.predicate.clone(),
+                        object:    QuadObject::Bytes(sq.object_cbor.clone()),
+                    };
+                    state.journal_assert(&quad).await;
+                    state.quad_store.assert(quad).await;
+                }
+            }
+
+            let output_b64 = B64.encode(&result.final_output_cbor);
+            Ok(json!({
+                "status":           "ok",
+                "supersteps_run":   result.supersteps_run,
+                "total_gas_used":   result.total_gas_used,
+                "assert_quads":     result.assert_quads.len(),
+                "output_cbor_b64":  output_b64,
+            }))
+        }
+
+        // ── kotoba_datalog_run ───────────────────────────────────────────────
+        MCP_TOOL_DATALOG_RUN => {
+            use kotoba_core::cid::KotobaCid;
+            use kotoba_kqe::{CitationLedger, DatalogProgram, DatalogRule};
+            use kotoba_kqe::delta::Delta;
+
+            let graph_str      = get_str("graph")?;
+            let epoch_pool     = args.get("epoch_pool_koto")
+                .and_then(Value::as_u64)
+                .unwrap_or(1_000_000); // default 1 KOTO
+
+            // Deserialize rules array
+            let rules: Vec<DatalogRule> = match args.get("rules") {
+                Some(r) => serde_json::from_value(r.clone())
+                    .map_err(|e| (ERR_INVALID_PARAMS, format!("invalid rules: {e}")))?,
+                None => return Err((ERR_INVALID_PARAMS, "missing required field: rules".into())),
+            };
+
+            let graph_cid = KotobaCid::from_bytes(graph_str.as_bytes());
+
+            // Load arrangement from QuadStore
+            let arrangement = match state.quad_store.arrangement(&graph_cid).await {
+                None => return Ok(json!({
+                    "derived": [], "citations": 0, "royalty_quads": 0
+                })),
+                Some(a) => a,
+            };
+
+            // Convert arrangement quads to input Deltas
+            let input_deltas: Vec<Delta> = arrangement
+                .quads(&graph_cid)
+                .into_iter()
+                .map(Delta::assert)
+                .collect();
+
+            let mut program = DatalogProgram::new();
+            for rule in rules {
+                program.add_rule(rule);
+            }
+
+            // Gap 1: evaluate with citation tracking (CPU-bound in spawn_blocking)
+            let (derived, ledger) = tokio::task::spawn_blocking(move || {
+                let mut ledger = CitationLedger::new();
+                let derived = program.evaluate_delta_cited(&input_deltas, &mut ledger);
+                (derived, ledger)
+            })
+            .await
+            .map_err(|e| (ERR_INTERNAL, e.to_string()))?;
+
+            let citation_count = ledger.total_citations();
+            let epoch          = ledger.epoch();
+
+            // Gap 3: flush epoch → royalty Quads → QuadStore
+            let entries       = { let mut l = ledger; l.flush_epoch(epoch_pool) };
+            let royalty_quads = CitationLedger::royalty_quads(&entries, epoch);
+            let royalty_count = royalty_quads.len();
+
+            for rq in royalty_quads {
+                state.journal_assert(&rq).await;
+                state.quad_store.assert(rq).await;
+            }
+
+            // Write derived facts into the store
+            let derived_count = derived.len();
+            for d in &derived {
+                state.quad_store.assert(d.quad.clone()).await;
+            }
+
+            Ok(json!({
+                "status":        "ok",
+                "derived":       derived_count,
+                "citations":     citation_count,
+                "royalty_quads": royalty_count,
+                "epoch":         epoch,
+            }))
+        }
+
         other => Err((ERR_NOT_FOUND, format!("unknown tool: {other}"))),
     }
 }
@@ -663,10 +845,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tools_list_contains_all_eight() {
+    fn tools_list_contains_all_ten() {
         let list = tools_list();
         let tools = list["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 10);
         let names: Vec<&str> = tools.iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
@@ -676,6 +858,8 @@ mod tests {
         assert!(names.contains(&MCP_TOOL_EMBED_CREATE));
         assert!(names.contains(&MCP_TOOL_WEIGHT_PUT));
         assert!(names.contains(&MCP_TOOL_LORA_APPLY));
+        assert!(names.contains(&MCP_TOOL_WASM_RUN));
+        assert!(names.contains(&MCP_TOOL_DATALOG_RUN));
     }
 
     #[test]
