@@ -37,6 +37,8 @@ pub enum SignalError {
     BadSignature,
     #[error("message counter mismatch")]
     CounterMismatch,
+    #[error("too many skipped message keys (gap exceeds limit)")]
+    TooManySkippedKeys,
     #[error("serialization: {0}")]
     Serde(#[from] serde_json::Error),
     #[error("store error: {0}")]

@@ -15,6 +15,10 @@ use kotoba_crypto::hkdf::ratchet_chain;
 use kotoba_crypto::aead::{seal, open};
 use crate::SignalError;
 
+/// Signal spec §5.2: reject messages that skip more than this many chain steps.
+/// Prevents an attacker from forcing O(N) ratchet work and unbounded `skipped_keys` growth.
+const MAX_SKIPPED_KEYS: usize = 1_000;
+
 /// Per-member sender key state (private).
 #[derive(ZeroizeOnDrop)]
 pub struct SenderKeyState {
@@ -174,6 +178,10 @@ impl GroupSession {
         if msg.n < self.chain_iter {
             return Err(SignalError::CounterMismatch);
         }
+        let skip_count = (msg.n - self.chain_iter) as usize;
+        if self.skipped_keys.len() + skip_count > MAX_SKIPPED_KEYS {
+            return Err(SignalError::TooManySkippedKeys);
+        }
         while self.chain_iter < msg.n {
             let (new_ck, mk) = ratchet_chain(&self.chain_key);
             self.chain_key = new_ck;
@@ -248,5 +256,167 @@ mod tests {
         let mut msg = sender.encrypt(b"secret").unwrap();
         msg.signature[0] ^= 0xFF;
         assert!(receiver.decrypt(&msg).is_err());
+    }
+
+    #[test]
+    fn sender_key_distribution_json_roundtrip() {
+        let sender = SenderKeyState::generate("group-rt", "did:plc:rt");
+        let dist = sender.distribution();
+        let json = serde_json::to_string(&dist).unwrap();
+        let restored: SenderKeyDistribution = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.group_id, dist.group_id);
+        assert_eq!(restored.sender_did, dist.sender_did);
+        assert_eq!(restored.chain_key, dist.chain_key);
+        assert_eq!(restored.signing_key_pub, dist.signing_key_pub);
+    }
+
+    #[test]
+    fn sender_key_message_json_roundtrip() {
+        let mut sender = SenderKeyState::generate("group-msg", "did:plc:msg");
+        let msg = sender.encrypt(b"payload").unwrap();
+        let json = serde_json::to_string(&msg).unwrap();
+        let restored: SenderKeyMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.group_id, msg.group_id);
+        assert_eq!(restored.sender_did, msg.sender_did);
+        assert_eq!(restored.n, msg.n);
+        assert_eq!(restored.ciphertext, msg.ciphertext);
+        assert_eq!(restored.signature, msg.signature);
+    }
+
+    #[test]
+    fn wrong_group_id_triggers_no_session() {
+        let mut sender = SenderKeyState::generate("group-a", "did:plc:alice");
+        let dist = sender.distribution();
+        let mut receiver = GroupSession::from_distribution(&dist).unwrap();
+
+        let mut msg = sender.encrypt(b"hello").unwrap();
+        msg.group_id = "group-b".to_string(); // wrong group
+        let result = receiver.decrypt(&msg);
+        assert!(matches!(result, Err(crate::SignalError::NoSession(_))));
+    }
+
+    #[test]
+    fn wrong_sender_did_triggers_no_session() {
+        let mut sender = SenderKeyState::generate("group-x", "did:plc:alice");
+        let dist = sender.distribution();
+        let mut receiver = GroupSession::from_distribution(&dist).unwrap();
+
+        let mut msg = sender.encrypt(b"hi").unwrap();
+        msg.sender_did = "did:plc:eve".to_string(); // wrong sender
+        let result = receiver.decrypt(&msg);
+        assert!(matches!(result, Err(crate::SignalError::NoSession(_))));
+    }
+
+    #[test]
+    fn chain_iter_increments_on_each_encrypt() {
+        let mut sender = SenderKeyState::generate("grp", "did:plc:counter");
+        assert_eq!(sender.chain_iter, 0);
+        sender.encrypt(b"a").unwrap();
+        assert_eq!(sender.chain_iter, 1);
+        sender.encrypt(b"b").unwrap();
+        assert_eq!(sender.chain_iter, 2);
+    }
+
+    #[test]
+    fn distribution_reflects_initial_state() {
+        let sender = SenderKeyState::generate("g", "did:plc:init");
+        let dist = sender.distribution();
+        assert_eq!(dist.group_id, "g");
+        assert_eq!(dist.sender_did, "did:plc:init");
+        assert_eq!(dist.chain_id, 0);
+        assert_eq!(dist.chain_iter, 0);
+        assert_eq!(dist.chain_key.len(), 32);
+        assert_eq!(dist.signing_key_pub.len(), 32);
+    }
+
+    #[test]
+    fn in_memory_store_store_and_load() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let store = InMemorySenderKeyStore::new();
+            let sender = SenderKeyState::generate("grp-store", "did:plc:bob");
+            let dist = sender.distribution();
+            store.store(dist.clone()).await;
+
+            let loaded = store.load("grp-store", "did:plc:bob").await;
+            assert!(loaded.is_some());
+            let d = loaded.unwrap();
+            assert_eq!(d.group_id, dist.group_id);
+            assert_eq!(d.sender_did, dist.sender_did);
+        });
+    }
+
+    #[test]
+    fn in_memory_store_missing_key_returns_none() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let store = InMemorySenderKeyStore::new();
+            let result = store.load("nonexistent-group", "did:plc:nobody").await;
+            assert!(result.is_none());
+        });
+    }
+
+    #[test]
+    fn max_skipped_keys_constant_is_positive_and_bounded() {
+        assert!(MAX_SKIPPED_KEYS >= 100,  "limit must allow normal out-of-order delivery");
+        assert!(MAX_SKIPPED_KEYS <= 5_000, "limit must cap memory to a sane ceiling");
+    }
+
+    #[test]
+    fn large_sequence_gap_is_rejected() {
+        let mut sender = SenderKeyState::generate("group-gap", "did:plc:alice");
+        let dist = sender.distribution();
+        let mut receiver = GroupSession::from_distribution(&dist).unwrap();
+
+        // Advance sender by MAX_SKIPPED_KEYS + 1 without receiver consuming
+        for _ in 0..=(MAX_SKIPPED_KEYS) {
+            sender.encrypt(b"skip me").unwrap();
+        }
+        // The next message has n = MAX_SKIPPED_KEYS + 1, which exceeds the cap
+        let msg = sender.encrypt(b"too far ahead").unwrap();
+        let result = receiver.decrypt(&msg);
+        assert!(
+            matches!(result, Err(crate::SignalError::TooManySkippedKeys)),
+            "expected TooManySkippedKeys, got {:?}", result
+        );
+    }
+
+    #[test]
+    fn gap_just_at_limit_is_accepted() {
+        let mut sender = SenderKeyState::generate("group-gap-ok", "did:plc:alice");
+        let dist = sender.distribution();
+        let mut receiver = GroupSession::from_distribution(&dist).unwrap();
+
+        // Send and collect exactly MAX_SKIPPED_KEYS - 1 messages
+        let mut msgs: Vec<SenderKeyMessage> = Vec::new();
+        for _ in 0..(MAX_SKIPPED_KEYS - 1) {
+            msgs.push(sender.encrypt(b"skip").unwrap());
+        }
+        // The next one lands exactly at the limit boundary
+        let final_msg = sender.encrypt(b"at boundary").unwrap();
+        // Receiver processes only the last one — skips MAX_SKIPPED_KEYS - 1 keys
+        let result = receiver.decrypt(&final_msg);
+        assert!(result.is_ok(), "gap at limit must be accepted, got {:?}", result);
+        assert_eq!(result.unwrap(), b"at boundary");
+    }
+
+    #[test]
+    fn out_of_order_delivery_works_within_limit() {
+        let mut sender = SenderKeyState::generate("group-ooo", "did:plc:alice");
+        let dist = sender.distribution();
+        let mut receiver = GroupSession::from_distribution(&dist).unwrap();
+
+        let msg0 = sender.encrypt(b"msg-0").unwrap();
+        let msg1 = sender.encrypt(b"msg-1").unwrap();
+        let msg2 = sender.encrypt(b"msg-2").unwrap();
+
+        // Deliver out of order: 2, 0, 1
+        let pt2 = receiver.decrypt(&msg2).unwrap();
+        let pt0 = receiver.decrypt(&msg0).unwrap();
+        let pt1 = receiver.decrypt(&msg1).unwrap();
+
+        assert_eq!(pt0, b"msg-0");
+        assert_eq!(pt1, b"msg-1");
+        assert_eq!(pt2, b"msg-2");
     }
 }
