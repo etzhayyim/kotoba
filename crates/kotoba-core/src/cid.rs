@@ -100,3 +100,74 @@ impl std::fmt::Display for KotobaCid {
         write!(f, "{}", self.to_multibase())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_bytes_header_is_cidv1_dag_cbor_blake3() {
+        let cid = KotobaCid::from_bytes(b"hello");
+        assert_eq!(cid.0[0], 1,                            "CIDv1 version byte");
+        assert_eq!(cid.0[1], KotobaCid::CODEC_DAG_CBOR,   "dag-cbor codec");
+        assert_eq!(cid.0[2], KotobaCid::MH_BLAKE3,        "blake3 multicodec");
+        assert_eq!(cid.0[3], 32,                           "hash length varint");
+    }
+
+    #[test]
+    fn from_bytes_is_deterministic() {
+        let a = KotobaCid::from_bytes(b"kotoba");
+        let b = KotobaCid::from_bytes(b"kotoba");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn from_bytes_differs_for_different_inputs() {
+        let a = KotobaCid::from_bytes(b"foo");
+        let b = KotobaCid::from_bytes(b"bar");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn multibase_roundtrip() {
+        let cid = KotobaCid::from_bytes(b"roundtrip test");
+        let encoded = cid.to_multibase();
+        assert!(encoded.starts_with('b'), "multibase prefix must be 'b' (base32lower)");
+        let decoded = KotobaCid::from_multibase(&encoded).expect("must roundtrip");
+        assert_eq!(cid, decoded);
+    }
+
+    #[test]
+    fn display_matches_to_multibase() {
+        let cid = KotobaCid::from_bytes(b"display test");
+        assert_eq!(format!("{cid}"), cid.to_multibase());
+    }
+
+    #[test]
+    fn from_multibase_rejects_wrong_prefix() {
+        let cid = KotobaCid::from_bytes(b"prefix test");
+        let encoded = cid.to_multibase();
+        // Replace 'b' prefix with 'z' (base58btc)
+        let bad = format!("z{}", &encoded[1..]);
+        assert!(KotobaCid::from_multibase(&bad).is_none());
+    }
+
+    #[test]
+    fn from_multibase_rejects_truncated() {
+        let cid = KotobaCid::from_bytes(b"truncated");
+        let encoded = cid.to_multibase();
+        // Drop last 4 chars → shorter byte sequence
+        let short = &encoded[..encoded.len() - 4];
+        assert!(KotobaCid::from_multibase(short).is_none());
+    }
+
+    #[test]
+    fn from_cbor_is_consistent_with_from_bytes() {
+        let value = "kotoba-cbor-test";
+        let mut buf = Vec::new();
+        ciborium::into_writer(&value, &mut buf).unwrap();
+        let expected = KotobaCid::from_bytes(&buf);
+        let actual   = KotobaCid::from_cbor(&value).unwrap();
+        assert_eq!(expected, actual);
+    }
+}
