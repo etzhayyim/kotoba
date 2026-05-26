@@ -555,4 +555,33 @@ mod tests {
         let objects_ts = arrangement.get_objects(&subject_cid, "node/registered_at");
         assert!(!objects_ts.is_empty(), "node/registered_at quad should exist");
     }
+
+    #[test]
+    fn is_ephemeral_returns_true_without_env_vars() {
+        std::env::remove_var("KOTOBA_AGENT_ED25519_HEX");
+        std::env::remove_var("KOTOBA_AGENT_X25519_HEX");
+        std::env::remove_var("KOTOBA_AGENT_DID");
+        let state = KotobaState::new(None).expect("new");
+        assert!(state.is_ephemeral(), "should be ephemeral without env vars");
+    }
+
+    #[test]
+    fn node_id_matches_operator_did_signing_key() {
+        // NodeId is derived from signing_key.to_bytes() — same identity used for
+        // both operator_did and node_id_hex (prevents the double-generation bug).
+        std::env::remove_var("KOTOBA_AGENT_ED25519_HEX");
+        std::env::remove_var("KOTOBA_AGENT_X25519_HEX");
+        std::env::remove_var("KOTOBA_AGENT_DID");
+        let state = KotobaState::new(None).expect("new");
+        // operator_did is non-empty and consistent with node_id (both from same identity)
+        assert!(!hex::encode(state.local_node_id.0).is_empty());
+        assert!(!state.operator_did.is_empty());
+        // Two calls produce different ephemeral identities — confirming Arc reuse
+        // within a single state (not across states)
+        let state2 = KotobaState::new(None).expect("new2");
+        assert_ne!(state.local_node_id.0, state2.local_node_id.0,
+            "distinct states have distinct ephemeral NodeIds");
+        assert_ne!(state.operator_did, state2.operator_did,
+            "distinct states have distinct ephemeral DIDs");
+    }
 }

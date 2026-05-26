@@ -528,9 +528,9 @@ let thread = compiled.run(thread)?;
 - Attestation staking: 自己認証 1,000 KOTO / 検証済み 5,000 KOTO → Quad `attest/stake_mkoto` に永続化
 - `WasmExecutor::execute()` → `InvokeResult::gas_used` を返す
 - `KotobaVm::execute()` → `ExecResult::gas_used` + `checkpoint_cids` を返す
-- **[gap 1, 2026-05-26]** `DatalogProgram::evaluate_delta_cited(&deltas, &mut CitationLedger)` — join hit 時に `CitationLedger::cite()` を呼ぶ; `evaluate_delta()` は backward compat で ledger なし版を維持
-- **[gap 2, 2026-05-26]** MCP tool `kotoba_wasm_run` → `WasmPregelRunner` → `WasmRunResult::total_gas_used` → Quad `gas/consumed_mkoto` per agent DID
-- **[gap 3, 2026-05-26]** MCP tool `kotoba_datalog_run` → `evaluate_delta_cited` → `flush_epoch()` → `royalty_quads()` → `QuadStore::assert()` per epoch
+- `DatalogProgram::evaluate_delta_cited(&deltas, &mut CitationLedger)` — join hit 時に `CitationLedger::cite()` を呼ぶ; `evaluate_delta()` は backward compat で ledger なし版を維持
+- MCP tool `kotoba_wasm_run` → `WasmPregelRunner` → `WasmRunResult::total_gas_used` → Quad `gas/consumed_mkoto` per agent DID
+- MCP tool `kotoba_datalog_run` → `evaluate_delta_cited` → `flush_epoch()` → `royalty_quads()` → `QuadStore::assert()` per epoch
 
 **未実装 (etzhayyim-exclusive)**:
 4. on-chain settlement: ERC-4337 / Base L2 への mKOTO royalty 送金ブリッジ (ADR-2605260004)

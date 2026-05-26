@@ -450,6 +450,111 @@ async fn mcp_tools_call_without_auth_returns_error() {
     assert_eq!(body["error"]["code"], -32001);
 }
 
+// ── MCP kotoba_wasm_run (skips if cargo-component unavailable) ───────────────
+
+#[tokio::test]
+async fn mcp_wasm_run_writes_gas_attribution() {
+    let Some(wasm_bytes) = build_guest_component() else {
+        eprintln!("cargo-component unavailable — skipping mcp_wasm_run_writes_gas_attribution");
+        return;
+    };
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+
+    let mut ctx_cbor = Vec::new();
+    {
+        use std::collections::BTreeMap;
+        let mut map: BTreeMap<&str, ciborium::Value> = BTreeMap::new();
+        map.insert("graph",       ciborium::Value::Text("mcp-wasm-graph".into()));
+        map.insert("session_cid", ciborium::Value::Null);
+        map.insert("args_cbor",   ciborium::Value::Bytes(b"mcp_wasm_test".to_vec()));
+        ciborium::into_writer(&map, &mut ctx_cbor).unwrap();
+    }
+
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post_auth(
+        "/mcp",
+        json!({
+            "jsonrpc": "2.0", "id": 20, "method": "tools/call",
+            "params": {
+                "name": "kotoba_wasm_run",
+                "arguments": {
+                    "wasm_b64":     B64.encode(&wasm_bytes),
+                    "agent_did":    "did:plc:e2e_mcp_wasm",
+                    "ctx_cbor_b64": B64.encode(&ctx_cbor),
+                }
+            }
+        }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.get("error").is_none(), "unexpected error: {body}");
+
+    let content_str = body["result"]["content"][0]["text"].as_str().expect("text");
+    let content: serde_json::Value = serde_json::from_str(content_str).expect("json");
+    assert_eq!(content["status"], "ok", "{content}");
+    assert!(content["total_gas_used"].as_u64().unwrap_or(0) > 0,
+        "expected gas_used > 0, got: {content}");
+    assert!(content["output_cbor_b64"].as_str().is_some(),
+        "missing output_cbor_b64: {content}");
+}
+
+// ── MCP kotoba_datalog_run ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn mcp_datalog_run_derives_and_flushes_royalty() {
+    let s = TestServer::start(false).await;
+
+    // Seed the graph with two edges: a→b and b→c
+    let graph = "mcp-datalog-test-graph";
+    let (_, cacao_b64) = build_ed25519_cacao(graph);
+    for (subj, pred, obj) in [("a", "edge", "b"), ("b", "edge", "c")] {
+        let (st, _) = s.post(
+            "/xrpc/ai.gftd.apps.kotoba.quad.create",
+            json!({
+                "graph":     graph,
+                "subject":   subj,
+                "predicate": pred,
+                "object":    obj,
+                "cacao_b64": cacao_b64,
+            }),
+        ).await;
+        assert_eq!(st, 200);
+    }
+
+    // reachable(?x, ?y) :- edge(?x, ?y)
+    let rule = json!({
+        "head": { "relation": "reachable", "args": [{"Variable": "x"}, {"Variable": "y"}] },
+        "body": [{ "Positive": { "relation": "edge", "args": [{"Variable": "x"}, {"Variable": "y"}] } }]
+    });
+
+    let (status, body) = s.post_auth(
+        "/mcp",
+        json!({
+            "jsonrpc": "2.0", "id": 21, "method": "tools/call",
+            "params": {
+                "name": "kotoba_datalog_run",
+                "arguments": {
+                    "graph": graph,
+                    "rules": [rule],
+                    "epoch_pool_koto": 1_000_000u64,
+                }
+            }
+        }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.get("error").is_none(), "unexpected error: {body}");
+
+    let content_str = body["result"]["content"][0]["text"].as_str().expect("text");
+    let content: serde_json::Value = serde_json::from_str(content_str).expect("json");
+    assert_eq!(content["status"], "ok", "{content}");
+    assert!(content["derived"].as_u64().unwrap_or(0) >= 2,
+        "expected derived >= 2, got: {content}");
+    assert!(content["citations"].as_u64().unwrap_or(0) > 0,
+        "expected citations > 0, got: {content}");
+    assert!(content.get("epoch").is_some(), "missing epoch field: {content}");
+}
+
 // ── WASM invoke.run (skips if cargo-component unavailable) ────────────────────
 
 #[tokio::test]

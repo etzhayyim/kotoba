@@ -681,7 +681,7 @@ async fn call_tool(
                 .map_err(|e| (ERR_INTERNAL, e.to_string()))?
                 .map_err(|e| (ERR_INTERNAL, format!("WasmPregelRunner: {e:?}")))?;
 
-            // Gap 2: write gas consumption Quad per agent DID + provider attribution
+            // Write gas consumption Quad per agent DID + provider attribution
             {
                 use kotoba_core::cid::KotobaCid;
                 use kotoba_kqe::quad::{Quad, QuadObject};
@@ -773,7 +773,7 @@ async fn call_tool(
                 program.add_rule(rule);
             }
 
-            // Gap 1: evaluate with citation tracking (CPU-bound in spawn_blocking)
+            // Evaluate with citation tracking (CPU-bound in spawn_blocking)
             let (derived, ledger) = tokio::task::spawn_blocking(move || {
                 let mut ledger = CitationLedger::new();
                 let derived = program.evaluate_delta_cited(&input_deltas, &mut ledger);
@@ -785,7 +785,7 @@ async fn call_tool(
             let citation_count = ledger.total_citations();
             let epoch          = ledger.epoch();
 
-            // Gap 3: flush epoch → royalty Quads → QuadStore
+            // Flush epoch → royalty Quads → QuadStore
             let entries       = { let mut l = ledger; l.flush_epoch(epoch_pool) };
             let royalty_quads = CitationLedger::royalty_quads(&entries, epoch);
             let royalty_count = royalty_quads.len();
@@ -1097,5 +1097,44 @@ mod tests {
         assert!(result.is_ok());
         let v = result.unwrap();
         assert_eq!(v["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn graph_query_avet_predicate_prefix_returns_matching_quads() {
+        let state = Arc::new(
+            crate::server::KotobaState::new(None).expect("state")
+        );
+        // Seed two quads with predicate "weight/layer/0" and one with "other"
+        for (pred, obj) in [("weight/layer/0", "val0"), ("weight/layer/1", "val1"), ("other", "x")] {
+            call_tool(MCP_TOOL_QUAD_CREATE, &json!({
+                "graph": "g", "subject": "model", "predicate": pred, "object": obj
+            }), &state).await.unwrap();
+        }
+        // AVET prefix scan should return only the two weight quads
+        let v = call_tool(MCP_TOOL_GRAPH_QUERY, &json!({
+            "graph": "g",
+            "predicate_prefix": "weight/"
+        }), &state).await.unwrap();
+        assert_eq!(v["count"], 2, "prefix scan should return 2 weight quads, got {v}");
+    }
+
+    #[tokio::test]
+    async fn graph_query_avet_predicate_object_returns_subjects() {
+        let state = Arc::new(
+            crate::server::KotobaState::new(None).expect("state")
+        );
+        // Seed: alice knows bob, carol knows bob, dave knows eve
+        for (s, o) in [("alice", "bob"), ("carol", "bob"), ("dave", "eve")] {
+            call_tool(MCP_TOOL_QUAD_CREATE, &json!({
+                "graph": "g2", "subject": s, "predicate": "knows", "object": o
+            }), &state).await.unwrap();
+        }
+        // AVET P+O→S: who knows bob?
+        let v = call_tool(MCP_TOOL_GRAPH_QUERY, &json!({
+            "graph": "g2",
+            "predicate": "knows",
+            "object": "bob"
+        }), &state).await.unwrap();
+        assert_eq!(v["count"], 2, "should find alice and carol, got {v}");
     }
 }
