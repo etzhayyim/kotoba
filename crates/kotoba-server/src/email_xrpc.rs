@@ -10,7 +10,7 @@ pub const NSID_EMAIL_READ:   &str = "ai.gftd.apps.kotoba.email.read";
 pub const NSID_EMAIL_INGEST: &str = "ai.gftd.apps.kotoba.email.ingest";
 
 use std::sync::Arc;
-use axum::{Json, extract::{Query, State}, response::IntoResponse, http::StatusCode};
+use axum::{Json, extract::{Query, State}, http::{HeaderMap, StatusCode}, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -19,6 +19,33 @@ use kotoba_kqe::quad::QuadObject;
 use kotoba_ingest::{graph_cid_for, EmailIngestor};
 
 use crate::server::KotobaState;
+
+const MAX_OWNER_DID_LEN: usize = 512;
+const MAX_EMAIL_CID_LEN: usize = 256;
+// 25 MiB raw ≈ 33 MiB base64 (Gmail attachment limit)
+const MAX_RAW_B64_LEN:   usize = 34 * 1024 * 1024;
+
+fn require_email_auth(
+    headers: &HeaderMap,
+    owner_did: &str,
+    operator_did: &str,
+) -> Result<(), (StatusCode, String)> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED,
+            "Authorization: Bearer <token> required".to_string()))?;
+    let sub = crate::graph_auth::jwt_sub(token)
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED,
+            "Bearer token missing sub claim".to_string()))?;
+    if sub == owner_did || sub == operator_did {
+        Ok(())
+    } else {
+        Err((StatusCode::UNAUTHORIZED,
+            format!("Bearer sub does not match owner_did {owner_did:?}")))
+    }
+}
 
 // ── email.list ────────────────────────────────────────────────────────────────
 
@@ -31,11 +58,18 @@ pub struct EmailListQuery {
 
 pub async fn email_list(
     State(state): State<Arc<KotobaState>>,
+    headers: HeaderMap,
     Query(q): Query<EmailListQuery>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if q.owner_did.is_empty() || q.owner_did.len() > MAX_OWNER_DID_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("owner_did must be 1–{MAX_OWNER_DID_LEN} bytes")));
+    }
+    require_email_auth(&headers, &q.owner_did, &state.operator_did)?;
+
     let graph_cid = graph_cid_for(&q.owner_did);
     let arrangement = match state.quad_store.arrangement(&graph_cid).await {
-        None => return Json(json!({ "emails": [], "total": 0 })),
+        None => return Ok(Json(json!({ "emails": [], "total": 0 })).into_response()),
         Some(a) => a,
     };
 
@@ -67,7 +101,7 @@ pub async fn email_list(
         json!({ "cid": cid_mb, "date": date, "message_id": message_id })
     }).collect();
 
-    Json(json!({ "emails": page, "total": total, "offset": offset, "limit": limit }))
+    Ok(Json(json!({ "emails": page, "total": total, "offset": offset, "limit": limit })).into_response())
 }
 
 // ── email.read ────────────────────────────────────────────────────────────────
@@ -80,8 +114,21 @@ pub struct EmailReadQuery {
 
 pub async fn email_read(
     State(state): State<Arc<KotobaState>>,
+    headers: HeaderMap,
     Query(q): Query<EmailReadQuery>,
 ) -> impl IntoResponse {
+    if q.owner_did.is_empty() || q.owner_did.len() > MAX_OWNER_DID_LEN {
+        return (StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("owner_did must be 1–{MAX_OWNER_DID_LEN} bytes") }))).into_response();
+    }
+    if q.email_cid.is_empty() || q.email_cid.len() > MAX_EMAIL_CID_LEN {
+        return (StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("email_cid must be 1–{MAX_EMAIL_CID_LEN} bytes") }))).into_response();
+    }
+    if let Err((code, msg)) = require_email_auth(&headers, &q.owner_did, &state.operator_did) {
+        return (code, Json(json!({ "error": msg }))).into_response();
+    }
+
     let crypto = match &state.crypto {
         Some(c) => Arc::clone(c),
         None => return (StatusCode::SERVICE_UNAVAILABLE,
@@ -168,8 +215,25 @@ pub struct EmailIngestResponse {
 
 pub async fn email_ingest(
     State(state): State<Arc<KotobaState>>,
+    headers: HeaderMap,
     Json(body): Json<EmailIngestBody>,
 ) -> impl IntoResponse {
+    if body.owner_did.is_empty() || body.owner_did.len() > MAX_OWNER_DID_LEN {
+        return (StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("owner_did must be 1–{MAX_OWNER_DID_LEN} bytes") }))).into_response();
+    }
+    if body.raw_b64.is_empty() {
+        return (StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "raw_b64 must not be empty" }))).into_response();
+    }
+    if body.raw_b64.len() > MAX_RAW_B64_LEN {
+        return (StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": format!("raw_b64 exceeds {MAX_RAW_B64_LEN} bytes") }))).into_response();
+    }
+    if let Err((code, msg)) = require_email_auth(&headers, &body.owner_did, &state.operator_did) {
+        return (code, Json(json!({ "error": msg }))).into_response();
+    }
+
     let crypto = match &state.crypto {
         Some(c) => Arc::clone(c),
         None => return (StatusCode::SERVICE_UNAVAILABLE,

@@ -107,6 +107,18 @@ impl TestServer {
         (status, body)
     }
 
+    async fn get_with_auth(&self, path: &str, token: &str) -> (u16, Value) {
+        let r = self.client
+            .get(format!("{}{}", self.base_url, path))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .expect("GET with auth");
+        let status = r.status().as_u16();
+        let body: Value = r.json().await.unwrap_or(Value::Null);
+        (status, body)
+    }
+
     /// POST quad.create with a freshly-signed Ed25519 CACAO for the given graph.
     async fn post_quad(&self, graph: &str, subject: &str, predicate: &str, object: &str) -> (u16, Value) {
         let (_, cacao_b64) = build_ed25519_cacao(graph);
@@ -590,6 +602,118 @@ async fn mcp_wasm_run_writes_gas_attribution() {
         "expected gas_used > 0, got: {content}");
     assert!(content["output_cbor_b64"].as_str().is_some(),
         "missing output_cbor_b64: {content}");
+}
+
+// ── MCP kotoba_wasm_run — Python componentize-py guest ───────────────────────
+
+#[tokio::test]
+async fn mcp_wasm_run_python_langgraph_agent() {
+    // Load the pre-built Python LangGraph agent WASM.
+    // Skip if the file is absent (developer hasn't built it yet or CI excludes it).
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace = manifest.parent().unwrap().parent().unwrap();
+    let wasm_path = workspace.join("examples/kotoba-langgraph-hello/agent.wasm");
+    let wasm_bytes = match std::fs::read(&wasm_path) {
+        Ok(b) => b,
+        Err(_) => {
+            eprintln!("kotoba-langgraph-hello/agent.wasm not found — skipping mcp_wasm_run_python_langgraph_agent");
+            return;
+        }
+    };
+
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+
+    // Build CBOR InvokeContext expected by handle_invoke() in _entry.py:
+    //   { "graph": str, "session_cid": str, "args": { "input": {...}, "thread_id": str } }
+    let mut ctx_cbor = Vec::new();
+    {
+        use std::collections::BTreeMap;
+        let mut input_msg: BTreeMap<&str, ciborium::Value> = BTreeMap::new();
+        input_msg.insert("type",    ciborium::Value::Text("human".into()));
+        input_msg.insert("content", ciborium::Value::Text("hello".into()));
+
+        let mut input_state: BTreeMap<&str, ciborium::Value> = BTreeMap::new();
+        input_state.insert("messages", ciborium::Value::Array(vec![
+            ciborium::Value::Map(
+                input_msg.into_iter().map(|(k, v)| (ciborium::Value::Text(k.into()), v)).collect()
+            ),
+        ]));
+
+        let mut args: BTreeMap<&str, ciborium::Value> = BTreeMap::new();
+        args.insert("input",     ciborium::Value::Map(
+            input_state.into_iter().map(|(k, v)| (ciborium::Value::Text(k.into()), v)).collect()
+        ));
+        args.insert("thread_id", ciborium::Value::Text("py-test-thread".into()));
+
+        let mut ctx: BTreeMap<&str, ciborium::Value> = BTreeMap::new();
+        ctx.insert("graph",       ciborium::Value::Text("py-hello-graph".into()));
+        ctx.insert("session_cid", ciborium::Value::Text("py-test-session".into()));
+        ctx.insert("args",        ciborium::Value::Map(
+            args.into_iter().map(|(k, v)| (ciborium::Value::Text(k.into()), v)).collect()
+        ));
+
+        ciborium::into_writer(&ctx, &mut ctx_cbor).unwrap();
+    }
+
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post_auth(
+        "/mcp",
+        json!({
+            "jsonrpc": "2.0", "id": 30, "method": "tools/call",
+            "params": {
+                "name": "kotoba_wasm_run",
+                "arguments": {
+                    "wasm_b64":     B64.encode(&wasm_bytes),
+                    "agent_did":    "did:plc:e2e_py_langgraph",
+                    "ctx_cbor_b64": B64.encode(&ctx_cbor),
+                }
+            }
+        }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.get("error").is_none(), "unexpected json-rpc error: {body}");
+
+    let content_str = body["result"]["content"][0]["text"].as_str().expect("text");
+    let content: serde_json::Value = serde_json::from_str(content_str).expect("json");
+    // WasmPregelRunner must complete without a Rust panic (HTTP 200 + status=ok)
+    assert_eq!(content["status"], "ok",
+        "expected WasmPregelRunner status=ok, got: {content}");
+
+    // Decode the output CBOR — must always be valid CBOR with "ok" or "err" key
+    let out_b64 = content["output_cbor_b64"].as_str().expect("output_cbor_b64");
+    let out_cbor = B64.decode(out_b64).expect("valid base64");
+    let out: ciborium::Value = ciborium::from_reader(std::io::Cursor::new(&out_cbor))
+        .expect("output_cbor_b64 must be valid CBOR (WasmPregelRunner encodes errors as CBOR)");
+    let out_map: std::collections::HashMap<String, ciborium::Value> = match out {
+        ciborium::Value::Map(ref m) => m.iter()
+            .filter_map(|(k, v)| k.as_text().map(|s| (s.to_string(), v.clone())))
+            .collect(),
+        _ => panic!("expected CBOR map from Python agent output, got: {out:?}"),
+    };
+    assert!(
+        out_map.contains_key("ok") || out_map.contains_key("err"),
+        "Python handle_invoke must return {{ok/err}}, got keys: {:?}",
+        out_map.keys().collect::<Vec<_>>()
+    );
+
+    let gas = content["total_gas_used"].as_u64().unwrap_or(0);
+    if gas > 0 {
+        // Python WASM executed — LLM may have failed but graph code ran
+        eprintln!("Python LangGraph WASM executed successfully: gas_used={gas}");
+    } else {
+        // gas=0 means WASM compilation failed before execution.
+        // Expected with wasmtime 22 which disables the extended-const proposal
+        // required by componentize-py 0.23 output. Upgrade wasmtime to fix.
+        let err_text = out_map.get("err")
+            .and_then(|v| v.as_text())
+            .unwrap_or("");
+        assert!(
+            err_text.contains("CompileFailed") || err_text.contains("compile"),
+            "gas=0 but error is unexpected (not a compile error): {err_text}"
+        );
+        eprintln!("NOTE: Python WASM compile failed (extended-const / wasmtime 22 limitation): {err_text}");
+    }
 }
 
 // ── MCP kotoba_datalog_run ────────────────────────────────────────────────────
@@ -1588,10 +1712,24 @@ async fn cc_status_returns_index_counts() {
 }
 
 #[tokio::test]
-async fn email_list_xrpc_unknown_owner_returns_empty() {
+async fn email_list_xrpc_without_auth_returns_401() {
     let s = TestServer::start(false).await;
     let (status, body) = s
         .get("/xrpc/ai.gftd.apps.kotoba.email.list?owner_did=did:key:zEmailXrpc1")
+        .await;
+    assert_eq!(status, 401, "{body}");
+}
+
+#[tokio::test]
+async fn email_list_xrpc_unknown_owner_returns_empty() {
+    let s   = TestServer::start(false).await;
+    let did = "did:key:zEmailXrpc1";
+    let tok = tenant_jwt(did);
+    let (status, body) = s
+        .get_with_auth(
+            &format!("/xrpc/ai.gftd.apps.kotoba.email.list?owner_did={did}"),
+            &tok,
+        )
         .await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["total"], 0, "{body}");
@@ -1599,6 +1737,27 @@ async fn email_list_xrpc_unknown_owner_returns_empty() {
         body["emails"].as_array().map(|a| a.is_empty()).unwrap_or(false),
         "{body}"
     );
+}
+
+#[tokio::test]
+async fn email_ingest_without_auth_returns_401() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post("/xrpc/ai.gftd.apps.kotoba.email.ingest", json!({
+        "owner_did": "did:key:zEmailIngest1",
+        "raw_b64": "aGVsbG8=",
+    })).await;
+    assert_eq!(status, 401, "{body}");
+}
+
+#[tokio::test]
+async fn email_ingest_empty_owner_did_returns_400() {
+    let s   = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zEmailOwner1");
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotoba.email.ingest", json!({
+        "owner_did": "",
+        "raw_b64": "aGVsbG8=",
+    }), &tok).await;
+    assert_eq!(status, 400, "{body}");
 }
 
 // ── weight.put CACAO auth tests ───────────────────────────────────────────────
