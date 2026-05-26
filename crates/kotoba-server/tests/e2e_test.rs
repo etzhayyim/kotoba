@@ -800,6 +800,38 @@ async fn mcp_datalog_run_derives_and_flushes_royalty() {
     assert!(content.get("epoch").is_some(), "missing epoch field: {content}");
 }
 
+// ── MCP datalog_run rules-count cap ───────────────────────────────────────────
+
+#[tokio::test]
+async fn mcp_datalog_run_too_many_rules_returns_error() {
+    let s = TestServer::start(false).await;
+    // Build 257 rules (MAX_DATALOG_RULES = 256).
+    let rule = json!({
+        "head": { "relation": "reachable", "args": [{"Variable": "x"}, {"Variable": "y"}] },
+        "body": [{ "Positive": { "relation": "edge", "args": [{"Variable": "x"}, {"Variable": "y"}] } }]
+    });
+    let rules: Vec<_> = (0..257).map(|_| rule.clone()).collect();
+
+    let (status, body) = s.post_auth(
+        "/mcp",
+        json!({
+            "jsonrpc": "2.0", "id": 99, "method": "tools/call",
+            "params": {
+                "name": "kotoba_datalog_run",
+                "arguments": { "graph": "cap-test-graph", "rules": rules }
+            }
+        }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    // MCP errors are returned in result.error, not HTTP 4xx
+    let err_code = body["result"]["error"]["code"].as_i64();
+    assert!(err_code.is_some(), "expected MCP error, got: {body}");
+    let err_msg = body["result"]["error"]["message"].as_str().unwrap_or("");
+    assert!(err_msg.contains("257") || err_msg.contains("256"),
+        "error should mention count/limit: {body}");
+}
+
 // ── WASM invoke.run (skips if cargo-component unavailable) ────────────────────
 
 #[tokio::test]
@@ -2725,6 +2757,106 @@ async fn attest_query_oversized_entity_did_returns_400() {
         &format!("/xrpc/ai.gftd.apps.kotoba.attest.query?entity_did={big_did}")
     ).await;
     assert_eq!(status, 400, "{body}");
+}
+
+// ── attest_claim stake enforcement ────────────────────────────────────────────
+
+#[tokio::test]
+async fn attest_claim_insufficient_stake_self_returns_422() {
+    let s   = TestServer::start(false).await;
+    let did = "did:key:zStaker1";
+    let tok = tenant_jwt(did);
+    // MIN_STAKE_SELF_ATTESTED = 1_000_000_000 mKOTO; send one less
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotoba.attest.claim", json!({
+        "entity_did":   did,
+        "attester_did": did,
+        "claim_type":   "self",
+        "stake_mkoto":  999_999_999u64,
+    }), &tok).await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "insufficient_stake", "{body}");
+    assert_eq!(body["required_mkoto"].as_u64().unwrap(), 1_000_000_000u64, "{body}");
+}
+
+#[tokio::test]
+async fn attest_claim_insufficient_stake_verified_entity_returns_422() {
+    let s   = TestServer::start(false).await;
+    let did = "did:key:zStaker2";
+    let tok = tenant_jwt(did);
+    // MIN_STAKE_VERIFIED_ENTITY = 5_000_000_000 mKOTO; send exactly MIN_STAKE_SELF_ATTESTED
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotoba.attest.claim", json!({
+        "entity_did":   "did:key:zEntity1",
+        "attester_did": did,
+        "claim_type":   "verified_entity",
+        "stake_mkoto":  1_000_000_000u64,
+    }), &tok).await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "insufficient_stake", "{body}");
+    assert_eq!(body["required_mkoto"].as_u64().unwrap(), 5_000_000_000u64, "{body}");
+}
+
+#[tokio::test]
+async fn attest_claim_sufficient_stake_self_succeeds() {
+    let s   = TestServer::start(false).await;
+    let did = "did:key:zStaker3";
+    let tok = tenant_jwt(did);
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotoba.attest.claim", json!({
+        "entity_did":   did,
+        "attester_did": did,
+        "claim_type":   "self",
+        "stake_mkoto":  1_000_000_000u64,
+    }), &tok).await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["status"], "attested", "{body}");
+}
+
+// ── attest_query live scan ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn attest_query_returns_claim_after_submit() {
+    let s   = TestServer::start(false).await;
+    let attester = "did:key:zQueryAttester1";
+    let entity   = "did:key:zQueryEntity1";
+    let tok = tenant_jwt(attester);
+
+    // Submit a claim
+    let (status, _) = s.post_auth("/xrpc/ai.gftd.apps.kotoba.attest.claim", json!({
+        "entity_did":   entity,
+        "attester_did": attester,
+        "claim_type":   "self",
+        "stake_mkoto":  1_000_000_000u64,
+    }), &tok).await;
+    assert_eq!(status, 201);
+
+    // Query by entity_did — should find the claim
+    let (status, body) = s.get(
+        &format!("/xrpc/ai.gftd.apps.kotoba.attest.query?entity_did={entity}")
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    let claims = body["claims"].as_array().expect("claims array");
+    assert_eq!(claims.len(), 1, "expected 1 claim: {body}");
+    assert_eq!(claims[0]["entity_did"], entity, "{body}");
+    assert_eq!(claims[0]["attester_did"], attester, "{body}");
+    assert_eq!(claims[0]["claim_type"], "self", "{body}");
+    assert_eq!(claims[0]["stake_mkoto"].as_u64().unwrap(), 1_000_000_000u64, "{body}");
+
+    // Query by attester_did — same claim
+    let (status, body) = s.get(
+        &format!("/xrpc/ai.gftd.apps.kotoba.attest.query?attester_did={attester}")
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    let claims = body["claims"].as_array().expect("claims array");
+    assert_eq!(claims.len(), 1, "expected 1 claim by attester: {body}");
+    assert_eq!(claims[0]["entity_did"], entity, "{body}");
+}
+
+#[tokio::test]
+async fn attest_query_no_filter_returns_empty() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.get("/xrpc/ai.gftd.apps.kotoba.attest.query").await;
+    assert_eq!(status, 200, "{body}");
+    let claims = body["claims"].as_array().expect("claims array");
+    assert_eq!(claims.len(), 0, "no-filter must return empty: {body}");
 }
 
 // ── request_log_query ────────────────────────────────────────────────────────

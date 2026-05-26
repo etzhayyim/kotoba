@@ -88,6 +88,15 @@ fn audit_graph_cid() -> KotobaCid {
     KotobaCid::from_bytes(b"kotoba/audit/requests/v1")
 }
 
+/// Extract a displayable string from a QuadObject: Text → clone, Cid → multibase, others → empty.
+fn quad_object_text(obj: &QuadObject) -> String {
+    match obj {
+        QuadObject::Text(s)   => s.clone(),
+        QuadObject::Cid(c)    => c.to_multibase(),
+        _                     => String::new(),
+    }
+}
+
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -242,15 +251,14 @@ pub async fn attest_claim(
     let claim_seed = format!("attest/{}/{}/{}", req.entity_did, req.attester_did, ts);
     let claim_cid = KotobaCid::from_bytes(claim_seed.as_bytes());
 
-    let entity_cid   = KotobaCid::from_bytes(req.entity_did.as_bytes());
-    let attester_cid = KotobaCid::from_bytes(req.attester_did.as_bytes());
-
+    // Store entity/attester as Text so the DID string is recoverable in queries.
+    // (KotobaCid::from_bytes is a blake3 hash — non-invertible.)
     let mut quads = vec![
         Quad {
             graph: graph.clone(),
             subject: claim_cid.clone(),
             predicate: "attest/entity".to_string(),
-            object: QuadObject::Cid(entity_cid),
+            object: QuadObject::Text(req.entity_did.clone()),
         },
         Quad {
             graph: graph.clone(),
@@ -262,7 +270,7 @@ pub async fn attest_claim(
             graph: graph.clone(),
             subject: claim_cid.clone(),
             predicate: "attest/attester".to_string(),
-            object: QuadObject::Cid(attester_cid),
+            object: QuadObject::Text(req.attester_did.clone()),
         },
         Quad {
             graph: graph.clone(),
@@ -403,10 +411,11 @@ pub async fn attest_challenge(
 
 /// GET `ai.gftd.apps.kotoba.attest.query`
 ///
-/// Query attestation records. Currently returns a stub response; full
-/// Datalog-backed query is Phase 2 (pending KQE arrangement integration).
+/// Query attestation records by entity_did or attester_did.
+/// Scans the hot Arrangement via AVET (POS) index; returns empty when neither
+/// filter is provided (full-scan is intentionally not supported to bound cost).
 pub async fn attest_query(
-    State(_state): State<Arc<KotobaState>>,
+    State(state): State<Arc<KotobaState>>,
     Query(params): Query<AttestQueryParams>,
 ) -> impl IntoResponse {
     if params.entity_did.as_deref().map(|s| s.len() > MAX_ATTEST_DID_LEN).unwrap_or(false) {
@@ -418,19 +427,62 @@ pub async fn attest_query(
             Json(serde_json::json!({ "error": format!("attester_did exceeds {MAX_ATTEST_DID_LEN} bytes") }))).into_response();
     }
     let limit = params.limit.unwrap_or(20).min(100);
+    let graph = attest_graph_cid();
 
+    // Resolve claim CIDs via AVET (POS) reverse lookup.
+    // entity/attester are stored as Text (not Cid), so the object_key is the DID string.
+    let claim_cids: Vec<kotoba_core::cid::KotobaCid> = if let Some(ref did) = params.entity_did {
+        state.quad_store.lookup_subject_by_po(Some(&graph), "attest/entity", did).await
+    } else if let Some(ref did) = params.attester_did {
+        state.quad_store.lookup_subject_by_po(Some(&graph), "attest/attester", did).await
+    } else {
+        // No filter: return empty to avoid unbounded full-scan.
+        return Json(AttestQueryResp { claims: Vec::new(), total: 0 }).into_response();
+    };
+
+    let mut claims: Vec<AttestRecord> = Vec::new();
+    for claim_cid in claim_cids.into_iter().take(limit) {
+        let quads = state.quad_store.get_entity_quads(Some(&graph), &claim_cid).await;
+        let mut rec = AttestRecord {
+            claim_cid:    claim_cid.to_multibase(),
+            entity_did:   String::new(),
+            claim_type:   String::new(),
+            attester_did: String::new(),
+            stake_mkoto:  0,
+            ts_unix:      0,
+        };
+        for q in &quads {
+            match q.predicate.as_str() {
+                "attest/entity"      => rec.entity_did   = quad_object_text(&q.object),
+                "attest/type"        => rec.claim_type   = quad_object_text(&q.object),
+                "attest/attester"    => rec.attester_did = quad_object_text(&q.object),
+                "attest/stake_mkoto" => {
+                    if let kotoba_kqe::quad::QuadObject::Integer(n) = &q.object {
+                        rec.stake_mkoto = *n as u64;
+                    }
+                }
+                "attest/ts_unix" => {
+                    if let kotoba_kqe::quad::QuadObject::Integer(n) = &q.object {
+                        rec.ts_unix = *n as u64;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !rec.entity_did.is_empty() {
+            claims.push(rec);
+        }
+    }
+
+    let total = claims.len();
     tracing::debug!(
         entity_did = ?params.entity_did,
         attester_did = ?params.attester_did,
         limit,
-        "attest.query called"
+        total,
+        "attest.query result"
     );
-
-    // Phase 1: return empty result; Phase 2 will scan the Arrangement.
-    Json(AttestQueryResp {
-        claims: Vec::new(),
-        total: 0,
-    }).into_response()
+    Json(AttestQueryResp { claims, total }).into_response()
 }
 
 /// GET `ai.gftd.apps.kotoba.request.log`
