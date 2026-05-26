@@ -489,10 +489,15 @@ pub async fn attest_query(
 ///
 /// Query the request audit log stored by the fingerprint middleware.
 /// Scans the audit graph Arrangement via predicate-prefix lookup.
+/// Requires operator auth — audit logs are internal security instruments.
 pub async fn request_log_query(
     State(state): State<Arc<KotobaState>>,
+    headers: HeaderMap,
     Query(params): Query<RequestLogQueryParams>,
 ) -> impl IntoResponse {
+    if let Err((code, msg)) = crate::graph_auth::require_operator_auth(&headers, &state.operator_did) {
+        return (code, Json(serde_json::json!({ "error": msg }))).into_response();
+    }
     let limit = params.limit.unwrap_or(20).min(100);
     let graph = audit_graph_cid();
 
@@ -542,7 +547,7 @@ pub async fn request_log_query(
         total,
         "request.log query result"
     );
-    Json(RequestLogResp { entries, total })
+    Json(RequestLogResp { entries, total }).into_response()
 }
 
 #[cfg(test)]

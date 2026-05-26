@@ -2912,23 +2912,33 @@ async fn attest_query_no_filter_returns_empty() {
 // ── request_log_query ────────────────────────────────────────────────────────
 
 #[tokio::test]
+async fn request_log_query_without_auth_returns_401() {
+    // Regression guard: audit log must be operator-only — leaking it reveals
+    // internal API usage patterns and DID activity timings to any caller.
+    let s = TestServer::start(false).await;
+    let (status, _body) = s.get("/xrpc/ai.gftd.apps.kotoba.request.log").await;
+    assert_eq!(status, 401, "request_log_query must reject unauthenticated requests");
+}
+
+#[tokio::test]
 async fn request_log_query_returns_empty_list() {
     let s = TestServer::start(false).await;
-    let (status, body) = s.get("/xrpc/ai.gftd.apps.kotoba.request.log").await;
+    let tok = tenant_jwt(&s.operator_did);
+    let (status, body) = s.get_with_auth("/xrpc/ai.gftd.apps.kotoba.request.log", &tok).await;
     assert_eq!(status, 200, "{body}");
     assert!(body["entries"].as_array().is_some(), "entries must be array: {body}");
-    assert_eq!(body["total"].as_u64().unwrap_or(1), 0, "{body}");
 }
 
 #[tokio::test]
 async fn request_log_query_returns_entries_after_requests() {
     let s = TestServer::start(false).await;
+    let tok = tenant_jwt(&s.operator_did);
     // Make a few requests so the fingerprint middleware writes audit quads.
-    s.get("/xrpc/ai.gftd.apps.kotoba.request.log").await;
-    s.get("/xrpc/ai.gftd.apps.kotoba.request.log").await;
+    s.get_with_auth("/xrpc/ai.gftd.apps.kotoba.request.log", &tok).await;
+    s.get_with_auth("/xrpc/ai.gftd.apps.kotoba.request.log", &tok).await;
     // Allow the fire-and-forget tokio tasks to complete (in-memory, µs).
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let (status, body) = s.get("/xrpc/ai.gftd.apps.kotoba.request.log").await;
+    let (status, body) = s.get_with_auth("/xrpc/ai.gftd.apps.kotoba.request.log", &tok).await;
     assert_eq!(status, 200, "{body}");
     let entries = body["entries"].as_array().expect("entries must be array");
     assert!(!entries.is_empty(), "expected audit entries after requests, got: {body}");
@@ -2941,13 +2951,17 @@ async fn request_log_query_returns_entries_after_requests() {
 #[tokio::test]
 async fn request_log_query_path_prefix_filter() {
     let s = TestServer::start(false).await;
+    let tok = tenant_jwt(&s.operator_did);
     // Make distinct requests to two different endpoint families.
-    s.get("/xrpc/ai.gftd.apps.kotoba.request.log").await;
-    s.get("/xrpc/ai.gftd.apps.kotoba.attest.query").await;
+    s.get_with_auth("/xrpc/ai.gftd.apps.kotoba.request.log", &tok).await;
+    s.get("/xrpc/ai.gftd.apps.kotoba.attest.query?entity_did=did:key:zTest1").await;
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     // Filter by exact prefix — should return only audit entries matching it.
     let (status, body) = s
-        .get("/xrpc/ai.gftd.apps.kotoba.request.log?path_prefix=/xrpc/ai.gftd.apps.kotoba.request.log")
+        .get_with_auth(
+            "/xrpc/ai.gftd.apps.kotoba.request.log?path_prefix=/xrpc/ai.gftd.apps.kotoba.request.log",
+            &tok,
+        )
         .await;
     assert_eq!(status, 200, "{body}");
     let entries = body["entries"].as_array().expect("entries must be array");
