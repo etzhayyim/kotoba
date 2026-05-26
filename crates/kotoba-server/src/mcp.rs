@@ -1136,7 +1136,6 @@ mod tests {
 
     #[test]
     fn check_auth_requires_bearer() {
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
         let mut h = HeaderMap::new();
         assert!(!check_auth(&h));
         // Opaque (non-JWT) token — no exp to check, passes
