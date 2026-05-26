@@ -1317,6 +1317,58 @@ async fn kotobase_pin_delete_removes_pin() {
 }
 
 #[tokio::test]
+async fn mcp_graph_query_empty_graph_returns_zero_count() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post_auth("/mcp", json!({
+        "jsonrpc": "2.0", "id": 10, "method": "tools/call",
+        "params": {
+            "name": "kotoba_graph_query",
+            "arguments": { "graph": "did:example:emptygraph" }
+        }
+    }), "test-token").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.get("error").is_none(), "unexpected error: {body}");
+    let content_str = body["result"]["content"][0]["text"].as_str().expect("text");
+    let content: serde_json::Value = serde_json::from_str(content_str).expect("json");
+    assert_eq!(content["count"], 0, "{content}");
+    assert!(content["quads"].is_array(), "quads must be array: {content}");
+}
+
+#[tokio::test]
+async fn mcp_email_list_no_emails_returns_empty() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post_auth("/mcp", json!({
+        "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+        "params": {
+            "name": "kotoba_email_list",
+            "arguments": { "owner_did": "did:key:zNoEmails1" }
+        }
+    }), "test-token").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.get("error").is_none(), "unexpected error: {body}");
+    let content_str = body["result"]["content"][0]["text"].as_str().expect("text");
+    let content: serde_json::Value = serde_json::from_str(content_str).expect("json");
+    assert_eq!(content["total"], 0, "{content}");
+    assert!(content["emails"].as_array().map(|a| a.is_empty()).unwrap_or(false), "{content}");
+}
+
+#[tokio::test]
+async fn mcp_infer_run_without_engine_returns_error() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post_auth("/mcp", json!({
+        "jsonrpc": "2.0", "id": 12, "method": "tools/call",
+        "params": {
+            "name": "kotoba_infer_run",
+            "arguments": { "prompt": "hello" }
+        }
+    }), "test-token").await;
+    assert_eq!(status, 200, "{body}");
+    // without a loaded model the tool must return a JSON-RPC error, not panic
+    let err = &body["error"];
+    assert!(err.is_object(), "expected error object when no engine loaded: {body}");
+}
+
+#[tokio::test]
 async fn mcp_graph_gc_returns_deleted_count() {
     let s = TestServer::start(false).await;
     let (status, body) = s.post_auth("/mcp", json!({
