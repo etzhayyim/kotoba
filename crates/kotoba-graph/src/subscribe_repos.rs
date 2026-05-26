@@ -440,3 +440,63 @@ fn cbor_cid_bytes(v: &Value) -> Option<[u8; 36]> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kotoba_store::MemoryBlockStore;
+    use std::sync::Arc;
+
+    fn mem() -> Arc<MemoryBlockStore> { Arc::new(MemoryBlockStore::new()) }
+
+    #[test]
+    fn cursor_slot_cid_has_expected_prefix() {
+        assert_eq!(CURSOR_SLOT_CID.0[0], 0x01); // CIDv1
+        assert_eq!(CURSOR_SLOT_CID.0[1], 0x71); // dag-cbor
+        assert_eq!(CURSOR_SLOT_CID.0[2], 0x1e); // blake3
+        assert_eq!(CURSOR_SLOT_CID.0[3], 0x20); // hash length 32
+    }
+
+    #[test]
+    fn load_cursor_returns_none_when_empty() {
+        let store = mem();
+        assert!(load_cursor(&*store).is_none());
+    }
+
+    #[test]
+    fn save_and_load_cursor_roundtrip() {
+        let store = mem();
+        save_cursor(&*store, 42_000);
+        assert_eq!(load_cursor(&*store), Some(42_000));
+    }
+
+    #[test]
+    fn save_cursor_overwrites_previous() {
+        let store = mem();
+        save_cursor(&*store, 1);
+        save_cursor(&*store, 9_999);
+        assert_eq!(load_cursor(&*store), Some(9_999));
+    }
+
+    #[test]
+    fn cbor_cid_bytes_extracts_36_byte_payload() {
+        let mut cid_bytes = vec![0x00u8]; // identity prefix
+        cid_bytes.extend_from_slice(&[0xABu8; 36]);
+        let val = ciborium::value::Value::Tag(42, Box::new(ciborium::value::Value::Bytes(cid_bytes)));
+        let result = cbor_cid_bytes(&val);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), [0xABu8; 36]);
+    }
+
+    #[test]
+    fn cbor_cid_bytes_rejects_wrong_tag() {
+        let val = ciborium::value::Value::Tag(0, Box::new(ciborium::value::Value::Bytes(vec![0u8; 37])));
+        assert!(cbor_cid_bytes(&val).is_none());
+    }
+
+    #[test]
+    fn cbor_cid_bytes_rejects_wrong_length() {
+        let val = ciborium::value::Value::Tag(42, Box::new(ciborium::value::Value::Bytes(vec![0u8; 20])));
+        assert!(cbor_cid_bytes(&val).is_none());
+    }
+}
