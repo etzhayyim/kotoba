@@ -44,6 +44,7 @@ blake3.workspace         = true
 bytes.workspace          = true
 object_store.workspace   = true
 ciborium.workspace       = true
+x25519-dalek.workspace   = true
 
 [dev-dependencies]
 reqwest.workspace         = true
