@@ -63,6 +63,7 @@ fn require_did_ownership(
 const MAX_DID_LEN:       usize = 512;
 const MAX_NAME_LEN:      usize = 256;
 const MAX_TIER_LEN:      usize =  32;
+const MAX_PIN_ID_LEN:    usize = 128;
 const MAX_SUBJECT_LEN:   usize = 512;
 const MAX_PREDICATE_LEN: usize = 256;
 const MAX_OBJECT_LEN:    usize = 65_536; // 64 KiB per triple value
@@ -295,6 +296,7 @@ pub struct PinListReq {
     pub tenant_did: String,
     pub status:     Option<String>,
     pub limit:      Option<usize>,
+    pub offset:     Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -311,9 +313,11 @@ pub struct PinRecord {
 
 #[derive(Debug, Serialize)]
 pub struct PinListResp {
-    pub ok:    bool,
-    pub pins:  Vec<PinRecord>,
-    pub total: usize,
+    pub ok:     bool,
+    pub pins:   Vec<PinRecord>,
+    pub total:  usize,
+    pub offset: usize,
+    pub limit:  usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -388,9 +392,11 @@ pub async fn handle_account_create(
 
 pub async fn handle_account_status(
     State(state): State<Arc<KotobaState>>,
+    headers: HeaderMap,
     Json(req): Json<AccountStatusReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     validate_did(&req.tenant_did)?;
+    require_did_ownership(&headers, &req.tenant_did, &state.operator_did)?;
     let tier = read_tier(&state, &req.tenant_did).await;
     let (quota_pins, quota_bytes) = quota_for_tier(&tier);
     let (used_pins, used_bytes)   = count_pins(&state, &req.tenant_did, None).await;
@@ -564,20 +570,23 @@ pub async fn handle_pin_create(
 
 pub async fn handle_pin_list(
     State(state): State<Arc<KotobaState>>,
+    headers: HeaderMap,
     Json(req): Json<PinListReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     validate_did(&req.tenant_did)?;
-    let limit = req.limit.unwrap_or(20).min(100);
-    let g     = format!("kotobase/pins/{}", req.tenant_did);
-    let gc    = cid(&g);
+    require_did_ownership(&headers, &req.tenant_did, &state.operator_did)?;
+    let limit  = req.limit.unwrap_or(20).min(100);
+    let offset = req.offset.unwrap_or(0);
+    let g      = format!("kotobase/pins/{}", req.tenant_did);
+    let gc     = cid(&g);
 
     let arr = match state.quad_store.arrangement(&gc).await {
         Some(a) => a,
-        None    => return Ok((StatusCode::OK, Json(PinListResp { ok: true, pins: vec![], total: 0 }))),
+        None    => return Ok((StatusCode::OK, Json(PinListResp { ok: true, pins: vec![], total: 0, offset, limit }))),
     };
 
     let pin_subjects = arr.get_subjects_by_predicate("kotobase/pin/cid");
-    let mut records: Vec<PinRecord> = pin_subjects.iter()
+    let records: Vec<PinRecord> = pin_subjects.iter()
         .filter_map(|subj_cid| {
             let get_text_local = |pred: &str| -> Option<String> {
                 arr.get_objects(subj_cid, pred)
@@ -607,9 +616,9 @@ pub async fn handle_pin_list(
         .collect();
 
     let total = records.len();
-    records.truncate(limit);
+    let page  = records.into_iter().skip(offset).take(limit).collect::<Vec<_>>();
 
-    Ok((StatusCode::OK, Json(PinListResp { ok: true, pins: records, total })))
+    Ok((StatusCode::OK, Json(PinListResp { ok: true, pins: page, total, offset, limit })))
 }
 
 pub async fn handle_pin_delete(
@@ -619,6 +628,10 @@ pub async fn handle_pin_delete(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     validate_did(&req.tenant_did)?;
     require_did_ownership(&headers, &req.tenant_did, &state.operator_did)?;
+    if req.pin_id.is_empty() || req.pin_id.len() > MAX_PIN_ID_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("pin_id must be 1–{MAX_PIN_ID_LEN} bytes")));
+    }
     let g     = format!("kotobase/pins/{}", req.tenant_did);
     let gc    = cid(&g);
     let subj  = cid(&req.pin_id);
@@ -646,9 +659,11 @@ pub async fn handle_pin_delete(
 
 pub async fn handle_usage_get(
     State(state): State<Arc<KotobaState>>,
+    headers: HeaderMap,
     Json(req): Json<UsageGetReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     validate_did(&req.tenant_did)?;
+    require_did_ownership(&headers, &req.tenant_did, &state.operator_did)?;
     let tier = read_tier(&state, &req.tenant_did).await;
     let (quota_pins, quota_bytes) = quota_for_tier(&tier);
     let (pin_count, total_bytes)  = count_pins(&state, &req.tenant_did, None).await;

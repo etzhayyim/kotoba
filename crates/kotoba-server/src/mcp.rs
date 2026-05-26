@@ -368,6 +368,12 @@ async fn call_tool(
             let graph = get_str("graph")?;
             let graph_cid = KotobaCid::from_bytes(graph.as_bytes());
 
+            const MAX_QUERY_RESULTS: usize = 1_000;
+            let limit = args.get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(MAX_QUERY_RESULTS as u64)
+                .min(MAX_QUERY_RESULTS as u64) as usize;
+
             let predicate_prefix = args.get("predicate_prefix").and_then(Value::as_str);
             let predicate        = args.get("predicate").and_then(Value::as_str);
             let object_key       = args.get("object").and_then(Value::as_str);
@@ -375,7 +381,9 @@ async fn call_tool(
 
             let quads: Vec<_> = if let Some(prefix) = predicate_prefix {
                 // AVET BTree prefix range scan — O(k) where k = matching quads
-                state.quad_store.quads_by_predicate_prefix(Some(&graph_cid), prefix).await
+                let mut q = state.quad_store.quads_by_predicate_prefix(Some(&graph_cid), prefix).await;
+                q.truncate(limit);
+                q
             } else if let (Some(pred), Some(obj)) = (predicate, object_key) {
                 // AVET P+O→S lookup then EAVT subject→quad reconstruction
                 let subjects = state.quad_store
@@ -386,10 +394,12 @@ async fn call_tool(
                     Some(a) => a,
                 };
                 let pred_owned = pred.to_owned();
-                subjects.iter()
+                let mut q: Vec<_> = subjects.iter()
                     .flat_map(|s| arr.get_subject_quads(&graph_cid, s))
                     .filter(|q| q.predicate == pred_owned)
-                    .collect()
+                    .collect();
+                q.truncate(limit);
+                q
             } else {
                 // Full-scan fallback with optional subject / predicate filters
                 let arr = match state.quad_store.arrangement(&graph_cid).await {
@@ -404,6 +414,7 @@ async fn call_tool(
                 if let Some(p) = predicate {
                     qs.retain(|q| q.predicate == p);
                 }
+                qs.truncate(limit);
                 qs
             };
 
@@ -411,6 +422,7 @@ async fn call_tool(
                 "graph": graph,
                 "count": quads.len(),
                 "quads": quads,
+                "limit": limit,
             }))
         }
 
@@ -420,9 +432,16 @@ async fn call_tool(
                 .ok_or_else(|| (ERR_INTERNAL, "no inference engine loaded".into()))?;
 
             let prompt     = get_str("prompt")?;
+            const MAX_PROMPT_LEN:      usize = 64 * 1024;
+            const MAX_NEW_TOKENS_LIMIT: u64  = 4096;
+            if prompt.len() > MAX_PROMPT_LEN {
+                return Err((ERR_INVALID_PARAMS,
+                    format!("prompt too large ({} bytes, limit {MAX_PROMPT_LEN})", prompt.len())));
+            }
             let max_tokens = args.get("max_new_tokens")
                 .and_then(Value::as_u64)
-                .unwrap_or(256) as usize;
+                .unwrap_or(256)
+                .min(MAX_NEW_TOKENS_LIMIT) as usize;
 
             let output = tokio::task::spawn_blocking(move || engine(&prompt, max_tokens))
                 .await
