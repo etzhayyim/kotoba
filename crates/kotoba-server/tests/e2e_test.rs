@@ -2036,3 +2036,33 @@ async fn cc_ingest_trigger_returns_started_job_id() {
     assert!(body["job_id"].as_str().is_some(), "job_id missing: {body}");
     assert_eq!(body["status"], "started", "{body}");
 }
+
+#[tokio::test]
+async fn cc_search_empty_query_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.get("/xrpc/ai.gftd.apps.kotoba.cc.search?q=").await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body["error"].as_str().is_some(), "{body}");
+}
+
+#[tokio::test]
+async fn cc_ingest_invalid_mode_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post(
+        "/xrpc/ai.gftd.apps.kotoba.cc.ingest",
+        json!({ "parquetDir": "/tmp/test", "mode": "invalid" }),
+    ).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body["error"].as_str().is_some(), "{body}");
+}
+
+#[tokio::test]
+async fn cc_rag_empty_query_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post(
+        "/xrpc/ai.gftd.apps.kotoba.cc.rag",
+        json!({ "query": "" }),
+    ).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body["error"].as_str().is_some(), "{body}");
+}
