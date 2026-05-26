@@ -153,6 +153,89 @@ mod tests {
             "expected PkMismatch, got {err:?}");
     }
 
+    /// Happy path: pk matches DID Document, chain is valid, grant exists → sealed data_key returned.
+    /// Verifies the sealed blob can be HPKE-opened with the accessor's X25519 secret key.
+    #[tokio::test]
+    async fn reencrypt_for_happy_path_returns_hpke_sealed_data_key() {
+        use ed25519_dalek::{Signer, SigningKey};
+        use x25519_dalek::StaticSecret;
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        use kotoba_auth::{Cacao, CacaoHeader, CacaoPayload, CacaoSig, DelegationChain};
+        use kotoba_auth::ed25519_pubkey_to_did_key;
+        use kotoba_crypto::hpke::hpke_open;
+
+        // ── Accessor key material ─────────────────────────────────────────
+        let ed_sk = SigningKey::from_bytes(&[7u8; 32]);
+        let accessor_did = ed25519_pubkey_to_did_key(ed_sk.verifying_key().as_bytes());
+
+        // X25519 key used for HPKE envelope delivery.
+        let x25519_sk = StaticSecret::from([9u8; 32]);
+        let x25519_pk = x25519_dalek::PublicKey::from(&x25519_sk);
+
+        // ── Owner & keys ──────────────────────────────────────────────────
+        let owner_did  = "did:key:zOwner99";
+        let owner_enc_key = [42u8; 32];
+        let re_key = [55u8; 32];
+
+        // ── Build + sign CACAO ────────────────────────────────────────────
+        let payload = CacaoPayload {
+            iss:       accessor_did.clone(),
+            aud:       "kotoba://test".into(),
+            issued_at: "2026-05-26T00:00:00Z".into(),
+            expiry:    None,
+            nonce:     "happy-path-nonce".into(),
+            domain:    "kotoba.test".into(),
+            statement: None,
+            version:   "1".into(),
+            // No resource restrictions — all caps/graphs granted.
+            resources: vec![],
+        };
+        let mut cacao = Cacao {
+            h: CacaoHeader { t: "caip122".into() },
+            p: payload,
+            s: CacaoSig { t: "EdDSA".into(), s: String::new() },
+        };
+        let msg = cacao.siwe_message();
+        let sig = ed_sk.sign(msg.as_bytes());
+        cacao.s.s = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+
+        let chain = DelegationChain::new(cacao);
+
+        // ── Registry: grant re_key ────────────────────────────────────────
+        let store    = Arc::new(MemoryBlockStore::new());
+        let registry = Arc::new(PreKeyRegistry::new(store));
+        registry
+            .grant(owner_did, &accessor_did, &re_key, &owner_enc_key)
+            .await
+            .expect("grant should succeed");
+
+        // ── PreProxy with correct X25519 pk in DID Document ──────────────
+        let resolver = Arc::new(InMemoryDidResolver::new());
+        resolver.insert(
+            &accessor_did,
+            make_doc_with_x25519(&accessor_did, *x25519_pk.as_bytes()),
+        );
+        let proxy = PreProxy::new(registry, resolver);
+
+        // ── Call under test ───────────────────────────────────────────────
+        let sealed = proxy
+            .reencrypt_for(
+                &chain,
+                owner_did,
+                &accessor_did,
+                &owner_enc_key,
+                x25519_pk.as_bytes(),
+            )
+            .await
+            .expect("reencrypt_for should succeed on happy path");
+
+        // ── Verify: HPKE-open recovers the raw re_key ─────────────────────
+        let recovered = hpke_open(&x25519_sk, &sealed)
+            .expect("hpke_open should succeed with accessor's secret key");
+        assert_eq!(recovered.as_slice(), &re_key,
+            "recovered re_key should match what was granted");
+    }
+
     #[tokio::test]
     async fn unknown_accessor_did_returns_did_resolve_error() {
         let accessor_did = "did:key:zUnknown";

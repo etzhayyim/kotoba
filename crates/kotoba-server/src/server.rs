@@ -123,6 +123,10 @@ pub struct KotobaState {
     /// Pre-populated with well-known public + authed graphs at startup.
     /// Callers may register additional graphs via `register_graph()`.
     pub graph_registry: Arc<tokio::sync::RwLock<HashMap<KotobaCid, (String, GraphVisibility)>>>,
+    // ── Outbound HTTP ─────────────────────────────────────────────────────────
+    /// Shared HTTP client — used for did:web DID document resolution and other
+    /// outbound fetches.  10-second timeout; connection pool reused across requests.
+    pub http_client: reqwest::Client,
 }
 
 impl KotobaState {
@@ -283,6 +287,10 @@ impl KotobaState {
             cc_embed_client,
             pre_key_registry:  None,
             graph_registry,
+            http_client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_default(),
         })
     }
 

@@ -81,13 +81,12 @@ impl Cacao {
         let p = &self.p;
         // Extract address from iss (last colon-separated segment)
         let address = p.iss.split(':').last().unwrap_or(&p.iss);
-        // Extract chain id from did:pkh:eip155:N:0x... → "N"
-        // NOTE: for did:erc725:gftd:260425:0x... this returns "260425" (date code),
-        // not a real EVM chain ID. TODO: future verification should handle this case
-        // explicitly and map date codes to chain IDs or require did:pkh format.
-        let chain_id = p.iss.split(':')
-            .rev().nth(1)
-            .unwrap_or("1");
+        // Extract chain id: did:pkh:eip155:N:0x... → "N"; did:key → "1" (CAIP-122 default)
+        let chain_id = if p.iss.starts_with("did:key:") {
+            "1"
+        } else {
+            p.iss.split(':').rev().nth(1).unwrap_or("1")
+        };
 
         let mut lines = Vec::new();
         lines.push(format!("{} wants you to sign in with your Ethereum account:", p.domain));
@@ -157,7 +156,7 @@ impl Cacao {
                 let signature = Signature::from_bytes(&sig_arr);
 
                 verifying_key
-                    .verify(msg.as_bytes(), &signature)
+                    .verify_strict(msg.as_bytes(), &signature)
                     .map_err(|e| CacaoError::Ed25519(e.to_string()))?;
 
                 Ok(self.p.iss.clone())
@@ -165,6 +164,82 @@ impl Cacao {
             other => Err(CacaoError::UnsupportedSigType(other.to_string())),
         }
     }
+
+    /// Returns `true` if the CACAO's `exp` field is set and is in the past.
+    pub fn is_expired(&self) -> bool {
+        match &self.p.expiry {
+            None => false,
+            Some(exp) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                format_unix_to_iso8601(now) > *exp
+            }
+        }
+    }
+
+    /// Verify the CACAO signature using an externally-resolved Ed25519 public key.
+    ///
+    /// Intended for issuers whose public key must be fetched from a DID document
+    /// (e.g. `did:web:`), where `verify_signature()` cannot resolve the key itself.
+    /// Returns the issuer DID string on success.
+    pub fn verify_with_pubkey(&self, pubkey: &[u8; 32]) -> Result<String, CacaoError> {
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+        let verifying_key = VerifyingKey::from_bytes(pubkey)
+            .map_err(|e| CacaoError::Ed25519(e.to_string()))?;
+        let msg = self.siwe_message();
+        let sig_bytes = decode_sig_bytes(&self.s.s)?;
+        let sig_arr: [u8; 64] = sig_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| CacaoError::Ed25519(
+                format!("expected 64-byte signature, got {}", sig_bytes.len())
+            ))?;
+        verifying_key
+            .verify_strict(msg.as_bytes(), &Signature::from_bytes(&sig_arr))
+            .map_err(|e| CacaoError::Ed25519(e.to_string()))?;
+        Ok(self.p.iss.clone())
+    }
+}
+
+/// Minimal ISO-8601 UTC formatter — accurate for 1970-2100.
+/// Duplicated from `delegation.rs` (not refactored) to keep crates independent.
+fn format_unix_to_iso8601(unix_secs: u64) -> String {
+    let s = unix_secs;
+    let sec  = s % 60; let s = s / 60;
+    let min  = s % 60; let s = s / 60;
+    let hour = s % 24;
+    let days = s / 24;
+    let (year, month, day) = unix_days_to_ymd(days);
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month, day, hour, min, sec)
+}
+
+fn unix_days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    let mut year = 1970u64;
+    loop {
+        let yd = if unix_is_leap(year) { 366 } else { 365 };
+        if days < yd { break; }
+        days -= yd;
+        year += 1;
+    }
+    let months = if unix_is_leap(year) {
+        [31u64, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31u64, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    let mut month = 1u64;
+    for &md in &months {
+        if days < md { break; }
+        days -= md;
+        month += 1;
+    }
+    (year, month, days + 1)
+}
+
+fn unix_is_leap(y: u64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
 /// Decode a signature string — tries base64url (no-pad) first, then hex.

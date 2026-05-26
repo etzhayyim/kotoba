@@ -20,6 +20,8 @@ pub enum AccessDenied {
     NotDenied,
     /// Authenticated tier: no `Authorization: Bearer …` header present.
     MissingBearer,
+    /// Authenticated tier: Bearer JWT `exp` claim is in the past.
+    TokenExpired,
     /// Private tier: `cacao_b64` query param is absent.
     MissingCacao,
     /// Private tier: base64 decode of `cacao_b64` failed.
@@ -40,6 +42,10 @@ impl AccessDenied {
             AccessDenied::MissingBearer => (
                 StatusCode::UNAUTHORIZED,
                 "Authorization: Bearer <token> required for authenticated graphs".into(),
+            ),
+            AccessDenied::TokenExpired => (
+                StatusCode::UNAUTHORIZED,
+                "Bearer token has expired".into(),
             ),
             AccessDenied::MissingCacao => (
                 StatusCode::UNAUTHORIZED,
@@ -63,6 +69,39 @@ impl AccessDenied {
             ),
         }
     }
+}
+
+/// Decode the JWT payload segment and return `true` if the `exp` claim is in the past.
+///
+/// This is a defense-in-depth check only — the JWT signature is NOT verified here.
+/// The edge BFF (AT Protocol PDS / CF Worker) is the trust boundary for signatures.
+/// Returns `false` for any token that cannot be decoded or has no `exp` claim.
+fn jwt_exp_elapsed(token: &str) -> bool {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    // A JWT has three dot-separated segments: header.payload.signature
+    let payload_b64 = match token.splitn(3, '.').nth(1) {
+        Some(p) => p,
+        None => return false,
+    };
+    // Pad to a multiple of 4 (URL_SAFE_NO_PAD tolerates missing padding on decode)
+    let bytes = match URL_SAFE_NO_PAD.decode(payload_b64) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let json: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let exp = match json.get("exp").and_then(|v| v.as_u64()) {
+        Some(e) => e,
+        None => return false,
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    now > exp
 }
 
 /// Check read access for a named graph.
@@ -90,6 +129,12 @@ pub fn check_read_access(
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
             if auth.starts_with("Bearer ") && auth.len() > "Bearer ".len() {
+                let token = &auth["Bearer ".len()..];
+                // Defense-in-depth: reject tokens whose JWT `exp` claim is clearly past.
+                // Signature is NOT verified here — the edge BFF is the trust boundary.
+                if jwt_exp_elapsed(token) {
+                    return Err(AccessDenied::TokenExpired);
+                }
                 Ok(())
             } else {
                 Err(AccessDenied::MissingBearer)

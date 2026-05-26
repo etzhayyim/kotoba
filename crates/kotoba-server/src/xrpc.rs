@@ -138,6 +138,84 @@ pub async fn health(State(state): State<Arc<KotobaState>>) -> impl IntoResponse 
     })
 }
 
+fn map_delegation_error(e: kotoba_auth::DelegationError) -> (StatusCode, String) {
+    use kotoba_auth::DelegationError;
+    match &e {
+        DelegationError::Expired => (StatusCode::UNAUTHORIZED, "cacao expired".to_string()),
+        DelegationError::GraphMismatch { expected, got } => (
+            StatusCode::UNAUTHORIZED,
+            format!("cacao graph mismatch: warrant covers {expected}, request targets {got}"),
+        ),
+        _ => (StatusCode::UNAUTHORIZED, format!("cacao delegation: {e}")),
+    }
+}
+
+/// Resolve a `did:web:` DID document over HTTPS, extract the Ed25519 public key,
+/// verify the CACAO signature, and check expiry + graph scope.
+///
+/// `did:web:domain`       → `https://domain/.well-known/did.json`
+/// `did:web:domain:path`  → `https://domain/path/did.json`
+async fn resolve_and_verify_did_web(
+    cacao: &kotoba_auth::Cacao,
+    graph: &str,
+    client: &reqwest::Client,
+) -> Result<String, (StatusCode, String)> {
+    use kotoba_auth::DidDocument;
+
+    // P3 — expiry check (DelegationChain path handles this for non-web DIDs)
+    if cacao.is_expired() {
+        return Err((StatusCode::UNAUTHORIZED, "cacao expired".to_string()));
+    }
+
+    // P3 — capability check
+    if let Some(cap) = cacao.p.capability() {
+        if cap != "quad:write" {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                format!("capability denied: need 'quad:write', CACAO grants '{cap}'"),
+            ));
+        }
+    }
+
+    // P3 — graph scope check
+    if let Some(cacao_graph) = cacao.p.graph_cid() {
+        if cacao_graph != graph {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                format!("cacao graph mismatch: warrant covers {cacao_graph}, request targets {graph}"),
+            ));
+        }
+    }
+
+    // Build did:web fetch URL
+    let suffix = cacao.p.iss.strip_prefix("did:web:").unwrap_or(&cacao.p.iss);
+    let url = if suffix.contains(':') {
+        format!("https://{}/did.json", suffix.replace(':', "/"))
+    } else {
+        format!("https://{}/.well-known/did.json", suffix)
+    };
+
+    let resp = client.get(&url).send().await
+        .map_err(|e| (StatusCode::UNAUTHORIZED, format!("did:web fetch {url}: {e}")))?;
+    if !resp.status().is_success() {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            format!("did:web fetch {url}: HTTP {}", resp.status()),
+        ));
+    }
+    let doc: DidDocument = resp.json().await
+        .map_err(|e| (StatusCode::UNAUTHORIZED, format!("did:web document parse: {e}")))?;
+
+    let pubkey = doc.ed25519_public_key()
+        .ok_or_else(|| (
+            StatusCode::UNAUTHORIZED,
+            format!("no Ed25519 key in DID document for {}", cacao.p.iss),
+        ))?;
+
+    cacao.verify_with_pubkey(&pubkey)
+        .map_err(|e| (StatusCode::UNAUTHORIZED, format!("did:web sig: {e}")))
+}
+
 /// POST /xrpc/ai.gftd.apps.kotoba.quad.create
 /// Publish a Quad assert to the KSE Journal (SPO topic).
 ///
@@ -162,19 +240,16 @@ pub async fn quad_create(
     let cacao = kotoba_auth::Cacao::from_cbor(&cbor)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("cacao parse: {e}")))?;
 
-    // Signature must be valid
-    let issuer_did = cacao.verify_signature()
-        .map_err(|e| (StatusCode::UNAUTHORIZED, format!("cacao sig: {e}")))?;
-
-    // The CACAO's graph resource must match the requested graph
-    if let Some(cacao_graph) = cacao.p.graph_cid() {
-        if cacao_graph != req.graph {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                format!("cacao graph mismatch: warrant covers {cacao_graph}, request targets {}", req.graph),
-            ));
-        }
-    }
+    // Dispatch on issuer DID method:
+    //   did:web:*  → P3: resolve DID document over HTTP, verify with extracted key
+    //   everything else → P1: DelegationChain verifies expiry + capability + graph + sig
+    let issuer_did = if cacao.p.iss.starts_with("did:web:") {
+        resolve_and_verify_did_web(&cacao, &req.graph, &state.http_client).await?
+    } else {
+        kotoba_auth::DelegationChain::new(cacao)
+            .verify(&req.graph, "quad:write")
+            .map_err(map_delegation_error)?
+    };
 
     tracing::info!(issuer = %issuer_did, graph = %req.graph, "quad.create: CACAO verified");
 
