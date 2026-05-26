@@ -639,6 +639,14 @@ pub async fn block_put(
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     use kotoba_core::cid::KotobaCid;
 
+    // 32 MiB per block (ProllyTree internal nodes are tiny; large leaf values should
+    // be chunked by the vault, not pushed as single raw blocks).
+    const MAX_BLOCK_B64_LEN: usize = 32 * 1024 * 1024;
+    if req.data_b64.len() > MAX_BLOCK_B64_LEN {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE,
+            format!("data_b64 too large ({} bytes, limit {MAX_BLOCK_B64_LEN})", req.data_b64.len())));
+    }
+
     let bytes = B64.decode(&req.data_b64)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let cid = KotobaCid::from_bytes(&bytes);
@@ -1127,6 +1135,14 @@ pub async fn lora_apply(
             .map_err(map_delegation_error)?
     };
     tracing::info!(issuer = %issuer_did, graph = %req.graph, "lora.apply: CACAO verified");
+
+    // 128 MiB for a LoRA delta (rank-128 F8 for a 4B model is ~200 MB unquantized;
+    // quantized rank-64 F8 fits comfortably under 128 MiB).
+    const MAX_ADAPTER_B64_LEN: usize = 128 * 1024 * 1024;
+    if req.adapter_b64.len() > MAX_ADAPTER_B64_LEN {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE,
+            format!("adapter_b64 too large ({} bytes, limit {MAX_ADAPTER_B64_LEN})", req.adapter_b64.len())));
+    }
 
     let bytes = B64.decode(&req.adapter_b64)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
