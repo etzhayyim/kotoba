@@ -7,8 +7,8 @@ pub use kotoba_core::store::BlockStore;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
-    #[error("sled error: {0}")]
-    Sled(#[from] sled::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// Verify that `blake3(data) == cid`, then put.  Returns `Err` on CID mismatch.

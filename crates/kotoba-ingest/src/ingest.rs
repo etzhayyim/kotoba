@@ -145,7 +145,7 @@ mod tests {
     use std::sync::Arc;
     use kotoba_kse::{SecureVault, Journal, Vault};
     use kotoba_graph::QuadStore;
-    use kotoba_store::SledBlockStore;
+    use kotoba_store::MemoryBlockStore;
 
     fn test_key() -> [u8; 32] {
         let mut k = [0u8; 32];
@@ -155,7 +155,7 @@ mod tests {
 
     fn make_ingestor() -> EmailIngestor {
         let journal     = Arc::new(Journal::new());
-        let block_store = Arc::new(SledBlockStore::temporary().expect("sled temp"));
+        let block_store = Arc::new(MemoryBlockStore::new()) as Arc<dyn kotoba_core::store::BlockStore + Send + Sync>;
         let quad_store  = Arc::new(QuadStore::new(journal, block_store));
         let vault       = SecureVault::new();
         EmailIngestor::new(
@@ -195,7 +195,7 @@ mod tests {
         let vault = Arc::new(SecureVault::new());
         let key   = test_key();
         let journal     = Arc::new(Journal::new());
-        let block_store = Arc::new(SledBlockStore::temporary().expect("sled temp"));
+        let block_store = Arc::new(MemoryBlockStore::new()) as Arc<dyn kotoba_core::store::BlockStore + Send + Sync>;
         let quad_store  = Arc::new(QuadStore::new(journal, block_store));
         let ing = EmailIngestor::new(
             Arc::clone(&vault), quad_store, key, "did:plc:test2".to_string()

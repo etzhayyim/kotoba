@@ -10,7 +10,7 @@ use kotoba_kse::{sync_window::SyncWindow, Journal, Shelf, Topic, Vault};
 use kotoba_kqe::quad::Quad;
 use kotoba_graph::QuadStore;
 use kotoba_kse::SecureVault;
-use kotoba_store::{BudgetedBlockStore, IpfsPinClient, LayeredBlockStore};
+use kotoba_store::IpfsPinClient;
 use kotoba_runtime::{host::InferenceFn, UdfExecutor, WasmExecutor};
 use kotoba_ingest::embed_client::{EmbedClient, HttpEmbedClient};
 use kotoba_vm::{distributed::DistributedPregelRunner, InvokeRouter};
@@ -42,7 +42,7 @@ pub struct KotobaState {
     /// Gemma 4 E2B inference engine, loaded at startup when `KOTOBA_LOAD_GEMMA` is set.
     pub inference_engine: Option<InferenceFn>,
     // ── BlockStore ───────────────────────────────────────────────────────
-    /// Content-addressed block store (sled-backed or ephemeral).
+    /// Content-addressed block store (BudgetedBlockStore<MemoryBlockStore> hot + optional B2 cold).
     pub block_store: Arc<dyn BlockStore + Send + Sync>,
     // ── QuadStore ────────────────────────────────────────────────────────────
     /// Quad write/read with ProllyTree commit + 3-index Journal publish.
@@ -65,32 +65,30 @@ pub struct KotobaState {
 
 impl KotobaState {
     pub fn new(inference_engine: Option<InferenceFn>) -> anyhow::Result<Self> {
-        // BlockStore — sled-backed when KOTOBA_STORE_PATH is set, ephemeral otherwise.
+        // Hot block cache — BudgetedBlockStore<MemoryBlockStore>.
+        // Capacity: KOTOBA_HOT_CACHE_BYTES (default 256 MiB) or
+        //           KOTOBA_STORAGE_BUDGET_BYTES (legacy alias, same meaning).
+        // Persistence: B2/S3 cold tier (LayeredBlockStore) if KOTOBA_B2_* env vars are set.
         // All KSE components (Journal, Vault, SecureVault) share the same store.
         let store_path: Option<String> = std::env::var("KOTOBA_STORE_PATH").ok();
-        let sled_db: Option<sled::Db> = store_path.as_ref().map(|path| {
-            sled::open(path)
-                .map_err(|e| anyhow::anyhow!("sled open failed: {e}"))
-                .expect("sled open")
-        });
 
-        let budget_bytes: Option<usize> = std::env::var("KOTOBA_STORAGE_BUDGET_BYTES")
+        const DEFAULT_HOT_BYTES: usize = 256 * 1024 * 1024; // 256 MiB
+        let hot_cache_bytes: usize = std::env::var("KOTOBA_HOT_CACHE_BYTES")
             .ok()
-            .and_then(|s| s.parse().ok());
+            .or_else(|| std::env::var("KOTOBA_STORAGE_BUDGET_BYTES").ok())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_HOT_BYTES);
 
-        let block_store: Arc<dyn BlockStore + Send + Sync> = match &sled_db {
-            Some(db) => {
-                tracing::info!("BlockStore: sled-backed persistence");
-                let inner = kotoba_store::SledBlockStore::from_db(db)
-                    .map_err(|e| anyhow::anyhow!("sled blocks tree: {e}"))?;
-                maybe_wrap(inner, budget_bytes)
-            }
-            None => {
-                tracing::warn!("BlockStore: ephemeral (set KOTOBA_STORE_PATH for persistence)");
-                let inner = kotoba_store::SledBlockStore::temporary()
-                    .map_err(|e| anyhow::anyhow!("sled temporary failed: {e}"))?;
-                maybe_wrap(inner, budget_bytes)
-            }
+        let block_store: Arc<dyn BlockStore + Send + Sync> = {
+            let hot = kotoba_store::BudgetedBlockStore::new(
+                kotoba_store::MemoryBlockStore::new(),
+                hot_cache_bytes,
+            );
+            tracing::info!(
+                hot_cache_mib = hot_cache_bytes / (1024 * 1024),
+                "BlockStore: BudgetedBlockStore<MemoryBlockStore> hot cache"
+            );
+            Arc::new(hot)
         };
 
         // Journal — Merkle WAL backed by block_store; head pointer in a sibling JSON file.
@@ -266,22 +264,6 @@ impl KotobaState {
     }
 }
 
-/// Optionally wrap a concrete `BlockStore` in a `BudgetedBlockStore`, then box it.
-///
-/// Accepts the concrete value (not `Arc<S>`) because `BudgetedBlockStore<S>`
-/// requires `S: BlockStore + Sized` — it cannot wrap a `dyn` or `Arc<dyn>`.
-fn maybe_wrap<S: BlockStore + Send + Sync + 'static>(
-    inner:  S,
-    budget: Option<usize>,
-) -> Arc<dyn BlockStore + Send + Sync> {
-    match budget {
-        Some(b) if b > 0 => {
-            tracing::info!(budget_bytes = b, "BlockStore: BudgetedBlockStore LRU eviction enabled");
-            Arc::new(BudgetedBlockStore::new(inner, b))
-        }
-        _ => Arc::new(inner),
-    }
-}
 
 /// Generate a deterministic-ish seed for the ephemeral dev NodeId.
 /// Production: load from persisted Ed25519 key in Shelf/Keychain.

@@ -6,16 +6,19 @@ license.workspace = true
 description = "Kotoba cryptographic primitives: HKDF-SHA256, AES-256-GCM, signal:v1: envelope"
 
 [dependencies]
-aes-gcm   = { workspace = true }
-hkdf      = { workspace = true }
-sha2      = { workspace = true }
-hmac      = { workspace = true }
-rand      = { workspace = true }
-rand_core = { workspace = true }
-base64    = { workspace = true }
-zeroize   = { workspace = true }
-thiserror = { workspace = true }
-bytes     = { workspace = true }
+aes-gcm      = { workspace = true }
+hkdf         = { workspace = true }
+sha2         = { workspace = true }
+hmac         = { workspace = true }
+rand         = { workspace = true }
+rand_core    = { workspace = true }
+base64       = { workspace = true }
+zeroize      = { workspace = true }
+thiserror    = { workspace = true }
+bytes        = { workspace = true }
+x25519-dalek = { workspace = true }
+async-trait  = { workspace = true }
 
 [dev-dependencies]
-hex = { workspace = true }
+hex   = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

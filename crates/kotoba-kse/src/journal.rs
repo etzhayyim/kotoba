@@ -107,14 +107,6 @@ impl Journal {
         }
     }
 
-    /// Legacy sled-backed constructor — kept for migration compatibility.
-    /// Creates a Journal using the sled tree for persistence via block store emulation.
-    #[deprecated(note = "use with_block_store instead")]
-    pub fn with_sled_tree(tree: sled::Tree) -> Self {
-        // Wrap the sled tree as a simple block store
-        Self::new()  // fallback to in-memory; sled backing removed
-    }
-
     pub async fn publish(&self, topic: Topic, payload: Bytes) -> JournalEntry {
         let mut seq_guard = self.seq.write().await;
         *seq_guard += 1;

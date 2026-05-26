@@ -275,32 +275,35 @@ entities × 2 quads = 要素数 (throughput = quad/s)
 - `build_internal_level` の境界チェックを max_key → **子 CID** に修正 (max_key は各レベルで同一 key が発火し無限再帰)
 - 1K entries での実測深さ ~3 levels → 1M quads は ~3-4 RTT、1B quads は ~5-6 RTT
 
-#### loadtest Phase 1 (純 Arrangement, 2026-05-25)
+#### loadtest Phase 1 (純 Arrangement, 2026-05-26, post-sled-removal)
 
-| quads | insert | MB_rss | p50 | p95 | p99 | quad/s | MB/Mquad |
+| quads | insert_ms | MB_rss | p50 | p95 | p99 | quad/s | MB/Mquad |
 |---|---|---|---|---|---|---|---|
-| 1M | 3.45s | 840 MB | 68µs | 7.4ms | 14ms | 290K | 840 |
-| 10M | 75.9s | 1570 MB | 829µs | 87ms | 136ms | 132K | 157 |
+| 1M | 1382 ms | 1919 MB | 8µs | 1759µs | 1969µs | 724K | 1919 |
+| 10M | 19274 ms | 7038 MB | 24µs | 16742µs | 18369µs | 519K | 704 |
 
-#### loadtest Phase 2 (QuadStore commit cycle + ProllyTree, 2026-05-25)
+#### loadtest Phase 2 (QuadStore commit cycle + ProllyTree, 2026-05-26)
 
 バッチ 1M quad ずつ insert → `commit()` (4 ProllyTree build) → `reset_arrangement()` を繰り返す。  
 `LOADTEST_MEM_LIMIT_MB=8192` (Phase-2 RSS 成長が 8 GB に達したら打ち切り)。
 
 | batch | insert_ms | commit_ms | MB_growth | ins_q/s | cum_q/s |
 |---|---|---|---|---|---|
-| 1 (1M) | 1620 | 4730 | 2288 | 617K | 142K |
-| 2 (2M) | 1391 | 4725 | 2397 | 719K | 144K |
-| 3 (3M) | 1509 | 4671 | 3013 | 663K | 144K |
-| 4 (4M) | 1426 | 4790 | 993 | 701K | 144K |
-| 5 (5M) | 1440 | 4696 | 361 | 694K | 145K |
-| 6–10 | ~1440 | ~4760 | ≤513→負 | ~690K | ~142K |
+| 1 (1M) | 2029 | 3969 | +856 | 493K | 147K |
+| 2 (2M) | 1576 | 3854 | -2834 | 635K | 148K |
+| 3 (3M) | 2523 | 3719 | -2816 | 396K | 146K |
+| 4 (4M) | 2095 | 4584 | -3615 | 477K | 139K |
+| 5 (5M) | 2203 | 4667 | -5678 | 454K | 134K |
+| 6 (6M) | 2165 | 5192 | -6911 | 462K | 128K |
+| 7 (7M) | 1832 | 4970 | -6222 | 546K | 126K |
+| 8 (8M) | 1714 | 4638 | -5110 | 583K | 126K |
+| 9 (9M) | 1607 | 5082 | -6413 | 622K | 124K |
+| 10 (10M) | 1709 | 3492 | -2731 | 585K | 128K |
 
-- **insert**: ~620–720K q/s (バッチ単独)
-- **commit (4 ProllyTree × 1M entries, serial)**: **~4.7 s/batch** (測定値)
-- **commit (4 ProllyTree 並列 + CAR bundle)**: **~1.5–2 s/batch** (期待値、並列 4 スレッド)
-- **combined throughput**: **~142K q/s** (insert + commit、serial 測定値)
-- **peak Phase-2 RSS growth**: ~3 GB (batch 3)。以降 OS がページ回収し減少 (batch 8–10 で負)
+- **insert**: ~393–635K q/s (バッチ単独)
+- **commit**: **~3.5–5.2 s/batch** (MemoryBlockStore、serial 4 prolly)
+- **combined throughput**: **~128K q/s** (total 10M quads in 78.3s)
+- **peak RSS growth**: +856 MB (batch 1)。以降 OS がページ回収し負 (batch 2–10)
 - Phase-2 は 8 GB 上限未達で全 10 バッチ完走
 
 Run: `cargo bench -p kotoba-kqe --bench arrangement`  
