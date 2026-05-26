@@ -1,6 +1,7 @@
 /// Wire format: `signal:v1:{base64url(nonce || ciphertext_with_tag)}`
 /// Compatible with the TypeScript `@gftd/signal` `signal:v1:` prefix convention.
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use zeroize::Zeroizing;
 use crate::aead::CryptoError;
 
 pub const SIGNAL_VAL_PREFIX: &str = "signal:v1:";
@@ -26,10 +27,10 @@ pub fn encrypt_field(key: &[u8; 32], plaintext: &[u8]) -> Result<String, CryptoE
 }
 
 /// High-level: decode `signal:v1:` envelope and AES-256-GCM decrypt.
-pub fn decrypt_field(key: &[u8; 32], envelope: &str) -> Result<Vec<u8>, CryptoError> {
+/// Returns `Zeroizing<Vec<u8>>` so plaintext is wiped from memory on drop.
+pub fn decrypt_field(key: &[u8; 32], envelope: &str) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
     let raw = decode_envelope(envelope)?;
-    let pt = crate::aead::open(key, &raw)?;
-    Ok(pt.to_vec())
+    crate::aead::open(key, &raw)
 }
 
 #[cfg(test)]
@@ -49,7 +50,7 @@ mod tests {
         let enc = encrypt_field(&key, msg).unwrap();
         assert!(enc.starts_with(SIGNAL_VAL_PREFIX));
         let dec = decrypt_field(&key, &enc).unwrap();
-        assert_eq!(dec, msg);
+        assert_eq!(dec.as_slice(), msg);
     }
 
     #[test]

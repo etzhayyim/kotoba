@@ -118,8 +118,9 @@ impl SignalStore {
         convo_id: &str,
     ) -> Result<String, SignalError> {
         let key = self.derive_field_key(peer_did, convo_id);
-        let bytes = kotoba_crypto::envelope::decrypt_field(&key, envelope).map_err(SignalError::Crypto)?;
-        String::from_utf8(bytes).map_err(|e| SignalError::Store(e.to_string()))
+        let mut bytes = kotoba_crypto::envelope::decrypt_field(&key, envelope).map_err(SignalError::Crypto)?;
+        let inner = std::mem::take(&mut *bytes);
+        String::from_utf8(inner).map_err(|e| SignalError::Store(e.to_string()))
     }
 }
 

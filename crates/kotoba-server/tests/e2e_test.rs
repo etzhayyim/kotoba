@@ -2203,3 +2203,64 @@ async fn agent_sync_advance_unknown_session_returns_404() {
     })).await;
     assert_eq!(status, 404, "{body}");
 }
+
+// ── signal endpoint security tests ───────────────────────────────────────────
+
+#[tokio::test]
+async fn signal_register_prekeys_without_auth_returns_401() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post("/xrpc/ai.gftd.signal.register.prekeys", json!({
+        "did": "did:plc:test123",
+        "deviceId": "device-1",
+        "identityKey": {},
+        "prekeyBundle": {},
+    })).await;
+    assert_eq!(status, 401, "{body}");
+}
+
+#[tokio::test]
+async fn signal_register_prekeys_empty_did_returns_400() {
+    let s = TestServer::start(false).await;
+    // Use a token whose sub matches the empty DID (won't reach the check — empty DID is caught first)
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.signal.register.prekeys", json!({
+        "did": "",
+        "deviceId": "device-1",
+        "identityKey": {},
+        "prekeyBundle": {},
+    }), "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJkaWQ6cGxjOnRlc3QxMjMifQ.dummysig").await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn signal_send_message_oversized_payload_returns_413() {
+    let s = TestServer::start(false).await;
+    // Build a payload exceeding 256 KiB
+    let large_ciphertext = "x".repeat(300 * 1024);
+    let (status, body) = s.post("/xrpc/ai.gftd.signal.send.message", json!({
+        "signalMessage": {
+            "recipientDid": "did:plc:recipient",
+            "deviceId": "device-1",
+            "ciphertext": large_ciphertext,
+            "messageType": 1u32,
+        },
+    })).await;
+    assert_eq!(status, 413, "{body}");
+}
+
+#[tokio::test]
+async fn signal_get_prekey_bundle_empty_did_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.get("/xrpc/ai.gftd.signal.get.prekey.bundle?did=").await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn signal_send_group_message_empty_group_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post("/xrpc/ai.gftd.signal.send.group.message", json!({
+        "groupId": "",
+        "senderDid": "did:plc:sender",
+        "senderKeyMessage": {},
+    })).await;
+    assert_eq!(status, 400, "{body}");
+}

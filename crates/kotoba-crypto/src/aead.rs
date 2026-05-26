@@ -33,6 +33,10 @@ pub fn seal(key: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<Vec<u8>, CryptoErro
 }
 
 /// AES-256-GCM seal with explicit nonce (for deterministic tests only).
+/// Only available under `#[cfg(test)]` — production code MUST use `seal` which
+/// generates a random nonce via OsRng.  Nonce reuse under a fixed key completely
+/// breaks AES-GCM confidentiality and integrity.
+#[cfg(test)]
 pub fn seal_with_nonce(
     key: &[u8; KEY_LEN],
     nonce: &[u8; NONCE_LEN],

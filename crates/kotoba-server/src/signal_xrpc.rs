@@ -14,13 +14,42 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::{State, Query},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
 
 use kotoba_signal::message::SignalMessage;
 use crate::server::KotobaState;
+
+// Soft caps — prevent shelf key exhaustion and oversized payloads.
+const MAX_DID_LEN:       usize = 512;
+const MAX_DEVICE_ID_LEN: usize = 128;
+const MAX_GROUP_ID_LEN:  usize = 128;
+const MAX_PAYLOAD_BYTES: usize = 256 * 1024; // 256 KiB per encrypted message
+
+/// Verify caller owns `did` via Bearer JWT `sub` claim.
+fn require_signal_auth(
+    headers: &HeaderMap,
+    did: &str,
+    operator_did: &str,
+) -> Result<(), (StatusCode, String)> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED,
+            "Authorization: Bearer <token> required".to_string()))?;
+    let sub = crate::graph_auth::jwt_sub(token)
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED,
+            "Bearer token missing sub claim".to_string()))?;
+    if sub == did || sub == operator_did {
+        Ok(())
+    } else {
+        Err((StatusCode::UNAUTHORIZED,
+            format!("Bearer sub does not match did {did:?}")))
+    }
+}
 
 // ── registerPrekeys ───────────────────────────────────────────────────────────
 
@@ -44,22 +73,32 @@ pub struct RegisterPrekeysResp {
 
 pub async fn register_prekeys(
     State(state): State<Arc<KotobaState>>,
+    headers: HeaderMap,
     Json(req): Json<RegisterPrekeysReq>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if req.did.is_empty() || req.did.len() > MAX_DID_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("did must be 1–{MAX_DID_LEN} bytes")));
+    }
+    if req.device_id.is_empty() || req.device_id.len() > MAX_DEVICE_ID_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("device_id must be 1–{MAX_DEVICE_ID_LEN} bytes")));
+    }
+    require_signal_auth(&headers, &req.did, &state.operator_did)?;
+
     let key = format!("signal/bundle/{}/{}", req.did, req.device_id);
     state.shelf.put(
         "KOTOBA_SIGNAL",
         key,
         bytes::Bytes::from(serde_json::to_vec(&req.prekey_bundle).unwrap_or_default()),
     ).await;
-    // Store identity key separately for lookup
     let ik_key = format!("signal/identity/{}/{}", req.did, req.device_id);
     state.shelf.put(
         "KOTOBA_SIGNAL",
         ik_key,
         bytes::Bytes::from(serde_json::to_vec(&req.identity_key).unwrap_or_default()),
     ).await;
-    Json(RegisterPrekeysResp { status: "ok", did: req.did })
+    Ok(Json(RegisterPrekeysResp { status: "ok", did: req.did }))
 }
 
 // ── getPrekeyBundle ───────────────────────────────────────────────────────────
@@ -74,7 +113,11 @@ pub struct GetPreKeyBundleQuery {
 pub async fn get_prekey_bundle(
     State(state): State<Arc<KotobaState>>,
     Query(q): Query<GetPreKeyBundleQuery>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if q.did.is_empty() || q.did.len() > MAX_DID_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("did must be 1–{MAX_DID_LEN} bytes")));
+    }
     let device_id = q.device_id.as_deref().unwrap_or("default");
     let bundle_key = format!("signal/bundle/{}/{}", q.did, device_id);
     let ik_key     = format!("signal/identity/{}/{}", q.did, device_id);
@@ -82,7 +125,7 @@ pub async fn get_prekey_bundle(
     let bundle_bytes = state.shelf.get("KOTOBA_SIGNAL", &bundle_key).await;
     let ik_bytes     = state.shelf.get("KOTOBA_SIGNAL", &ik_key).await;
 
-    match (bundle_bytes, ik_bytes) {
+    Ok(match (bundle_bytes, ik_bytes) {
         (Some(b), Some(ik)) => {
             let bundle: serde_json::Value = serde_json::from_slice(&b).unwrap_or_default();
             let identity_key: serde_json::Value = serde_json::from_slice(&ik).unwrap_or_default();
@@ -97,7 +140,7 @@ pub async fn get_prekey_bundle(
             "error": "prekey bundle not found",
             "did": q.did,
         }))).into_response(),
-    }
+    })
 }
 
 // ── sendMessage ───────────────────────────────────────────────────────────────
@@ -119,7 +162,15 @@ pub async fn send_message(
     State(state): State<Arc<KotobaState>>,
     Json(req): Json<SendMessageReq>,
 ) -> impl IntoResponse {
-    // Route the encrypted message envelope to the recipient's inbox on the KSE Journal.
+    let raw_len = serde_json::to_vec(&req.signal_message)
+        .map(|v| v.len())
+        .unwrap_or(usize::MAX);
+    if raw_len > MAX_PAYLOAD_BYTES {
+        return (StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({ "error": format!("signal_message exceeds {MAX_PAYLOAD_BYTES} bytes") })),
+        ).into_response();
+    }
+
     let msg: SignalMessage = match serde_json::from_value(req.signal_message.clone()) {
         Ok(m) => m,
         Err(e) => return (
@@ -153,6 +204,25 @@ pub async fn send_group_message(
     State(state): State<Arc<KotobaState>>,
     Json(req): Json<SendGroupMessageReq>,
 ) -> impl IntoResponse {
+    if req.group_id.is_empty() || req.group_id.len() > MAX_GROUP_ID_LEN {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("group_id must be 1–{MAX_GROUP_ID_LEN} bytes") })),
+        ).into_response();
+    }
+    if req.sender_did.is_empty() || req.sender_did.len() > MAX_DID_LEN {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("sender_did must be 1–{MAX_DID_LEN} bytes") })),
+        ).into_response();
+    }
+    let raw_len = serde_json::to_vec(&req.sender_key_message)
+        .map(|v| v.len())
+        .unwrap_or(usize::MAX);
+    if raw_len > MAX_PAYLOAD_BYTES {
+        return (StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({ "error": format!("sender_key_message exceeds {MAX_PAYLOAD_BYTES} bytes") })),
+        ).into_response();
+    }
+
     let topic = kotoba_kse::topic::Topic(
         format!("kotoba/signal/group/{}", req.group_id),
     );
@@ -184,6 +254,25 @@ pub async fn distribute_sender_key(
     State(state): State<Arc<KotobaState>>,
     Json(req): Json<DistributeSenderKeyReq>,
 ) -> impl IntoResponse {
+    if req.recipient_did.is_empty() || req.recipient_did.len() > MAX_DID_LEN {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("recipient_did must be 1–{MAX_DID_LEN} bytes") })),
+        ).into_response();
+    }
+    if req.recipient_device.is_empty() || req.recipient_device.len() > MAX_DEVICE_ID_LEN {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("recipient_device must be 1–{MAX_DEVICE_ID_LEN} bytes") })),
+        ).into_response();
+    }
+    let raw_len = serde_json::to_vec(&req.signal_message)
+        .map(|v| v.len())
+        .unwrap_or(usize::MAX);
+    if raw_len > MAX_PAYLOAD_BYTES {
+        return (StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({ "error": format!("signal_message exceeds {MAX_PAYLOAD_BYTES} bytes") })),
+        ).into_response();
+    }
+
     let topic = kotoba_kse::topic::Topic(
         format!("kotoba/signal/inbox/{}/{}", req.recipient_did, req.recipient_device),
     );
