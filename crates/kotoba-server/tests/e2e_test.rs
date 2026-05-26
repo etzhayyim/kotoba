@@ -1140,3 +1140,138 @@ async fn quad_create_cacao_cbor_parse_error_returns_400() {
     ).await;
     assert_eq!(status, 400);
 }
+
+// ── kotobase input validation tests ──────────────────────────────────────────
+
+const KOTOBASE_ACCOUNT_CREATE: &str = "/xrpc/ai.gftd.apps.kotobase.accountCreate";
+const KOTOBASE_PIN_CREATE:      &str = "/xrpc/ai.gftd.apps.kotobase.pinCreate";
+const KOTOBASE_PIN_LIST:        &str = "/xrpc/ai.gftd.apps.kotobase.pinList";
+const KOTOBASE_USAGE_GET:       &str = "/xrpc/ai.gftd.apps.kotobase.usageGet";
+
+#[tokio::test]
+async fn kotobase_account_create_roundtrip() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post(KOTOBASE_ACCOUNT_CREATE, json!({
+        "tenant_did": "did:key:zAlice",
+        "tier": "free",
+    })).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["ok"].as_bool().unwrap_or(false), "{body}");
+    assert_eq!(body["tier"], "free");
+    assert_eq!(body["tenant_did"], "did:key:zAlice");
+}
+
+#[tokio::test]
+async fn kotobase_account_create_invalid_did_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, _body) = s.post(KOTOBASE_ACCOUNT_CREATE, json!({
+        "tenant_did": "not-a-did",
+    })).await;
+    assert_eq!(status, 400);
+}
+
+#[tokio::test]
+async fn kotobase_account_create_empty_did_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, _body) = s.post(KOTOBASE_ACCOUNT_CREATE, json!({
+        "tenant_did": "",
+    })).await;
+    assert_eq!(status, 400);
+}
+
+#[tokio::test]
+async fn kotobase_account_create_unknown_tier_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, _body) = s.post(KOTOBASE_ACCOUNT_CREATE, json!({
+        "tenant_did": "did:key:zAlice2",
+        "tier": "enterprise_ultra",
+    })).await;
+    assert_eq!(status, 400);
+}
+
+#[tokio::test]
+async fn kotobase_pin_create_negative_size_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post(KOTOBASE_PIN_CREATE, json!({
+        "tenant_did": "did:key:zAlice3",
+        "name": "my-pin",
+        "cid": "bafytest",
+        "size_hint_bytes": -1_i64,
+    })).await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn kotobase_pin_create_name_too_long_returns_400() {
+    let s = TestServer::start(false).await;
+    let long_name = "x".repeat(300);
+    let (status, body) = s.post(KOTOBASE_PIN_CREATE, json!({
+        "tenant_did": "did:key:zAlice4",
+        "name": long_name,
+        "cid": "bafytest",
+    })).await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn kotobase_pin_list_invalid_did_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, _body) = s.post(KOTOBASE_PIN_LIST, json!({
+        "tenant_did": "invalid",
+    })).await;
+    assert_eq!(status, 400);
+}
+
+#[tokio::test]
+async fn kotobase_usage_get_empty_did_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, _body) = s.post(KOTOBASE_USAGE_GET, json!({
+        "tenant_did": "",
+    })).await;
+    assert_eq!(status, 400);
+}
+
+#[tokio::test]
+async fn kotobase_account_and_pin_lifecycle() {
+    let s = TestServer::start(false).await;
+    let did = "did:key:zLifecycle1";
+
+    // Create account
+    let (status, body) = s.post(KOTOBASE_ACCOUNT_CREATE, json!({
+        "tenant_did": did,
+    })).await;
+    assert_eq!(status, 200, "{body}");
+
+    // Pin a CID
+    let (status, body) = s.post(KOTOBASE_PIN_CREATE, json!({
+        "tenant_did": did,
+        "name": "test-pin",
+        "cid": "bafybeiczsscdsbs7ffqz55asqdf3smv6klcw3gofszvwlyarci47bgf354",
+        "size_hint_bytes": 1024_i64,
+    })).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["ok"].as_bool().unwrap_or(false), "{body}");
+    assert!(!body["pin_id"].as_str().unwrap_or("").is_empty(), "{body}");
+
+    // Check usage
+    let (status, body) = s.post(KOTOBASE_USAGE_GET, json!({
+        "tenant_did": did,
+    })).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["pin_count"], 1, "{body}");
+}
+
+#[tokio::test]
+async fn mcp_graph_gc_returns_deleted_count() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post_auth("/mcp", json!({
+        "jsonrpc": "2.0", "id": 99, "method": "tools/call",
+        "params": { "name": "kotoba_graph_gc", "arguments": {} }
+    }), "test-token").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.get("error").is_none(), "unexpected error: {body}");
+    let content_str = body["result"]["content"][0]["text"].as_str().expect("text");
+    let content: serde_json::Value = serde_json::from_str(content_str).expect("json");
+    assert_eq!(content["status"], "ok", "{content}");
+    assert!(content["deleted_blocks"].is_number(), "missing deleted_blocks: {content}");
+}

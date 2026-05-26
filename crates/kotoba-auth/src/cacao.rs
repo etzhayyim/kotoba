@@ -137,7 +137,7 @@ impl Cacao {
                 Ok(eth::eth_address_to_erc725_did(&recovered))
             }
             "EdDSA" => {
-                use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+                use ed25519_dalek::{Signature, VerifyingKey};
 
                 let pubkey_bytes = did_key::parse_ed25519_did_key(&self.p.iss)
                     .map_err(|e| CacaoError::DidKeyParse(e.to_string()))?;
@@ -197,7 +197,7 @@ impl Cacao {
     /// (e.g. `did:web:`), where `verify_signature()` cannot resolve the key itself.
     /// Returns the issuer DID string on success.
     pub fn verify_with_pubkey(&self, pubkey: &[u8; 32]) -> Result<String, CacaoError> {
-        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+        use ed25519_dalek::{Signature, VerifyingKey};
 
         let verifying_key = VerifyingKey::from_bytes(pubkey)
             .map_err(|e| CacaoError::Ed25519(e.to_string()))?;

@@ -516,7 +516,7 @@ pub async fn handle_pin_list(
 
     let arr = match state.quad_store.arrangement(&gc).await {
         Some(a) => a,
-        None    => return (StatusCode::OK, Json(PinListResp { ok: true, pins: vec![], total: 0 })),
+        None    => return Ok((StatusCode::OK, Json(PinListResp { ok: true, pins: vec![], total: 0 }))),
     };
 
     let pin_subjects = arr.get_subjects_by_predicate("kotobase/pin/cid");

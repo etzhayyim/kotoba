@@ -36,9 +36,10 @@ pub fn unwrap_key(
         return Err(CryptoError::TooShort(12));
     }
     let cipher = Aes256Gcm::new_from_slice(wrapping_key).map_err(|_| CryptoError::OpenFailed)?;
-    let nonce = aes_gcm::Nonce::from_slice(&data[..12]);
+    let nonce_arr: [u8; 12] = data[..12].try_into().map_err(|_| CryptoError::TooShort(12))?;
+    let nonce = aes_gcm::Nonce::from(nonce_arr);
     let payload = Payload { msg: &data[12..], aad };
-    let pt = cipher.decrypt(nonce, payload).map_err(|_| CryptoError::OpenFailed)?;
+    let pt = cipher.decrypt(&nonce, payload).map_err(|_| CryptoError::OpenFailed)?;
     Ok(Zeroizing::new(pt))
 }
 
