@@ -19,7 +19,6 @@ kotoba-core.workspace    = true
 kotoba-crypto.workspace  = true
 kotoba-signal.workspace  = true
 kotoba-store             = { path = "../kotoba-store" }
-sled.workspace           = true
 kotoba-kse.workspace     = true
 kotoba-kqe.workspace     = true
 kotoba-dht               = { path = "../kotoba-dht" }

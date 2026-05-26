@@ -23,7 +23,7 @@ RUN useradd -m -u 1000 kotoba
 
 COPY --from=builder /build/target/release/kotoba /usr/local/bin/kotoba
 
-RUN mkdir -p /data/sled && chown kotoba:kotoba /data/sled
+RUN mkdir -p /data && chown kotoba:kotoba /data
 
 USER kotoba
 

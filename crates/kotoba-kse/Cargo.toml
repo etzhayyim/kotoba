@@ -9,7 +9,6 @@ description = "Kotoba Stream Engine: Journal, Topic, Shelf, Vault"
 kotoba-core.workspace = true
 kotoba-store.workspace = true
 kotoba-crypto.workspace = true
-sled.workspace = true
 rand.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true

@@ -57,12 +57,6 @@ impl Vault {
         Self { blobs: Arc::new(RwLock::new(HashMap::new())), store: Some(store) }
     }
 
-    /// Legacy sled-backed constructor — kept for migration compatibility.
-    #[deprecated(note = "use with_block_store instead")]
-    pub fn with_sled_tree(_tree: sled::Tree) -> Self {
-        Self::new()
-    }
-
     /// Store a blob, choosing the chunking strategy from its MIME type.
     ///
     /// Returns a `BlobRef` whose `cid` is:

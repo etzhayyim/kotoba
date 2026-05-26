@@ -3,7 +3,7 @@ name = "kotoba-store"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Kotoba content-addressed block store (sled + S3/B2 + tiered + iroh)"
+description = "Kotoba content-addressed block store (memory + S3/B2 + tiered + iroh)"
 
 [features]
 default   = ["iroh-cold"]
@@ -11,7 +11,6 @@ iroh-cold = ["dep:iroh-blobs", "dep:iroh-io"]
 
 [dependencies]
 kotoba-core.workspace = true
-sled             = { workspace = true }
 bytes.workspace  = true
 serde.workspace  = true
 thiserror.workspace = true

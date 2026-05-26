@@ -114,7 +114,7 @@ pub async fn email_read(
                         Json(json!({ "error": "invalid body_cid multibase" }))).into_response(),
                 };
                 // SecureVault requires BlobRef; reconstruct from CID
-                let blob_ref = kotoba_kse::BlobRef { cid: blob_cid, size: 0 };
+                let blob_ref = kotoba_kse::BlobRef { cid: blob_cid, size: 0, mime_type: None, chunked: false };
                 match state.secure_vault.get(&vault_key, &blob_ref).await {
                     Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR,
                         Json(json!({ "error": format!("vault decrypt: {e}") }))).into_response(),

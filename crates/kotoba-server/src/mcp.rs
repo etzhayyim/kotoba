@@ -529,7 +529,7 @@ async fn call_tool(
             }
             let blob_cid = kotoba_core::cid::KotobaCid::from_multibase(&body_cid_str)
                 .ok_or_else(|| (ERR_INTERNAL, "invalid body_cid multibase".to_string()))?;
-            let blob_ref  = kotoba_kse::BlobRef { cid: blob_cid, size: 0 };
+            let blob_ref  = kotoba_kse::BlobRef { cid: blob_cid, size: 0, mime_type: None, chunked: false };
             let body_bytes = state.secure_vault.get(&vault_key, &blob_ref).await
                 .map_err(|e| (ERR_INTERNAL, format!("vault decrypt: {e}")))?
                 .ok_or_else(|| (ERR_NOT_FOUND, "body blob not found in vault".to_string()))?;
