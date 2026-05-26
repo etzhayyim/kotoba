@@ -60,6 +60,32 @@ fn require_signal_auth(
     }
 }
 
+/// Require any valid, non-expired Bearer JWT with a sub claim.
+/// Used when the specific sender DID is not known at the HTTP layer
+/// (e.g. `distributeSenderKey` where the sender is identified inside the ciphertext).
+fn require_any_bearer_auth(
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, String)> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(|| {
+            tracing::warn!("distribute_sender_key: missing Bearer token");
+            (StatusCode::UNAUTHORIZED, "Authorization: Bearer <token> required".to_string())
+        })?;
+    if crate::graph_auth::jwt_exp_elapsed(token) {
+        tracing::warn!("distribute_sender_key: expired JWT");
+        return Err((StatusCode::UNAUTHORIZED, "Bearer token has expired".to_string()));
+    }
+    crate::graph_auth::jwt_sub(token)
+        .map(|_| ())
+        .ok_or_else(|| {
+            tracing::warn!("distribute_sender_key: JWT missing sub claim");
+            (StatusCode::UNAUTHORIZED, "Bearer token missing sub claim".to_string())
+        })
+}
+
 // ── registerPrekeys ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -166,6 +192,7 @@ pub struct SendMessageResp {
 
 pub async fn send_message(
     State(state): State<Arc<KotobaState>>,
+    headers: HeaderMap,
     Json(req): Json<SendMessageReq>,
 ) -> impl IntoResponse {
     let raw_len = serde_json::to_vec(&req.signal_message)
@@ -184,6 +211,11 @@ pub async fn send_message(
             Json(serde_json::json!({ "error": e.to_string() })),
         ).into_response(),
     };
+
+    // Require the caller to prove ownership of signal_message.sender_did.
+    if let Err((code, err_msg)) = require_signal_auth(&headers, &msg.sender_did, &state.operator_did) {
+        return (code, Json(serde_json::json!({ "error": err_msg }))).into_response();
+    }
 
     let topic_name = format!("signal/inbox/{}/{}", msg.recipient_did, msg.device_id);
     let topic = kotoba_kse::topic::Topic(format!("kotoba/{topic_name}"));
@@ -208,6 +240,7 @@ pub struct SendGroupMessageReq {
 
 pub async fn send_group_message(
     State(state): State<Arc<KotobaState>>,
+    headers: HeaderMap,
     Json(req): Json<SendGroupMessageReq>,
 ) -> impl IntoResponse {
     if req.group_id.is_empty() || req.group_id.len() > MAX_GROUP_ID_LEN {
@@ -219,6 +252,9 @@ pub async fn send_group_message(
         return (StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": format!("sender_did must be 1–{MAX_DID_LEN} bytes") })),
         ).into_response();
+    }
+    if let Err((code, err_msg)) = require_signal_auth(&headers, &req.sender_did, &state.operator_did) {
+        return (code, Json(serde_json::json!({ "error": err_msg }))).into_response();
     }
     let raw_len = serde_json::to_vec(&req.sender_key_message)
         .map(|v| v.len())
@@ -258,6 +294,7 @@ pub struct DistributeSenderKeyReq {
 
 pub async fn distribute_sender_key(
     State(state): State<Arc<KotobaState>>,
+    headers: HeaderMap,
     Json(req): Json<DistributeSenderKeyReq>,
 ) -> impl IntoResponse {
     if req.recipient_did.is_empty() || req.recipient_did.len() > MAX_DID_LEN {
@@ -277,6 +314,11 @@ pub async fn distribute_sender_key(
         return (StatusCode::PAYLOAD_TOO_LARGE,
             Json(serde_json::json!({ "error": format!("signal_message exceeds {MAX_PAYLOAD_BYTES} bytes") })),
         ).into_response();
+    }
+    // Require any authenticated caller (the sender distributing their key).
+    // We verify: Bearer present + non-expired + has sub claim.
+    if let Err((code, err_msg)) = require_any_bearer_auth(&headers) {
+        return (code, Json(serde_json::json!({ "error": err_msg }))).into_response();
     }
 
     let topic = kotoba_kse::topic::Topic(

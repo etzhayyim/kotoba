@@ -2716,14 +2716,53 @@ async fn request_log_query_returns_empty_list() {
 #[tokio::test]
 async fn signal_distribute_sender_key_ok() {
     let s = TestServer::start(false).await;
+    let tok = tenant_jwt(&s.operator_did);
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.signal.distribute.sender.key", json!({
+        "recipientDid":    "did:key:zRecipient1",
+        "recipientDevice": "device-1",
+        "signalMessage":   { "ciphertext": "AAAA", "messageType": 3 },
+    }), &tok).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["status"], "ok", "{body}");
+    assert!(body["messageId"].as_str().is_some(), "{body}");
+}
+
+#[tokio::test]
+async fn signal_distribute_sender_key_without_auth_returns_401() {
+    let s = TestServer::start(false).await;
     let (status, body) = s.post("/xrpc/ai.gftd.signal.distribute.sender.key", json!({
         "recipientDid":    "did:key:zRecipient1",
         "recipientDevice": "device-1",
         "signalMessage":   { "ciphertext": "AAAA", "messageType": 3 },
     })).await;
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(body["status"], "ok", "{body}");
-    assert!(body["messageId"].as_str().is_some(), "{body}");
+    assert_eq!(status, 401, "{body}");
+}
+
+#[tokio::test]
+async fn signal_send_message_without_auth_returns_401() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post("/xrpc/ai.gftd.signal.send.message", json!({
+        "signalMessage": {
+            "messageType":       "directMessage",
+            "senderDid":         "did:key:zSender",
+            "recipientDid":      "did:key:zRecipient",
+            "deviceId":          "dev-1",
+            "ciphertextEnvelope": "AAAA",
+            "timestamp":         "2026-05-26T00:00:00Z",
+        },
+    })).await;
+    assert_eq!(status, 401, "{body}");
+}
+
+#[tokio::test]
+async fn signal_send_group_message_without_auth_returns_401() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post("/xrpc/ai.gftd.signal.send.group.message", json!({
+        "groupId":          "grp-1",
+        "senderDid":        "did:key:zSender",
+        "senderKeyMessage": {},
+    })).await;
+    assert_eq!(status, 401, "{body}");
 }
 
 #[tokio::test]
