@@ -123,6 +123,10 @@ pub struct KotobaState {
     /// Pre-populated with well-known public + authed graphs at startup.
     /// Callers may register additional graphs via `register_graph()`.
     pub graph_registry: Arc<tokio::sync::RwLock<HashMap<KotobaCid, (String, GraphVisibility)>>>,
+    // ── CACAO Nonce Store ─────────────────────────────────────────────────────
+    /// Replay-prevention registry for CACAO nonces (CAIP-74 §8).
+    /// Tracks each nonce until the corresponding CACAO expires.
+    pub nonce_store: Arc<crate::nonce_store::NonceStore>,
     // ── Outbound HTTP ─────────────────────────────────────────────────────────
     /// Shared HTTP client — used for did:web DID document resolution and other
     /// outbound fetches.  10-second timeout; connection pool reused across requests.
@@ -287,6 +291,7 @@ impl KotobaState {
             cc_embed_client,
             pre_key_registry:  None,
             graph_registry,
+            nonce_store: Arc::new(crate::nonce_store::NonceStore::new()),
             http_client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
                 .build()

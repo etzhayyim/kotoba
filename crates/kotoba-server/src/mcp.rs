@@ -323,6 +323,16 @@ async fn call_tool(
             let predicate = get_str("predicate")?;
             let object    = get_str("object")?;
 
+            // Guard: reject oversized field values before any CID computation.
+            // Malformed inputs with multi-MiB strings would bloat the block store.
+            const MAX_FIELD_LEN: usize = 4096;
+            for (name, val) in [("graph", &graph), ("subject", &subject), ("predicate", &predicate), ("object", &object)] {
+                if val.len() > MAX_FIELD_LEN {
+                    return Err((ERR_INVALID_PARAMS,
+                        format!("field '{name}' too large ({} bytes, limit {MAX_FIELD_LEN})", val.len())));
+                }
+            }
+
             let quad = Quad {
                 graph:     KotobaCid::from_bytes(graph.as_bytes()),
                 subject:   KotobaCid::from_bytes(subject.as_bytes()),
@@ -1105,6 +1115,23 @@ mod tests {
         }), &state).await;
         let (code, _) = result.unwrap_err();
         assert_eq!(code, ERR_INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn call_tool_quad_create_oversized_field_errors() {
+        let state = Arc::new(
+            crate::server::KotobaState::new(None).expect("state")
+        );
+        let big = "x".repeat(4097);
+        let result = call_tool(MCP_TOOL_QUAD_CREATE, &json!({
+            "graph":     "g",
+            "subject":   big,
+            "predicate": "p",
+            "object":    "o"
+        }), &state).await;
+        let (code, msg) = result.unwrap_err();
+        assert_eq!(code, ERR_INVALID_PARAMS);
+        assert!(msg.contains("too large"), "expected 'too large' in: {msg}");
     }
 
     #[tokio::test]

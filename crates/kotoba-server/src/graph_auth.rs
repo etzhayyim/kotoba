@@ -34,6 +34,8 @@ pub enum AccessDenied {
     IssuerMismatch { expected: String, got: String },
     /// Private tier: CACAO `aud` field does not match this node's DID.
     AudienceMismatch { expected: String, got: String },
+    /// Private tier: CACAO nonce has already been seen — replay attack detected.
+    ReplayedNonce(String),
 }
 
 impl AccessDenied {
@@ -72,6 +74,10 @@ impl AccessDenied {
             AccessDenied::AudienceMismatch { expected, got } => (
                 StatusCode::UNAUTHORIZED,
                 format!("cacao audience mismatch: expected {expected}, got {got}"),
+            ),
+            AccessDenied::ReplayedNonce(nonce) => (
+                StatusCode::UNAUTHORIZED,
+                format!("cacao nonce already used: {nonce}"),
             ),
         }
     }
@@ -125,6 +131,7 @@ pub fn check_read_access(
     headers: &HeaderMap,
     cacao_b64: Option<&str>,
     expected_aud: Option<&str>,
+    nonce_store: Option<&crate::nonce_store::NonceStore>,
 ) -> Result<(), AccessDenied> {
     match visibility {
         GraphVisibility::Public => Ok(()),
@@ -202,6 +209,24 @@ pub fn check_read_access(
                 });
             }
 
+            // 5. Nonce replay prevention (CAIP-74 §8) — only when a store is provided.
+            //    Expiry is bounded at now + MAX_CACAO_AGE (7 days) — the same cap that
+            //    DelegationChain::verify() applies, so nonces are never kept longer than
+            //    the CACAO itself could be valid.
+            if let Some(store) = nonce_store {
+                let nonce = chain.chain[0].p.nonce.clone();
+                // Conservative upper-bound: keep nonce until max possible expiry.
+                const MAX_CACAO_AGE_SECS: u64 = 7 * 24 * 3600;
+                let expiry_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .saturating_add(MAX_CACAO_AGE_SECS);
+                if !store.check_and_register(&nonce, expiry_unix) {
+                    return Err(AccessDenied::ReplayedNonce(nonce));
+                }
+            }
+
             Ok(())
         }
     }
@@ -231,7 +256,7 @@ mod tests {
     #[test]
     fn public_graph_always_allowed() {
         let vis = GraphVisibility::Public;
-        assert!(check_read_access(&vis, &HeaderMap::new(), None, None).is_ok());
+        assert!(check_read_access(&vis, &HeaderMap::new(), None, None, None).is_ok());
     }
 
     #[test]
@@ -239,13 +264,13 @@ mod tests {
         let vis = GraphVisibility::Authenticated;
         // A non-JWT opaque token (no `exp` claim) — should pass (no exp to check)
         let h = bearer_headers("opaque-session-token");
-        assert!(check_read_access(&vis, &h, None, None).is_ok());
+        assert!(check_read_access(&vis, &h, None, None, None).is_ok());
     }
 
     #[test]
     fn authenticated_rejects_missing_bearer() {
         let vis = GraphVisibility::Authenticated;
-        let err = check_read_access(&vis, &HeaderMap::new(), None, None).unwrap_err();
+        let err = check_read_access(&vis, &HeaderMap::new(), None, None, None).unwrap_err();
         assert!(matches!(err, AccessDenied::MissingBearer));
     }
 
@@ -255,7 +280,7 @@ mod tests {
         // exp = 1 (far in the past)
         let token = jwt_with_exp(1);
         let h = bearer_headers(&token);
-        let err = check_read_access(&vis, &h, None, None).unwrap_err();
+        let err = check_read_access(&vis, &h, None, None, None).unwrap_err();
         assert!(matches!(err, AccessDenied::TokenExpired), "expected TokenExpired, got {err:?}");
     }
 
@@ -266,7 +291,7 @@ mod tests {
         let far_future: u64 = 4_102_444_800;
         let token = jwt_with_exp(far_future);
         let h = bearer_headers(&token);
-        assert!(check_read_access(&vis, &h, None, None).is_ok());
+        assert!(check_read_access(&vis, &h, None, None, None).is_ok());
     }
 
     #[test]

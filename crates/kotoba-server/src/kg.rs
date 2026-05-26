@@ -87,7 +87,7 @@ pub async fn kg_entity(
 
     // ── Read-access gate ─────────────────────────────────────────────────────
     let visibility = state.graph_visibility(&graph_cid).await;
-    check_read_access(&visibility, &headers, q.cacao_b64.as_deref(), Some(&state.operator_did))
+    check_read_access(&visibility, &headers, q.cacao_b64.as_deref(), Some(&state.operator_did), Some(&state.nonce_store))
         .map_err(AccessDenied::into_response)?;
 
     let (lookup_pred, lookup_val) = match (&q.id, &q.qid) {
@@ -202,7 +202,7 @@ pub async fn kg_catalog(
 
     // ── Read-access gate ─────────────────────────────────────────────────────
     let visibility = state.graph_visibility(&graph_cid).await;
-    check_read_access(&visibility, &headers, q.cacao_b64.as_deref(), Some(&state.operator_did))
+    check_read_access(&visibility, &headers, q.cacao_b64.as_deref(), Some(&state.operator_did), Some(&state.nonce_store))
         .map_err(AccessDenied::into_response)?;
 
     let entity_count   = state.quad_store.count_by_predicate_prefix(&graph_cid, "kg/id").await;
@@ -335,7 +335,7 @@ pub async fn kg_search(
 
     // ── Read-access gate ─────────────────────────────────────────────────────
     let visibility = state.graph_visibility(&graph_cid).await;
-    check_read_access(&visibility, &headers, q.cacao_b64.as_deref(), Some(&state.operator_did))
+    check_read_access(&visibility, &headers, q.cacao_b64.as_deref(), Some(&state.operator_did), Some(&state.nonce_store))
         .map_err(AccessDenied::into_response)?;
 
     // Use inference engine for query embedding when available, matching kg_embed semantics.
@@ -606,7 +606,7 @@ pub async fn kg_query(
 
     // ── Read-access gate ─────────────────────────────────────────────────────
     let visibility = state.graph_visibility(&graph_cid).await;
-    check_read_access(&visibility, &headers, req.cacao_b64.as_deref(), Some(&state.operator_did))
+    check_read_access(&visibility, &headers, req.cacao_b64.as_deref(), Some(&state.operator_did), Some(&state.nonce_store))
         .map_err(AccessDenied::into_response)?;
 
     // Compile query to DatalogProgram
