@@ -257,4 +257,70 @@ mod tests {
         // 2 entries × 2 quads each
         assert_eq!(quads.len(), 4);
     }
+
+    #[test]
+    fn royalty_sum_never_exceeds_pool() {
+        // Float truncation means individual royalties may round down.
+        // The sum of all royalties must always be ≤ total_pool_mkoto.
+        let mut ledger = CitationLedger::new();
+        // 7 citations across 3 datoms — creates uneven fractional splits.
+        for i in 0..4 { ledger.cite_quad(&make_quad(&format!("a{i}"))); }
+        for i in 0..2 { ledger.cite_quad(&make_quad(&format!("b{i}"))); }
+        ledger.cite_quad(&make_quad("c0"));
+
+        let pool = 1_000_000_u64;
+        let entries = ledger.flush_epoch(pool);
+        let sum: u64 = entries.iter().map(|e| e.royalty_mkoto).sum();
+        assert!(
+            sum <= pool,
+            "royalty sum {sum} must not exceed pool {pool} (float truncation invariant)"
+        );
+    }
+
+    #[test]
+    fn sole_citation_gets_full_pool() {
+        let mut ledger = CitationLedger::new();
+        ledger.cite_quad(&make_quad("only"));
+        let pool = 5_000_000_u64;
+        let entries = ledger.flush_epoch(pool);
+        assert_eq!(entries.len(), 1);
+        // 1/1 of citations → full pool (float: (5_000_000.0 * 1.0) as u64 = 5_000_000)
+        assert_eq!(entries[0].royalty_mkoto, pool);
+    }
+
+    #[test]
+    fn equal_citations_split_approximately_equal() {
+        let mut ledger = CitationLedger::new();
+        let q_a = make_quad("eq-a");
+        let q_b = make_quad("eq-b");
+        ledger.cite_quad(&q_a);
+        ledger.cite_quad(&q_b);
+        let pool = 1_000_000_u64;
+        let entries = ledger.flush_epoch(pool);
+        assert_eq!(entries.len(), 2);
+        let sum: u64 = entries.iter().map(|e| e.royalty_mkoto).sum();
+        assert!(sum <= pool, "sum must not exceed pool");
+        // Each should be ~500_000; allow ±1 for integer truncation.
+        for e in &entries {
+            assert!(
+                e.royalty_mkoto >= 499_999 && e.royalty_mkoto <= 500_001,
+                "equal split expected ~500_000, got {}", e.royalty_mkoto
+            );
+        }
+    }
+
+    #[test]
+    fn multi_epoch_counter_resets() {
+        let mut ledger = CitationLedger::new();
+        ledger.cite_quad(&make_quad("e1"));
+        ledger.flush_epoch(1_000_000);
+        assert_eq!(ledger.total_citations(), 0, "citations should reset after flush");
+        assert_eq!(ledger.epoch(), 1);
+
+        ledger.cite_quad(&make_quad("e2"));
+        ledger.cite_quad(&make_quad("e2"));
+        ledger.flush_epoch(1_000_000);
+        assert_eq!(ledger.total_citations(), 0);
+        assert_eq!(ledger.epoch(), 2, "epoch should increment on each flush");
+    }
 }
