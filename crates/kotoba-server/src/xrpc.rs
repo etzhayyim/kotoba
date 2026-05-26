@@ -1541,6 +1541,7 @@ pub struct AgentSyncOpenResp {
 /// BudgetedBlockStore so they survive eviction for the duration of the session.
 pub async fn agent_sync_open(
     State(state): State<Arc<KotobaState>>,
+    headers: axum::http::HeaderMap,
     Json(req):    Json<AgentSyncOpenReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     use kotoba_core::cid::KotobaCid;
@@ -1554,6 +1555,8 @@ pub async fn agent_sync_open(
         return Err((StatusCode::BAD_REQUEST,
             "session_id must be 1–256 printable ASCII characters".into()));
     }
+
+    crate::graph_auth::require_any_bearer_auth(&headers, "agent.syncopen")?;
 
     // Cap total concurrent sessions to prevent HashMap memory exhaustion.
     const MAX_CONCURRENT_SESSIONS: usize = 1_000;
@@ -1609,6 +1612,7 @@ pub struct AgentSyncAdvResp {
 /// Advance the SyncWindow: unpin the old head, pin the new head.
 pub async fn agent_sync_advance(
     State(state): State<Arc<KotobaState>>,
+    headers: axum::http::HeaderMap,
     Json(req):    Json<AgentSyncAdvReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     use kotoba_core::cid::KotobaCid;
@@ -1620,6 +1624,8 @@ pub async fn agent_sync_advance(
         return Err((StatusCode::BAD_REQUEST,
             "session_id must be 1–256 printable ASCII characters".into()));
     }
+
+    crate::graph_auth::require_any_bearer_auth(&headers, "agent.syncadvance")?;
 
     let new_head = KotobaCid::from_multibase(&req.new_head_cid)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid new_head_cid".into()))?;
@@ -1658,6 +1664,7 @@ pub struct AgentSyncCloseResp {
 /// Close the SyncWindow session, unpinning all anchors.
 pub async fn agent_sync_close(
     State(state): State<Arc<KotobaState>>,
+    headers: axum::http::HeaderMap,
     Json(req):    Json<AgentSyncCloseReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     const MAX_SESSION_ID_LEN: usize = 256;
@@ -1667,6 +1674,8 @@ pub async fn agent_sync_close(
         return Err((StatusCode::BAD_REQUEST,
             "session_id must be 1–256 printable ASCII characters".into()));
     }
+
+    crate::graph_auth::require_any_bearer_auth(&headers, "agent.syncclose")?;
 
     let mut sessions = state.agent_sessions.write().await;
     let window = sessions.remove(&req.session_id)

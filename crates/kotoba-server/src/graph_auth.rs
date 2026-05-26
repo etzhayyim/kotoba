@@ -164,6 +164,34 @@ pub fn require_operator_auth(
     }
 }
 
+/// Require any valid, non-expired Bearer JWT that carries a `sub` claim.
+///
+/// Used when the specific caller DID is not known at the HTTP layer
+/// (e.g. `distributeSenderKey`, `agent.syncopen/advance/close`).
+pub(crate) fn require_any_bearer_auth(
+    headers: &HeaderMap,
+    context: &str,
+) -> Result<(), (StatusCode, String)> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(|| {
+            tracing::warn!("{context}: missing Bearer token");
+            (StatusCode::UNAUTHORIZED, "Authorization: Bearer <token> required".to_string())
+        })?;
+    if jwt_exp_elapsed(token) {
+        tracing::warn!("{context}: expired JWT");
+        return Err((StatusCode::UNAUTHORIZED, "Bearer token has expired".to_string()));
+    }
+    jwt_sub(token)
+        .map(|_| ())
+        .ok_or_else(|| {
+            tracing::warn!("{context}: JWT missing sub claim");
+            (StatusCode::UNAUTHORIZED, "Bearer token missing sub claim".to_string())
+        })
+}
+
 /// Check read access for a named graph.
 ///
 /// - `Public`        → always `Ok(())`

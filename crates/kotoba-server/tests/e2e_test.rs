@@ -868,8 +868,9 @@ async fn agent_sync_open_creates_session() {
     let s = TestServer::start(false).await;
     use kotoba_core::cid::KotobaCid;
     let graph_cid = KotobaCid::from_bytes(b"sync-graph").to_multibase();
+    let tok = tenant_jwt(&s.operator_did);
 
-    let (status, body) = s.post(
+    let (status, body) = s.post_auth(
         "/xrpc/ai.gftd.apps.kotoba.agent.syncopen",
         json!({
             "session_id": "sess-1",
@@ -877,6 +878,7 @@ async fn agent_sync_open_creates_session() {
             "since_seq":  0,
             "head_cid":   null,
         }),
+        &tok,
     ).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["status"], "ok");
@@ -885,20 +887,35 @@ async fn agent_sync_open_creates_session() {
 }
 
 #[tokio::test]
+async fn agent_sync_open_without_auth_returns_401() {
+    let s = TestServer::start(false).await;
+    use kotoba_core::cid::KotobaCid;
+    let graph_cid = KotobaCid::from_bytes(b"sync-graph-noauth").to_multibase();
+    let (status, body) = s.post(
+        "/xrpc/ai.gftd.apps.kotoba.agent.syncopen",
+        json!({ "session_id": "sess-noauth", "graph_cid": graph_cid, "since_seq": 0, "head_cid": null }),
+    ).await;
+    assert_eq!(status, 401, "{body}");
+}
+
+#[tokio::test]
 async fn agent_sync_advance_updates_watermark() {
     let s = TestServer::start(false).await;
     use kotoba_core::cid::KotobaCid;
     let graph_cid = KotobaCid::from_bytes(b"sync-graph-adv").to_multibase();
     let head_cid  = KotobaCid::from_bytes(b"head-v1").to_multibase();
+    let tok = tenant_jwt(&s.operator_did);
 
-    s.post(
+    s.post_auth(
         "/xrpc/ai.gftd.apps.kotoba.agent.syncopen",
         json!({ "session_id": "sess-adv", "graph_cid": graph_cid, "since_seq": 0, "head_cid": null }),
+        &tok,
     ).await;
 
-    let (status, body) = s.post(
+    let (status, body) = s.post_auth(
         "/xrpc/ai.gftd.apps.kotoba.agent.syncadvance",
         json!({ "session_id": "sess-adv", "new_head_cid": head_cid, "new_seq": 42 }),
+        &tok,
     ).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["status"], "ok");
@@ -910,24 +927,28 @@ async fn agent_sync_close_removes_session() {
     let s = TestServer::start(false).await;
     use kotoba_core::cid::KotobaCid;
     let graph_cid = KotobaCid::from_bytes(b"sync-graph-close").to_multibase();
+    let tok = tenant_jwt(&s.operator_did);
 
-    s.post(
+    s.post_auth(
         "/xrpc/ai.gftd.apps.kotoba.agent.syncopen",
         json!({ "session_id": "sess-close", "graph_cid": graph_cid, "since_seq": 0, "head_cid": null }),
+        &tok,
     ).await;
 
-    let (status, body) = s.post(
+    let (status, body) = s.post_auth(
         "/xrpc/ai.gftd.apps.kotoba.agent.syncclose",
         json!({ "session_id": "sess-close" }),
+        &tok,
     ).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["status"], "ok");
     assert_eq!(body["session_id"], "sess-close");
 
     // Second close → 404 (session removed)
-    let (status2, _) = s.post(
+    let (status2, _) = s.post_auth(
         "/xrpc/ai.gftd.apps.kotoba.agent.syncclose",
         json!({ "session_id": "sess-close" }),
+        &tok,
     ).await;
     assert_eq!(status2, 404);
 }
@@ -939,33 +960,38 @@ async fn agent_sync_full_lifecycle() {
     let graph_cid = KotobaCid::from_bytes(b"lifecycle-graph").to_multibase();
     let head1     = KotobaCid::from_bytes(b"lifecycle-head-1").to_multibase();
     let head2     = KotobaCid::from_bytes(b"lifecycle-head-2").to_multibase();
+    let tok = tenant_jwt(&s.operator_did);
 
     // open
-    let (st, _) = s.post(
+    let (st, _) = s.post_auth(
         "/xrpc/ai.gftd.apps.kotoba.agent.syncopen",
         json!({ "session_id": "lc", "graph_cid": graph_cid, "since_seq": 0, "head_cid": null }),
+        &tok,
     ).await;
     assert_eq!(st, 200);
 
     // advance × 2
-    let (st, b) = s.post(
+    let (st, b) = s.post_auth(
         "/xrpc/ai.gftd.apps.kotoba.agent.syncadvance",
         json!({ "session_id": "lc", "new_head_cid": head1, "new_seq": 10 }),
+        &tok,
     ).await;
     assert_eq!(st, 200);
     assert_eq!(b["since_seq"], 10);
 
-    let (st, b) = s.post(
+    let (st, b) = s.post_auth(
         "/xrpc/ai.gftd.apps.kotoba.agent.syncadvance",
         json!({ "session_id": "lc", "new_head_cid": head2, "new_seq": 20 }),
+        &tok,
     ).await;
     assert_eq!(st, 200);
     assert_eq!(b["since_seq"], 20);
 
     // close
-    let (st, _) = s.post(
+    let (st, _) = s.post_auth(
         "/xrpc/ai.gftd.apps.kotoba.agent.syncclose",
         json!({ "session_id": "lc" }),
+        &tok,
     ).await;
     assert_eq!(st, 200);
 }
@@ -2450,11 +2476,12 @@ async fn agent_sync_advance_unknown_session_returns_404() {
     let s = TestServer::start(false).await;
     use kotoba_core::cid::KotobaCid;
     let head_cid = KotobaCid::from_bytes(b"head-adv").to_multibase();
-    let (status, body) = s.post("/xrpc/ai.gftd.apps.kotoba.agent.syncadvance", json!({
+    let tok = tenant_jwt(&s.operator_did);
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotoba.agent.syncadvance", json!({
         "session_id":   "no-such-session",
         "new_head_cid": head_cid,
         "new_seq":      0u64,
-    })).await;
+    }), &tok).await;
     assert_eq!(status, 404, "{body}");
 }
 

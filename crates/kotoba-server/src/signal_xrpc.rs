@@ -60,32 +60,6 @@ fn require_signal_auth(
     }
 }
 
-/// Require any valid, non-expired Bearer JWT with a sub claim.
-/// Used when the specific sender DID is not known at the HTTP layer
-/// (e.g. `distributeSenderKey` where the sender is identified inside the ciphertext).
-fn require_any_bearer_auth(
-    headers: &HeaderMap,
-) -> Result<(), (StatusCode, String)> {
-    let token = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or_else(|| {
-            tracing::warn!("distribute_sender_key: missing Bearer token");
-            (StatusCode::UNAUTHORIZED, "Authorization: Bearer <token> required".to_string())
-        })?;
-    if crate::graph_auth::jwt_exp_elapsed(token) {
-        tracing::warn!("distribute_sender_key: expired JWT");
-        return Err((StatusCode::UNAUTHORIZED, "Bearer token has expired".to_string()));
-    }
-    crate::graph_auth::jwt_sub(token)
-        .map(|_| ())
-        .ok_or_else(|| {
-            tracing::warn!("distribute_sender_key: JWT missing sub claim");
-            (StatusCode::UNAUTHORIZED, "Bearer token missing sub claim".to_string())
-        })
-}
-
 // ── registerPrekeys ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -317,7 +291,7 @@ pub async fn distribute_sender_key(
     }
     // Require any authenticated caller (the sender distributing their key).
     // We verify: Bearer present + non-expired + has sub claim.
-    if let Err((code, err_msg)) = require_any_bearer_auth(&headers) {
+    if let Err((code, err_msg)) = crate::graph_auth::require_any_bearer_auth(&headers, "distribute_sender_key") {
         return (code, Json(serde_json::json!({ "error": err_msg }))).into_response();
     }
 
