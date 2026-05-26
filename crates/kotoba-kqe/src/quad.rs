@@ -52,3 +52,57 @@ impl Quad {
         key
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cid(tag: &[u8]) -> KotobaCid { KotobaCid::from_bytes(tag) }
+
+    fn quad(pred: &str, obj: QuadObject) -> Quad {
+        Quad { graph: cid(b"g"), subject: cid(b"s"), predicate: pred.to_string(), object: obj }
+    }
+
+    #[test]
+    fn spo_key_starts_with_subject_bytes() {
+        let q = quad("pred/foo", QuadObject::Text("v".to_string()));
+        let key = q.spo_key();
+        assert_eq!(&key[..36], &cid(b"s").0);
+    }
+
+    #[test]
+    fn spo_key_differs_by_predicate() {
+        let a = quad("pred/a", QuadObject::Text("same".to_string())).spo_key();
+        let b = quad("pred/b", QuadObject::Text("same".to_string())).spo_key();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn spo_key_cid_object_appended() {
+        let obj_cid = cid(b"obj");
+        let q = quad("rel", QuadObject::Cid(obj_cid.clone()));
+        let key = q.spo_key();
+        // Key = subject(36) + predicate bytes + cid bytes(36)
+        assert_eq!(key.len(), 36 + "rel".len() + 36);
+        assert_eq!(&key[36 + "rel".len()..], &obj_cid.0);
+    }
+
+    #[test]
+    fn spo_key_scalar_object_not_appended() {
+        let q_int  = quad("p", QuadObject::Integer(42)).spo_key();
+        let q_text = quad("p", QuadObject::Text("x".to_string())).spo_key();
+        // Both should be same length: subject + predicate only
+        let expected_len = 36 + "p".len();
+        assert_eq!(q_int.len(),  expected_len);
+        assert_eq!(q_text.len(), expected_len);
+    }
+
+    #[test]
+    fn spo_key_encrypted_uses_ct_cid() {
+        let ct = cid(b"ct");
+        let pol = cid(b"policy");
+        let q = quad("enc/field", QuadObject::Encrypted { ct_cid: ct.clone(), policy_cid: pol });
+        let key = q.spo_key();
+        assert_eq!(&key[36 + "enc/field".len()..], &ct.0);
+    }
+}

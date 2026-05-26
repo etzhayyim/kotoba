@@ -28,3 +28,39 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kotoba_core::cid::KotobaCid;
+
+    fn make_quad() -> Quad {
+        let cid = KotobaCid::from_bytes(b"test");
+        Quad {
+            graph:     cid.clone(),
+            subject:   cid.clone(),
+            predicate: "test/pred".to_string(),
+            object:    crate::quad::QuadObject::Text("value".to_string()),
+        }
+    }
+
+    #[test]
+    fn assert_delta_has_assert_multiplicity() {
+        let d = Delta::assert(make_quad());
+        assert_eq!(d.mult, Multiplicity::Assert);
+        assert!(d.is_assert());
+    }
+
+    #[test]
+    fn retract_delta_has_retract_multiplicity() {
+        let d = Delta::retract(make_quad());
+        assert_eq!(d.mult, Multiplicity::Retract);
+        assert!(!d.is_assert());
+    }
+
+    #[test]
+    fn delta_ts_is_nonzero() {
+        let d = Delta::assert(make_quad());
+        assert!(d.ts > 0);
+    }
+}
