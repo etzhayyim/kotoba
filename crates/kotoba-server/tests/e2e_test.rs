@@ -2882,3 +2882,47 @@ async fn operator_auth_expired_token_returns_401() {
     ).await;
     assert_eq!(status, 401, "{body}");
 }
+
+// ── signal DID prefix validation tests ───────────────────────────────────────
+
+#[tokio::test]
+async fn signal_register_prekeys_invalid_did_prefix_returns_400() {
+    let s = TestServer::start(false).await;
+    let tok = tenant_jwt("not-a-did");
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.signal.register.prekeys", json!({
+        "did":          "not-a-did",
+        "deviceId":     "device-1",
+        "identityKey":  {},
+        "prekeyBundle": {},
+    }), &tok).await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn signal_get_prekey_bundle_invalid_did_prefix_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.get("/xrpc/ai.gftd.signal.get.prekey.bundle?did=not-a-did").await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn signal_send_group_message_invalid_sender_did_prefix_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post("/xrpc/ai.gftd.signal.send.group.message", json!({
+        "groupId":          "grp-1",
+        "senderDid":        "not-a-did",
+        "senderKeyMessage": {},
+    })).await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn signal_distribute_sender_key_invalid_recipient_did_prefix_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post("/xrpc/ai.gftd.signal.distribute.sender.key", json!({
+        "recipientDid":    "not-a-did",
+        "recipientDevice": "device-1",
+        "signalMessage":   {},
+    })).await;
+    assert_eq!(status, 400, "{body}");
+}
