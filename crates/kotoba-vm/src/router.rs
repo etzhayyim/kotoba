@@ -151,3 +151,58 @@ impl InvokeRouter {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kotoba_kqe::{arrangement::Arrangement, datalog::DatalogProgram};
+
+    fn router() -> InvokeRouter {
+        InvokeRouter::new(10_000, "http://localhost:9999").unwrap()
+    }
+
+    #[test]
+    fn error_display_missing_wasm_bytes() {
+        let msg = RouterError::MissingWasmBytes.to_string();
+        assert!(msg.contains("wasm"));
+    }
+
+    #[test]
+    fn error_display_steps_exceeded() {
+        let msg = RouterError::StepsExceeded.to_string();
+        assert!(msg.contains("step"));
+    }
+
+    #[test]
+    fn datalog_empty_program_returns_dispatch_result() {
+        let r   = router();
+        let prog = DatalogProgram::new();
+        let arr  = Arrangement::default();
+        let result = r.dispatch(
+            "prog-cid", ProgramType::Datalog, "did:test:agent",
+            1, None, vec![], Some(&prog), Some(&arr), &[], 100,
+        );
+        assert!(result.is_ok(), "empty datalog program should succeed: {result:?}");
+        assert!(matches!(result.unwrap(), DispatchResult::Datalog(_)));
+    }
+
+    #[test]
+    fn wasm_node_without_bytes_returns_missing_bytes_error() {
+        let r = router();
+        let result = r.dispatch(
+            "prog-cid", ProgramType::WasmNode, "did:test:agent",
+            1, None, vec![], None, None, &[], 0,
+        );
+        assert!(matches!(result, Err(RouterError::MissingWasmBytes)));
+    }
+
+    #[test]
+    fn wasm_udf_without_bytes_returns_missing_bytes_error() {
+        let r = router();
+        let result = r.dispatch(
+            "prog-cid", ProgramType::WasmUdf, "did:test:agent",
+            1, None, vec![], None, None, &[], 0,
+        );
+        assert!(matches!(result, Err(RouterError::MissingWasmBytes)));
+    }
+}
