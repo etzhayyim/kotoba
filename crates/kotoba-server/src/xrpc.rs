@@ -264,19 +264,23 @@ async fn resolve_and_verify_did_web(
             ));
         }
     }
-    // Stream chunks and enforce byte budget during download, preventing slow-loris inflate.
-    use futures::TryStreamExt as _;
+    // Stream chunks with a running budget check to prevent slow-loris inflate attacks.
     let mut body_bytes = bytes::BytesMut::new();
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.try_next().await
-        .map_err(|e| (StatusCode::UNAUTHORIZED, format!("did:web read body: {e}")))?
-    {
-        body_bytes.extend_from_slice(&chunk);
-        if body_bytes.len() > MAX_DID_DOC_BYTES {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                format!("did:web document exceeds {MAX_DID_DOC_BYTES} byte limit"),
-            ));
+    let mut resp = resp;
+    loop {
+        match resp.chunk().await
+            .map_err(|e| (StatusCode::UNAUTHORIZED, format!("did:web read body: {e}")))?
+        {
+            None => break,
+            Some(chunk) => {
+                body_bytes.extend_from_slice(&chunk);
+                if body_bytes.len() > MAX_DID_DOC_BYTES {
+                    return Err((
+                        StatusCode::UNAUTHORIZED,
+                        format!("did:web document exceeds {MAX_DID_DOC_BYTES} byte limit"),
+                    ));
+                }
+            }
         }
     }
     let body_bytes = body_bytes.freeze();

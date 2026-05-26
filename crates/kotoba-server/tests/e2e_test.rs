@@ -834,6 +834,38 @@ async fn mcp_datalog_run_too_many_rules_returns_error() {
         "error should mention count/limit: {body}");
 }
 
+#[tokio::test]
+async fn mcp_datalog_run_too_many_body_literals_returns_error() {
+    let s = TestServer::start(false).await;
+    // Build a rule with 17 body literals (MAX_BODY_LITERALS = 16).
+    let body_lit = json!({ "Positive": { "relation": "edge", "args": [{"Variable": "x"}, {"Variable": "y"}] } });
+    let body: Vec<_> = (0..17).map(|_| body_lit.clone()).collect();
+    let rule = json!({
+        "head": { "relation": "reachable", "args": [{"Variable": "x"}, {"Variable": "y"}] },
+        "body": body
+    });
+
+    let (status, body_resp) = s.post_auth(
+        "/mcp",
+        json!({
+            "jsonrpc": "2.0", "id": 100, "method": "tools/call",
+            "params": {
+                "name": "kotoba_datalog_run",
+                "arguments": { "graph": "lit-test-graph", "rules": [rule] }
+            }
+        }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "{body_resp}");
+    let err_node = if body_resp["error"].is_object() { &body_resp["error"] } else { &body_resp["result"]["error"] };
+    let err_code = err_node["code"].as_i64();
+    assert!(err_code.is_some(), "expected MCP error, got: {body_resp}");
+    assert_eq!(err_code.unwrap(), -32602, "expected ERR_INVALID_PARAMS: {body_resp}");
+    let err_msg = err_node["message"].as_str().unwrap_or("");
+    assert!(err_msg.contains("17") || err_msg.contains("16"),
+        "error should mention literal count/limit: {body_resp}");
+}
+
 // ── WASM invoke.run (skips if cargo-component unavailable) ────────────────────
 
 #[tokio::test]

@@ -875,6 +875,16 @@ async fn call_tool(
                 return Err((ERR_INVALID_PARAMS,
                     format!("rules array has {} items (limit {MAX_DATALOG_RULES})", rules.len())));
             }
+            // Limit body depth per rule — match_body recurses once per literal;
+            // a 64-literal body can already cause exponential join fan-out.
+            const MAX_BODY_LITERALS: usize = 16;
+            for (i, rule) in rules.iter().enumerate() {
+                if rule.body.len() > MAX_BODY_LITERALS {
+                    return Err((ERR_INVALID_PARAMS,
+                        format!("rule[{i}] body has {} literals (limit {MAX_BODY_LITERALS})",
+                            rule.body.len())));
+                }
+            }
 
             let graph_cid = KotobaCid::from_bytes(graph_str.as_bytes());
 
