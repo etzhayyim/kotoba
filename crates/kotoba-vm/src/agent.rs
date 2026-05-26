@@ -699,7 +699,7 @@ impl PregelReActRunner {
                 vec![]
             } else {
                 let dst = match out.route.as_deref() {
-                    Some(key) => VertexId::from_str(key),
+                    Some(key) => VertexId::from(key),
                     None      => vertex.id.clone(),
                 };
                 vec![Message { src: vertex.id.clone(), dst, payload: b"cont".to_vec() }]
@@ -889,7 +889,7 @@ mod tests {
 
         use crate::pregel::{PregelGraph, VertexId};
         let mut g = PregelGraph::new();
-        g.add_vertex(VertexId::from_str("agent"), b"state".to_vec());
+        g.add_vertex(VertexId::from("agent"), b"state".to_vec());
         let store = MemoryBlockStore::new();
         let cid = g.checkpoint(&store).unwrap();
         assert!(store.has(&cid));

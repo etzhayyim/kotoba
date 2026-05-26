@@ -31,10 +31,20 @@ use kotoba_core::prolly::{ProllyTree, ProllyNode};
 pub struct VertexId(pub KotobaCid);
 
 impl VertexId {
-    pub fn from_str(s: &str) -> Self {
+    pub fn cid(&self) -> &KotobaCid { &self.0 }
+}
+
+impl std::str::FromStr for VertexId {
+    type Err = std::convert::Infallible;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(KotobaCid::from_bytes(s.as_bytes())))
+    }
+}
+
+impl From<&str> for VertexId {
+    fn from(s: &str) -> Self {
         Self(KotobaCid::from_bytes(s.as_bytes()))
     }
-    pub fn cid(&self) -> &KotobaCid { &self.0 }
 }
 
 #[derive(Debug, Clone)]
@@ -281,19 +291,20 @@ pub fn graph_from_deltas(deltas: &[Delta]) -> PregelGraph {
     for d in deltas {
         let key = d.quad.subject.to_multibase();
         if seen_subjects.insert(key.clone()) {
-            let vid = VertexId::from_str(&key);
+            let vid = VertexId::from(key.as_str());
             graph.add_vertex(vid, Vec::new());
         }
     }
 
     // Seed with one message per delta (to the subject vertex)
-    let seed_id = VertexId::from_str("__seed__");
+    let seed_id = VertexId::from("__seed__");
     for d in deltas {
         // Serialize delta minimally as predicate bytes
         let payload = d.quad.predicate.as_bytes().to_vec();
+        let dst_mb = d.quad.subject.to_multibase();
         graph.inject_message(Message {
             src:     seed_id.clone(),
-            dst:     VertexId::from_str(&d.quad.subject.to_multibase()),
+            dst:     VertexId::from(dst_mb.as_str()),
             payload,
         });
     }
@@ -332,7 +343,7 @@ pub fn datalog_compute_fn(
             };
             Message {
                 src:     vertex.id.clone(),
-                dst:     VertexId::from_str(&dst_key),
+                dst:     VertexId::from(dst_key.as_str()),
                 payload: d.quad.predicate.as_bytes().to_vec(),
             }
         }).collect();
@@ -358,8 +369,8 @@ mod tests {
 
     fn make_msg(src: &str, dst: &str, payload: &[u8]) -> Message {
         Message {
-            src: VertexId::from_str(src),
-            dst: VertexId::from_str(dst),
+            src: VertexId::from(src),
+            dst: VertexId::from(dst),
             payload: payload.to_vec(),
         }
     }
@@ -367,7 +378,7 @@ mod tests {
     #[test]
     fn test_single_vertex_compute() {
         let mut graph = PregelGraph::new();
-        let vid = VertexId::from_str("v1");
+        let vid = VertexId::from("v1");
         graph.add_vertex(vid.clone(), Vec::new());
         graph.inject_message(make_msg("seed", "v1", b"ping"));
 
@@ -389,23 +400,23 @@ mod tests {
     fn test_message_passing_between_vertices() {
         let mut graph = PregelGraph::new();
         // Vertices start inactive; they activate when they receive messages.
-        graph.add_vertex(VertexId::from_str("a"), Vec::new());
-        graph.add_vertex(VertexId::from_str("b"), Vec::new());
+        graph.add_vertex(VertexId::from("a"), Vec::new());
+        graph.add_vertex(VertexId::from("b"), Vec::new());
         graph.inject_message(make_msg("seed", "a", b"start"));
 
         // a receives "start", sends "hello" to b
         let compute: ComputeFn = Box::new(|v, inbox| {
-            if v.id == VertexId::from_str("a") && !inbox.is_empty() {
+            if v.id == VertexId::from("a") && !inbox.is_empty() {
                 ComputeOutput {
                     new_state:  b"sent".to_vec(),
                     messages:   vec![Message {
                         src:     v.id.clone(),
-                        dst:     VertexId::from_str("b"),
+                        dst:     VertexId::from("b"),
                         payload: b"hello".to_vec(),
                     }],
                     vote_halt: true,
                 }
-            } else if v.id == VertexId::from_str("b") && !inbox.is_empty() {
+            } else if v.id == VertexId::from("b") && !inbox.is_empty() {
                 let got = inbox[0].payload.clone();
                 ComputeOutput { new_state: got, messages: vec![], vote_halt: true }
             } else {
@@ -423,14 +434,14 @@ mod tests {
         assert_eq!(r2.msg_delivered, 1);
         assert!(r2.all_halted);
 
-        let b = graph.vertex(&VertexId::from_str("b")).unwrap();
+        let b = graph.vertex(&VertexId::from("b")).unwrap();
         assert_eq!(b.state, b"hello");
     }
 
     #[test]
     fn test_run_reaches_fixpoint() {
         let mut graph = PregelGraph::new();
-        graph.add_vertex(VertexId::from_str("x"), Vec::new());
+        graph.add_vertex(VertexId::from("x"), Vec::new());
         graph.inject_message(make_msg("s", "x", b"go"));
 
         let compute: ComputeFn = Box::new(|_, _inbox| ComputeOutput {
@@ -461,7 +472,7 @@ mod tests {
 
         let r = graph.superstep(&compute);
         assert_eq!(r.active_count, 1);
-        let v = graph.vertex(&VertexId::from_str("new-vertex")).unwrap();
+        let v = graph.vertex(&VertexId::from("new-vertex")).unwrap();
         assert_eq!(v.state, b"created");
     }
 
@@ -476,7 +487,7 @@ mod tests {
             ComputeOutput { new_state, messages: vec![], vote_halt: true }
         });
 
-        let dst = VertexId::from_str("target");
+        let dst = VertexId::from("target");
 
         // Graph A: inject in order alpha, beta, gamma
         let mut graph_a = PregelGraph::new();
@@ -517,7 +528,7 @@ mod tests {
 
         let mut graph = PregelGraph::new();
         for name in &["vc", "va", "vb"] {
-            let vid = VertexId::from_str(name);
+            let vid = VertexId::from(*name);
             graph.add_vertex(vid.clone(), Vec::new());
             graph.inject_message(make_msg("seed", name, b"go"));
         }
@@ -532,7 +543,7 @@ mod tests {
     #[test]
     fn test_superstep_counter() {
         let mut graph = PregelGraph::new();
-        graph.add_vertex(VertexId::from_str("a"), Vec::new());
+        graph.add_vertex(VertexId::from("a"), Vec::new());
         graph.inject_message(make_msg("s", "a", b"x"));
 
         let compute: ComputeFn = Box::new(|_, _| ComputeOutput {
@@ -551,8 +562,8 @@ mod tests {
         use kotoba_store::MemoryBlockStore;
 
         let mut graph = PregelGraph::new();
-        let va = VertexId::from_str("a");
-        let vb = VertexId::from_str("b");
+        let va = VertexId::from("a");
+        let vb = VertexId::from("b");
         graph.add_vertex(va.clone(), b"state-a".to_vec());
         graph.add_vertex(vb.clone(), b"state-b".to_vec());
 
@@ -570,12 +581,12 @@ mod tests {
         // Two graphs with the same vertex states but inserted in different order
         // must produce the same checkpoint CID.
         let mut g1 = PregelGraph::new();
-        g1.add_vertex(VertexId::from_str("alpha"), b"state-1".to_vec());
-        g1.add_vertex(VertexId::from_str("beta"),  b"state-2".to_vec());
+        g1.add_vertex(VertexId::from("alpha"), b"state-1".to_vec());
+        g1.add_vertex(VertexId::from("beta"),  b"state-2".to_vec());
 
         let mut g2 = PregelGraph::new();
-        g2.add_vertex(VertexId::from_str("beta"),  b"state-2".to_vec());
-        g2.add_vertex(VertexId::from_str("alpha"), b"state-1".to_vec());
+        g2.add_vertex(VertexId::from("beta"),  b"state-2".to_vec());
+        g2.add_vertex(VertexId::from("alpha"), b"state-1".to_vec());
 
         let s1 = MemoryBlockStore::new();
         let s2 = MemoryBlockStore::new();

@@ -85,7 +85,7 @@ impl KotobaVm {
         let steps_used = superstep_results.len() as u32;
 
         let status = if steps_used >= max_steps
-            && !superstep_results.last().map_or(false, |r| r.all_halted)
+            && !superstep_results.last().is_some_and(|r| r.all_halted)
         {
             ExecStatus::StepsExceeded
         } else {
@@ -192,9 +192,9 @@ mod tests {
         // Build a graph manually with a vertex that sends a message every step
         // and never votes halt — forces StepsExceeded regardless of max_steps.
         let mut graph = PregelGraph::new();
-        let v = VertexId::from_str("v");
+        let v = VertexId::from("v");
         graph.add_vertex(v.clone(), Vec::new());
-        graph.inject_message(Message { src: VertexId::from_str("seed"), dst: v.clone(), payload: b"go".to_vec() });
+        graph.inject_message(Message { src: VertexId::from("seed"), dst: v.clone(), payload: b"go".to_vec() });
 
         let compute: ComputeFn = Box::new(|vertex, _| ComputeOutput {
             new_state: vec![],
@@ -274,7 +274,7 @@ mod tests {
         // must produce different link CIDs.
 
         let mut graph = PregelGraph::new();
-        let v = VertexId::from_str("v");
+        let v = VertexId::from("v");
         graph.add_vertex(v.clone(), b"state".to_vec());
         // Step 1 — run one superstep and checkpoint
         let halt_fn: ComputeFn = Box::new(|vertex: &Vertex, _| ComputeOutput {

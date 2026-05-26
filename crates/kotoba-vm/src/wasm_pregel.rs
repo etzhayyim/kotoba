@@ -195,10 +195,10 @@ impl WasmPregelRunner {
 
         // Build graph: one vertex, seeded with initial_ctx_cbor
         let mut graph  = PregelGraph::new();
-        let vertex_id  = VertexId::from_str("wasm::program");
+        let vertex_id  = VertexId::from("wasm::program");
         graph.add_vertex(vertex_id.clone(), Vec::new());
         graph.inject_message(Message {
-            src:     VertexId::from_str("__init__"),
+            src:     VertexId::from("__init__"),
             dst:     vertex_id.clone(),
             payload: initial_ctx_cbor,
         });

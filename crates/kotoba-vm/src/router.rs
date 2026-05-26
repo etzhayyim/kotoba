@@ -71,6 +71,7 @@ impl InvokeRouter {
     ///
     /// `program_bytes` must be supplied for WasmNode / WasmUdf program types.
     /// For Datalog, pass `None`; `program` and `arrangement` must be Some.
+    #[allow(clippy::too_many_arguments)]
     pub fn dispatch(
         &self,
         program_cid:    &str,
@@ -96,6 +97,7 @@ impl InvokeRouter {
     }
 
     /// Like `dispatch` but supplies a quad snapshot for `kqe.query` in WASM guests.
+    #[allow(clippy::too_many_arguments)]
     pub fn dispatch_with_snapshot(
         &self,
         program_cid:    &str,

@@ -19,9 +19,9 @@
 //! // server: forward swarm GossipMessages → inbound_tx
 //! // server: forward outbound_rx → swarm.send_pregel_message()
 //!
-//! let vid = VertexId::from_str("vertex-a");
+//! let vid = VertexId::from("vertex-a");
 //! runner.add_local_vertex(vid.clone(), Vec::new());
-//! runner.graph.inject_message(Message { src: VertexId::from_str("seed"), dst: vid, payload: b"go".to_vec() });
+//! runner.graph.inject_message(Message { src: VertexId::from("seed"), dst: vid, payload: b"go".to_vec() });
 //!
 //! let compute: SharedComputeFn = Arc::new(|v, inbox| ComputeOutput {
 //!     new_state:  format!("step:{}", inbox.len()).into_bytes(),
@@ -114,8 +114,8 @@ impl DistributedPregelRunner {
     /// is currently available.
     pub fn drain_inbound(&mut self) {
         while let Ok(dmsg) = self.inbound_rx.try_recv() {
-            let dst = VertexId::from_str(&dmsg.dst);
-            let src = VertexId::from_str(&dmsg.src);
+            let dst = VertexId::from(dmsg.dst.as_str());
+            let src = VertexId::from(dmsg.src.as_str());
             self.graph.inject_message(Message {
                 src,
                 dst,
@@ -260,10 +260,10 @@ mod tests {
     async fn test_distributed_runner_local_compute() {
         let (_, _, mut runner) = DistributedPregelRunner::channel_pair(64);
 
-        let vid = VertexId::from_str("vertex-a");
+        let vid = VertexId::from("vertex-a");
         runner.add_local_vertex(vid.clone(), Vec::new());
         runner.graph.inject_message(Message {
-            src:     VertexId::from_str("seed"),
+            src:     VertexId::from("seed"),
             dst:     vid.clone(),
             payload: b"hello".to_vec(),
         });
@@ -295,7 +295,7 @@ mod tests {
     async fn test_inbound_messages_injected_before_superstep() {
         let (inbound_tx, _, mut runner) = DistributedPregelRunner::channel_pair(16);
 
-        let vid = VertexId::from_str("vertex-b");
+        let vid = VertexId::from("vertex-b");
         runner.add_local_vertex(vid.clone(), Vec::new());
 
         // Send a message via the inbound channel (simulates a peer gossip message)
@@ -322,23 +322,23 @@ mod tests {
         let (_, mut outbound_rx, mut runner) = DistributedPregelRunner::channel_pair(16);
 
         // Add vertex-local; it will send a message to "remote-vertex" (not local)
-        let local_vid = VertexId::from_str("local-vertex");
+        let local_vid = VertexId::from("local-vertex");
         runner.add_local_vertex(local_vid.clone(), Vec::new());
         runner.graph.inject_message(Message {
-            src:     VertexId::from_str("seed"),
+            src:     VertexId::from("seed"),
             dst:     local_vid.clone(),
             payload: b"go".to_vec(),
         });
 
         // Compute: send one message to a non-local vertex
-        let remote_key = VertexId::from_str("remote-vertex").cid().to_multibase();
+        let remote_key = VertexId::from("remote-vertex").cid().to_multibase();
         let remote_key_clone = remote_key.clone();
         let compute: SharedComputeFn = Arc::new(move |v: &Vertex, _inbox: &[Message]| {
             ComputeOutput {
                 new_state: v.state.clone(),
                 messages:  vec![Message {
                     src:     v.id.clone(),
-                    dst:     VertexId::from_str("remote-vertex"),
+                    dst:     VertexId::from("remote-vertex"),
                     payload: b"hello-remote".to_vec(),
                 }],
                 vote_halt: true,
@@ -359,12 +359,12 @@ mod tests {
     async fn test_local_messages_stay_in_graph() {
         let (_, mut outbound_rx, mut runner) = DistributedPregelRunner::channel_pair(16);
 
-        let va = VertexId::from_str("va");
-        let vb = VertexId::from_str("vb");
+        let va = VertexId::from("va");
+        let vb = VertexId::from("vb");
         runner.add_local_vertex(va.clone(), Vec::new());
         runner.add_local_vertex(vb.clone(), Vec::new());
         runner.graph.inject_message(Message {
-            src:     VertexId::from_str("seed"),
+            src:     VertexId::from("seed"),
             dst:     va.clone(),
             payload: b"start".to_vec(),
         });
@@ -372,7 +372,7 @@ mod tests {
         // va sends to vb (both local) — should NOT appear on outbound_rx
         let vb_clone = vb.clone();
         let compute: SharedComputeFn = Arc::new(move |v: &Vertex, _inbox: &[Message]| {
-            if v.id == VertexId::from_str("va") {
+            if v.id == VertexId::from("va") {
                 ComputeOutput {
                     new_state: b"done".to_vec(),
                     messages:  vec![Message {

@@ -1,5 +1,8 @@
 use anyhow::Result;
 use std::sync::Arc;
+
+/// `(topic, payload)` pair drained from the KSE inbox.
+type KseInboxItem = (String, Vec<u8>);
 use wasmtime::{Config, Engine, Store};
 use wasmtime::component::{Component, ComponentType, Lift, Linker, Lower};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiView, ResourceTable};
@@ -410,9 +413,9 @@ fn bind_kse(linker: &mut Linker<HostState>) -> Result<()> {
         "drain",
         |mut ctx: wasmtime::StoreContextMut<HostState>,
          (topic_pattern, max_items): (String, u32)|
-         -> Result<(Result<Vec<(String, Vec<u8>)>, String>,)> {
+         -> Result<(Result<Vec<KseInboxItem>, String>,)> {
             ctx.data_mut().charge_gas(20)?;
-            let matches: Vec<(String, Vec<u8>)> = ctx.data().kse_inbox.iter()
+            let matches: Vec<KseInboxItem> = ctx.data().kse_inbox.iter()
                 .filter(|(t, _)| topic_pattern.is_empty() || t.starts_with(&topic_pattern))
                 .take(max_items as usize)
                 .cloned()

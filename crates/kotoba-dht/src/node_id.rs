@@ -14,7 +14,7 @@ impl NodeId {
     /// XOR distance for Kademlia-style routing
     pub fn xor_distance(&self, other: &Self) -> [u8; 32] {
         let mut dist = [0u8; 32];
-        for i in 0..32 { dist[i] = self.0[i] ^ other.0[i]; }
+        for (i, slot) in dist.iter_mut().enumerate() { *slot = self.0[i] ^ other.0[i]; }
         dist
     }
 

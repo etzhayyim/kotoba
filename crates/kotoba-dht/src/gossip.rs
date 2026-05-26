@@ -8,7 +8,7 @@ pub struct GossipMessage {
 }
 
 pub enum GossipKind {
-    Entry(ChainEntry),
+    Entry(Box<ChainEntry>),
     Warrant(Warrant),
 }
 
