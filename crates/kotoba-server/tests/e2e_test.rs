@@ -1019,8 +1019,8 @@ fn build_ed25519_cacao(graph: &str) -> (String, String) {
         p: kotoba_auth::CacaoPayload {
             iss:       did.clone(),
             aud:       "kotoba://node/test".into(),
-            issued_at: "2026-01-01T00:00:00Z".into(),
-            expiry:    None,
+            issued_at: "2026-05-26T00:00:00Z".into(),
+            expiry:    Some("2030-01-01T00:00:00Z".into()),
             nonce:     "nonce-42".into(),
             domain:    "kotoba.test".into(),
             statement: Some("Authorize quad write".into()),

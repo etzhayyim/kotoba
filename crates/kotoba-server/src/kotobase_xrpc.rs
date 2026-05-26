@@ -25,6 +25,48 @@ use crate::server::KotobaState;
 use kotoba_kqe::quad::{Quad, QuadObject};
 use kotoba_core::cid::KotobaCid;
 
+// ── Input validation ──────────────────────────────────────────────────────
+
+const MAX_DID_LEN:     usize = 512;
+const MAX_NAME_LEN:    usize = 256;
+const MAX_TIER_LEN:    usize =  32;
+const MAX_SUBJECT_LEN: usize = 512;
+const MAX_PREDICATE_LEN: usize = 256;
+const MAX_OBJECT_LEN:  usize = 65_536; // 64 KiB per triple value
+
+fn validate_did(did: &str) -> Result<(), (StatusCode, String)> {
+    if did.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "tenant_did must not be empty".into()));
+    }
+    if !did.starts_with("did:") {
+        return Err((StatusCode::BAD_REQUEST, format!("tenant_did is not a valid DID: {did:?}")));
+    }
+    if did.len() > MAX_DID_LEN {
+        return Err((StatusCode::BAD_REQUEST, format!("tenant_did exceeds {MAX_DID_LEN} bytes")));
+    }
+    Ok(())
+}
+
+fn validate_name(name: &str) -> Result<(), (StatusCode, String)> {
+    if name.len() > MAX_NAME_LEN {
+        return Err((StatusCode::BAD_REQUEST, format!("name exceeds {MAX_NAME_LEN} characters")));
+    }
+    Ok(())
+}
+
+fn validate_triple(t: &TripleInput) -> Result<(), (StatusCode, String)> {
+    if t.subject.is_empty() || t.subject.len() > MAX_SUBJECT_LEN {
+        return Err((StatusCode::BAD_REQUEST, format!("triple subject must be 1-{MAX_SUBJECT_LEN} bytes")));
+    }
+    if t.predicate.is_empty() || t.predicate.len() > MAX_PREDICATE_LEN {
+        return Err((StatusCode::BAD_REQUEST, format!("triple predicate must be 1-{MAX_PREDICATE_LEN} bytes")));
+    }
+    if t.object.len() > MAX_OBJECT_LEN {
+        return Err((StatusCode::BAD_REQUEST, format!("triple object exceeds {MAX_OBJECT_LEN} bytes")));
+    }
+    Ok(())
+}
+
 // ── Quota constants ────────────────────────────────────────────────────────
 
 const QUOTA_FREE_PINS:     i64 = 3;
@@ -274,8 +316,17 @@ pub struct UsageGetResp {
 pub async fn handle_account_create(
     State(state): State<Arc<KotobaState>>,
     Json(req): Json<AccountCreateReq>,
-) -> impl IntoResponse {
-    let tier = req.tier.as_deref().unwrap_or("free").to_string();
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    validate_did(&req.tenant_did)?;
+
+    let tier_raw = req.tier.as_deref().unwrap_or("free");
+    if tier_raw.len() > MAX_TIER_LEN {
+        return Err((StatusCode::BAD_REQUEST, format!("tier exceeds {MAX_TIER_LEN} characters")));
+    }
+    let tier = match tier_raw {
+        "free" | "starter" | "pro" => tier_raw.to_string(),
+        other => return Err((StatusCode::BAD_REQUEST, format!("unknown tier: {other:?}"))),
+    };
     let now  = now_unix_str();
     let g    = format!("kotobase/accounts/{}", req.tenant_did);
 
@@ -285,19 +336,20 @@ pub async fn handle_account_create(
     ];
     state.quad_store.assert_batch_silent(quads).await;
 
-    (StatusCode::OK, Json(AccountCreateResp {
+    Ok((StatusCode::OK, Json(AccountCreateResp {
         ok: true,
         tenant_did: req.tenant_did,
         tier,
         created_at: now,
         error: None,
-    }))
+    })))
 }
 
 pub async fn handle_account_status(
     State(state): State<Arc<KotobaState>>,
     Json(req): Json<AccountStatusReq>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    validate_did(&req.tenant_did)?;
     let tier = read_tier(&state, &req.tenant_did).await;
     let (quota_pins, quota_bytes) = quota_for_tier(&tier);
     let (used_pins, used_bytes)   = count_pins(&state, &req.tenant_did, None).await;
@@ -305,7 +357,7 @@ pub async fn handle_account_status(
     let g = format!("kotobase/accounts/{}", req.tenant_did);
     let created_at = get_text(&state, &g, &req.tenant_did, "kotobase/account/created_at").await;
 
-    (StatusCode::OK, Json(AccountStatusResp {
+    Ok((StatusCode::OK, Json(AccountStatusResp {
         ok: true,
         tenant_did: req.tenant_did,
         tier,
@@ -315,13 +367,56 @@ pub async fn handle_account_status(
         used_bytes,
         created_at,
         error: None,
-    }))
+    })))
 }
 
 pub async fn handle_pin_create(
     State(state): State<Arc<KotobaState>>,
     Json(req): Json<PinCreateReq>,
 ) -> impl IntoResponse {
+    // Input validation
+    if let Err((status, msg)) = validate_did(&req.tenant_did) {
+        return (status, Json(PinCreateResp {
+            ok: false, pin_id: String::new(), cid: String::new(),
+            status: "failed".into(), size_bytes: 0,
+            error: Some(msg),
+        }));
+    }
+    if let Err((status, msg)) = validate_name(&req.name) {
+        return (status, Json(PinCreateResp {
+            ok: false, pin_id: String::new(), cid: String::new(),
+            status: "failed".into(), size_bytes: 0,
+            error: Some(msg),
+        }));
+    }
+    if let Some(size_hint) = req.size_hint_bytes {
+        if size_hint < 0 {
+            return (StatusCode::BAD_REQUEST, Json(PinCreateResp {
+                ok: false, pin_id: String::new(), cid: String::new(),
+                status: "failed".into(), size_bytes: 0,
+                error: Some("size_hint_bytes must not be negative".into()),
+            }));
+        }
+    }
+    if let Some(qi) = &req.quads {
+        if qi.graph.is_empty() || qi.graph.len() > MAX_SUBJECT_LEN {
+            return (StatusCode::BAD_REQUEST, Json(PinCreateResp {
+                ok: false, pin_id: String::new(), cid: String::new(),
+                status: "failed".into(), size_bytes: 0,
+                error: Some(format!("quads.graph must be 1-{MAX_SUBJECT_LEN} bytes")),
+            }));
+        }
+        for t in qi.triples.as_deref().unwrap_or(&[]) {
+            if let Err((status, msg)) = validate_triple(t) {
+                return (status, Json(PinCreateResp {
+                    ok: false, pin_id: String::new(), cid: String::new(),
+                    status: "failed".into(), size_bytes: 0,
+                    error: Some(msg),
+                }));
+            }
+        }
+    }
+
     if req.cid.is_none() == req.quads.is_none() {
         return (StatusCode::BAD_REQUEST, Json(PinCreateResp {
             ok: false, pin_id: String::new(), cid: String::new(),
@@ -343,7 +438,7 @@ pub async fn handle_pin_create(
             error: Some(format!("QuotaExceeded: tier={tier} pins={used_pins}/{quota_pins}")),
         }));
     }
-    if quota_bytes >= 0 && size > 0 && used_bytes + size > quota_bytes {
+    if quota_bytes >= 0 && size > 0 && size <= quota_bytes && used_bytes + size > quota_bytes {
         return (StatusCode::TOO_MANY_REQUESTS, Json(PinCreateResp {
             ok: false, pin_id: String::new(), cid: String::new(),
             status: "failed".into(), size_bytes: 0,
@@ -413,7 +508,8 @@ pub async fn handle_pin_create(
 pub async fn handle_pin_list(
     State(state): State<Arc<KotobaState>>,
     Json(req): Json<PinListReq>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    validate_did(&req.tenant_did)?;
     let limit = req.limit.unwrap_or(20).min(100);
     let g     = format!("kotobase/pins/{}", req.tenant_did);
     let gc    = cid(&g);
@@ -456,42 +552,44 @@ pub async fn handle_pin_list(
     let total = records.len();
     records.truncate(limit);
 
-    (StatusCode::OK, Json(PinListResp { ok: true, pins: records, total }))
+    Ok((StatusCode::OK, Json(PinListResp { ok: true, pins: records, total })))
 }
 
 pub async fn handle_pin_delete(
     State(state): State<Arc<KotobaState>>,
     Json(req): Json<PinDeleteReq>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    validate_did(&req.tenant_did)?;
     let g     = format!("kotobase/pins/{}", req.tenant_did);
     let gc    = cid(&g);
     let subj  = cid(&req.pin_id);
 
     let arr = match state.quad_store.arrangement(&gc).await {
         Some(a) => a,
-        None => return (StatusCode::NOT_FOUND, Json(PinDeleteResp {
+        None => return Ok((StatusCode::NOT_FOUND, Json(PinDeleteResp {
             ok: false, error: Some("NotFound: no pins for this tenant".into()),
-        })),
+        }))),
     };
 
     let quads = arr.get_subject_quads(&gc, &subj);
     if quads.is_empty() {
-        return (StatusCode::NOT_FOUND, Json(PinDeleteResp {
+        return Ok((StatusCode::NOT_FOUND, Json(PinDeleteResp {
             ok: false, error: Some("NotFound: pin not found".into()),
-        }));
+        })));
     }
 
     for q in quads {
         state.quad_store.retract_silent(q).await;
     }
 
-    (StatusCode::OK, Json(PinDeleteResp { ok: true, error: None }))
+    Ok((StatusCode::OK, Json(PinDeleteResp { ok: true, error: None })))
 }
 
 pub async fn handle_usage_get(
     State(state): State<Arc<KotobaState>>,
     Json(req): Json<UsageGetReq>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    validate_did(&req.tenant_did)?;
     let tier = read_tier(&state, &req.tenant_did).await;
     let (quota_pins, quota_bytes) = quota_for_tier(&tier);
     let (pin_count, total_bytes)  = count_pins(&state, &req.tenant_did, None).await;
@@ -502,7 +600,7 @@ pub async fn handle_usage_get(
     let remaining_pins  = if quota_pins  < 0 { -1 } else { (quota_pins  - pin_count).max(0) };
     let remaining_bytes = if quota_bytes < 0 { -1 } else { (quota_bytes - total_bytes).max(0) };
 
-    (StatusCode::OK, Json(UsageGetResp {
+    Ok((StatusCode::OK, Json(UsageGetResp {
         ok: true,
         tenant_did: req.tenant_did,
         tier,
@@ -515,7 +613,7 @@ pub async fn handle_usage_get(
         quota_bytes,
         remaining_pins,
         remaining_bytes,
-    }))
+    })))
 }
 
 // ── NSID list for test invariant ──────────────────────────────────────────

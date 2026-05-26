@@ -8,11 +8,10 @@ version = "0.1.0"
 description = "LangGraph-compatible graph engine for kotoba WASM Component Model (pure Python)"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
-# Pure Python — no pydantic, no C extensions, no langgraph runtime dependency.
-# cbor2 is needed only for the KotobaCheckpointer KQE path (available as pure Python).
-dependencies = [
-    "cbor2>=5",
-]
+# Pure Python — zero dependencies outside stdlib.
+# CBOR encode/decode is handled by the inline kotoba_langgraph._cbor module
+# (cbor2 5.x requires a Rust/C extension and cannot be bundled with componentize-py).
+dependencies = []
 
 [project.optional-dependencies]
 build = [

@@ -166,10 +166,17 @@ impl Cacao {
     }
 
     /// Returns `true` if the CACAO's `exp` field is set and is in the past.
+    ///
+    /// A malformed `exp` (non-UTC, wrong length, non-digits) is treated as expired
+    /// (fail-safe) to prevent bypasses via timezone-offset corruption of the
+    /// lexicographic comparison.
     pub fn is_expired(&self) -> bool {
         match &self.p.expiry {
             None => false,
             Some(exp) => {
+                if !is_strict_utc_iso8601(exp) {
+                    return true;
+                }
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -177,6 +184,11 @@ impl Cacao {
                 format_unix_to_iso8601(now) > *exp
             }
         }
+    }
+
+    /// Returns the `issued_at` timestamp as Unix seconds, or `None` if malformed.
+    pub fn issued_at_secs(&self) -> Option<u64> {
+        parse_strict_utc_iso8601(&self.p.issued_at)
     }
 
     /// Verify the CACAO signature using an externally-resolved Ed25519 public key.
@@ -202,6 +214,59 @@ impl Cacao {
             .map_err(|e| CacaoError::Ed25519(e.to_string()))?;
         Ok(self.p.iss.clone())
     }
+}
+
+/// Validates that `s` is strictly `YYYY-MM-DDTHH:MM:SSZ` (20 chars, UTC only).
+/// Non-UTC offsets (e.g. `+09:00`) corrupt the lexicographic expiry comparison.
+fn is_strict_utc_iso8601(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 20
+        && b[4] == b'-' && b[7] == b'-' && b[10] == b'T'
+        && b[13] == b':' && b[16] == b':' && b[19] == b'Z'
+        && b[0..4].iter().all(|c| c.is_ascii_digit())
+        && b[5..7].iter().all(|c| c.is_ascii_digit())
+        && b[8..10].iter().all(|c| c.is_ascii_digit())
+        && b[11..13].iter().all(|c| c.is_ascii_digit())
+        && b[14..16].iter().all(|c| c.is_ascii_digit())
+        && b[17..19].iter().all(|c| c.is_ascii_digit())
+}
+
+/// Parses a strict `YYYY-MM-DDTHH:MM:SSZ` string to Unix seconds.
+fn parse_strict_utc_iso8601(s: &str) -> Option<u64> {
+    if !is_strict_utc_iso8601(s) { return None; }
+    let b = s.as_bytes();
+    let year  = p4(&b[0..4])?;
+    let month = p2(&b[5..7])?;
+    let day   = p2(&b[8..10])?;
+    let hour  = p2(&b[11..13])?;
+    let min   = p2(&b[14..16])?;
+    let sec   = p2(&b[17..19])?;
+    if month == 0 || month > 12 || day == 0 { return None; }
+    if hour > 23 || min > 59 || sec > 59 { return None; }
+    let mut days: u64 = 0;
+    for y in 1970..year {
+        days += if unix_is_leap(y) { 366 } else { 365 };
+    }
+    let mdays: [u64; 12] = if unix_is_leap(year) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    if day > mdays[(month - 1) as usize] { return None; }
+    for m in 0..(month - 1) as usize { days += mdays[m]; }
+    days += day - 1;
+    Some(days * 86_400 + hour * 3_600 + min * 60 + sec)
+}
+
+fn p4(b: &[u8]) -> Option<u64> {
+    if b.len() != 4 { return None; }
+    Some((b[0]-b'0') as u64 * 1000 + (b[1]-b'0') as u64 * 100
+       + (b[2]-b'0') as u64 * 10 + (b[3]-b'0') as u64)
+}
+
+fn p2(b: &[u8]) -> Option<u64> {
+    if b.len() != 2 { return None; }
+    Some((b[0]-b'0') as u64 * 10 + (b[1]-b'0') as u64)
 }
 
 /// Minimal ISO-8601 UTC formatter — accurate for 1970-2100.

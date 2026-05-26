@@ -4,6 +4,7 @@ pub mod delegation;
 pub mod eth;
 pub mod did_key;
 pub mod resolver;
+pub mod passkey;
 
 pub use did_document::{DidDocument, VerificationMethod, ServiceEndpoint};
 pub use cacao::{Cacao, CacaoHeader, CacaoPayload, CacaoSig, CacaoError};
@@ -11,6 +12,11 @@ pub use delegation::{DelegationChain, DelegationError};
 pub use eth::{eth_address_to_erc725_did, personal_sign_hash, recover_eth_address};
 pub use did_key::{parse_ed25519_did_key, ed25519_pubkey_to_did_key};
 pub use resolver::{DidDocumentResolver, DidResolverError, InMemoryDidResolver};
+pub use passkey::{
+    PasskeyAssertion, PasskeyGate, PasskeyGateError,
+    KeyOpKind, AuthLevel, KeyOpPolicy, Authorization,
+    KeyHierarchy,
+};
 
 #[cfg(test)]
 mod tests {
@@ -437,5 +443,62 @@ mod tests {
         let doc2: DidDocument = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(doc.id, doc2.id);
         assert_eq!(doc.service.len(), doc2.service.len());
+    }
+
+    // ── Cacao::is_expired UTC format validation ─────────────────────────────
+
+    fn make_cacao(expiry: Option<&str>, issued_at: &str) -> Cacao {
+        let mut p = test_payload(vec![]);
+        p.issued_at = issued_at.into();
+        p.expiry = expiry.map(|s| s.into());
+        Cacao {
+            h: CacaoHeader { t: "eip4361".into() },
+            p,
+            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+        }
+    }
+
+    #[test]
+    fn is_expired_past_utc_is_true() {
+        let c = make_cacao(Some("2020-01-01T00:00:00Z"), "2019-01-01T00:00:00Z");
+        assert!(c.is_expired());
+    }
+
+    #[test]
+    fn is_expired_future_utc_is_false() {
+        let c = make_cacao(Some("2099-12-31T23:59:59Z"), "2026-01-01T00:00:00Z");
+        assert!(!c.is_expired());
+    }
+
+    #[test]
+    fn is_expired_none_expiry_is_false() {
+        let c = make_cacao(None, "2026-05-26T00:00:00Z");
+        assert!(!c.is_expired());
+    }
+
+    #[test]
+    fn is_expired_non_utc_offset_treated_as_expired() {
+        // +09:00 offset: corrupt lexicographic comparison — fail-safe: treat as expired
+        let c = make_cacao(Some("2099-01-01T09:00:00+09:00"), "2026-01-01T00:00:00Z");
+        assert!(c.is_expired(), "non-UTC offset must be treated as expired");
+    }
+
+    #[test]
+    fn is_expired_wrong_length_exp_treated_as_expired() {
+        let c = make_cacao(Some("2099-01-01"), "2026-01-01T00:00:00Z");
+        assert!(c.is_expired(), "short/malformed exp must be treated as expired");
+    }
+
+    #[test]
+    fn issued_at_secs_valid_roundtrip() {
+        let c = make_cacao(None, "2026-05-26T00:00:00Z");
+        let secs = c.issued_at_secs().expect("valid iat");
+        assert!(secs > 0);
+    }
+
+    #[test]
+    fn issued_at_secs_malformed_returns_none() {
+        let c = make_cacao(None, "not-a-date");
+        assert!(c.issued_at_secs().is_none());
     }
 }

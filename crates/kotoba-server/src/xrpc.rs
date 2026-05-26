@@ -166,6 +166,22 @@ async fn resolve_and_verify_did_web(
     if cacao.is_expired() {
         return Err((StatusCode::UNAUTHORIZED, "cacao expired".to_string()));
     }
+    // P3b — max-age check for no-expiry CACAOs (mirrors DelegationChain::verify logic)
+    if cacao.p.expiry.is_none() {
+        const MAX_CACAO_AGE_SECS: u64 = 7 * 24 * 3600;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        match cacao.issued_at_secs() {
+            None => return Err((StatusCode::UNAUTHORIZED, "cacao: invalid iat format".to_string())),
+            Some(iat) => {
+                if now.saturating_sub(iat) > MAX_CACAO_AGE_SECS {
+                    return Err((StatusCode::UNAUTHORIZED, "cacao expired (max-age exceeded)".to_string()));
+                }
+            }
+        }
+    }
 
     // P3 — capability check
     if let Some(cap) = cacao.p.capability() {

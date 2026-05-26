@@ -29,13 +29,13 @@ from typing import Any
 
 
 def _cbor_loads(data: bytes) -> Any:
-    import cbor2
-    return cbor2.loads(data)
+    from kotoba_langgraph._cbor import loads
+    return loads(data)
 
 
 def _cbor_dumps(obj: Any) -> bytes:
-    import cbor2
-    return cbor2.dumps(obj)
+    from kotoba_langgraph._cbor import dumps
+    return dumps(obj)
 
 
 def handle_invoke(ctx_cbor: bytes, compiled_graph: Any) -> bytes:

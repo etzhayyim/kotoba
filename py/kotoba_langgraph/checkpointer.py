@@ -32,13 +32,13 @@ def _try_kqe():
 
 def _cbor_text(text: str) -> bytes:
     """Encode a string as CBOR ``{"Text": text}`` (ciborium map format)."""
-    import cbor2
-    return cbor2.dumps({"Text": text})
+    from kotoba_langgraph._cbor import dumps
+    return dumps({"Text": text})
 
 
 def _cbor_text_decode(raw: bytes) -> str:
-    import cbor2
-    obj = cbor2.loads(raw)
+    from kotoba_langgraph._cbor import loads
+    obj = loads(raw)
     if isinstance(obj, dict) and "Text" in obj:
         return obj["Text"]
     return raw.decode("utf-8", errors="replace")
