@@ -2926,3 +2926,62 @@ async fn signal_distribute_sender_key_invalid_recipient_did_prefix_returns_400()
     })).await;
     assert_eq!(status, 400, "{body}");
 }
+
+// ── DID prefix validation tests (email / attest / invoke_run) ────────────────
+
+#[tokio::test]
+async fn email_list_invalid_did_prefix_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.get("/xrpc/ai.gftd.apps.kotoba.email.list?owner_did=not-a-did").await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn email_ingest_invalid_did_prefix_returns_400() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+    let s = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zOperator");
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotoba.email.ingest", json!({
+        "owner_did": "not-a-did",
+        "raw_b64":   B64.encode(b"From: test@example.com\r\n\r\nBody"),
+    }), &tok).await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn attest_claim_invalid_entity_did_prefix_returns_400() {
+    let s = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zAttester");
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotoba.attest.claim", json!({
+        "entity_did":   "not-a-did",
+        "attester_did": "did:key:zAttester",
+        "claim_type":   "self",
+        "stake_mkoto":  1_000_000_000u64,
+    }), &tok).await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn attest_claim_invalid_attester_did_prefix_returns_400() {
+    let s = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zSelf");
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotoba.attest.claim", json!({
+        "entity_did":   "did:key:zSelf",
+        "attester_did": "not-a-did",
+        "claim_type":   "self",
+        "stake_mkoto":  1_000_000_000u64,
+    }), &tok).await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn attest_challenge_invalid_challenger_did_prefix_returns_400() {
+    let s = TestServer::start(false).await;
+    let tok = tenant_jwt("not-a-did");
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotoba.attest.challenge", json!({
+        "claim_cid":      "bafybeifake000000000000000000000000000",
+        "challenger_did": "not-a-did",
+        "reason":         "bad actor",
+    }), &tok).await;
+    assert_eq!(status, 400, "{body}");
+}
