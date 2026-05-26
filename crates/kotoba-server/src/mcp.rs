@@ -116,13 +116,15 @@ fn tools_list() -> Value {
             },
             {
                 "name": MCP_TOOL_GRAPH_QUERY,
-                "description": "SPO pattern query over a named graph Arrangement. Returns matching quads.",
+                "description": "Graph query over a named graph. Supports EAVT (subject), AVET (predicate+object), AVET-prefix (predicate_prefix) indexed paths in addition to full-scan SPO.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "graph":     { "type": "string", "description": "Named graph CID (multibase)" },
-                        "subject":   { "type": "string", "description": "(optional) Subject filter" },
-                        "predicate": { "type": "string", "description": "(optional) Predicate filter (exact match)" }
+                        "graph":            { "type": "string", "description": "Named graph CID (multibase)" },
+                        "subject":          { "type": "string", "description": "(optional) Subject filter — EAVT index" },
+                        "predicate":        { "type": "string", "description": "(optional) Predicate filter — exact match" },
+                        "object":           { "type": "string", "description": "(optional) Object filter — combined with predicate for AVET P+O→S lookup" },
+                        "predicate_prefix": { "type": "string", "description": "(optional) Predicate prefix range scan — AVET BTree range (e.g. 'weight/' lists all weight quads)" }
                     },
                     "required": ["graph"]
                 }
@@ -329,20 +331,44 @@ async fn call_tool(
             let graph = get_str("graph")?;
             let graph_cid = KotobaCid::from_bytes(graph.as_bytes());
 
-            let arrangement = match state.quad_store.arrangement(&graph_cid).await {
-                None => return Ok(json!({ "graph": graph, "count": 0, "quads": [] })),
-                Some(a) => a,
+            let predicate_prefix = args.get("predicate_prefix").and_then(Value::as_str);
+            let predicate        = args.get("predicate").and_then(Value::as_str);
+            let object_key       = args.get("object").and_then(Value::as_str);
+            let subject_str      = args.get("subject").and_then(Value::as_str);
+
+            let quads: Vec<_> = if let Some(prefix) = predicate_prefix {
+                // AVET BTree prefix range scan — O(k) where k = matching quads
+                state.quad_store.quads_by_predicate_prefix(Some(&graph_cid), prefix).await
+            } else if let (Some(pred), Some(obj)) = (predicate, object_key) {
+                // AVET P+O→S lookup then EAVT subject→quad reconstruction
+                let subjects = state.quad_store
+                    .lookup_subject_by_po(Some(&graph_cid), pred, obj)
+                    .await;
+                let arr = match state.quad_store.arrangement(&graph_cid).await {
+                    None => return Ok(json!({ "graph": graph, "count": 0, "quads": [] })),
+                    Some(a) => a,
+                };
+                let pred_owned = pred.to_owned();
+                subjects.iter()
+                    .flat_map(|s| arr.get_subject_quads(&graph_cid, s))
+                    .filter(|q| q.predicate == pred_owned)
+                    .collect()
+            } else {
+                // Full-scan fallback with optional subject / predicate filters
+                let arr = match state.quad_store.arrangement(&graph_cid).await {
+                    None => return Ok(json!({ "graph": graph, "count": 0, "quads": [] })),
+                    Some(a) => a,
+                };
+                let mut qs = arr.quads(&graph_cid);
+                if let Some(s) = subject_str {
+                    let s_cid = KotobaCid::from_bytes(s.as_bytes());
+                    qs.retain(|q| q.subject == s_cid);
+                }
+                if let Some(p) = predicate {
+                    qs.retain(|q| q.predicate == p);
+                }
+                qs
             };
-
-            let mut quads = arrangement.quads(&graph_cid);
-
-            if let Some(s) = args.get("subject").and_then(Value::as_str) {
-                let s_cid = KotobaCid::from_bytes(s.as_bytes());
-                quads.retain(|q| q.subject == s_cid);
-            }
-            if let Some(p) = args.get("predicate").and_then(Value::as_str) {
-                quads.retain(|q| q.predicate == p);
-            }
 
             Ok(json!({
                 "graph": graph,
