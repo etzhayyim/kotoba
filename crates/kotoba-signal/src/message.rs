@@ -78,3 +78,76 @@ pub enum ReceiptStatus {
     Delivered,
     Read,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signal_content_type_constant() {
+        assert_eq!(SIGNAL_CONTENT_TYPE, "application/x-signal-envelope");
+    }
+
+    #[test]
+    fn message_type_json_is_camel_case() {
+        assert_eq!(serde_json::to_string(&MessageType::DirectMessage).unwrap(),  "\"directMessage\"");
+        assert_eq!(serde_json::to_string(&MessageType::GroupMessage).unwrap(),   "\"groupMessage\"");
+        assert_eq!(serde_json::to_string(&MessageType::Receipt).unwrap(),        "\"receipt\"");
+    }
+
+    #[test]
+    fn receipt_status_json_is_camel_case() {
+        assert_eq!(serde_json::to_string(&ReceiptStatus::Delivered).unwrap(), "\"delivered\"");
+        assert_eq!(serde_json::to_string(&ReceiptStatus::Read).unwrap(),      "\"read\"");
+    }
+
+    #[test]
+    fn signal_message_json_roundtrip() {
+        let msg = SignalMessage {
+            message_type:       MessageType::DirectMessage,
+            sender_did:         "did:key:zSender".to_string(),
+            recipient_did:      "did:key:zRecip".to_string(),
+            device_id:          "device-1".to_string(),
+            group_id:           None,
+            ciphertext_envelope: "base64ciphertext==".to_string(),
+            timestamp:          "2026-01-01T00:00:00Z".to_string(),
+            ephemeral_key:      None,
+            one_time_prekey_id: None,
+        };
+        let json  = serde_json::to_string(&msg).unwrap();
+        let back: SignalMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.sender_did,    msg.sender_did);
+        assert_eq!(back.recipient_did, msg.recipient_did);
+        // Optional None fields should be absent from JSON
+        assert!(!json.contains("groupId"));
+        assert!(!json.contains("ephemeralKey"));
+        assert!(!json.contains("oneTimePrekeyId"));
+    }
+
+    #[test]
+    fn thread_message_reactions_omitted_when_empty() {
+        let m = ThreadMessage {
+            id:         "msg-1".to_string(),
+            sender_did: "did:key:z1".to_string(),
+            text:       "hello".to_string(),
+            reply_to:   None,
+            reactions:  vec![],
+            timestamp:  "2026-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(!json.contains("reactions"), "empty reactions must be omitted");
+    }
+
+    #[test]
+    fn reaction_json_roundtrip() {
+        let r = Reaction {
+            sender_did: "did:key:zA".to_string(),
+            emoji:      "👍".to_string(),
+            message_id: "msg-42".to_string(),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: Reaction = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.emoji, "👍");
+        assert_eq!(back.message_id, "msg-42");
+    }
+}

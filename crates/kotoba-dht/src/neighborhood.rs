@@ -32,3 +32,59 @@ impl Neighborhood {
         nearest.contains(&&self.local) || nearest.len() < K
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nid(tag: &[u8]) -> NodeId { NodeId::from_pubkey(tag) }
+
+    #[test]
+    fn add_peer_deduplicates() {
+        let mut nb = Neighborhood::new(nid(b"local"));
+        nb.add_peer(nid(b"alice"));
+        nb.add_peer(nid(b"alice"));
+        assert_eq!(nb.peers.len(), 1);
+    }
+
+    #[test]
+    fn add_peer_truncates_to_k_times_8() {
+        let mut nb = Neighborhood::new(nid(b"local"));
+        for i in 0..100u8 {
+            nb.add_peer(nid(&[i]));
+        }
+        assert!(nb.peers.len() <= K * 8);
+    }
+
+    #[test]
+    fn responsible_for_returns_at_most_k() {
+        let mut nb = Neighborhood::new(nid(b"local"));
+        for i in 0..20u8 { nb.add_peer(nid(&[i])); }
+        let resp = nb.responsible_for(&nid(b"target"));
+        assert!(resp.len() <= K);
+    }
+
+    #[test]
+    fn is_responsible_with_fewer_than_k_peers() {
+        let local = nid(b"only-node");
+        let mut nb = Neighborhood::new(local.clone());
+        // With < K peers, every node is responsible (nearest.len() < K)
+        assert!(nb.is_responsible(&nid(b"any-address")));
+        // Add local to peers so it appears in k_nearest
+        nb.add_peer(nid(b"peer1"));
+        // Still < K peers so always responsible
+        assert!(nb.is_responsible(&nid(b"any-address")));
+    }
+
+    #[test]
+    fn peers_are_sorted_by_xor_distance() {
+        let local = nid(b"local");
+        let mut nb = Neighborhood::new(local.clone());
+        for i in 0..10u8 { nb.add_peer(nid(&[i, 42])); }
+        // Verify sorted order
+        let dists: Vec<_> = nb.peers.iter().map(|p| local.xor_distance(p)).collect();
+        let mut sorted = dists.clone();
+        sorted.sort();
+        assert_eq!(dists, sorted);
+    }
+}
