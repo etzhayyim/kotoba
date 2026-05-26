@@ -44,3 +44,45 @@ impl From<IpFamily> for socket2::Domain {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn from_ipv4_addr() {
+        let addr: IpAddr = Ipv4Addr::LOCALHOST.into();
+        assert_eq!(IpFamily::from(addr), IpFamily::V4);
+    }
+
+    #[test]
+    fn from_ipv6_addr() {
+        let addr: IpAddr = Ipv6Addr::LOCALHOST.into();
+        assert_eq!(IpFamily::from(addr), IpFamily::V6);
+    }
+
+    #[test]
+    fn unspecified_v4() {
+        let u = IpFamily::V4.unspecified_addr();
+        assert_eq!(u, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn unspecified_v6() {
+        let u = IpFamily::V6.unspecified_addr();
+        assert_eq!(u, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn local_v4() {
+        let l = IpFamily::V4.local_addr();
+        assert_eq!(l, IpAddr::V4(Ipv4Addr::LOCALHOST));
+    }
+
+    #[test]
+    fn local_v6() {
+        let l = IpFamily::V6.local_addr();
+        assert_eq!(l, IpAddr::V6(Ipv6Addr::LOCALHOST));
+    }
+}
