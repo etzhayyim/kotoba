@@ -89,14 +89,20 @@ impl SignalStore {
         })
     }
 
-    // ── Field-level encryption (convo-scoped, compatible with @gftd/signal) ─
+    // ── Field-level encryption (convo-scoped) ─────────────────────────────────
 
     /// Derive a convo-scoped AES-256-GCM key.
-    /// HKDF-SHA256(ikm = ik_dh_pub, info = "kotoba-field:{did}:{convo_id}")
+    /// HKDF-SHA256(ikm = ik_dh_pub, info = "kotoba-field\x00{did}\x00{convo_id}")
+    ///
+    /// NUL is used as separator because DIDs and convo IDs never contain NUL,
+    /// preventing key-confusion between ("x", "y:z") and ("x:y", "z").
     pub fn derive_field_key(&self, peer_did: &str, convo_id: &str) -> [u8; 32] {
         let ik_dh_pub = x25519_dalek::PublicKey::from(&self.identity.dh).to_bytes();
-        let info = format!("kotoba-field:{peer_did}:{convo_id}");
-        kotoba_crypto::hkdf::derive_key(&ik_dh_pub, info.as_bytes())
+        let mut info = b"kotoba-field\x00".to_vec();
+        info.extend_from_slice(peer_did.as_bytes());
+        info.push(0);
+        info.extend_from_slice(convo_id.as_bytes());
+        kotoba_crypto::hkdf::derive_key(&ik_dh_pub, &info)
     }
 
     /// Encrypt a field value → `signal:v1:{base64url}`.
@@ -140,6 +146,15 @@ mod tests {
         assert!(enc.starts_with("signal:v1:"));
         let dec = store.decrypt_field(&enc, "did:plc:bob", "convo-1").unwrap();
         assert_eq!(dec, "secret value");
+    }
+
+    #[test]
+    fn key_confusion_different_splits_produce_distinct_keys() {
+        // "did:plc:a" + "b:c" must differ from "did:plc:a:b" + "c"
+        let store = SignalStore::new("did:plc:owner", "dev-1");
+        let k1 = store.derive_field_key("did:plc:a", "b:c");
+        let k2 = store.derive_field_key("did:plc:a:b", "c");
+        assert_ne!(k1, k2, "HKDF key-confusion: different splits must yield different keys");
     }
 
     #[tokio::test]
