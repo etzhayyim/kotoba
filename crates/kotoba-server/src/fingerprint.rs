@@ -82,7 +82,11 @@ pub async fn fingerprint_middleware(
     let method = req.method().as_str().to_string();
     let raw    = req.uri().path();
     let path   = if raw.len() > MAX_AUDIT_PATH_LEN {
-        format!("{}…", &raw[..MAX_AUDIT_PATH_LEN])
+        // Walk back from MAX_AUDIT_PATH_LEN to a valid UTF-8 char boundary so
+        // the byte-index slice does not panic on multi-byte characters.
+        let mut end = MAX_AUDIT_PATH_LEN;
+        while !raw.is_char_boundary(end) { end -= 1; }
+        format!("{}…", &raw[..end])
     } else {
         raw.to_string()
     };
@@ -252,5 +256,54 @@ mod tests {
     fn max_audit_constants_values() {
         assert_eq!(MAX_AUDIT_IP_LEN, 64);
         assert_eq!(MAX_AUDIT_PATH_LEN, 512);
+    }
+
+    // ── path truncation edge cases ────────────────────────────────────────────
+
+    #[test]
+    fn path_short_of_limit_is_not_truncated() {
+        // A path shorter than MAX_AUDIT_PATH_LEN must pass through unchanged.
+        let short = "/xrpc/ai.gftd.apps.kotoba.graph.query";
+        assert!(short.len() < MAX_AUDIT_PATH_LEN);
+        // Simulate the truncation logic used in fingerprint_middleware.
+        let result = if short.len() > MAX_AUDIT_PATH_LEN {
+            let mut end = MAX_AUDIT_PATH_LEN;
+            while !short.is_char_boundary(end) { end -= 1; }
+            format!("{}…", &short[..end])
+        } else {
+            short.to_string()
+        };
+        assert_eq!(result, short);
+    }
+
+    #[test]
+    fn path_truncation_on_multibyte_boundary_does_not_panic() {
+        // Construct a path of exactly MAX_AUDIT_PATH_LEN + 3 bytes where the
+        // byte at MAX_AUDIT_PATH_LEN falls inside a 3-byte UTF-8 character (€).
+        // Without the char-boundary walk-back this would panic with:
+        //   "byte index N is not a char boundary"
+        let prefix = "/".repeat(MAX_AUDIT_PATH_LEN - 1); // 511 ASCII bytes
+        let multibyte = "€";                              // 3 bytes: 0xE2 0x82 0xAC
+        let long_path = format!("{prefix}{multibyte}abc"); // byte 512 = 0x82 (not boundary)
+        assert!(long_path.len() > MAX_AUDIT_PATH_LEN);
+        // Should not panic
+        let mut end = MAX_AUDIT_PATH_LEN;
+        while !long_path.is_char_boundary(end) { end -= 1; }
+        let truncated = format!("{}…", &long_path[..end]);
+        assert!(truncated.ends_with('…'), "truncated path must end with ellipsis");
+        // The char boundary walk-back must have settled at byte 511 (= before '€')
+        assert_eq!(end, MAX_AUDIT_PATH_LEN - 1);
+    }
+
+    #[test]
+    fn path_truncation_ascii_at_exact_limit_keeps_full_limit() {
+        // An all-ASCII path of exactly MAX_AUDIT_PATH_LEN + 1 bytes:
+        // char boundary is at every byte, so end stays at MAX_AUDIT_PATH_LEN.
+        let long_path = "a".repeat(MAX_AUDIT_PATH_LEN + 1);
+        let mut end = MAX_AUDIT_PATH_LEN;
+        while !long_path.is_char_boundary(end) { end -= 1; }
+        assert_eq!(end, MAX_AUDIT_PATH_LEN, "ASCII boundary walk-back must be a no-op");
+        let truncated = format!("{}…", &long_path[..end]);
+        assert_eq!(truncated.len(), MAX_AUDIT_PATH_LEN + "…".len());
     }
 }

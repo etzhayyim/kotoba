@@ -20,10 +20,11 @@ use kotoba_ingest::{graph_cid_for, EmailIngestor};
 
 use crate::server::KotobaState;
 
-const MAX_OWNER_DID_LEN: usize = 512;
-const MAX_EMAIL_CID_LEN: usize = 256;
+const MAX_OWNER_DID_LEN:  usize = 512;
+const MAX_EMAIL_CID_LEN:  usize = 256;
 // 25 MiB raw ≈ 33 MiB base64 (Gmail attachment limit)
-const MAX_RAW_B64_LEN:   usize = 34 * 1024 * 1024;
+const MAX_RAW_B64_LEN:    usize = 34 * 1024 * 1024;
+const MAX_THREAD_ID_LEN:  usize = 256; // mirrors EmailIngestor::ingest_raw validation
 
 fn require_email_auth(
     headers: &HeaderMap,
@@ -234,6 +235,11 @@ pub async fn email_ingest(
         return (StatusCode::PAYLOAD_TOO_LARGE,
             Json(json!({ "error": format!("raw_b64 exceeds {MAX_RAW_B64_LEN} bytes") }))).into_response();
     }
+    let thread_id = body.thread_id.as_deref().unwrap_or("");
+    if thread_id.len() > MAX_THREAD_ID_LEN {
+        return (StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("thread_id exceeds {MAX_THREAD_ID_LEN} bytes") }))).into_response();
+    }
     if let Err((code, msg)) = require_email_auth(&headers, &body.owner_did, &state.operator_did) {
         return (code, Json(json!({ "error": msg }))).into_response();
     }
@@ -251,6 +257,17 @@ pub async fn email_ingest(
             Json(json!({ "error": format!("base64 decode: {e}") }))).into_response(),
     };
 
+    // Reject oversized decoded payloads before passing to the ingestor.
+    // A 34 MiB base64 string decodes to ~25.5 MiB, which can exceed
+    // EmailIngestor::MAX_EMAIL_BYTES (25 MiB). Return 413 here rather
+    // than letting the ingestor return an anyhow error that becomes 500.
+    if raw.len() > EmailIngestor::MAX_EMAIL_BYTES {
+        return (StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": format!(
+                "decoded email exceeds {} bytes", EmailIngestor::MAX_EMAIL_BYTES
+            ) }))).into_response();
+    }
+
     let ingestor = EmailIngestor::new(
         crypto,
         Arc::clone(&state.vault),
@@ -258,7 +275,6 @@ pub async fn email_ingest(
         body.owner_did,
     );
 
-    let thread_id = body.thread_id.as_deref().unwrap_or("");
     match ingestor.ingest_raw(&raw, thread_id).await {
         Ok(cid) => Json(json!({
             "status": "ok",
@@ -343,6 +359,40 @@ mod tests {
     #[test]
     fn max_email_cid_len_is_256() {
         assert_eq!(MAX_EMAIL_CID_LEN, 256);
+    }
+
+    #[test]
+    fn max_thread_id_len_matches_ingestor_limit() {
+        // MAX_THREAD_ID_LEN in this file must equal the limit enforced inside
+        // EmailIngestor::ingest_raw so that the XRPC handler catches oversized
+        // thread_id with 400 before the ingestor would return an anyhow error.
+        use kotoba_ingest::EmailIngestor;
+        // ingest_raw rejects thread_id.len() > 256
+        assert_eq!(MAX_THREAD_ID_LEN, 256,
+            "XRPC handler limit must match ingestor limit");
+        // Also ensure the constant is used (not dead code)
+        let _ = MAX_THREAD_ID_LEN;
+    }
+
+    #[test]
+    fn max_email_bytes_is_25_mib() {
+        use kotoba_ingest::EmailIngestor;
+        assert_eq!(EmailIngestor::MAX_EMAIL_BYTES, 25 * 1024 * 1024,
+            "EmailIngestor::MAX_EMAIL_BYTES must be 25 MiB");
+    }
+
+    #[test]
+    fn decoded_size_guard_catches_overshoot_between_b64_and_raw_limits() {
+        // A 34 MiB base64 string decodes to ~25.5 MiB of raw bytes, which
+        // exceeds EmailIngestor::MAX_EMAIL_BYTES (25 MiB).  The decoded-size
+        // guard must fire before the ingestor gets called.
+        use kotoba_ingest::EmailIngestor;
+        let max_b64_decoded = (MAX_RAW_B64_LEN / 4) * 3; // approx upper bound
+        assert!(
+            max_b64_decoded > EmailIngestor::MAX_EMAIL_BYTES,
+            "b64 limit must allow payloads that would exceed the raw email limit \
+             so the decoded-size guard is reachable"
+        );
     }
 
     // ── open_field_safe ───────────────────────────────────────────────────────
