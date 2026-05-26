@@ -509,13 +509,14 @@ async fn mcp_node_info_returns_did_and_roles() {
 #[tokio::test]
 async fn mcp_node_register_returns_ok() {
     let s = TestServer::start(false).await;
+    let tok = tenant_jwt(&s.operator_did);
     let (status, body) = s.post_auth(
         "/mcp",
         json!({
             "jsonrpc": "2.0", "id": 11, "method": "tools/call",
             "params": { "name": "kotoba_node_register", "arguments": {} }
         }),
-        "test-token",
+        &tok,
     ).await;
     assert_eq!(status, 200, "{body}");
     assert!(body.get("error").is_none(), "unexpected error: {body}");
@@ -523,6 +524,22 @@ async fn mcp_node_register_returns_ok() {
     let content: serde_json::Value = serde_json::from_str(content_str).expect("json");
     assert_eq!(content["status"], "ok");
     assert!(content["operator_did"].as_str().unwrap_or("").starts_with("did:"));
+}
+
+#[tokio::test]
+async fn mcp_node_register_non_operator_returns_auth_error() {
+    let s = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zNotTheOperator");
+    let (status, body) = s.post_auth(
+        "/mcp",
+        json!({
+            "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+            "params": { "name": "kotoba_node_register", "arguments": {} }
+        }),
+        &tok,
+    ).await;
+    assert_eq!(status, 200, "MCP always returns 200");
+    assert!(body.get("error").is_some(), "expected JSON-RPC error: {body}");
 }
 
 #[tokio::test]
@@ -1840,16 +1857,31 @@ async fn mcp_infer_run_without_engine_returns_error() {
 #[tokio::test]
 async fn mcp_graph_gc_returns_deleted_count() {
     let s = TestServer::start(false).await;
+    let tok = tenant_jwt(&s.operator_did);
     let (status, body) = s.post_auth("/mcp", json!({
         "jsonrpc": "2.0", "id": 99, "method": "tools/call",
         "params": { "name": "kotoba_graph_gc", "arguments": {} }
-    }), "test-token").await;
+    }), &tok).await;
     assert_eq!(status, 200, "{body}");
     assert!(body.get("error").is_none(), "unexpected error: {body}");
     let content_str = body["result"]["content"][0]["text"].as_str().expect("text");
     let content: serde_json::Value = serde_json::from_str(content_str).expect("json");
     assert_eq!(content["status"], "ok", "{content}");
     assert!(content["deleted_blocks"].is_number(), "missing deleted_blocks: {content}");
+}
+
+#[tokio::test]
+async fn mcp_graph_gc_non_operator_returns_auth_error() {
+    // Regression guard: kotoba_graph_gc and kotoba_commit_prune are destructive
+    // admin tools — non-operators must receive a JSON-RPC auth error.
+    let s = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zNotTheOperator");
+    let (status, body) = s.post_auth("/mcp", json!({
+        "jsonrpc": "2.0", "id": 99, "method": "tools/call",
+        "params": { "name": "kotoba_graph_gc", "arguments": {} }
+    }), &tok).await;
+    assert_eq!(status, 200, "MCP always returns 200");
+    assert!(body.get("error").is_some(), "expected JSON-RPC error for non-operator: {body}");
 }
 
 // ── XRPC route smoke tests (KG / CC / email) ──────────────────────────────────
