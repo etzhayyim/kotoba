@@ -34,14 +34,23 @@ fn require_email_auth(
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED,
-            "Authorization: Bearer <token> required".to_string()))?;
+        .ok_or_else(|| {
+            tracing::warn!("email auth: missing Bearer token");
+            (StatusCode::UNAUTHORIZED, "Authorization: Bearer <token> required".to_string())
+        })?;
+    if crate::graph_auth::jwt_exp_elapsed(token) {
+        tracing::warn!("email auth: expired JWT");
+        return Err((StatusCode::UNAUTHORIZED, "Bearer token has expired".to_string()));
+    }
     let sub = crate::graph_auth::jwt_sub(token)
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED,
-            "Bearer token missing sub claim".to_string()))?;
+        .ok_or_else(|| {
+            tracing::warn!("email auth: JWT missing sub claim");
+            (StatusCode::UNAUTHORIZED, "Bearer token missing sub claim".to_string())
+        })?;
     if sub == owner_did || sub == operator_did {
         Ok(())
     } else {
+        tracing::warn!(sub = %sub, owner_did = %owner_did, "email auth: sub mismatch");
         Err((StatusCode::UNAUTHORIZED,
             format!("Bearer sub does not match owner_did {owner_did:?}")))
     }
