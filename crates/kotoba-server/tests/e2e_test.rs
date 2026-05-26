@@ -269,9 +269,11 @@ async fn commit_store_and_get_roundtrip() {
 
     s.post_quad("commit-e2e", "s", "p", "o").await;
 
+    // CACAO must be built against the same graph string sent in the request (multibase CID)
+    let (_, cacao_b64) = build_ed25519_cacao(&graph_cid);
     let (status, store) = s.post(
         "/xrpc/ai.gftd.apps.kotoba.commit.store",
-        json!({ "graph": graph_cid, "author": "did:plc:e2e", "seq": 1 }),
+        json!({ "graph": graph_cid, "author": "did:plc:e2e", "seq": 1, "cacao_b64": cacao_b64 }),
     ).await;
     assert_eq!(status, 200, "{store}");
     assert!(store["cid"].as_str().is_some());
@@ -282,6 +284,19 @@ async fn commit_store_and_get_roundtrip() {
     assert_eq!(status2, 200, "{get}");
     assert_eq!(get["seq"], 1);
     assert_eq!(get["author"], "did:plc:e2e");
+}
+
+#[tokio::test]
+async fn commit_store_without_cacao_returns_401() {
+    use kotoba_core::cid::KotobaCid;
+    let s = TestServer::start(false).await;
+    let graph_cid = KotobaCid::from_bytes(b"commit-e2e-noauth").to_multibase();
+
+    let (status, body) = s.post(
+        "/xrpc/ai.gftd.apps.kotoba.commit.store",
+        json!({ "graph": graph_cid, "author": "did:plc:e2e", "seq": 1 }),
+    ).await;
+    assert_eq!(status, 401, "missing cacao must return 401: {body}");
 }
 
 #[tokio::test]
@@ -1748,4 +1763,52 @@ async fn kotobase_pin_create_wrong_sub_returns_401() {
         "cid": "bafytest",
     }), &attacker_jwt).await;
     assert_eq!(status, 401);
+}
+
+// ── weight.get tests ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn weight_get_unknown_cid_returns_404() {
+    use kotoba_core::cid::KotobaCid;
+    let s = TestServer::start(false).await;
+    // A well-formed multibase CID that does not exist in the store
+    let cid = KotobaCid::from_bytes(b"nonexistent-weight-blob").to_multibase();
+    let (status, _body) = s.get(
+        &format!("/xrpc/ai.gftd.apps.kotoba.weight.get?cid={cid}")
+    ).await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test]
+async fn weight_put_then_get_roundtrip() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+    let s = TestServer::start(false).await;
+    let graph = "weight-roundtrip-graph";
+    let (_, cacao_b64) = build_ed25519_cacao(graph);
+
+    let data = vec![0x3cu8, 0x7fu8, 0x00u8];
+    let (status, put_body) = s.post(
+        "/xrpc/ai.gftd.apps.kotoba.weight.put",
+        json!({
+            "model_cid":  "bafkreiabcdef",
+            "layer":      1u32,
+            "data_b64":   B64.encode(&data),
+            "shape":      [3u32],
+            "dtype":      "fp8e4m3",
+            "graph":      graph,
+            "cacao_b64":  cacao_b64,
+        }),
+    ).await;
+    assert_eq!(status, 200, "{put_body}");
+    let blob_cid = put_body["blob_cid"].as_str().expect("blob_cid").to_string();
+
+    // Now GET the blob back by its CID
+    let (status, get_body) = s.get(
+        &format!("/xrpc/ai.gftd.apps.kotoba.weight.get?cid={blob_cid}")
+    ).await;
+    assert_eq!(status, 200, "{get_body}");
+    assert_eq!(get_body["cid"], blob_cid, "{get_body}");
+    let returned = B64.decode(get_body["data_b64"].as_str().expect("data_b64"))
+        .expect("valid base64");
+    assert_eq!(returned, data, "roundtripped bytes must match");
 }
