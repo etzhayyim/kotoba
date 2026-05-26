@@ -793,6 +793,13 @@ pub async fn commit_store(
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     use kotoba_core::cid::KotobaCid;
 
+    // ── Input length guards ───────────────────────────────────────────────
+    const MAX_GRAPH_LEN: usize = 512;
+    if req.graph.len() > MAX_GRAPH_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("graph field too long ({} bytes, limit {MAX_GRAPH_LEN})", req.graph.len())));
+    }
+
     // ── CACAO auth ─────────────────────────────────────────────────────────
     let b64 = req.cacao_b64.as_deref()
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "cacao_b64 is required for commit.store".to_string()))?;
@@ -966,6 +973,23 @@ pub async fn weight_put(
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     use kotoba_core::cid::KotobaCid;
     use kotoba_kqe::quad::{Quad, QuadObject, TensorDtype};
+
+    // ── Input length guards ───────────────────────────────────────────────
+    const MAX_GRAPH_LEN:     usize = 512;
+    const MAX_MODEL_CID_LEN: usize = 512;
+    const MAX_DTYPE_LEN:     usize = 16;
+    if req.graph.len() > MAX_GRAPH_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("graph field too long ({} bytes, limit {MAX_GRAPH_LEN})", req.graph.len())));
+    }
+    if req.model_cid.len() > MAX_MODEL_CID_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("model_cid field too long ({} bytes, limit {MAX_MODEL_CID_LEN})", req.model_cid.len())));
+    }
+    if req.dtype.len() > MAX_DTYPE_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("dtype field too long ({} bytes, limit {MAX_DTYPE_LEN})", req.dtype.len())));
+    }
 
     // ── CACAO auth ────────────────────────────────────────────────────────
     let b64 = req.cacao_b64.as_deref()
@@ -1224,6 +1248,18 @@ pub async fn lora_apply(
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     use kotoba_core::cid::KotobaCid;
     use kotoba_kqe::quad::{Quad, QuadObject, TensorDtype};
+
+    // ── Input length guards ───────────────────────────────────────────────
+    const MAX_GRAPH_LEN:     usize = 512;
+    const MAX_MODEL_CID_LEN: usize = 512;
+    if req.graph.len() > MAX_GRAPH_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("graph field too long ({} bytes, limit {MAX_GRAPH_LEN})", req.graph.len())));
+    }
+    if req.model_cid.len() > MAX_MODEL_CID_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("model_cid field too long ({} bytes, limit {MAX_MODEL_CID_LEN})", req.model_cid.len())));
+    }
 
     // ── CACAO auth ────────────────────────────────────────────────────────
     let b64 = req.cacao_b64.as_deref()
