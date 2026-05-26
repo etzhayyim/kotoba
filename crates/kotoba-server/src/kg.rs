@@ -45,6 +45,11 @@ pub fn kg_graph_cid() -> KotobaCid {
     KotobaCid::from_bytes(b"yatabase-kg-v1")
 }
 
+const MAX_KG_ID_LEN:    usize = 256;
+const MAX_KG_TEXT_LEN:  usize = 8_192;  // max embed text — prevents inference-engine DoS
+const MAX_KG_QUERY_LEN: usize = 2_048;
+const MAX_KG_LIMIT:     usize = 1_000;
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KgEntityQuery {
@@ -263,6 +268,14 @@ pub async fn kg_embed(
     Json(req):    Json<KgEmbedReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     use kotoba_kqe::quad::Quad;
+    if req.entity_id.is_empty() || req.entity_id.len() > MAX_KG_ID_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("entityId must be 1–{MAX_KG_ID_LEN} bytes")));
+    }
+    if req.text.is_empty() || req.text.len() > MAX_KG_TEXT_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("text must be 1–{MAX_KG_TEXT_LEN} bytes")));
+    }
     let graph_cid = kg_graph_cid();
 
     let subjects = state.quad_store
@@ -329,9 +342,13 @@ pub async fn kg_search(
     Query(q):     Query<KgSearchQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     use std::time::Instant;
+    if q.q.is_empty() || q.q.len() > MAX_KG_QUERY_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("q must be 1–{MAX_KG_QUERY_LEN} bytes")));
+    }
     let t0        = Instant::now();
     let graph_cid = kg_graph_cid();
-    let limit     = q.limit.min(100);
+    let limit     = q.limit.min(MAX_KG_LIMIT);
 
     // ── Read-access gate ─────────────────────────────────────────────────────
     let visibility = state.graph_visibility(&graph_cid).await;
@@ -457,10 +474,47 @@ pub struct KgIngestResp {
 ///
 /// Write a KG entity into the `yatabase-kg-v1` named graph. Each field becomes
 /// a quad with predicate conventions matching `kg_entity` lookups.
+const MAX_KG_CLAIMS:      usize = 1_024;
+const MAX_KG_RELATIONS:   usize = 1_024;
+const MAX_KG_VEC_DIMS:    usize = 4_096;
+const MAX_KG_FIELD_LEN:   usize = 4_096;
+
 pub async fn kg_ingest(
     State(state): State<Arc<KotobaState>>,
     Json(req):    Json<KgIngestReq>,
 ) -> impl IntoResponse {
+    use axum::Json as AxumJson;
+    if req.id.is_empty() || req.id.len() > MAX_KG_ID_LEN {
+        return (StatusCode::BAD_REQUEST,
+            AxumJson(serde_json::json!({"ok": false, "error":
+                format!("id must be 1–{MAX_KG_ID_LEN} bytes")}))).into_response();
+    }
+    if req.claims.len() > MAX_KG_CLAIMS {
+        return (StatusCode::BAD_REQUEST,
+            AxumJson(serde_json::json!({"ok": false, "error":
+                format!("claims array exceeds {MAX_KG_CLAIMS} entries")}))).into_response();
+    }
+    if req.relations.len() > MAX_KG_RELATIONS {
+        return (StatusCode::BAD_REQUEST,
+            AxumJson(serde_json::json!({"ok": false, "error":
+                format!("relations array exceeds {MAX_KG_RELATIONS} entries")}))).into_response();
+    }
+    if req.label_vec.len() > MAX_KG_VEC_DIMS {
+        return (StatusCode::BAD_REQUEST,
+            AxumJson(serde_json::json!({"ok": false, "error":
+                format!("labelVec exceeds {MAX_KG_VEC_DIMS} dimensions")}))).into_response();
+    }
+    // Validate per-field lengths to prevent oversized individual quads
+    for f in [&req.qid, &req.kind, &req.label_ja, &req.label_en, &req.license,
+              &req.extractor, &req.valid_from, &req.valid_to, &req.ingested_at, &req.source_id] {
+        if let Some(v) = f {
+            if v.len() > MAX_KG_FIELD_LEN {
+                return (StatusCode::BAD_REQUEST,
+                    AxumJson(serde_json::json!({"ok": false, "error":
+                        format!("field value exceeds {MAX_KG_FIELD_LEN} bytes")}))).into_response();
+            }
+        }
+    }
     use kotoba_kqe::quad::Quad;
 
     let graph   = kg_graph_cid();
@@ -524,7 +578,7 @@ pub async fn kg_ingest(
         ok:          true,
         subject_cid: subject.to_multibase(),
         quad_count:  count,
-    })
+    }).into_response()
 }
 
 // ── kg.delete ─────────────────────────────────────────────────────────────────
@@ -544,6 +598,11 @@ pub async fn kg_delete(
     State(state): State<Arc<KotobaState>>,
     Json(req):    Json<KgDeleteReq>,
 ) -> impl IntoResponse {
+    if req.id.is_empty() || req.id.len() > MAX_KG_ID_LEN {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "ok": false, "error": format!("id must be 1–{MAX_KG_ID_LEN} bytes"),
+        }))).into_response();
+    }
     let graph   = kg_graph_cid();
     let subject = KotobaCid::from_bytes(req.id.as_bytes());
 
@@ -558,11 +617,11 @@ pub async fn kg_delete(
         state.quad_store.retract(quad).await;
     }
 
-    Json(serde_json::json!({
+    (StatusCode::OK, Json(serde_json::json!({
         "ok":            true,
         "id":            req.id,
         "retractedCount": retracted,
-    }))
+    }))).into_response()
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -592,6 +651,8 @@ pub struct KgQueryReq {
 /// Both compilers enforce binary-relation arity (exactly 2 RETURN variables).
 /// Results are returned as `[{ "a": "<cid>", "b": "<cid>" }]` pairs where
 /// the variable names come from the compiled output_relation.
+const MAX_KG_QUERY_PROG_LEN: usize = 65_536;  // 64 KiB — SPARQL/Cypher compile DoS guard
+
 pub async fn kg_query(
     State(state): State<Arc<KotobaState>>,
     headers:      HeaderMap,
@@ -600,6 +661,15 @@ pub async fn kg_query(
     use std::time::Instant;
     use kotoba_kqe::cypher::CypherCompiler;
     use kotoba_graph::sparql::SparqlCompiler;
+
+    if req.query.is_empty() || req.query.len() > MAX_KG_QUERY_PROG_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("query must be 1–{MAX_KG_QUERY_PROG_LEN} bytes")));
+    }
+    if !matches!(req.lang.as_str(), "sparql" | "cypher") {
+        return Err((StatusCode::BAD_REQUEST,
+            "lang must be 'sparql' or 'cypher'".to_string()));
+    }
 
     let t0        = Instant::now();
     let graph_cid = kg_graph_cid();
