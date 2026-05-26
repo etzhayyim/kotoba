@@ -584,4 +584,19 @@ mod tests {
         assert_ne!(state.operator_did, state2.operator_did,
             "distinct states have distinct ephemeral DIDs");
     }
+
+    #[tokio::test]
+    async fn init_crypto_preserves_operator_did() {
+        // Guard against the double-generation bug: init_crypto() must not call
+        // AgentIdentity::from_env() again; it must reuse the Arc stored in new().
+        std::env::remove_var("KOTOBA_AGENT_ED25519_HEX");
+        std::env::remove_var("KOTOBA_AGENT_X25519_HEX");
+        std::env::remove_var("KOTOBA_AGENT_DID");
+        let state = KotobaState::new(None).expect("new");
+        let did_before = state.operator_did.clone();
+        let state = state.init_crypto().await.expect("init_crypto");
+        assert_eq!(state.operator_did, did_before,
+            "operator_did must be unchanged after init_crypto");
+        assert!(state.crypto_required().is_ok(), "crypto must be initialized");
+    }
 }

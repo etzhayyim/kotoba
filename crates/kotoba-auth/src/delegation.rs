@@ -2,6 +2,10 @@ use super::cacao::{Cacao, CacaoError};
 use thiserror::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Maximum age of a CACAO that has no explicit `exp` field.
+/// CACAOs older than this are rejected to prevent indefinite token reuse.
+const MAX_CACAO_AGE_SECS: u64 = 7 * 24 * 3600; // 7 days
+
 #[derive(Debug)]
 pub struct DelegationChain {
     pub chain: Vec<Cacao>,
@@ -39,16 +43,33 @@ impl DelegationChain {
         }
         let cacao = &self.chain[0];
 
-        // 1. Check expiry
+        // 1. Temporal validity
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
         if let Some(exp) = &cacao.p.expiry {
-            let now_secs = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            // exp format: "2025-01-01T00:00:00Z" — lexicographic comparison is correct for UTC
+            // Require strict UTC format `YYYY-MM-DDTHH:MM:SSZ`.
+            // Non-UTC offsets (e.g. +09:00) corrupt the lexicographic comparison
+            // and could allow a caller to present a CACAO as unexpired when it isn't.
+            if !is_utc_iso8601(exp) {
+                return Err(DelegationError::InvalidExpiry(exp.clone()));
+            }
             let now_iso = format_iso8601(now_secs);
             if now_iso > *exp {
                 return Err(DelegationError::Expired);
+            }
+        } else {
+            // No explicit expiry — apply a max-age cap based on `issued_at`.
+            // Without this, a stolen or leaked CACAO is valid indefinitely.
+            match parse_utc_iso8601(&cacao.p.issued_at) {
+                None => return Err(DelegationError::InvalidExpiry(cacao.p.issued_at.clone())),
+                Some(iat_secs) => {
+                    if now_secs.saturating_sub(iat_secs) > MAX_CACAO_AGE_SECS {
+                        return Err(DelegationError::Expired);
+                    }
+                }
             }
         }
 
@@ -76,6 +97,62 @@ impl DelegationChain {
 
         Ok(issuer_did)
     }
+}
+
+/// Returns `true` iff `s` is strictly `YYYY-MM-DDTHH:MM:SSZ` (20 chars, UTC only).
+fn is_utc_iso8601(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 20
+        && b[4] == b'-' && b[7] == b'-' && b[10] == b'T'
+        && b[13] == b':' && b[16] == b':' && b[19] == b'Z'
+        && b[0..4].iter().all(|c| c.is_ascii_digit())
+        && b[5..7].iter().all(|c| c.is_ascii_digit())
+        && b[8..10].iter().all(|c| c.is_ascii_digit())
+        && b[11..13].iter().all(|c| c.is_ascii_digit())
+        && b[14..16].iter().all(|c| c.is_ascii_digit())
+        && b[17..19].iter().all(|c| c.is_ascii_digit())
+}
+
+/// Parse a strict `YYYY-MM-DDTHH:MM:SSZ` string to a Unix timestamp (seconds).
+/// Returns `None` on format errors or impossible calendar dates.
+fn parse_utc_iso8601(s: &str) -> Option<u64> {
+    if !is_utc_iso8601(s) { return None; }
+    let b = s.as_bytes();
+    let year  = parse4(&b[0..4])?;
+    let month = parse2(&b[5..7])?;
+    let day   = parse2(&b[8..10])?;
+    let hour  = parse2(&b[11..13])?;
+    let min   = parse2(&b[14..16])?;
+    let sec   = parse2(&b[17..19])?;
+    if month == 0 || month > 12 || day == 0 { return None; }
+    if hour > 23 || min > 59 || sec > 59 { return None; }
+
+    // Days since 1970-01-01
+    let mut days: u64 = 0;
+    for y in 1970..year {
+        days += if is_leap(y) { 366 } else { 365 };
+    }
+    let mdays: [u64; 12] = if is_leap(year) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    if day > mdays[(month - 1) as usize] { return None; }
+    for m in 0..(month - 1) as usize { days += mdays[m]; }
+    days += day - 1;
+
+    Some(days * 86_400 + hour * 3_600 + min * 60 + sec)
+}
+
+fn parse4(b: &[u8]) -> Option<u64> {
+    if b.len() != 4 { return None; }
+    Some((b[0]-b'0') as u64 * 1000 + (b[1]-b'0') as u64 * 100
+       + (b[2]-b'0') as u64 * 10 + (b[3]-b'0') as u64)
+}
+
+fn parse2(b: &[u8]) -> Option<u64> {
+    if b.len() != 2 { return None; }
+    Some((b[0]-b'0') as u64 * 10 + (b[1]-b'0') as u64)
 }
 
 fn format_iso8601(unix_secs: u64) -> String {
@@ -132,6 +209,8 @@ pub enum DelegationError {
     CapabilityDenied(String),
     #[error("expired")]
     Expired,
+    #[error("invalid timestamp (must be YYYY-MM-DDTHH:MM:SSZ UTC): {0}")]
+    InvalidExpiry(String),
     #[error("root issuer mismatch")]
     RootMismatch,
     #[error("graph scope mismatch: expected '{expected}', got '{got}'")]

@@ -4,7 +4,7 @@
 /// Auth:  initialize / tools/list / ping → public
 ///        tools/call → requires `Authorization: Bearer <AT-session-JWT>`
 ///
-/// Tools exposed (13):
+/// Tools exposed (14):
 ///   kotoba_quad_create      — assert a quad into the graph
 ///   kotoba_graph_query      — SPO pattern query
 ///   kotoba_infer_run        — run inference via inference engine
@@ -18,6 +18,7 @@
 ///   kotoba_node_info        — return this node's DID, roles, NodeId, peer count
 ///   kotoba_node_register    — write/refresh node registration Quads
 ///   kotoba_network_peers    — list KDHT neighborhood peers
+///   kotoba_graph_gc         — mark-sweep GC: delete unreachable blocks from the block store
 
 pub const MCP_TOOL_QUAD_CREATE:   &str = "kotoba_quad_create";
 pub const MCP_TOOL_GRAPH_QUERY:   &str = "kotoba_graph_query";
@@ -32,6 +33,7 @@ pub const MCP_TOOL_DATALOG_RUN:     &str = "kotoba_datalog_run";
 pub const MCP_TOOL_NODE_INFO:       &str = "kotoba_node_info";
 pub const MCP_TOOL_NODE_REGISTER:   &str = "kotoba_node_register";
 pub const MCP_TOOL_NETWORK_PEERS:   &str = "kotoba_network_peers";
+pub const MCP_TOOL_GRAPH_GC:        &str = "kotoba_graph_gc";
 
 use std::sync::Arc;
 use axum::{
@@ -258,6 +260,15 @@ fn tools_list() -> Value {
             {
                 "name": MCP_TOOL_NETWORK_PEERS,
                 "description": "List KDHT neighborhood peers for this node.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": MCP_TOOL_GRAPH_GC,
+                "description": "Mark-sweep GC: walk CommitDag to collect live block CIDs, then delete any block not reachable from a live commit. Returns the count of deleted blocks. Safe to call at any time — idempotent.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -866,6 +877,15 @@ async fn call_tool(
             }))
         }
 
+        // ── kotoba_graph_gc ──────────────────────────────────────────────────
+        MCP_TOOL_GRAPH_GC => {
+            let deleted = state.quad_store
+                .gc_dead_blocks()
+                .await
+                .map_err(|e| (ERR_INTERNAL, e.to_string()))?;
+            Ok(json!({ "status": "ok", "deleted_blocks": deleted }))
+        }
+
         other => Err((ERR_NOT_FOUND, format!("unknown tool: {other}"))),
     }
 }
@@ -975,7 +995,7 @@ mod tests {
     fn tools_list_contains_all() {
         let list = tools_list();
         let tools = list["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 14);
         let names: Vec<&str> = tools.iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
@@ -990,6 +1010,7 @@ mod tests {
         assert!(names.contains(&MCP_TOOL_NODE_INFO));
         assert!(names.contains(&MCP_TOOL_NODE_REGISTER));
         assert!(names.contains(&MCP_TOOL_NETWORK_PEERS));
+        assert!(names.contains(&MCP_TOOL_GRAPH_GC));
     }
 
     #[test]
@@ -1136,5 +1157,16 @@ mod tests {
             "object": "bob"
         }), &state).await.unwrap();
         assert_eq!(v["count"], 2, "should find alice and carol, got {v}");
+    }
+
+    #[tokio::test]
+    async fn graph_gc_returns_ok_with_deleted_count() {
+        let state = Arc::new(
+            crate::server::KotobaState::new(None).expect("state")
+        );
+        // Fresh store has no committed blocks — GC should delete 0 and succeed.
+        let v = call_tool(MCP_TOOL_GRAPH_GC, &json!({}), &state).await.unwrap();
+        assert_eq!(v["status"], "ok");
+        assert!(v["deleted_blocks"].as_u64().is_some(), "deleted_blocks must be a number");
     }
 }

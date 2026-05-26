@@ -328,6 +328,55 @@ mod tests {
         assert!(matches!(err, DelegationError::Expired), "expected Expired, got {err:?}");
     }
 
+    #[test]
+    fn delegation_verify_non_utc_exp_returns_invalid_expiry() {
+        let mut p = test_payload(vec![]);
+        // +09:00 offset: would corrupt lexicographic comparison against `...Z` now_iso
+        p.expiry = Some("2099-01-01T09:00:00+09:00".into());
+        let cacao = Cacao {
+            h: CacaoHeader { t: "eip4361".into() },
+            p,
+            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+        };
+        let chain = delegation::DelegationChain::new(cacao);
+        let err = chain.verify("graph_cid", "quad:write").unwrap_err();
+        assert!(matches!(err, DelegationError::InvalidExpiry(_)),
+            "expected InvalidExpiry, got {err:?}");
+    }
+
+    #[test]
+    fn delegation_verify_old_cacao_without_exp_is_rejected() {
+        let mut p = test_payload(vec![]);
+        // issued more than 7 days ago — should be rejected by max-age check
+        p.issued_at = "2020-01-01T00:00:00Z".into();
+        p.expiry = None;
+        let cacao = Cacao {
+            h: CacaoHeader { t: "eip4361".into() },
+            p,
+            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+        };
+        let chain = delegation::DelegationChain::new(cacao);
+        let err = chain.verify("graph_cid", "quad:write").unwrap_err();
+        assert!(matches!(err, DelegationError::Expired),
+            "expected Expired (max-age), got {err:?}");
+    }
+
+    #[test]
+    fn delegation_verify_invalid_iat_format_is_rejected() {
+        let mut p = test_payload(vec![]);
+        p.issued_at = "not-a-date".into();
+        p.expiry = None;
+        let cacao = Cacao {
+            h: CacaoHeader { t: "eip4361".into() },
+            p,
+            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+        };
+        let chain = delegation::DelegationChain::new(cacao);
+        let err = chain.verify("graph_cid", "quad:write").unwrap_err();
+        assert!(matches!(err, DelegationError::InvalidExpiry(_)),
+            "expected InvalidExpiry, got {err:?}");
+    }
+
     // ── DidDocument ────────────────────────────────────────────────────────
 
     fn test_did_doc() -> DidDocument {

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kotoba-langgraph"
+version = "0.1.0"
+description = "LangGraph-compatible graph engine for kotoba WASM Component Model (pure Python)"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+# Pure Python — no pydantic, no C extensions, no langgraph runtime dependency.
+# cbor2 is needed only for the KotobaCheckpointer KQE path (available as pure Python).
+dependencies = [
+    "cbor2>=5",
+]
+
+[project.optional-dependencies]
+build = [
+    "componentize-py>=0.23",
+]
+dev = [
+    "pytest>=8",
+    # Optional: real LangGraph for local dev/test (not used in WASM)
+    "langgraph>=1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["kotoba_langgraph"]
