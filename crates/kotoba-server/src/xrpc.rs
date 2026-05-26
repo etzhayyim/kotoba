@@ -31,6 +31,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use crate::server::KotobaState;
 
+/// Maximum size of a base64-encoded CACAO delegation token (8 KiB decoded ≈ 6 KiB base64).
+const MAX_CACAO_B64_LEN: usize = 8 * 1024;
+
 // ── Request / Response types ───────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -292,7 +295,6 @@ pub async fn quad_create(
     let b64 = req.cacao_b64.as_deref()
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "cacao_b64 is required for quad.create".to_string()))?;
 
-    const MAX_CACAO_B64_LEN: usize = 8 * 1024;
     if b64.len() > MAX_CACAO_B64_LEN {
         return Err((StatusCode::BAD_REQUEST,
             format!("cacao_b64 too large ({} bytes, limit {MAX_CACAO_B64_LEN})", b64.len())));
@@ -764,7 +766,6 @@ pub async fn commit_store(
     // ── CACAO auth ─────────────────────────────────────────────────────────
     let b64 = req.cacao_b64.as_deref()
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "cacao_b64 is required for commit.store".to_string()))?;
-    const MAX_CACAO_B64_LEN: usize = 8 * 1024;
     if b64.len() > MAX_CACAO_B64_LEN {
         return Err((StatusCode::BAD_REQUEST,
             format!("cacao_b64 too large ({} bytes, limit {MAX_CACAO_B64_LEN})", b64.len())));
@@ -939,7 +940,6 @@ pub async fn weight_put(
     // ── CACAO auth ────────────────────────────────────────────────────────
     let b64 = req.cacao_b64.as_deref()
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "cacao_b64 is required for weight.put".to_string()))?;
-    const MAX_CACAO_B64_LEN: usize = 8 * 1024;
     if b64.len() > MAX_CACAO_B64_LEN {
         return Err((StatusCode::BAD_REQUEST,
             format!("cacao_b64 too large ({} bytes, limit {MAX_CACAO_B64_LEN})", b64.len())));
@@ -1063,7 +1063,6 @@ pub async fn quad_retract(
     let b64 = req.cacao_b64.as_deref()
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "cacao_b64 is required for quad.retract".to_string()))?;
 
-    const MAX_CACAO_B64_LEN: usize = 8 * 1024;
     if b64.len() > MAX_CACAO_B64_LEN {
         return Err((StatusCode::BAD_REQUEST,
             format!("cacao_b64 too large ({} bytes, limit {MAX_CACAO_B64_LEN})", b64.len())));
@@ -1199,7 +1198,6 @@ pub async fn lora_apply(
     // ── CACAO auth ────────────────────────────────────────────────────────
     let b64 = req.cacao_b64.as_deref()
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "cacao_b64 is required for lora.apply".to_string()))?;
-    const MAX_CACAO_B64_LEN: usize = 8 * 1024;
     if b64.len() > MAX_CACAO_B64_LEN {
         return Err((StatusCode::BAD_REQUEST,
             format!("cacao_b64 too large ({} bytes, limit {MAX_CACAO_B64_LEN})", b64.len())));
