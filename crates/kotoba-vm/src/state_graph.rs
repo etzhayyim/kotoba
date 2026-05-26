@@ -437,7 +437,7 @@ impl CompiledGraph {
                 object:    QuadObject::Text(reducer.to_string()),
             });
         }
-        for (node_name, _kind) in &self.nodes {
+        for node_name in self.nodes.keys() {
             quads.push(Quad {
                 graph:     g.clone(),
                 subject:   KotobaCid::from_bytes(format!("node/{node_name}").as_bytes()),
