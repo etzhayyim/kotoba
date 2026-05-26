@@ -42,4 +42,46 @@ mod tests {
         let addr = quic_addr(4242);
         assert!(addr.to_string().ends_with("quic-v1"), "should end with quic-v1: {addr}");
     }
+
+    #[test]
+    fn default_listen_addr_constant_matches_function() {
+        let from_const: Multiaddr = DEFAULT_LISTEN_ADDR.parse().unwrap();
+        assert_eq!(from_const, default_listen_addr());
+    }
+
+    #[test]
+    fn default_listen_addr_uses_udp() {
+        let addr = default_listen_addr();
+        assert!(addr.to_string().contains("udp"), "default addr should use udp: {addr}");
+    }
+
+    #[test]
+    fn quic_addr_port_max() {
+        let addr = quic_addr(65535);
+        let s = addr.to_string();
+        assert!(s.contains("65535"), "multiaddr should contain 65535: {s}");
+        assert!(s.contains("quic-v1"), "should still be quic-v1: {s}");
+    }
+
+    #[test]
+    fn quic_addr_port_1() {
+        let addr = quic_addr(1);
+        let s = addr.to_string();
+        assert!(s.contains("/1/"), "multiaddr should contain /1/: {s}");
+        assert!(s.contains("quic-v1"), "should be quic-v1: {s}");
+    }
+
+    #[test]
+    fn quic_addr_port_8080() {
+        let addr = quic_addr(8080);
+        let s = addr.to_string();
+        assert!(s.contains("8080"), "multiaddr should contain 8080: {s}");
+    }
+
+    #[test]
+    fn default_listen_addr_port_is_zero() {
+        let addr = default_listen_addr();
+        // Port 0 means OS-assigned
+        assert!(addr.to_string().contains("/0/"), "default addr should have port 0: {addr}");
+    }
 }

@@ -35,4 +35,40 @@ mod tests {
         assert_eq!(t, "kotoba/pregel/messages");
         assert!(!t.contains("kotoba/kotoba/"), "prefix must not be doubled");
     }
+
+    #[test]
+    fn deeply_nested_topic_preserves_all_segments() {
+        let t = gossipsub_topic("a/b/c/d/e");
+        assert_eq!(t, "kotoba/a/b/c/d/e");
+    }
+
+    #[test]
+    fn single_segment_topic() {
+        assert_eq!(gossipsub_topic("hello"), "kotoba/hello");
+    }
+
+    #[test]
+    fn topic_with_only_slash() {
+        // A single slash → strip it → bare prefix
+        assert_eq!(gossipsub_topic("/"), "kotoba/");
+    }
+
+    #[test]
+    fn topic_with_numbers_and_hyphens() {
+        assert_eq!(gossipsub_topic("layer-3/block-42"), "kotoba/layer-3/block-42");
+    }
+
+    #[test]
+    fn topic_result_always_starts_with_kotoba_slash() {
+        let inputs = ["foo", "/foo", "//foo", "", "a/b/c"];
+        for input in inputs {
+            let result = gossipsub_topic(input);
+            assert!(result.starts_with("kotoba/"), "result should start with 'kotoba/': got '{result}' for input '{input}'");
+        }
+    }
+
+    #[test]
+    fn trailing_slash_preserved() {
+        assert_eq!(gossipsub_topic("topic/"), "kotoba/topic/");
+    }
 }

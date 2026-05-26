@@ -118,4 +118,84 @@ mod tests {
         cs.delete(&cid).unwrap();
         assert!(!inner.has(&cid));
     }
+
+    #[test]
+    fn captured_data_matches_written_data() {
+        let inner = Arc::new(MemoryBlockStore::default());
+        let cs    = CapturingBlockStore::new(Arc::clone(&inner) as _);
+
+        let cid  = make_cid(b"data-check");
+        let data = b"exact payload bytes";
+        cs.put(&cid, data).unwrap();
+
+        let drained = cs.drain();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].1, data.as_slice());
+    }
+
+    #[test]
+    fn captured_cid_matches_written_cid() {
+        let inner = Arc::new(MemoryBlockStore::default());
+        let cs    = CapturingBlockStore::new(Arc::clone(&inner) as _);
+
+        let cid = make_cid(b"cid-match");
+        cs.put(&cid, b"content").unwrap();
+
+        let drained = cs.drain();
+        assert_eq!(drained[0].0, cid);
+    }
+
+    #[test]
+    fn double_drain_second_drain_is_empty() {
+        let inner = Arc::new(MemoryBlockStore::default());
+        let cs    = CapturingBlockStore::new(Arc::clone(&inner) as _);
+
+        cs.put(&make_cid(b"a"), b"a").unwrap();
+        cs.put(&make_cid(b"b"), b"b").unwrap();
+
+        let first  = cs.drain();
+        let second = cs.drain();
+        assert_eq!(first.len(), 2);
+        assert!(second.is_empty(), "second drain must be empty");
+        assert!(cs.is_empty());
+    }
+
+    #[test]
+    fn new_store_is_empty() {
+        let inner = Arc::new(MemoryBlockStore::default());
+        let cs    = CapturingBlockStore::new(Arc::clone(&inner) as _);
+        assert!(cs.is_empty());
+        assert_eq!(cs.len(), 0);
+    }
+
+    #[test]
+    fn pin_delegates_to_inner() {
+        let inner = Arc::new(MemoryBlockStore::default());
+        let cid   = make_cid(b"pin-test");
+        let cs    = CapturingBlockStore::new(Arc::clone(&inner) as _);
+
+        cs.put(&cid, b"pinned").unwrap();
+        cs.pin(&cid);
+        assert!(cs.is_pinned(&cid));
+        cs.unpin(&cid);
+        assert!(!cs.is_pinned(&cid));
+    }
+
+    #[test]
+    fn multiple_puts_accumulate_in_order() {
+        let inner = Arc::new(MemoryBlockStore::default());
+        let cs    = CapturingBlockStore::new(Arc::clone(&inner) as _);
+
+        for i in 0u8..5 {
+            let cid = make_cid(&[i; 4]);
+            cs.put(&cid, &[i; 8]).unwrap();
+        }
+        assert_eq!(cs.len(), 5);
+        let drained = cs.drain();
+        assert_eq!(drained.len(), 5);
+        // Verify each entry data
+        for (i, (_cid, data)) in drained.iter().enumerate() {
+            assert_eq!(data, &vec![i as u8; 8]);
+        }
+    }
 }

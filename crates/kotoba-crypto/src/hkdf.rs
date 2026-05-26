@@ -83,4 +83,87 @@ mod tests {
         assert_ne!(new_ck, mk);
         assert_ne!(new_ck, ck);
     }
+
+    #[test]
+    fn hkdf_key_len_constant_is_32() {
+        assert_eq!(HKDF_KEY_LEN, 32);
+    }
+
+    #[test]
+    fn derive_key_output_is_32_bytes() {
+        let k = derive_key(b"ikm", b"info");
+        assert_eq!(k.len(), 32);
+    }
+
+    #[test]
+    fn derive_key_with_salt_deterministic() {
+        let k1 = derive_key_with_salt(b"ikm", b"my-salt", b"context");
+        let k2 = derive_key_with_salt(b"ikm", b"my-salt", b"context");
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn derive_key_with_salt_differs_from_no_salt() {
+        let no_salt = derive_key(b"ikm", b"info");
+        let salted  = derive_key_with_salt(b"ikm", b"salt", b"info");
+        assert_ne!(no_salt, salted);
+    }
+
+    #[test]
+    fn derive_key_with_empty_salt_same_as_derive_key() {
+        // derive_key calls derive_key_with_salt with empty salt; must agree
+        let k1 = derive_key(b"material", b"label");
+        let k2 = derive_key_with_salt(b"material", &[], b"label");
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn derive_bytes_produces_requested_length() {
+        for len in [0usize, 1, 32, 64, 100] {
+            let out = derive_bytes(b"ikm", b"salt", b"info", len);
+            assert_eq!(out.len(), len, "length mismatch for {len}");
+        }
+    }
+
+    #[test]
+    fn derive_bytes_deterministic() {
+        let b1 = derive_bytes(b"key", b"s", b"i", 48);
+        let b2 = derive_bytes(b"key", b"s", b"i", 48);
+        assert_eq!(b1, b2);
+    }
+
+    #[test]
+    fn ratchet_root_deterministic() {
+        let rk = [0x11u8; 32];
+        let dh = [0x22u8; 32];
+        let (r1a, c1a) = ratchet_root(&rk, &dh);
+        let (r1b, c1b) = ratchet_root(&rk, &dh);
+        assert_eq!(r1a, r1b);
+        assert_eq!(c1a, c1b);
+    }
+
+    #[test]
+    fn ratchet_root_produces_distinct_rk_and_ck() {
+        let rk = [0x33u8; 32];
+        let dh = [0x44u8; 32];
+        let (new_rk, new_ck) = ratchet_root(&rk, &dh);
+        assert_ne!(new_rk, new_ck);
+        assert_ne!(new_rk, rk);
+    }
+
+    #[test]
+    fn ratchet_chain_is_deterministic() {
+        let ck = [0x55u8; 32];
+        let (nc1, mk1) = ratchet_chain(&ck);
+        let (nc2, mk2) = ratchet_chain(&ck);
+        assert_eq!(nc1, nc2);
+        assert_eq!(mk1, mk2);
+    }
+
+    #[test]
+    fn ratchet_chain_mk_differs_from_input() {
+        let ck = [0x66u8; 32];
+        let (_, mk) = ratchet_chain(&ck);
+        assert_ne!(mk, ck);
+    }
 }

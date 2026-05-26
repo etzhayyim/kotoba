@@ -70,4 +70,68 @@ mod tests {
         let wrapped = wrap_key(&wk, &sk, b"alice").unwrap();
         assert!(unwrap_key(&wk, &wrapped, b"bob").is_err());
     }
+
+    #[test]
+    fn wrapped_output_length_is_nonce_plus_plaintext_plus_tag() {
+        let wk = random_key();
+        let plaintext = b"32-byte-secret-key-material-here"; // 32 bytes
+        let wrapped = wrap_key(&wk, plaintext, b"").unwrap();
+        // nonce(12) + plaintext(32) + tag(16) = 60
+        assert_eq!(wrapped.len(), 12 + plaintext.len() + 16);
+    }
+
+    #[test]
+    fn empty_plaintext_wraps_and_unwraps() {
+        let wk = random_key();
+        let wrapped = wrap_key(&wk, b"", b"aad").unwrap();
+        // nonce(12) + empty + tag(16) = 28
+        assert_eq!(wrapped.len(), 12 + 16);
+        let recovered = unwrap_key(&wk, &wrapped, b"aad").unwrap();
+        assert_eq!(recovered.as_slice(), b"");
+    }
+
+    #[test]
+    fn unwrap_data_too_short_returns_too_short_error() {
+        let wk = random_key();
+        // data.len() < 12 must return TooShort(12)
+        let short = vec![0u8; 11];
+        let err = unwrap_key(&wk, &short, b"").unwrap_err();
+        assert!(matches!(err, crate::aead::CryptoError::TooShort(12)));
+    }
+
+    #[test]
+    fn unwrap_empty_data_returns_too_short_error() {
+        let wk = random_key();
+        let err = unwrap_key(&wk, &[], b"").unwrap_err();
+        assert!(matches!(err, crate::aead::CryptoError::TooShort(12)));
+    }
+
+    #[test]
+    fn wrong_wrapping_key_fails() {
+        let wk = random_key();
+        let wrong_wk = random_key();
+        let plaintext = b"super-secret";
+        let wrapped = wrap_key(&wk, plaintext, b"ctx").unwrap();
+        assert!(unwrap_key(&wrong_wk, &wrapped, b"ctx").is_err());
+    }
+
+    #[test]
+    fn tampered_ciphertext_fails() {
+        let wk = random_key();
+        let plaintext = b"important-key-bytes";
+        let mut wrapped = wrap_key(&wk, plaintext, b"label").unwrap();
+        // Flip a byte in the ciphertext region (after the nonce)
+        wrapped[12] ^= 0xFF;
+        assert!(unwrap_key(&wk, &wrapped, b"label").is_err());
+    }
+
+    #[test]
+    fn two_wraps_of_same_plaintext_produce_different_output() {
+        let wk = random_key();
+        let sk = b"same-plaintext-key";
+        let w1 = wrap_key(&wk, sk, b"").unwrap();
+        let w2 = wrap_key(&wk, sk, b"").unwrap();
+        // Different random nonces → different ciphertext
+        assert_ne!(w1, w2);
+    }
 }

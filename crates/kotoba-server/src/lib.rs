@@ -123,6 +123,77 @@ mod tests {
             .expect("KotobaState::new should succeed in test env");
         let _router = super::build_router(std::sync::Arc::new(state));
     }
+
+    // ── NSID detailed format checks ───────────────────────────────────────
+
+    #[test]
+    fn all_nsids_no_trailing_dot() {
+        for nsid in ALL_NSIDS {
+            assert!(!nsid.ends_with('.'), "NSID must not end with dot: {nsid}");
+        }
+    }
+
+    #[test]
+    fn all_nsids_have_at_least_four_segments() {
+        for nsid in ALL_NSIDS {
+            let segments: Vec<&str> = nsid.split('.').collect();
+            assert!(
+                segments.len() >= 4,
+                "NSID should have at least 4 dot-separated segments: {nsid}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_nsids_start_with_ai_gftd_apps() {
+        for nsid in ALL_NSIDS {
+            assert!(
+                nsid.starts_with("ai.gftd.apps."),
+                "NSID does not start with ai.gftd.apps.: {nsid}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_nsids_no_consecutive_dots() {
+        for nsid in ALL_NSIDS {
+            assert!(
+                !nsid.contains(".."),
+                "NSID must not contain consecutive dots: {nsid}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_nsids_no_uppercase() {
+        for nsid in ALL_NSIDS {
+            assert!(
+                !nsid.chars().any(|c| c.is_uppercase()),
+                "NSID must not contain uppercase: {nsid}"
+            );
+        }
+    }
+
+    #[test]
+    fn kotobase_nsids_have_at_least_four_segments() {
+        for nsid in super::kotobase_xrpc::ALL_NSIDS {
+            let segments: Vec<&str> = nsid.split('.').collect();
+            assert!(
+                segments.len() >= 4,
+                "kotobase NSID should have >= 4 segments: {nsid}"
+            );
+        }
+    }
+
+    #[test]
+    fn kotobase_nsids_no_consecutive_dots() {
+        for nsid in super::kotobase_xrpc::ALL_NSIDS {
+            assert!(
+                !nsid.contains(".."),
+                "kotobase NSID must not contain consecutive dots: {nsid}"
+            );
+        }
+    }
 }
 
 pub fn build_router(state: Arc<KotobaState>) -> Router {

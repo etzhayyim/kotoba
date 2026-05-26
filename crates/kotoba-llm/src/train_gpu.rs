@@ -406,4 +406,78 @@ mod tests {
         cpu_matmul_at(&a, &delta, &mut g, 2, 2, 2);
         assert_eq!(g, vec![1.0, 3.0, 2.0, 4.0]);
     }
+
+    #[test]
+    fn adam_config_default_fields() {
+        let cfg = AdamConfig::default();
+        assert!((cfg.lr           - 1e-4).abs() < 1e-10);
+        assert!((cfg.beta1        - 0.9 ).abs() < 1e-10);
+        assert!((cfg.beta2        - 0.999).abs() < 1e-10);
+        assert!((cfg.eps          - 1e-8).abs() < 1e-15);
+        assert!((cfg.weight_decay - 0.01).abs() < 1e-10);
+    }
+
+    #[test]
+    fn adam_config_clone_is_equal() {
+        let cfg   = AdamConfig::default();
+        let cfg2  = cfg.clone();
+        // No PartialEq on AdamConfig — compare fields manually
+        assert!((cfg.lr - cfg2.lr).abs() < 1e-15);
+        assert!((cfg.beta1 - cfg2.beta1).abs() < 1e-15);
+        assert!((cfg.beta2 - cfg2.beta2).abs() < 1e-15);
+    }
+
+    #[test]
+    fn adam_config_debug_contains_lr() {
+        let cfg = AdamConfig::default();
+        let s   = format!("{:?}", cfg);
+        assert!(s.contains("lr"), "Debug output must mention 'lr': {s}");
+    }
+
+    #[test]
+    fn wgsl_shaders_returns_four_entries() {
+        let shaders = wgsl_shaders();
+        assert_eq!(shaders.len(), 4);
+    }
+
+    #[test]
+    fn wgsl_shaders_has_expected_names() {
+        let shaders = wgsl_shaders();
+        let names: Vec<&str> = shaders.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, vec!["matmul", "matmul_at", "ce_loss", "adamw"]);
+    }
+
+    #[test]
+    fn wgsl_shaders_source_non_empty() {
+        for (name, src) in wgsl_shaders() {
+            assert!(!src.is_empty(), "shader '{name}' must have non-empty WGSL source");
+            assert!(src.contains("@compute"), "shader '{name}' must contain @compute");
+        }
+    }
+
+    #[test]
+    fn ce_loss_grad_correct_label_gets_negative_gradient() {
+        // For a single token with one-hot label=0, the gradient at position 0
+        // should be (softmax_0 - 1) * scale < 0.
+        let vocab   = 3usize;
+        let logits  = vec![2.0f32, 0.0, 0.0]; // label 0 has highest logit
+        let labels  = vec![0u32];
+        let mut grad = vec![0.0f32; vocab];
+        cpu_ce_loss_grad(&logits, &labels, &mut grad, 1.0, vocab);
+        assert!(grad[0] < 0.0, "gradient at correct label should be negative: {}", grad[0]);
+        assert!(grad[1] > 0.0, "gradient at incorrect label should be positive: {}", grad[1]);
+    }
+
+    #[test]
+    fn adamw_zero_gradient_applies_weight_decay_only() {
+        let mut w  = vec![1.0f32];
+        let g      = vec![0.0f32]; // zero gradient
+        let mut m1 = vec![0.0f32];
+        let mut m2 = vec![0.0f32];
+        let cfg    = AdamConfig::default();
+        adamw_step(&mut w, &g, &mut m1, &mut m2, &cfg, 1.0);
+        // With zero gradient, weight decay only: w ≈ w*(1 - lr*wd) = 1*(1 - 1e-4*0.01) ≈ 0.999999
+        assert!(w[0] < 1.0, "weight decay must reduce weight even with zero gradient: {}", w[0]);
+        assert!(w[0] > 0.999, "weight decay alone should not reduce too much: {}", w[0]);
+    }
 }

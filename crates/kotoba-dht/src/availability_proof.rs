@@ -251,4 +251,102 @@ mod tests {
         assert!(!result.trigger_slash());
         assert!(!result.eligible_for_reward());
     }
+
+    #[test]
+    fn peer_mismatch_returns_none() {
+        let mut challenge = make_challenge(vec![]);
+        challenge.target_peer = vec![0xAAu8; 32];
+        let mut proof = make_proof(1, vec![]);
+        proof.prover_peer = vec![0xBBu8; 32]; // different peer
+        assert!(verify_proof(&challenge, &proof, &[]).is_none());
+    }
+
+    #[test]
+    fn hash_block_empty_returns_32_bytes() {
+        let h = hash_block(b"");
+        assert_eq!(h.len(), 32, "blake3 hash must always be 32 bytes");
+    }
+
+    #[test]
+    fn hash_block_is_deterministic() {
+        let data = b"reproducible block content";
+        let h1 = hash_block(data);
+        let h2 = hash_block(data);
+        assert_eq!(h1, h2, "hash_block must be deterministic");
+    }
+
+    #[test]
+    fn score_exactly_0_8_is_eligible_not_slash() {
+        // 4 of 5 correct → score = 0.8 → eligible_for_reward, not trigger_slash
+        let cids: Vec<Vec<u8>> = (0..5).map(make_cid).collect();
+        let hashes: Vec<Vec<u8>> = cids.iter().map(|c| hash_block(c)).collect();
+
+        let entries: Vec<ProofEntry> = cids[..4]
+            .iter()
+            .zip(hashes[..4].iter())
+            .map(|(c, h)| ProofEntry { cid_bytes: c.clone(), content_hash: h.clone() })
+            .collect();
+
+        let challenge = make_challenge(cids);
+        let proof = make_proof(1, entries);
+        let expected: Vec<Option<Vec<u8>>> = hashes.into_iter().map(Some).collect();
+        let result = verify_proof(&challenge, &proof, &expected).unwrap();
+
+        assert!((result.score - 0.8).abs() < 1e-9);
+        assert!(result.eligible_for_reward(), "score=0.8 must be eligible");
+        assert!(!result.trigger_slash(), "score=0.8 must not slash");
+    }
+
+    #[test]
+    fn score_exactly_0_5_no_slash_no_reward() {
+        // 1 of 2 correct → score = 0.5 → no slash (< 0.50 required), no reward (< 0.80)
+        let cids: Vec<Vec<u8>> = (0..2).map(make_cid).collect();
+        let hashes: Vec<Vec<u8>> = cids.iter().map(|c| hash_block(c)).collect();
+
+        let entries: Vec<ProofEntry> = vec![
+            ProofEntry { cid_bytes: cids[0].clone(), content_hash: hashes[0].clone() },
+        ];
+
+        let challenge = make_challenge(cids);
+        let proof = make_proof(1, entries);
+        let expected: Vec<Option<Vec<u8>>> = hashes.into_iter().map(Some).collect();
+        let result = verify_proof(&challenge, &proof, &expected).unwrap();
+
+        assert!((result.score - 0.5).abs() < 1e-9);
+        assert!(!result.trigger_slash(), "score=0.5 must not trigger slash (threshold is < 0.50)");
+        assert!(!result.eligible_for_reward(), "score=0.5 must not be eligible for reward");
+    }
+
+    #[test]
+    fn extra_proof_entries_not_in_challenge_are_ignored() {
+        let cid = make_cid(10);
+        let h = hash_block(&cid);
+        let challenge = make_challenge(vec![cid.clone()]);
+        let extra_cid = make_cid(99);
+        let proof = make_proof(1, vec![
+            ProofEntry { cid_bytes: cid,       content_hash: h.clone() },
+            ProofEntry { cid_bytes: extra_cid, content_hash: vec![0u8; 32] }, // extra — not in challenge
+        ]);
+        let result = verify_proof(&challenge, &proof, &[Some(h)]).unwrap();
+        assert_eq!(result.score, 1.0, "extra entries must not degrade score");
+        assert_eq!(result.challenged, 1);
+        assert_eq!(result.proven, 1);
+    }
+
+    #[test]
+    fn proof_entry_clone_is_equal() {
+        let entry = ProofEntry { cid_bytes: vec![1, 2, 3], content_hash: vec![4, 5, 6] };
+        let cloned = entry.clone();
+        assert_eq!(entry.cid_bytes, cloned.cid_bytes);
+        assert_eq!(entry.content_hash, cloned.content_hash);
+    }
+
+    #[test]
+    fn proof_entry_serde_roundtrip() {
+        let entry = ProofEntry { cid_bytes: vec![0u8; 36], content_hash: hash_block(b"test") };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: ProofEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(entry.cid_bytes, back.cid_bytes);
+        assert_eq!(entry.content_hash, back.content_hash);
+    }
 }

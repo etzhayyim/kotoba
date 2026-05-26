@@ -246,4 +246,70 @@ mod tests {
         let m2 = bob.encrypt(b"pong").unwrap();
         assert_eq!(alice.decrypt(&m2).unwrap(), b"pong");
     }
+
+    #[test]
+    fn ratchet_message_json_roundtrip() {
+        let (mut alice, _bob) = make_pair();
+        let msg = alice.encrypt(b"serialize me").unwrap();
+        let json = serde_json::to_string(&msg).unwrap();
+        let restored: RatchetMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.dh_pub, msg.dh_pub);
+        assert_eq!(restored.pn, msg.pn);
+        assert_eq!(restored.n, msg.n);
+        assert_eq!(restored.ciphertext, msg.ciphertext);
+    }
+
+    #[test]
+    fn send_counter_increments_per_message() {
+        let (mut alice, _bob) = make_pair();
+        assert_eq!(alice.send_counter, 0);
+        alice.encrypt(b"a").unwrap();
+        assert_eq!(alice.send_counter, 1);
+        alice.encrypt(b"b").unwrap();
+        assert_eq!(alice.send_counter, 2);
+    }
+
+    #[test]
+    fn receiver_init_send_chain_is_none() {
+        let shared = [0x77u8; 32];
+        let spk_priv = StaticSecret::random_from_rng(OsRng);
+        let bob = RatchetState::init_receiver(shared, spk_priv);
+        assert!(bob.send_chain_key.is_none());
+    }
+
+    #[test]
+    fn sender_init_send_chain_is_some() {
+        let (alice, _bob) = make_pair();
+        assert!(alice.send_chain_key.is_some());
+    }
+
+    #[test]
+    fn wrong_length_dh_pub_returns_counter_mismatch() {
+        let (mut alice, mut bob) = make_pair();
+        let mut msg = alice.encrypt(b"hello").unwrap();
+        // Truncate dh_pub to 16 bytes — try_into::<[u8;32]> must fail
+        msg.dh_pub = msg.dh_pub[..16].to_vec();
+        let result = bob.decrypt(&msg);
+        assert!(matches!(result, Err(crate::SignalError::CounterMismatch)));
+    }
+
+    #[test]
+    fn encrypt_without_send_chain_returns_no_session() {
+        let shared = [0x88u8; 32];
+        let spk_priv = StaticSecret::random_from_rng(OsRng);
+        let mut bob = RatchetState::init_receiver(shared, spk_priv);
+        // Bob's send_chain_key is None at init_receiver — encrypt must fail
+        let result = bob.encrypt(b"no chain");
+        assert!(matches!(result, Err(crate::SignalError::NoSession(_))));
+    }
+
+    #[test]
+    fn out_of_order_delivery() {
+        let (mut alice, mut bob) = make_pair();
+        let m0 = alice.encrypt(b"first").unwrap();
+        let m1 = alice.encrypt(b"second").unwrap();
+        // Deliver second before first — skipped-keys path
+        assert_eq!(bob.decrypt(&m1).unwrap(), b"second");
+        assert_eq!(bob.decrypt(&m0).unwrap(), b"first");
+    }
 }

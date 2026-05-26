@@ -191,4 +191,36 @@ mod tests {
             "HostState::new() must leave inference_engine as None"
         );
     }
+
+    #[test]
+    fn runtime_error_program_not_found_display() {
+        let e = crate::error::RuntimeError::ProgramNotFound("cid-abc".to_string());
+        let s = e.to_string();
+        assert!(s.contains("cid-abc"), "display must include the program id: {s}");
+    }
+
+    #[test]
+    fn runtime_error_gas_exceeded_contains_limit() {
+        let e = crate::error::RuntimeError::GasExceeded { limit: 5_000 };
+        let s = e.to_string();
+        assert!(s.contains("5000") || s.contains("5_000"), "must mention gas limit: {s}");
+    }
+
+    #[test]
+    fn runtime_error_trap_contains_message() {
+        let e = crate::error::RuntimeError::Trap("stack overflow".to_string());
+        assert!(e.to_string().contains("stack overflow"));
+    }
+
+    #[test]
+    fn host_state_stores_agent_did() {
+        let state = crate::host::HostState::new("did:plc:runtime-test", 1_000);
+        assert_eq!(state.agent_did, "did:plc:runtime-test");
+    }
+
+    #[test]
+    fn host_state_stores_gas_remaining() {
+        let state = crate::host::HostState::new("did:plc:test", 99_999);
+        assert_eq!(state.gas_remaining, 99_999);
+    }
 }

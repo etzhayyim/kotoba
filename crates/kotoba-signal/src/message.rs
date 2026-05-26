@@ -150,4 +150,108 @@ mod tests {
         assert_eq!(back.emoji, "👍");
         assert_eq!(back.message_id, "msg-42");
     }
+
+    #[test]
+    fn delivery_receipt_json_roundtrip() {
+        let r = DeliveryReceipt {
+            message_ids: vec!["msg-1".to_string(), "msg-2".to_string()],
+            status:      ReceiptStatus::Delivered,
+            timestamp:   "2026-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: DeliveryReceipt = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.message_ids, vec!["msg-1", "msg-2"]);
+        assert_eq!(back.status, ReceiptStatus::Delivered);
+    }
+
+    #[test]
+    fn receipt_status_equality() {
+        assert_eq!(ReceiptStatus::Delivered, ReceiptStatus::Delivered);
+        assert_ne!(ReceiptStatus::Delivered, ReceiptStatus::Read);
+    }
+
+    #[test]
+    fn message_type_equality() {
+        assert_eq!(MessageType::DirectMessage, MessageType::DirectMessage);
+        assert_ne!(MessageType::DirectMessage, MessageType::GroupMessage);
+        assert_ne!(MessageType::GroupMessage,   MessageType::Receipt);
+    }
+
+    #[test]
+    fn signal_message_with_group_fields_roundtrip() {
+        let msg = SignalMessage {
+            message_type:        MessageType::GroupMessage,
+            sender_did:          "did:key:zSender".to_string(),
+            recipient_did:       "did:key:zRecip".to_string(),
+            device_id:           "device-2".to_string(),
+            group_id:            Some("group-xyz".to_string()),
+            ciphertext_envelope: "abc".to_string(),
+            timestamp:           "2026-01-01T00:00:00Z".to_string(),
+            ephemeral_key:       Some("ephem-pub-key".to_string()),
+            one_time_prekey_id:  Some(42),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: SignalMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.group_id, Some("group-xyz".to_string()));
+        assert_eq!(back.ephemeral_key, Some("ephem-pub-key".to_string()));
+        assert_eq!(back.one_time_prekey_id, Some(42));
+        // Optional fields must be present in JSON
+        assert!(json.contains("groupId"));
+        assert!(json.contains("ephemeralKey"));
+        assert!(json.contains("oneTimePrekeyId"));
+    }
+
+    #[test]
+    fn thread_message_reply_to_roundtrip() {
+        let m = ThreadMessage {
+            id:         "msg-2".to_string(),
+            sender_did: "did:key:zA".to_string(),
+            text:       "reply".to_string(),
+            reply_to:   Some("msg-1".to_string()),
+            reactions:  vec![],
+            timestamp:  "2026-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        let back: ThreadMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.reply_to, Some("msg-1".to_string()));
+        assert!(json.contains("replyTo"));
+    }
+
+    #[test]
+    fn thread_message_with_reactions_roundtrip() {
+        let m = ThreadMessage {
+            id:         "msg-3".to_string(),
+            sender_did: "did:key:zA".to_string(),
+            text:       "hi".to_string(),
+            reply_to:   None,
+            reactions:  vec![
+                Reaction { sender_did: "did:key:zB".to_string(), emoji: "🔥".to_string(), message_id: "msg-3".to_string() },
+            ],
+            timestamp:  "2026-01-02T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        let back: ThreadMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.reactions.len(), 1);
+        assert_eq!(back.reactions[0].emoji, "🔥");
+        // reactions should appear in JSON when non-empty
+        assert!(json.contains("reactions"));
+    }
+
+    #[test]
+    fn signal_message_clone_is_independent() {
+        let msg = SignalMessage {
+            message_type:        MessageType::Receipt,
+            sender_did:          "did:key:zA".to_string(),
+            recipient_did:       "did:key:zB".to_string(),
+            device_id:           "d1".to_string(),
+            group_id:            None,
+            ciphertext_envelope: "cipher".to_string(),
+            timestamp:           "2026-01-01T00:00:00Z".to_string(),
+            ephemeral_key:       None,
+            one_time_prekey_id:  None,
+        };
+        let cloned = msg.clone();
+        assert_eq!(cloned.message_type, MessageType::Receipt);
+        assert_eq!(cloned.sender_did, msg.sender_did);
+    }
 }

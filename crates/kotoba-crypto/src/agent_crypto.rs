@@ -153,4 +153,53 @@ mod tests {
         let pt = c.decrypt_blob(&ct).await.unwrap();
         assert_eq!(pt.as_slice(), data);
     }
+
+    #[tokio::test]
+    async fn encrypt_empty_plaintext_roundtrip() {
+        let c  = test_crypto();
+        let ct = c.encrypt(b"scope", b"").await.unwrap();
+        let pt = c.decrypt(b"scope", &ct).await.unwrap();
+        assert!(pt.is_empty(), "empty plaintext must round-trip");
+    }
+
+    #[tokio::test]
+    async fn seal_field_starts_with_signal_prefix() {
+        let c   = test_crypto();
+        let env = c.seal_field(b"any-scope", "test value").await.unwrap();
+        assert!(env.starts_with("signal:v1:"), "envelope must start with signal:v1:");
+    }
+
+    #[tokio::test]
+    async fn open_field_wrong_scope_returns_error() {
+        let c   = test_crypto();
+        let env = c.seal_field(b"scope-correct", "hello").await.unwrap();
+        let result = c.open_field(b"scope-wrong", &env).await;
+        assert!(result.is_err(), "wrong scope must fail to open field");
+    }
+
+    #[tokio::test]
+    async fn same_plaintext_different_scope_different_blob_ciphertext() {
+        let c  = test_crypto();
+        let ct1 = c.encrypt_blob(b"same data").await.unwrap();
+        let ct2 = c.encrypt_blob(b"same data").await.unwrap();
+        // Nonces are random → ciphertexts differ even with same scope (b"blob")
+        assert_ne!(ct1, ct2, "random nonces ensure ciphertexts differ");
+    }
+
+    #[tokio::test]
+    async fn scope_key_derivation_produces_different_keys_per_scope() {
+        let c  = test_crypto();
+        let msg = b"payload";
+        let ct_a = c.encrypt(b"alpha", msg).await.unwrap();
+        let ct_b = c.encrypt(b"beta",  msg).await.unwrap();
+        // Ciphertexts differ because scope keys differ (plus random nonces)
+        assert_ne!(ct_a, ct_b);
+    }
+
+    #[tokio::test]
+    async fn open_field_invalid_envelope_prefix_returns_error() {
+        let c = test_crypto();
+        let result = c.open_field(b"scope", "not-a-signal-value").await;
+        assert!(result.is_err(), "must reject invalid envelope prefix");
+    }
 }

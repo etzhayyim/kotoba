@@ -266,4 +266,91 @@ mod tests {
         assert_eq!(r.quad.predicate, "weight/block/2/attn/q");
         assert_eq!(a.quad.predicate, "weight/block/2/attn/q");
     }
+
+    #[test]
+    fn gradient_ref_step_zero() {
+        let gr = GradientRef {
+            model_cid: cid(b"model"),
+            kind:      WeightKind::LmHead,
+            step:      0,
+            blob_cid:  cid(b"grad"),
+            shape:     vec![2048, 32000],
+        };
+        assert_eq!(gr.to_assert_delta(g()).quad.predicate, "grad/lm_head/step/0");
+    }
+
+    #[test]
+    fn gradient_ref_large_step() {
+        let gr = GradientRef {
+            model_cid: cid(b"model"),
+            kind:      WeightKind::Embed,
+            step:      1_000_000,
+            blob_cid:  cid(b"grad"),
+            shape:     vec![32000, 2048],
+        };
+        assert_eq!(gr.to_assert_delta(g()).quad.predicate, "grad/embed/step/1000000");
+    }
+
+    #[test]
+    fn adam_moments_block_ffn_predicates() {
+        let m = AdamMoments {
+            model_cid: cid(b"model"),
+            kind:      WeightKind::BlockFfnGate(7),
+            m1_cid:    cid(b"m1"),
+            m2_cid:    cid(b"m2"),
+            shape:     vec![2048, 8192],
+        };
+        let [a1, a2] = m.to_assert_deltas(g());
+        assert_eq!(a1.quad.predicate, "train/adam/m1/block/7/ffn/gate");
+        assert_eq!(a2.quad.predicate, "train/adam/m2/block/7/ffn/gate");
+    }
+
+    #[test]
+    fn optimizer_step_retract_uses_old_cid_assert_uses_new() {
+        let old = cid(b"old_weight");
+        let new = cid(b"new_weight");
+        let step = OptimizerStep {
+            model_cid:      cid(b"model"),
+            kind:           WeightKind::LmHead,
+            old_weight_cid: old.clone(),
+            new_weight_cid: new.clone(),
+            shape:          vec![2048, 32000],
+            step:           10,
+        };
+        let [retract, assert_d] = step.weight_deltas(g());
+        if let QuadObject::TensorCid { cid: rc, .. } = &retract.quad.object {
+            assert_eq!(*rc, old, "retract must use old CID");
+        } else { panic!("expected TensorCid"); }
+        if let QuadObject::TensorCid { cid: ac, .. } = &assert_d.quad.object {
+            assert_eq!(*ac, new, "assert must use new CID");
+        } else { panic!("expected TensorCid"); }
+    }
+
+    #[test]
+    fn train_batch_quality_field() {
+        let b = TrainBatch {
+            input_tokens:  vec![1, 2, 3],
+            target_tokens: vec![2, 3, 4],
+            quality:       0.75,
+        };
+        assert!((b.quality - 0.75).abs() < f32::EPSILON);
+        assert_eq!(b.input_tokens.len(), b.target_tokens.len());
+    }
+
+    #[test]
+    fn adam_moments_retract_all_have_retract_multiplicity() {
+        use kotoba_kqe::delta::Multiplicity;
+        let m = AdamMoments {
+            model_cid: cid(b"model"),
+            kind:      WeightKind::FinalNorm,
+            m1_cid:    cid(b"m1"),
+            m2_cid:    cid(b"m2"),
+            shape:     vec![2048],
+        };
+        let [r1, r2] = m.to_retract_deltas(g());
+        assert_eq!(r1.mult, Multiplicity::Retract);
+        assert_eq!(r2.mult, Multiplicity::Retract);
+        assert_eq!(r1.quad.predicate, "train/adam/m1/norm/final");
+        assert_eq!(r2.quad.predicate, "train/adam/m2/norm/final");
+    }
 }

@@ -636,4 +636,101 @@ mod tests {
         assert_eq!(ing.k_centroids, 10);
         assert_eq!(ing.graph_cid, cc_chunks_graph());
     }
+
+    #[test]
+    fn ingest_status_new_has_graph_cids() {
+        let status = IngestStatus::new();
+        assert!(!status.pages_graph_cid.is_empty(),  "pages_graph_cid must be set");
+        assert!(!status.chunks_graph_cid.is_empty(), "chunks_graph_cid must be set");
+        assert_ne!(status.pages_graph_cid, status.chunks_graph_cid,
+            "pages and chunks graph CIDs must differ");
+    }
+
+    #[test]
+    fn ingest_status_default_counters_are_zero() {
+        let status = IngestStatus::default();
+        assert_eq!(status.pages_files,     0);
+        assert_eq!(status.pages_quads,     0);
+        assert_eq!(status.chunks_total,    0);
+        assert_eq!(status.chunks_embedded, 0);
+        assert_eq!(status.ivf_k,           0);
+        assert!(!status.ivf_built);
+    }
+
+    #[test]
+    fn ingest_status_clone_equals_original() {
+        let s1 = IngestStatus::new();
+        let s2 = s1.clone();
+        assert_eq!(s1.pages_graph_cid,  s2.pages_graph_cid);
+        assert_eq!(s1.chunks_graph_cid, s2.chunks_graph_cid);
+    }
+
+    #[test]
+    fn subject_from_vertex_same_input_same_cid() {
+        let a = subject_from_vertex("vertex-001");
+        let b = subject_from_vertex("vertex-001");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn subject_from_vertex_different_input_different_cid() {
+        let a = subject_from_vertex("vertex-001");
+        let b = subject_from_vertex("vertex-002");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn text_quad_predicate_and_object() {
+        let graph = cc_pages_graph();
+        let subj  = subject_from_vertex("page-xyz");
+        let q     = text_quad(&graph, &subj, "cc/url", "https://example.com");
+        assert_eq!(q.predicate, "cc/url");
+        assert_eq!(q.graph,   graph);
+        assert_eq!(q.subject, subj);
+        match q.object {
+            QuadObject::Text(v) => assert_eq!(v, "https://example.com"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn int_quad_predicate_and_object() {
+        let graph = cc_pages_graph();
+        let subj  = subject_from_vertex("page-xyz");
+        let q     = int_quad(&graph, &subj, "cc/outlink_count", 42);
+        assert_eq!(q.predicate, "cc/outlink_count");
+        match q.object {
+            QuadObject::Integer(v) => assert_eq!(v, 42),
+            other => panic!("expected Integer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cid_quad_predicate_and_object() {
+        let graph   = cc_chunks_graph();
+        let subj    = subject_from_chunk("page-rkey", 0);
+        let target  = subject_from_vertex("page-rkey");
+        let q       = cid_quad(&graph, &subj, "cc/chunk/page", &target);
+        assert_eq!(q.predicate, "cc/chunk/page");
+        match q.object {
+            QuadObject::Cid(c) => assert_eq!(c, target),
+            other => panic!("expected Cid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn page_ingestor_with_batch_updates_size() {
+        let qs  = make_store();
+        let ing = CcPageIngestor::new(qs).with_batch(99);
+        assert_eq!(ing.batch_size, 99);
+    }
+
+    #[tokio::test]
+    async fn chunk_ingestor_with_batch_updates_size() {
+        use crate::embed_client::Blake3EmbedClient;
+        let qs    = make_store();
+        let embed = Arc::new(Blake3EmbedClient::new(64));
+        let ing   = CcChunkIngestor::new(qs, embed).with_batch(200);
+        assert_eq!(ing.batch_size, 200);
+    }
 }

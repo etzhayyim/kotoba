@@ -362,4 +362,95 @@ mod tests {
         }
         // Passes as long as no panic — full gossip delivery is integration-test territory
     }
+
+    // ── Pure unit tests (no network) ──────────────────────────────────────────
+
+    #[test]
+    fn parse_pregel_event_returns_none_for_non_gossip_event() {
+        let peer = PeerId::random();
+        let event = KotobaNetEvent::PeerConnected(peer);
+        assert!(KotobaSwarm::parse_pregel_event(&event).is_none());
+    }
+
+    #[test]
+    fn parse_pregel_event_returns_none_for_wrong_topic() {
+        let event = KotobaNetEvent::GossipMessage {
+            topic:  "kotoba/unrelated/topic".to_string(),
+            data:   b"{}".to_vec(),
+            source: None,
+        };
+        assert!(KotobaSwarm::parse_pregel_event(&event).is_none());
+    }
+
+    #[test]
+    fn parse_pregel_event_returns_none_for_invalid_json() {
+        let full_topic = crate::gossipsub::gossipsub_topic(crate::pregel_msg::PREGEL_GOSSIP_TOPIC);
+        let event = KotobaNetEvent::GossipMessage {
+            topic:  full_topic,
+            data:   b"not-valid-json".to_vec(),
+            source: None,
+        };
+        assert!(KotobaSwarm::parse_pregel_event(&event).is_none());
+    }
+
+    #[test]
+    fn parse_pregel_event_succeeds_for_valid_message() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+        let full_topic = crate::gossipsub::gossipsub_topic(crate::pregel_msg::PREGEL_GOSSIP_TOPIC);
+        let msg = crate::pregel_msg::PregelNetMessage {
+            src:         "node-A".to_string(),
+            dst:         "node-B".to_string(),
+            payload_b64: B64.encode(b"hello pregel"),
+        };
+        let data = serde_json::to_vec(&msg).unwrap();
+        let event = KotobaNetEvent::GossipMessage {
+            topic:  full_topic,
+            data,
+            source: None,
+        };
+        let parsed = KotobaSwarm::parse_pregel_event(&event);
+        assert!(parsed.is_some());
+        let p = parsed.unwrap();
+        assert_eq!(p.src, "node-A");
+        assert_eq!(p.dst, "node-B");
+    }
+
+    #[test]
+    fn kotoba_net_event_peer_disconnected_holds_peer_id() {
+        let peer = PeerId::random();
+        let event = KotobaNetEvent::PeerDisconnected(peer);
+        if let KotobaNetEvent::PeerDisconnected(p) = event {
+            assert_eq!(p, peer);
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn kotoba_net_event_routing_updated_holds_peer() {
+        let peer = PeerId::random();
+        let event = KotobaNetEvent::RoutingUpdated { peer };
+        if let KotobaNetEvent::RoutingUpdated { peer: p } = event {
+            assert_eq!(p, peer);
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn kotoba_net_event_gossip_message_fields() {
+        let peer = PeerId::random();
+        let event = KotobaNetEvent::GossipMessage {
+            topic:  "kotoba/test".to_string(),
+            data:   vec![1, 2, 3],
+            source: Some(peer),
+        };
+        if let KotobaNetEvent::GossipMessage { topic, data, source } = event {
+            assert_eq!(topic, "kotoba/test");
+            assert_eq!(data, vec![1u8, 2, 3]);
+            assert_eq!(source, Some(peer));
+        } else {
+            panic!("wrong variant");
+        }
+    }
 }

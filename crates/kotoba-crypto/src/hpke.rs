@@ -120,4 +120,42 @@ mod tests {
         // Ephemeral key randomises each seal
         assert_ne!(s1, s2);
     }
+
+    #[test]
+    fn hpke_too_short_returns_error() {
+        let (sk, _pk) = random_keypair();
+        // fewer than EPHEMERAL_PK_LEN (32) bytes
+        let short = vec![0u8; EPHEMERAL_PK_LEN - 1];
+        let result = hpke_open(&sk, &short);
+        assert!(result.is_err(), "must fail on too-short input");
+    }
+
+    #[test]
+    fn hpke_empty_sealed_returns_error() {
+        let (sk, _pk) = random_keypair();
+        let result = hpke_open(&sk, &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn hpke_roundtrip_empty_plaintext() {
+        let (sk, pk) = random_keypair();
+        let sealed = hpke_seal(&pk, b"").unwrap();
+        let opened = hpke_open(&sk, &sealed).unwrap();
+        assert!(opened.is_empty(), "empty plaintext must round-trip");
+    }
+
+    #[test]
+    fn hpke_roundtrip_large_payload() {
+        let (sk, pk) = random_keypair();
+        let msg: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+        let sealed = hpke_seal(&pk, &msg).unwrap();
+        let opened = hpke_open(&sk, &sealed).unwrap();
+        assert_eq!(opened.as_slice(), msg.as_slice());
+    }
+
+    #[test]
+    fn ephemeral_pk_len_constant_is_32() {
+        assert_eq!(EPHEMERAL_PK_LEN, 32);
+    }
 }

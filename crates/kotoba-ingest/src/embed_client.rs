@@ -232,4 +232,59 @@ mod tests {
         let client = Blake3EmbedClient::new(8);
         assert_eq!(client.model_id(), "blake3-pseudo");
     }
+
+    #[tokio::test]
+    async fn blake3_dim_accessor() {
+        let client = Blake3EmbedClient::new(256);
+        assert_eq!(client.dim(), 256);
+    }
+
+    #[tokio::test]
+    async fn blake3_empty_batch_returns_empty_vec() {
+        let client = Blake3EmbedClient::new(64);
+        let results = client.embed_batch(&[]).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn blake3_values_in_range() {
+        // All values should be in [-1.0, 1.0]
+        let client = Blake3EmbedClient::new(32);
+        let results = client.embed_batch(&["test text here"]).await.unwrap();
+        for &v in &results[0] {
+            assert!(v >= -1.0 && v <= 1.0, "value out of range: {v}");
+        }
+    }
+
+    #[tokio::test]
+    async fn blake3_dim_1() {
+        let client = Blake3EmbedClient::new(1);
+        let results = client.embed_batch(&["x"]).await.unwrap();
+        assert_eq!(results[0].len(), 1);
+    }
+
+    #[tokio::test]
+    async fn http_embed_client_new_stores_dim_and_model() {
+        let client = HttpEmbedClient::new("http://localhost:11434", "nomic-embed-text", 768, 64);
+        assert_eq!(client.dim(), 768);
+        assert_eq!(client.model_id(), "nomic-embed-text");
+    }
+
+    #[tokio::test]
+    async fn http_embed_client_custom_batch_and_dim() {
+        let client = HttpEmbedClient::new("http://example.com", "my-model", 384, 32);
+        assert_eq!(client.dim(), 384);
+        assert_eq!(client.model_id(), "my-model");
+    }
+
+    #[tokio::test]
+    async fn blake3_large_batch_returns_correct_count() {
+        let client = Blake3EmbedClient::new(16);
+        let texts: Vec<&str> = (0..20).map(|_| "hello").collect();
+        let results = client.embed_batch(&texts).await.unwrap();
+        assert_eq!(results.len(), 20);
+        for v in &results {
+            assert_eq!(v.len(), 16);
+        }
+    }
 }

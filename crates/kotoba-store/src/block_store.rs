@@ -55,4 +55,43 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("io error") || msg.contains("disk full"), "got: {msg}");
     }
+
+    #[test]
+    fn put_verified_empty_data() {
+        let store = Arc::new(MemoryBlockStore::new());
+        let data  = b"";
+        let cid   = KotobaCid::from_bytes(data);
+        put_verified(&*store, &cid, data).unwrap();
+        assert!(store.has(&cid), "empty data must be stored");
+    }
+
+    #[test]
+    fn put_verified_binary_data() {
+        let store = Arc::new(MemoryBlockStore::new());
+        let data: Vec<u8> = (0u8..=255).collect();
+        let cid = KotobaCid::from_bytes(&data);
+        put_verified(&*store, &cid, &data).unwrap();
+        assert!(store.has(&cid));
+    }
+
+    #[test]
+    fn put_verified_two_different_blocks() {
+        let store = Arc::new(MemoryBlockStore::new());
+        let d1 = b"block one";
+        let d2 = b"block two";
+        let c1 = KotobaCid::from_bytes(d1);
+        let c2 = KotobaCid::from_bytes(d2);
+        put_verified(&*store, &c1, d1).unwrap();
+        put_verified(&*store, &c2, d2).unwrap();
+        assert!(store.has(&c1));
+        assert!(store.has(&c2));
+        assert_ne!(c1, c2, "different data must yield different CIDs");
+    }
+
+    #[test]
+    fn store_error_debug_is_non_empty() {
+        let err = StoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, "err"));
+        let s = format!("{:?}", err);
+        assert!(!s.is_empty());
+    }
 }

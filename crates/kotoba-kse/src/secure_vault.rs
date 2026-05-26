@@ -140,4 +140,73 @@ mod tests {
         let raw = sv.inner.get(&blob_ref.cid).await.unwrap();
         assert_ne!(raw, plaintext);
     }
+
+    #[tokio::test]
+    async fn default_creates_valid_vault() {
+        let sv  = SecureVault::default();
+        let key = random_key();
+        let data = Bytes::from_static(b"default test");
+        let blob_ref = sv.put(&key, data.clone()).await.unwrap();
+        let got = sv.get(&key, &blob_ref).await.unwrap().unwrap();
+        assert_eq!(got, data);
+    }
+
+    #[tokio::test]
+    async fn contains_returns_true_after_put() {
+        let sv  = SecureVault::new();
+        let key = random_key();
+        let blob_ref = sv.put(&key, Bytes::from_static(b"check contains")).await.unwrap();
+        assert!(sv.contains(&blob_ref).await);
+    }
+
+    #[tokio::test]
+    async fn contains_returns_false_for_missing() {
+        use kotoba_core::cid::KotobaCid;
+        use crate::vault::BlobRef;
+
+        let sv = SecureVault::new();
+        let fake_ref = BlobRef {
+            cid:       KotobaCid::from_bytes(b"nonexistent"),
+            size:      0,
+            mime_type: None,
+            chunked:   false,
+        };
+        assert!(!sv.contains(&fake_ref).await);
+    }
+
+    #[tokio::test]
+    async fn get_returns_none_for_missing_blob() {
+        use kotoba_core::cid::KotobaCid;
+        use crate::vault::BlobRef;
+
+        let sv  = SecureVault::new();
+        let key = random_key();
+        let fake_ref = BlobRef {
+            cid:       KotobaCid::from_bytes(b"absent"),
+            size:      0,
+            mime_type: None,
+            chunked:   false,
+        };
+        let result = sv.get(&key, &fake_ref).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn different_plaintexts_different_blob_refs() {
+        let sv   = SecureVault::new();
+        let key  = random_key();
+        let ref1 = sv.put(&key, Bytes::from_static(b"alpha")).await.unwrap();
+        let ref2 = sv.put(&key, Bytes::from_static(b"beta")).await.unwrap();
+        // Different plaintexts → different CIDs (AES-GCM nonce is random)
+        assert_ne!(ref1.cid, ref2.cid);
+    }
+
+    #[tokio::test]
+    async fn empty_plaintext_roundtrip() {
+        let sv  = SecureVault::new();
+        let key = random_key();
+        let blob_ref = sv.put(&key, Bytes::new()).await.unwrap();
+        let got = sv.get(&key, &blob_ref).await.unwrap().unwrap();
+        assert_eq!(got.len(), 0);
+    }
 }

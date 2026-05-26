@@ -87,4 +87,68 @@ mod tests {
         let ba = b.dh(&a_pub.to_bytes());
         assert_eq!(ab, ba);
     }
+
+    #[test]
+    fn public_key_signing_bytes_are_32_bytes() {
+        let kp = IdentityKeyPair::generate();
+        let pk = kp.public_key();
+        assert_eq!(pk.signing.len(), 32);
+    }
+
+    #[test]
+    fn public_key_dh_bytes_are_32_bytes() {
+        let kp = IdentityKeyPair::generate();
+        let pk = kp.public_key();
+        assert_eq!(pk.dh.len(), 32);
+    }
+
+    #[test]
+    fn identity_key_json_roundtrip() {
+        let kp = IdentityKeyPair::generate();
+        let pk = kp.public_key();
+        let json = serde_json::to_string(&pk).unwrap();
+        let restored: IdentityKey = serde_json::from_str(&json).unwrap();
+        assert_eq!(pk, restored);
+    }
+
+    #[test]
+    fn dh_public_returns_32_byte_array() {
+        let kp = IdentityKeyPair::generate();
+        let pk = kp.public_key();
+        let arr = pk.dh_public();
+        assert!(arr.is_some());
+        assert_eq!(arr.unwrap().len(), 32);
+    }
+
+    #[test]
+    fn verify_with_wrong_sig_bytes_returns_false() {
+        let kp = IdentityKeyPair::generate();
+        let pk = kp.public_key();
+        let bad_sig = vec![0u8; 64]; // all-zero is not a valid signature
+        assert!(!pk.verify(b"some message", &bad_sig));
+    }
+
+    #[test]
+    fn verify_with_short_sig_returns_false() {
+        let kp = IdentityKeyPair::generate();
+        let pk = kp.public_key();
+        // Short (31-byte) signature — from_slice must fail, verify returns false
+        let short_sig = vec![0u8; 31];
+        assert!(!pk.verify(b"msg", &short_sig));
+    }
+
+    #[test]
+    fn two_generate_calls_produce_different_keys() {
+        let kp1 = IdentityKeyPair::generate();
+        let kp2 = IdentityKeyPair::generate();
+        assert_ne!(kp1.public_key().signing, kp2.public_key().signing);
+    }
+
+    #[test]
+    fn identity_key_equality() {
+        let kp = IdentityKeyPair::generate();
+        let pk1 = kp.public_key();
+        let pk2 = kp.public_key();
+        assert_eq!(pk1, pk2);
+    }
 }

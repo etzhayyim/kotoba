@@ -193,4 +193,68 @@ mod tests {
         assert_eq!(back.peer_did,   s.peer_did);
         assert_eq!(back.state_blob, s.state_blob);
     }
+
+    #[test]
+    fn serialized_session_clone_is_independent() {
+        let s = make_session("did:key:zB", "dev-2");
+        let c = s.clone();
+        assert_eq!(c.peer_did,  s.peer_did);
+        assert_eq!(c.device_id, s.device_id);
+        assert_eq!(c.state_blob, s.state_blob);
+    }
+
+    #[test]
+    fn serialized_session_debug_contains_did() {
+        let s = make_session("did:key:zDebug", "dev");
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("did:key:zDebug"));
+    }
+
+    #[tokio::test]
+    async fn multiple_peers_stored_independently() {
+        let store = InMemorySessionStore::new();
+        let s1 = make_session("did:key:zA", "d1");
+        let s2 = make_session("did:key:zB", "d1");
+        store.store_session("did:key:zA", "d1", s1).await;
+        store.store_session("did:key:zB", "d1", s2).await;
+
+        let loaded_a = store.load_session("did:key:zA", "d1").await;
+        let loaded_b = store.load_session("did:key:zB", "d1").await;
+        assert!(loaded_a.is_some());
+        assert!(loaded_b.is_some());
+        assert_eq!(loaded_a.unwrap().peer_did, "did:key:zA");
+        assert_eq!(loaded_b.unwrap().peer_did, "did:key:zB");
+    }
+
+    #[tokio::test]
+    async fn store_clone_shares_state() {
+        let store  = InMemorySessionStore::new();
+        let cloned = store.clone();
+        let s = make_session("did:key:zC", "dev-c");
+        store.store_session("did:key:zC", "dev-c", s).await;
+        // The clone wraps the same Arc<RwLock> so it must see the new entry
+        let loaded = cloned.load_session("did:key:zC", "dev-c").await;
+        assert!(loaded.is_some(), "clone should share the underlying map");
+    }
+
+    #[test]
+    fn serialized_session_empty_blob() {
+        let s = SerializedSession {
+            peer_did:   "did:key:zA".to_string(),
+            device_id:  "d1".to_string(),
+            state_blob: vec![],
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SerializedSession = serde_json::from_str(&json).unwrap();
+        assert!(back.state_blob.is_empty());
+    }
+
+    #[tokio::test]
+    async fn new_and_default_produce_equivalent_stores() {
+        let s1 = InMemorySessionStore::new();
+        let s2 = InMemorySessionStore::default();
+        // Both should start empty
+        assert!(s1.load_session("any", "any").await.is_none());
+        assert!(s2.load_session("any", "any").await.is_none());
+    }
 }

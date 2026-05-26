@@ -194,4 +194,66 @@ mod tests {
         assert_eq!(bundle.did, "did:plc:alice");
         assert!(bundle.one_time_prekey.is_some());
     }
+
+    #[tokio::test]
+    async fn generate_prekeys_creates_correct_count() {
+        let store = SignalStore::new("did:plc:alice", "dev-1");
+        store.generate_prekeys(1, 10).await;
+        let ids = store.prekey_ids().await;
+        assert_eq!(ids.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn consume_prekey_removes_entry() {
+        let store = SignalStore::new("did:plc:alice", "dev-1");
+        store.generate_prekeys(1, 3).await;
+        let key = store.consume_prekey(1).await;
+        assert!(key.is_some(), "prekey 1 should exist");
+        let ids = store.prekey_ids().await;
+        assert_eq!(ids.len(), 2, "consumed key should be removed");
+        let again = store.consume_prekey(1).await;
+        assert!(again.is_none(), "consuming the same key twice should return None");
+    }
+
+    #[tokio::test]
+    async fn prekey_bundle_error_when_spk_missing() {
+        let store = SignalStore::new("did:plc:alice", "dev-1");
+        store.generate_prekeys(1, 1).await;
+        // No signed prekey registered → should err with NoSignedPreKey
+        let result = store.prekey_bundle(99).await;
+        assert!(result.is_err(), "missing SPK should return error");
+    }
+
+    #[tokio::test]
+    async fn prekey_bundle_no_opk_when_empty() {
+        let store = SignalStore::new("did:plc:bob", "dev-2");
+        store.rotate_signed_prekey(1).await;
+        // No one-time prekeys → bundle.one_time_prekey should be None
+        let bundle = store.prekey_bundle(1).await.unwrap();
+        assert!(bundle.one_time_prekey.is_none());
+        assert!(bundle.one_time_prekey_id.is_none());
+    }
+
+    #[test]
+    fn derive_field_key_changes_with_peer_did() {
+        let store = SignalStore::new("did:plc:owner", "dev-1");
+        let k1 = store.derive_field_key("did:plc:alice", "convo-1");
+        let k2 = store.derive_field_key("did:plc:bob",   "convo-1");
+        assert_ne!(k1, k2, "different peer_did must yield different keys");
+    }
+
+    #[test]
+    fn encrypt_field_same_plaintext_produces_different_ciphertexts() {
+        let store = SignalStore::new("did:plc:owner", "dev-1");
+        // AES-GCM uses a random nonce per call → same plaintext encrypts differently each time
+        let c1 = store.encrypt_field("hello", "did:plc:bob", "convo-1").unwrap();
+        let c2 = store.encrypt_field("hello", "did:plc:bob", "convo-1").unwrap();
+        assert_ne!(c1, c2, "random nonce must produce distinct ciphertexts");
+    }
+
+    #[tokio::test]
+    async fn get_signed_prekey_returns_none_for_unknown_id() {
+        let store = SignalStore::new("did:plc:alice", "dev-1");
+        assert!(store.get_signed_prekey(999).await.is_none());
+    }
 }
