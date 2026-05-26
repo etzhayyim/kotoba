@@ -106,3 +106,51 @@ pub trait EnterpriseDialect {
         output: &str,
     ) -> anyhow::Result<CompiledEnterpriseQuery>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn post_process_default_all_none() {
+        let pp = PostProcess::default();
+        assert!(pp.limit.is_none());
+        assert!(pp.offset.is_none());
+        assert!(pp.percent.is_none());
+        assert!(pp.order_by.is_empty());
+        assert!(pp.sample_n.is_none());
+    }
+
+    #[test]
+    fn post_process_limit_and_offset_set() {
+        let pp = PostProcess {
+            limit:    Some(100),
+            offset:   Some(10),
+            percent:  None,
+            order_by: vec!["name".to_string()],
+            sample_n: None,
+        };
+        assert_eq!(pp.limit, Some(100));
+        assert_eq!(pp.offset, Some(10));
+        assert_eq!(pp.order_by, vec!["name"]);
+    }
+
+    #[test]
+    fn enterprise_feature_equality() {
+        assert_eq!(EnterpriseFeature::Pivot, EnterpriseFeature::Pivot);
+        assert_ne!(EnterpriseFeature::Pivot, EnterpriseFeature::OlapWindow);
+    }
+
+    #[test]
+    fn enterprise_feature_debug_contains_variant_name() {
+        let s = format!("{:?}", EnterpriseFeature::HierarchicalQuery);
+        assert!(s.contains("HierarchicalQuery"));
+    }
+
+    #[test]
+    fn enterprise_feature_clone() {
+        let f = EnterpriseFeature::Temporal;
+        let g = f.clone();
+        assert_eq!(f, g);
+    }
+}
