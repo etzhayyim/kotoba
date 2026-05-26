@@ -28,6 +28,20 @@ const MAX_DEVICE_ID_LEN: usize = 128;
 const MAX_GROUP_ID_LEN:  usize = 128;
 const MAX_PAYLOAD_BYTES: usize = 256 * 1024; // 256 KiB per encrypted message
 
+/// Validate a DID string: non-empty, `did:` prefix, within max length.
+fn validate_signal_did(did: &str, field: &str) -> Result<(), (StatusCode, String)> {
+    if did.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, format!("{field} must not be empty")));
+    }
+    if !did.starts_with("did:") {
+        return Err((StatusCode::BAD_REQUEST, format!("{field} is not a valid DID (must start with 'did:')")));
+    }
+    if did.len() > MAX_DID_LEN {
+        return Err((StatusCode::BAD_REQUEST, format!("{field} exceeds {MAX_DID_LEN} bytes")));
+    }
+    Ok(())
+}
+
 /// Verify caller owns `did` via Bearer JWT `sub` claim.
 fn require_signal_auth(
     headers: &HeaderMap,
@@ -85,10 +99,7 @@ pub async fn register_prekeys(
     headers: HeaderMap,
     Json(req): Json<RegisterPrekeysReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    if req.did.is_empty() || req.did.len() > MAX_DID_LEN {
-        return Err((StatusCode::BAD_REQUEST,
-            format!("did must be 1–{MAX_DID_LEN} bytes")));
-    }
+    validate_signal_did(&req.did, "did")?;
     if req.device_id.is_empty() || req.device_id.len() > MAX_DEVICE_ID_LEN {
         return Err((StatusCode::BAD_REQUEST,
             format!("device_id must be 1–{MAX_DEVICE_ID_LEN} bytes")));
@@ -120,10 +131,7 @@ pub async fn get_prekey_bundle(
     State(state): State<Arc<KotobaState>>,
     Query(q): Query<GetPreKeyBundleQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    if q.did.is_empty() || q.did.len() > MAX_DID_LEN {
-        return Err((StatusCode::BAD_REQUEST,
-            format!("did must be 1–{MAX_DID_LEN} bytes")));
-    }
+    validate_signal_did(&q.did, "did")?;
     let device_id = q.device_id.as_deref().unwrap_or("default");
     let bundle_key = format!("signal/bundle/{}/{}", q.did, device_id);
     let ik_key     = format!("signal/identity/{}/{}", q.did, device_id);
@@ -133,8 +141,12 @@ pub async fn get_prekey_bundle(
 
     Ok(match (bundle_bytes, ik_bytes) {
         (Some(b), Some(ik)) => {
-            let bundle: serde_json::Value = serde_json::from_slice(&b).unwrap_or_default();
-            let identity_key: serde_json::Value = serde_json::from_slice(&ik).unwrap_or_default();
+            let bundle: serde_json::Value = serde_json::from_slice(&b)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("stored prekey bundle is malformed: {e}")))?;
+            let identity_key: serde_json::Value = serde_json::from_slice(&ik)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("stored identity key is malformed: {e}")))?;
             Json(serde_json::json!({
                 "did": q.did,
                 "deviceId": device_id,
@@ -193,8 +205,12 @@ pub async fn send_message(
 
     let topic_name = format!("signal/inbox/{}/{}", msg.recipient_did, msg.device_id);
     let topic = kotoba_kse::topic::Topic(format!("kotoba/{topic_name}"));
-    let payload = bytes::Bytes::from(serde_json::to_vec(&req.signal_message).unwrap_or_default());
-    let entry = state.journal.publish(topic, payload).await;
+    let payload_vec = match serde_json::to_vec(&req.signal_message) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("signal_message serialize: {e}") }))).into_response(),
+    };
+    let entry = state.journal.publish(topic, bytes::Bytes::from(payload_vec)).await;
 
     Json(SendMessageResp {
         status: "ok",
@@ -222,10 +238,8 @@ pub async fn send_group_message(
             Json(serde_json::json!({ "error": format!("group_id must be 1–{MAX_GROUP_ID_LEN} bytes") })),
         ).into_response();
     }
-    if req.sender_did.is_empty() || req.sender_did.len() > MAX_DID_LEN {
-        return (StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": format!("sender_did must be 1–{MAX_DID_LEN} bytes") })),
-        ).into_response();
+    if let Err((code, msg)) = validate_signal_did(&req.sender_did, "sender_did") {
+        return (code, Json(serde_json::json!({ "error": msg }))).into_response();
     }
     if let Err((code, err_msg)) = require_signal_auth(&headers, &req.sender_did, &state.operator_did) {
         return (code, Json(serde_json::json!({ "error": err_msg }))).into_response();
@@ -242,10 +256,12 @@ pub async fn send_group_message(
     let topic = kotoba_kse::topic::Topic(
         format!("kotoba/signal/group/{}", req.group_id),
     );
-    let payload = bytes::Bytes::from(
-        serde_json::to_vec(&req.sender_key_message).unwrap_or_default(),
-    );
-    let entry = state.journal.publish(topic, payload).await;
+    let payload_vec = match serde_json::to_vec(&req.sender_key_message) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("sender_key_message serialize: {e}") }))).into_response(),
+    };
+    let entry = state.journal.publish(topic, bytes::Bytes::from(payload_vec)).await;
 
     Json(serde_json::json!({
         "status": "ok",
@@ -271,10 +287,8 @@ pub async fn distribute_sender_key(
     headers: HeaderMap,
     Json(req): Json<DistributeSenderKeyReq>,
 ) -> impl IntoResponse {
-    if req.recipient_did.is_empty() || req.recipient_did.len() > MAX_DID_LEN {
-        return (StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": format!("recipient_did must be 1–{MAX_DID_LEN} bytes") })),
-        ).into_response();
+    if let Err((code, msg)) = validate_signal_did(&req.recipient_did, "recipient_did") {
+        return (code, Json(serde_json::json!({ "error": msg }))).into_response();
     }
     if req.recipient_device.is_empty() || req.recipient_device.len() > MAX_DEVICE_ID_LEN {
         return (StatusCode::BAD_REQUEST,
@@ -298,10 +312,12 @@ pub async fn distribute_sender_key(
     let topic = kotoba_kse::topic::Topic(
         format!("kotoba/signal/inbox/{}/{}", req.recipient_did, req.recipient_device),
     );
-    let payload = bytes::Bytes::from(
-        serde_json::to_vec(&req.signal_message).unwrap_or_default(),
-    );
-    let entry = state.journal.publish(topic, payload).await;
+    let payload_vec = match serde_json::to_vec(&req.signal_message) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("signal_message serialize: {e}") }))).into_response(),
+    };
+    let entry = state.journal.publish(topic, bytes::Bytes::from(payload_vec)).await;
 
     Json(serde_json::json!({
         "status": "ok",

@@ -140,7 +140,7 @@ pub async fn run_subscribe_repos(
                             // Persist cursor every CURSOR_PERSIST_INTERVAL commits
                             if let Some(seq) = seq {
                                 let n = commit_count.fetch_add(1, Ordering::Relaxed) + 1;
-                                if n % CURSOR_PERSIST_INTERVAL == 0 {
+                                if n.is_multiple_of(CURSOR_PERSIST_INTERVAL) {
                                     save_cursor(&*block_store, seq);
                                     debug!(seq, "subscribeRepos cursor persisted");
                                 }
@@ -215,7 +215,7 @@ async fn handle_commit(
         None => return None,
     };
 
-    if !did_filter.is_empty() && !did_filter.iter().any(|d| *d == repo) {
+    if !did_filter.is_empty() && !did_filter.contains(&repo) {
         return None;
     }
 

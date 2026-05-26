@@ -87,6 +87,12 @@ pub struct CommitDag {
     heads:   HashMap<String, KotobaCid>, // graph_cid → head commit_cid
 }
 
+impl Default for CommitDag {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CommitDag {
     pub fn new() -> Self {
         Self { commits: HashMap::new(), heads: HashMap::new() }

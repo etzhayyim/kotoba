@@ -40,6 +40,12 @@ impl ShelfBucket {
     pub fn delete(&mut self, key: &str) { self.entries.remove(key); }
 }
 
+impl Default for Shelf {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Shelf {
     pub fn new() -> Self {
         let mut buckets = HashMap::new();
