@@ -824,10 +824,12 @@ async fn mcp_datalog_run_too_many_rules_returns_error() {
         "test-token",
     ).await;
     assert_eq!(status, 200, "{body}");
-    // MCP errors are returned in result.error, not HTTP 4xx
-    let err_code = body["result"]["error"]["code"].as_i64();
+    // kotoba MCP returns JSON-RPC top-level error for invalid params
+    let err_node = if body["error"].is_object() { &body["error"] } else { &body["result"]["error"] };
+    let err_code = err_node["code"].as_i64();
     assert!(err_code.is_some(), "expected MCP error, got: {body}");
-    let err_msg = body["result"]["error"]["message"].as_str().unwrap_or("");
+    assert_eq!(err_code.unwrap(), -32602, "expected ERR_INVALID_PARAMS: {body}");
+    let err_msg = err_node["message"].as_str().unwrap_or("");
     assert!(err_msg.contains("257") || err_msg.contains("256"),
         "error should mention count/limit: {body}");
 }

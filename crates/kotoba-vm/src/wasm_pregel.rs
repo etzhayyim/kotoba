@@ -166,11 +166,21 @@ impl WasmPregelRunner {
                 }
             };
 
-            // Accumulate side effects
+            // Accumulate side effects — cap asserts to avoid unbounded memory across supersteps.
+            // The post-run MCP/XRPC layer enforces the hard limit; we stop accumulating
+            // one over that limit so the caller can detect the overflow and reject.
+            const MAX_ACCUMULATED_QUADS: usize = 10_001;
             state.total_gas_used += invoke.gas_used;
             state.accumulated_quads.extend(invoke.assert_quads.into_iter().map(Into::into));
             state.accumulated_retracts.extend(invoke.retract_quads.into_iter().map(Into::into));
             state.accumulated_publishes.extend(invoke.pending_publishes);
+            // Vote halt immediately if quad budget is exceeded (no point continuing).
+            if state.accumulated_quads.len() >= MAX_ACCUMULATED_QUADS {
+                state.final_output_cbor = br#"{"status":"quota_exceeded"}"#.to_vec();
+                let mut buf = Vec::new();
+                let _ = ciborium::into_writer(&state, &mut buf);
+                return ComputeOutput { new_state: buf, messages: vec![], vote_halt: true };
+            }
 
             // Decide continuation: check for "status": "continue" in output CBOR
             let should_continue = decode_status_continue(&invoke.output_cbor);

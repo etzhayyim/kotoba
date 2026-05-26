@@ -373,6 +373,7 @@ async fn call_tool(
             let graph_cid = KotobaCid::from_bytes(graph.as_bytes());
 
             const MAX_QUERY_RESULTS: usize = 1_000;
+            const MAX_QUERY_FIELD_LEN: usize = 4096;
             let limit = args.get("limit")
                 .and_then(Value::as_u64)
                 .unwrap_or(MAX_QUERY_RESULTS as u64)
@@ -382,6 +383,22 @@ async fn call_tool(
             let predicate        = args.get("predicate").and_then(Value::as_str);
             let object_key       = args.get("object").and_then(Value::as_str);
             let subject_str      = args.get("subject").and_then(Value::as_str);
+
+            // Bound optional filter fields to prevent oversized BTree prefix scans.
+            for (name, val) in [
+                ("graph", Some(graph.as_str())),
+                ("predicate_prefix", predicate_prefix),
+                ("predicate", predicate),
+                ("object", object_key),
+                ("subject", subject_str),
+            ] {
+                if let Some(v) = val {
+                    if v.len() > MAX_QUERY_FIELD_LEN {
+                        return Err((ERR_INVALID_PARAMS,
+                            format!("field '{name}' too large ({} bytes, limit {MAX_QUERY_FIELD_LEN})", v.len())));
+                    }
+                }
+            }
 
             let quads: Vec<_> = if let Some(prefix) = predicate_prefix {
                 // AVET BTree prefix range scan — O(k) where k = matching quads

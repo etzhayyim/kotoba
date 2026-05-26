@@ -836,6 +836,22 @@ pub async fn graph_query(
     let graph_cid = KotobaCid::from_multibase(&req.graph)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid graph CID".into()))?;
 
+    // Bound filter fields — large strings would be hashed to a CID and never match anything,
+    // but we reject early to avoid allocating and scanning unnecessarily.
+    const MAX_FILTER_LEN: usize = 4096;
+    if let Some(s) = &req.subject {
+        if s.len() > MAX_FILTER_LEN {
+            return Err((StatusCode::BAD_REQUEST,
+                format!("subject too long ({} bytes, limit {MAX_FILTER_LEN})", s.len())));
+        }
+    }
+    if let Some(p) = &req.predicate {
+        if p.len() > MAX_FILTER_LEN {
+            return Err((StatusCode::BAD_REQUEST,
+                format!("predicate too long ({} bytes, limit {MAX_FILTER_LEN})", p.len())));
+        }
+    }
+
     // ── Read-access gate ─────────────────────────────────────────────────────
     let visibility = state.graph_visibility(&graph_cid).await;
     check_read_access(&visibility, &headers, req.cacao_b64.as_deref(), Some(state.operator_did.as_str()), None)
