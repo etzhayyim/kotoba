@@ -140,6 +140,31 @@ impl CommitDag {
         Ok(live)
     }
 
+    /// Prune non-HEAD commits with `seq < before_seq` from the in-memory DAG.
+    ///
+    /// HEAD commits (pointed to by `heads`) are always retained regardless of seq,
+    /// because gc_dead_blocks() uses them as GC roots.  Only historical (non-HEAD)
+    /// commits are eligible for removal.
+    ///
+    /// Returns the number of commit entries removed.
+    pub fn prune_non_head(&mut self, before_seq: u64) -> usize {
+        // Collect the set of all current HEAD CID multibase strings.
+        let head_cids: std::collections::HashSet<String> =
+            self.heads.values().map(|c| c.to_multibase()).collect();
+
+        let before = self.commits.len();
+        self.commits.retain(|cid_mb, commit| {
+            // Always keep: HEAD commits and commits at/after before_seq.
+            head_cids.contains(cid_mb) || commit.seq >= before_seq
+        });
+        before - self.commits.len()
+    }
+
+    /// Return the total number of commits stored (HEAD + historical).
+    pub fn commit_count(&self) -> usize {
+        self.commits.len()
+    }
+
     /// Persist the head commit for `graph_cid` to the block store.
     pub fn persist_head(
         &self,
@@ -199,5 +224,60 @@ mod tests {
         let cid = dag.persist_head(&graph, &store).unwrap().unwrap();
         let loaded = Commit::load(&cid, &store).unwrap().unwrap();
         assert_eq!(loaded.graph, graph);
+    }
+
+    #[test]
+    fn prune_non_head_removes_old_non_head_commits() {
+        let graph = KotobaCid::from_bytes(b"g");
+        let mut dag = CommitDag::new();
+
+        // Add 3 commits seq 0, 1, 2; the last one becomes HEAD.
+        for seq in 0u64..3 {
+            let root = KotobaCid::from_bytes(format!("root-{seq}").as_bytes());
+            let c = Commit::seal(graph.clone(), root, None, "did:x".into(), seq, HashMap::new());
+            dag.add(c);
+        }
+        assert_eq!(dag.commit_count(), 3);
+
+        // Prune commits with seq < 2 (non-HEAD); HEAD (seq=2) must survive.
+        let pruned = dag.prune_non_head(2);
+        assert_eq!(pruned, 2, "expected 2 old commits pruned");
+        assert_eq!(dag.commit_count(), 1, "only HEAD should remain");
+
+        // HEAD is still accessible.
+        let head = dag.head(&graph).expect("head must survive pruning");
+        assert_eq!(head.seq, 2);
+    }
+
+    #[test]
+    fn prune_non_head_always_keeps_head_even_below_seq_threshold() {
+        let graph = KotobaCid::from_bytes(b"g2");
+        let root  = KotobaCid::from_bytes(b"r");
+        let mut dag = CommitDag::new();
+        // Only one commit at seq=0; it is HEAD.
+        let c = Commit::seal(graph.clone(), root, None, "did:x".into(), 0, HashMap::new());
+        dag.add(c);
+
+        // Prune with before_seq=100 (higher than HEAD seq); HEAD must still survive.
+        let pruned = dag.prune_non_head(100);
+        assert_eq!(pruned, 0, "HEAD must not be pruned regardless of seq threshold");
+        assert_eq!(dag.commit_count(), 1);
+    }
+
+    #[test]
+    fn prune_non_head_leaves_recent_non_head_commits() {
+        let graph = KotobaCid::from_bytes(b"g3");
+        let mut dag = CommitDag::new();
+        for seq in 0u64..5 {
+            let root = KotobaCid::from_bytes(format!("r{seq}").as_bytes());
+            let c = Commit::seal(graph.clone(), root, None, "did:x".into(), seq, HashMap::new());
+            dag.add(c);
+        }
+        // Prune commits with seq < 3; seq 3 is recent non-HEAD, seq 4 is HEAD.
+        let pruned = dag.prune_non_head(3);
+        // Commits 0, 1, 2 should be gone (seq < 3, non-HEAD).
+        assert_eq!(pruned, 3);
+        // Commits 3 (recent) and 4 (HEAD) survive.
+        assert_eq!(dag.commit_count(), 2);
     }
 }

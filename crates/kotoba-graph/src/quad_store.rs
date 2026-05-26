@@ -605,6 +605,28 @@ impl QuadStore {
         }
         Ok(deleted)
     }
+
+    /// Prune historical (non-HEAD) commit entries from the in-memory CommitDag where
+    /// `commit.seq < before_seq`.  HEAD commits are always preserved.
+    ///
+    /// This bounds CommitDag memory growth in long-running nodes that commit frequently.
+    /// Typically called after `gc_dead_blocks()` so that block GC runs first while all
+    /// historical commits are still visible as GC roots.
+    ///
+    /// Returns the count of commit entries removed.
+    pub async fn prune_old_commits(&self, before_seq: u64) -> usize {
+        let mut dag = self.commit_dag.write().await;
+        let pruned = dag.prune_non_head(before_seq);
+        if pruned > 0 {
+            tracing::info!(pruned, before_seq, "prune_old_commits: removed {pruned} historical commits");
+        }
+        pruned
+    }
+
+    /// Return the number of commits currently held in the in-memory CommitDag.
+    pub async fn commit_dag_size(&self) -> usize {
+        self.commit_dag.read().await.commit_count()
+    }
 }
 
 #[cfg(test)]
@@ -783,5 +805,30 @@ mod tests {
         // Running GC a second time on an already-clean store is idempotent
         let deleted2 = qs.gc_dead_blocks().await.unwrap();
         assert_eq!(deleted2, 0, "second GC pass on clean store removes nothing");
+    }
+
+    #[tokio::test]
+    async fn prune_old_commits_removes_historical_keeps_head() {
+        let journal     = Arc::new(Journal::new());
+        let block_store = Arc::new(MemoryBlockStore::new());
+        let qs = QuadStore::new(Arc::clone(&journal), Arc::clone(&block_store) as _);
+        let graph = KotobaCid::from_bytes(b"prune-graph");
+
+        // Three commits — each bumps committed_seq.
+        for i in 0u64..3 {
+            qs.assert(make_quad("prune-graph", &format!("s{i}"), "p", "v")).await;
+            qs.commit("did:test", graph.clone(), i + 1).await.unwrap();
+        }
+        // After 3 commits the CommitDag holds 3 entries.
+        assert_eq!(qs.commit_dag_size().await, 3);
+
+        // Prune commits where seq < committed_seq (i.e. keep only the HEAD at seq=3).
+        let pruned = qs.prune_old_commits(3).await;
+        assert_eq!(pruned, 2, "two historical commits should be pruned");
+        assert_eq!(qs.commit_dag_size().await, 1, "only HEAD survives");
+
+        // HEAD is still reachable for GC and queries.
+        let dag = qs.commit_dag.read().await;
+        assert!(dag.head(&graph).is_some(), "HEAD must survive prune");
     }
 }

@@ -19,6 +19,7 @@
 ///   kotoba_node_register    — write/refresh node registration Quads
 ///   kotoba_network_peers    — list KDHT neighborhood peers
 ///   kotoba_graph_gc         — mark-sweep GC: delete unreachable blocks from the block store
+///   kotoba_commit_prune     — prune historical non-HEAD commit entries from CommitDag (15)
 
 pub const MCP_TOOL_QUAD_CREATE:   &str = "kotoba_quad_create";
 pub const MCP_TOOL_GRAPH_QUERY:   &str = "kotoba_graph_query";
@@ -34,6 +35,7 @@ pub const MCP_TOOL_NODE_INFO:       &str = "kotoba_node_info";
 pub const MCP_TOOL_NODE_REGISTER:   &str = "kotoba_node_register";
 pub const MCP_TOOL_NETWORK_PEERS:   &str = "kotoba_network_peers";
 pub const MCP_TOOL_GRAPH_GC:        &str = "kotoba_graph_gc";
+pub const MCP_TOOL_COMMIT_PRUNE:    &str = "kotoba_commit_prune";
 
 use std::sync::Arc;
 use axum::{
@@ -273,6 +275,20 @@ fn tools_list() -> Value {
                     "type": "object",
                     "properties": {},
                     "required": []
+                }
+            },
+            {
+                "name": MCP_TOOL_COMMIT_PRUNE,
+                "description": "Prune historical non-HEAD commit entries from the in-memory CommitDag where seq < before_seq. HEAD commits are always preserved. Call after kotoba_graph_gc to free DAG memory. Returns pruned count and remaining dag_size.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "before_seq": {
+                            "type": "integer",
+                            "description": "Remove non-HEAD commits whose seq is strictly less than this value. Use the current committed_seq to discard all history."
+                        }
+                    },
+                    "required": ["before_seq"]
                 }
             }
         ]
@@ -896,6 +912,16 @@ async fn call_tool(
             Ok(json!({ "status": "ok", "deleted_blocks": deleted }))
         }
 
+        // ── kotoba_commit_prune ──────────────────────────────────────────────
+        MCP_TOOL_COMMIT_PRUNE => {
+            let before_seq = args.get("before_seq")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| (ERR_INVALID_PARAMS, "missing required field: before_seq".into()))?;
+            let pruned   = state.quad_store.prune_old_commits(before_seq).await;
+            let dag_size = state.quad_store.commit_dag_size().await;
+            Ok(json!({ "status": "ok", "pruned_commits": pruned, "dag_size": dag_size }))
+        }
+
         other => Err((ERR_NOT_FOUND, format!("unknown tool: {other}"))),
     }
 }
@@ -1005,7 +1031,7 @@ mod tests {
     fn tools_list_contains_all() {
         let list = tools_list();
         let tools = list["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 15);
         let names: Vec<&str> = tools.iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
@@ -1021,6 +1047,7 @@ mod tests {
         assert!(names.contains(&MCP_TOOL_NODE_REGISTER));
         assert!(names.contains(&MCP_TOOL_NETWORK_PEERS));
         assert!(names.contains(&MCP_TOOL_GRAPH_GC));
+        assert!(names.contains(&MCP_TOOL_COMMIT_PRUNE));
     }
 
     #[test]
@@ -1195,5 +1222,29 @@ mod tests {
         let v = call_tool(MCP_TOOL_GRAPH_GC, &json!({}), &state).await.unwrap();
         assert_eq!(v["status"], "ok");
         assert!(v["deleted_blocks"].as_u64().is_some(), "deleted_blocks must be a number");
+    }
+
+    #[tokio::test]
+    async fn commit_prune_returns_ok_with_counts() {
+        let state = Arc::new(
+            crate::server::KotobaState::new(None).expect("state")
+        );
+        // Fresh store — no commits yet; prune with before_seq=0 removes nothing.
+        let v = call_tool(MCP_TOOL_COMMIT_PRUNE, &json!({ "before_seq": 0 }), &state)
+            .await
+            .unwrap();
+        assert_eq!(v["status"], "ok");
+        assert_eq!(v["pruned_commits"].as_u64().unwrap(), 0);
+        assert!(v["dag_size"].as_u64().is_some(), "dag_size must be a number");
+    }
+
+    #[tokio::test]
+    async fn commit_prune_missing_before_seq_errors() {
+        let state = Arc::new(
+            crate::server::KotobaState::new(None).expect("state")
+        );
+        let result = call_tool(MCP_TOOL_COMMIT_PRUNE, &json!({}), &state).await;
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, ERR_INVALID_PARAMS);
     }
 }
