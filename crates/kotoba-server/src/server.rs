@@ -6,7 +6,7 @@ use kotoba_dht::{
     neighborhood::Neighborhood,
     node_id::NodeId,
 };
-use kotoba_kse::{sync_window::SyncWindow, Journal, Shelf, Topic, Vault};
+use kotoba_kse::{sync_window::SyncWindow, Journal, KseStore, Shelf, Topic, Vault};
 use kotoba_kqe::quad::Quad;
 use kotoba_graph::QuadStore;
 use kotoba_kse::SecureVault;
@@ -15,6 +15,7 @@ use kotoba_runtime::{host::InferenceFn, UdfExecutor, WasmExecutor};
 use kotoba_ingest::embed_client::{EmbedClient, HttpEmbedClient};
 use kotoba_vm::{distributed::DistributedPregelRunner, InvokeRouter};
 use kotoba_core::store::BlockStore;
+use kotoba_crypto::AgentCrypto;
 
 /// Shared server state — Arc-wrapped and injected into every axum handler.
 pub struct KotobaState {
@@ -51,10 +52,15 @@ pub struct KotobaState {
     /// Optional IPFS Pinning Service client (Pinata/web3.storage/Filebase).
     pub ipfs_pin: Option<Arc<IpfsPinClient>>,
     // ── Email E2E Storage ────────────────────────────────────────────────────
-    /// AES-256-GCM encrypted vault for email body blobs.
+    /// AES-256-GCM encrypted vault for email body blobs (legacy; kept for compat).
     pub secure_vault: Arc<SecureVault>,
-    /// 32-byte vault key from KOTOBA_VAULT_KEY (hex).  None = email features disabled.
-    pub vault_key: Option<[u8; 32]>,
+    // ── Agent-Sovereign Crypto ───────────────────────────────────────────────
+    /// Opaque crypto engine — encrypts/decrypts without exposing raw key bytes.
+    /// Initialised via `init_crypto()` after construction; starts as `None`.
+    pub crypto: Option<Arc<dyn AgentCrypto>>,
+    // ── KSE Key-Ref Store ────────────────────────────────────────────────────
+    /// KseStore for agent key-ref pointer persistence (backed by LocalFileSystem or B2).
+    pub kse_store: Option<KseStore>,
     // ── Agent Sessions ───────────────────────────────────────────────────────
     /// Active SyncWindow sessions keyed by session_id.
     pub agent_sessions: Arc<tokio::sync::RwLock<HashMap<String, SyncWindow>>>,
@@ -156,21 +162,17 @@ impl KotobaState {
             SecureVault::new()
         });
 
-        // Vault key — 32 bytes from KOTOBA_VAULT_KEY (64 hex chars)
-        let vault_key: Option<[u8; 32]> = std::env::var("KOTOBA_VAULT_KEY").ok().and_then(|s| {
-            let b = hex::decode(s.trim()).ok()?;
-            if b.len() != 32 {
-                tracing::warn!("KOTOBA_VAULT_KEY must be 64 hex chars (32 bytes); email features disabled");
-                return None;
-            }
-            let mut k = [0u8; 32];
-            k.copy_from_slice(&b);
-            tracing::info!("KOTOBA_VAULT_KEY loaded — email E2E encryption enabled");
-            Some(k)
+        // KseStore — for agent key-ref pointer storage; backed by LocalFileSystem if
+        // KOTOBA_STORE_PATH is set, otherwise None (crypto will be ephemeral).
+        let kse_store: Option<KseStore> = store_path.as_ref().and_then(|path| {
+            let dir = std::path::Path::new(path.as_str()).parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            std::fs::create_dir_all(&dir).ok()?;
+            let fs = object_store::local::LocalFileSystem::new_with_prefix(&dir).ok()?;
+            tracing::info!(?dir, "KseStore: LocalFileSystem key-ref store enabled");
+            Some(KseStore::new(Arc::new(fs), "kse/"))
         });
-        if vault_key.is_none() {
-            tracing::info!("KOTOBA_VAULT_KEY not set — email features disabled");
-        }
 
         // CC embed client — optional; enables vector search over Common Crawl data
         let cc_embed_client: Option<Arc<dyn EmbedClient>> =
@@ -196,10 +198,42 @@ impl KotobaState {
             quad_store,
             ipfs_pin,
             secure_vault,
-            vault_key,
+            crypto:          None,
+            kse_store,
             agent_sessions:  Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             cc_embed_client,
         })
+    }
+
+    /// Initialise the agent-sovereign crypto engine.
+    ///
+    /// Must be called once from the async context (e.g. `main.rs`) after
+    /// `KotobaState::new()`. Loads or generates the vault key via HPKE.
+    pub async fn init_crypto(mut self) -> anyhow::Result<Self> {
+        use kotoba_kse::{AgentIdentity, SovereignCrypto};
+
+        let identity = AgentIdentity::from_env();
+        tracing::info!(did = %identity.did, ephemeral = identity.ephemeral, "agent identity initialised");
+
+        // Build a temporary in-memory KseStore if no persistent one is available
+        let sc: SovereignCrypto = if let Some(ref ks) = self.kse_store {
+            SovereignCrypto::load_or_genesis(&identity, ks, &self.block_store).await?
+        } else {
+            // No persistent KseStore — generate ephemeral key in a temp KseStore
+            let fs = object_store::memory::InMemory::new();
+            let tmp_ks = KseStore::new(Arc::new(fs), "kse/");
+            SovereignCrypto::load_or_genesis(&identity, &tmp_ks, &self.block_store).await?
+        };
+
+        self.crypto = Some(Arc::new(sc));
+        tracing::info!("agent-sovereign crypto initialised");
+        Ok(self)
+    }
+
+    /// Returns a reference to the crypto engine, or errors if not initialised.
+    pub fn crypto_required(&self) -> anyhow::Result<Arc<dyn AgentCrypto>> {
+        self.crypto.clone()
+            .ok_or_else(|| anyhow::anyhow!("crypto not initialised — call init_crypto() first"))
     }
 
     /// Replay Journal WAL into the in-memory QuadStore Arrangement.

@@ -74,7 +74,7 @@ impl AgentIdentity {
                     arr
                 };
                 let signing_key = SigningKey::from_bytes(&seed);
-                let dh_secret   = StaticSecret::from(Zeroizing::new(dh_bytes));
+                let dh_secret   = StaticSecret::from(dh_bytes);
 
                 tracing::info!(did = %did, "AgentIdentity loaded from env");
                 Self { signing_key, dh_secret, did, ephemeral: false }

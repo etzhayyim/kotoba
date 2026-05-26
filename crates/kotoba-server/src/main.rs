@@ -65,6 +65,9 @@ async fn main() -> anyhow::Result<()> {
     // ── 2. KotobaState ────────────────────────────────────────────────────────
     let state = KotobaState::new(inference_engine)?;
 
+    // ── 2a. Agent-sovereign crypto — load or generate vault key ──────────────
+    let state = state.init_crypto().await?;
+
     tracing::info!(
         version  = state.version,
         node_id  = %hex::encode(state.local_node_id.0),
@@ -163,15 +166,18 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // ── 5. Gmail polling loop (optional) ─────────────────────────────────────
-    if let Some(vault_key) = state.vault_key {
-        if std::env::var("KOTOBA_GMAIL_CLIENT_ID").is_ok() {
+    if std::env::var("KOTOBA_GMAIL_CLIENT_ID").is_ok() {
+        if let Some(ref crypto) = state.crypto {
             tracing::info!("Gmail poll loop enabled");
-            let sv = Arc::clone(&state.secure_vault);
+            let cr = Arc::clone(crypto);
+            let vt = Arc::clone(&state.vault);
             let qs = Arc::clone(&state.quad_store);
-            tokio::spawn(kotoba_ingest::gmail_poll_loop(vault_key, sv, qs));
+            tokio::spawn(kotoba_ingest::gmail_poll_loop(cr, vt, qs));
         } else {
-            tracing::info!("Gmail poll loop disabled (set KOTOBA_GMAIL_CLIENT_ID to enable)");
+            tracing::warn!("Gmail poll loop skipped — crypto not initialised");
         }
+    } else {
+        tracing::info!("Gmail poll loop disabled (set KOTOBA_GMAIL_CLIENT_ID to enable)");
     }
 
     // ── 6. Jetstream AT Protocol firehose (optional) ──────────────────────────

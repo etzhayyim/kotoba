@@ -467,8 +467,8 @@ async fn call_tool(
             entries.sort_by(|a, b| b.1.cmp(&a.1));
             let total = entries.len();
 
-            let vault_key = state.vault_key;
-            let emails: Vec<Value> = entries.into_iter().skip(offset).take(limit).map(|(cid_mb, date)| {
+            let mut emails: Vec<Value> = Vec::new();
+            for (cid_mb, date) in entries.into_iter().skip(offset).take(limit) {
                 let get_text = |pred: &str| -> String {
                     if let Some(cid) = kotoba_core::cid::KotobaCid::from_multibase(&cid_mb) {
                         arrangement.get_objects(&cid, pred)
@@ -481,17 +481,18 @@ async fn call_tool(
                 let subject_enc = get_text("email/subject");
                 let from_enc    = get_text("email/from");
 
-                let subject = vault_key.as_ref()
-                    .and_then(|k| kotoba_crypto::envelope::decrypt_field(k, &subject_enc).ok())
-                    .and_then(|b| String::from_utf8(b).ok())
-                    .unwrap_or(subject_enc);
-                let from = vault_key.as_ref()
-                    .and_then(|k| kotoba_crypto::envelope::decrypt_field(k, &from_enc).ok())
-                    .and_then(|b| String::from_utf8(b).ok())
-                    .unwrap_or(from_enc);
+                let (subject, from) = if let Some(ref crypto) = state.crypto {
+                    let s = crypto.open_field(b"email/subject", &subject_enc).await
+                        .unwrap_or_else(|_| subject_enc.clone());
+                    let f = crypto.open_field(b"email/from", &from_enc).await
+                        .unwrap_or_else(|_| from_enc.clone());
+                    (s, f)
+                } else {
+                    (subject_enc, from_enc)
+                };
 
-                json!({ "cid": cid_mb, "date": date, "message_id": message_id, "subject": subject, "from": from })
-            }).collect();
+                emails.push(json!({ "cid": cid_mb, "date": date, "message_id": message_id, "subject": subject, "from": from }));
+            }
 
             Ok(json!({ "emails": emails, "total": total, "offset": offset, "limit": limit }))
         }
@@ -504,8 +505,8 @@ async fn call_tool(
             let email_cid_str = get_str("email_cid")?;
             let owner_did     = get_str("owner_did")?;
 
-            let vault_key = state.vault_key.ok_or_else(|| {
-                (ERR_INTERNAL, "vault_key not configured (set KOTOBA_VAULT_KEY)".to_string())
+            let crypto = state.crypto.as_ref().ok_or_else(|| {
+                (ERR_INTERNAL, "crypto not initialised".to_string())
             })?;
 
             let graph_cid = graph_cid_for(&owner_did);
@@ -522,34 +523,36 @@ async fn call_tool(
                     .unwrap_or_default()
             };
 
-            // body_cid → SecureVault decrypt
+            // body_cid → Vault decrypt via AgentCrypto
             let body_cid_str = get_text("email/body_cid");
             if body_cid_str.is_empty() {
                 return Err((ERR_NOT_FOUND, "email/body_cid not found".to_string()));
             }
             let blob_cid = kotoba_core::cid::KotobaCid::from_multibase(&body_cid_str)
                 .ok_or_else(|| (ERR_INTERNAL, "invalid body_cid multibase".to_string()))?;
-            let blob_ref  = kotoba_kse::BlobRef { cid: blob_cid, size: 0, mime_type: None, chunked: false };
-            let body_bytes = state.secure_vault.get(&vault_key, &blob_ref).await
-                .map_err(|e| (ERR_INTERNAL, format!("vault decrypt: {e}")))?
+            let enc_bytes = state.vault.get(&blob_cid).await
                 .ok_or_else(|| (ERR_NOT_FOUND, "body blob not found in vault".to_string()))?;
-            let body = String::from_utf8_lossy(&body_bytes).into_owned();
+            let body_pt = crypto.decrypt_blob(&enc_bytes).await
+                .map_err(|e| (ERR_INTERNAL, format!("decrypt body: {e}")))?;
+            let body = String::from_utf8_lossy(&body_pt).into_owned();
 
-            let dec = |pred: &str| -> String {
-                let enc = get_text(pred);
-                kotoba_crypto::envelope::decrypt_field(&vault_key, &enc)
-                    .ok().and_then(|b| String::from_utf8(b).ok()).unwrap_or(enc)
+            let open_f = |scope: &'static [u8], enc: String| {
+                let cr = Arc::clone(crypto);
+                async move {
+                    if enc.starts_with("signal:v1:") {
+                        cr.open_field(scope, &enc).await.unwrap_or(enc)
+                    } else { enc }
+                }
             };
-            let plain = |pred: &str| -> String { get_text(pred) };
 
             Ok(json!({
                 "email_cid":  email_cid_str,
-                "message_id": plain("email/message_id"),
-                "from":       dec("email/from"),
-                "to":         dec("email/to"),
-                "subject":    dec("email/subject"),
-                "date":       plain("email/date"),
-                "thread_id":  plain("email/thread_id"),
+                "message_id": get_text("email/message_id"),
+                "from":       open_f(b"email/from",    get_text("email/from")).await,
+                "to":         open_f(b"email/to",      get_text("email/to")).await,
+                "subject":    open_f(b"email/subject", get_text("email/subject")).await,
+                "date":       get_text("email/date"),
+                "thread_id":  get_text("email/thread_id"),
                 "body":       body,
             }))
         }

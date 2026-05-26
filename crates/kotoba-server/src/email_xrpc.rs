@@ -17,7 +17,6 @@ use serde_json::{json, Value};
 use kotoba_core::cid::KotobaCid;
 use kotoba_kqe::quad::QuadObject;
 use kotoba_ingest::{graph_cid_for, EmailIngestor};
-use kotoba_crypto::envelope::decrypt_field;
 
 use crate::server::KotobaState;
 
@@ -83,9 +82,10 @@ pub async fn email_read(
     State(state): State<Arc<KotobaState>>,
     Query(q): Query<EmailReadQuery>,
 ) -> impl IntoResponse {
-    let Some(vault_key) = state.vault_key else {
-        return (StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "error": "vault_key not configured (set KOTOBA_VAULT_KEY)" }))).into_response();
+    let crypto = match &state.crypto {
+        Some(c) => Arc::clone(c),
+        None => return (StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "crypto not initialised" }))).into_response(),
     };
 
     let graph_cid = graph_cid_for(&q.owner_did);
@@ -97,7 +97,7 @@ pub async fn email_read(
 
     let email_cid = KotobaCid::from_bytes(q.email_cid.as_bytes());
 
-    // Fetch body_cid → SecureVault decrypt
+    // Fetch body_cid → Vault decrypt via AgentCrypto
     let body_text = {
         let blob_cid_str = arrangement
             .get_objects(&email_cid, "email/body_cid")
@@ -113,23 +113,27 @@ pub async fn email_read(
                     None => return (StatusCode::INTERNAL_SERVER_ERROR,
                         Json(json!({ "error": "invalid body_cid multibase" }))).into_response(),
                 };
-                // SecureVault requires BlobRef; reconstruct from CID
-                let blob_ref = kotoba_kse::BlobRef { cid: blob_cid, size: 0, mime_type: None, chunked: false };
-                match state.secure_vault.get(&vault_key, &blob_ref).await {
-                    Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": format!("vault decrypt: {e}") }))).into_response(),
-                    Ok(None) => return (StatusCode::NOT_FOUND,
+                let enc_bytes = match state.vault.get(&blob_cid).await {
+                    Some(b) => b,
+                    None => return (StatusCode::NOT_FOUND,
                         Json(json!({ "error": "body blob not found in vault" }))).into_response(),
-                    Ok(Some(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
+                };
+                match crypto.decrypt_blob(&enc_bytes).await {
+                    Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": format!("decrypt body: {e}") }))).into_response(),
+                    Ok(pt) => String::from_utf8_lossy(&pt).into_owned(),
                 }
             }
         }
     };
 
-    // Decrypt PII fields
-    let from = decrypt_text_field(&arrangement, &email_cid, "email/from", &vault_key);
-    let to   = decrypt_text_field(&arrangement, &email_cid, "email/to",   &vault_key);
-    let subj = decrypt_text_field(&arrangement, &email_cid, "email/subject", &vault_key);
+    // Decrypt PII fields using AgentCrypto::open_field
+    let from = open_field_safe(&*crypto, b"email/from",
+        &get_text_field(&arrangement, &email_cid, "email/from")).await;
+    let to   = open_field_safe(&*crypto, b"email/to",
+        &get_text_field(&arrangement, &email_cid, "email/to")).await;
+    let subj = open_field_safe(&*crypto, b"email/subject",
+        &get_text_field(&arrangement, &email_cid, "email/subject")).await;
     let date = get_text_field(&arrangement, &email_cid, "email/date");
     let thread_id  = get_text_field(&arrangement, &email_cid, "email/thread_id");
     let message_id = get_text_field(&arrangement, &email_cid, "email/message_id");
@@ -166,9 +170,10 @@ pub async fn email_ingest(
     State(state): State<Arc<KotobaState>>,
     Json(body): Json<EmailIngestBody>,
 ) -> impl IntoResponse {
-    let Some(vault_key) = state.vault_key else {
-        return (StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "error": "vault_key not configured" }))).into_response();
+    let crypto = match &state.crypto {
+        Some(c) => Arc::clone(c),
+        None => return (StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "crypto not initialised" }))).into_response(),
     };
 
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
@@ -179,9 +184,9 @@ pub async fn email_ingest(
     };
 
     let ingestor = EmailIngestor::new(
-        Arc::clone(&state.secure_vault),
+        crypto,
+        Arc::clone(&state.vault),
         Arc::clone(&state.quad_store),
-        vault_key,
         body.owner_did,
     );
 
@@ -209,16 +214,18 @@ fn get_text_field(
         .unwrap_or_default()
 }
 
-fn decrypt_text_field(
-    arr:       &kotoba_kqe::arrangement::Arrangement,
-    subject:   &KotobaCid,
-    predicate: &str,
-    key:       &[u8; 32],
+/// Open a `signal:v1:` envelope using AgentCrypto; returns ciphertext on failure
+/// (same fallback as the old decrypt_text_field).
+async fn open_field_safe(
+    crypto:   &dyn kotoba_crypto::AgentCrypto,
+    scope:    &[u8],
+    envelope: &str,
 ) -> String {
-    let enc = get_text_field(arr, subject, predicate);
-    if enc.is_empty() { return enc; }
-    decrypt_field(key, &enc)
-        .ok()
-        .and_then(|b| String::from_utf8(b).ok())
-        .unwrap_or_else(|| enc)  // return ciphertext if decrypt fails (wrong key)
+    if envelope.is_empty() { return envelope.to_string(); }
+    if !envelope.starts_with("signal:v1:") {
+        // Plain-text legacy value — return as-is
+        return envelope.to_string();
+    }
+    crypto.open_field(scope, envelope).await
+        .unwrap_or_else(|_| envelope.to_string()) // return ciphertext if decrypt fails
 }

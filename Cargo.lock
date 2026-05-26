@@ -4325,7 +4325,6 @@ dependencies = [
  "anyhow",
  "criterion",
  "kotoba-core",
- "kotoba-kse",
  "serde",
  "sqlparser",
  "thiserror 1.0.69",
@@ -4338,13 +4337,18 @@ name = "kotoba-kse"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "blake3",
  "bytes",
  "ciborium",
+ "ed25519-dalek",
+ "hex",
  "kotoba-core",
  "kotoba-crypto",
  "kotoba-store",
  "object_store",
  "rand 0.8.6",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -4352,6 +4356,8 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

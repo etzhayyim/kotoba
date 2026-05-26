@@ -9,8 +9,9 @@ pub use ingest::{EmailIngestor, graph_cid_for};
 
 use std::sync::Arc;
 use std::time::Duration;
-use kotoba_kse::SecureVault;
+use kotoba_kse::Vault;
 use kotoba_graph::QuadStore;
+use kotoba_crypto::AgentCrypto;
 
 /// Long-running polling loop.  Call from a `tokio::spawn`.
 ///
@@ -20,9 +21,9 @@ use kotoba_graph::QuadStore;
 ///   KOTOBA_GMAIL_POLL_INTERVAL_SECS (default: 60)
 ///   KOTOBA_GMAIL_HISTORY_ID         (optional seed; otherwise fetched from profile)
 pub async fn gmail_poll_loop(
-    vault_key:    [u8; 32],
-    secure_vault: Arc<SecureVault>,
-    quad_store:   Arc<QuadStore>,
+    crypto:    Arc<dyn AgentCrypto>,
+    vault:     Arc<Vault>,
+    quad_store: Arc<QuadStore>,
 ) {
     let owner_did = std::env::var("KOTOBA_GMAIL_OWNER_DID")
         .unwrap_or_else(|_| "did:plc:unknown".to_string());
@@ -63,9 +64,9 @@ pub async fn gmail_poll_loop(
     };
 
     let ingestor = EmailIngestor::new(
-        secure_vault,
+        crypto,
+        vault,
         quad_store,
-        vault_key,
         owner_did.clone(),
     );
 
