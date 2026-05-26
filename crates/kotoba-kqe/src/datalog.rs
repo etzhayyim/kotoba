@@ -1,9 +1,9 @@
-/// Datalog rule layer — semi-naive bottom-up evaluation (Phase 4)
-/// Monotone semantics: facts only grow via Delta(+1), shrink via Delta(-1)
-/// Stratified negation: PTIME complete, halting guaranteed
-///
-/// Atom arity is fixed at 2 (binary relations) — Quad enforces (S, P, O).
-/// Ground identifiers are hashed to KotobaCid via `cid_of_str`.
+//! Datalog rule layer — semi-naive bottom-up evaluation (Phase 4)
+//! Monotone semantics: facts only grow via Delta(+1), shrink via Delta(-1)
+//! Stratified negation: PTIME complete, halting guaranteed
+//!
+//! Atom arity is fixed at 2 (binary relations) — Quad enforces (S, P, O).
+//! Ground identifiers are hashed to KotobaCid via `cid_of_str`.
 
 /// Maximum fixpoint iterations before aborting (guards against very deep
 /// transitive-closure chains that would otherwise run for O(N) rounds).
@@ -313,7 +313,7 @@ impl DatalogProgram {
                 if let Some((gs, go)) = self.ground_atom_as_pair(atom, &binding) {
                     let present = fact_base
                         .get(&atom.relation)
-                        .map_or(false, |s| s.contains(&(gs, go)));
+                        .is_some_and(|s| s.contains(&(gs, go)));
                     if !present {
                         self.match_body(
                             rule, body, idx + 1, binding,
