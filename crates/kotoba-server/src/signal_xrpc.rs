@@ -27,10 +27,25 @@ const MAX_DID_LEN:       usize = 512;
 const MAX_DEVICE_ID_LEN: usize = 128;
 const MAX_GROUP_ID_LEN:  usize = 128;
 const MAX_PAYLOAD_BYTES: usize = 256 * 1024; // 256 KiB per encrypted message
+const MAX_BUNDLE_BYTES:  usize = 64 * 1024;  // 64 KiB per prekey bundle / identity key
 
 /// Thin wrapper — delegates to the shared validator in `graph_auth`.
 fn validate_signal_did(did: &str, field: &str) -> Result<(), (StatusCode, String)> {
     crate::graph_auth::validate_did(did, field, MAX_DID_LEN)
+}
+
+/// Validates a value used as a path component in storage keys or topic names.
+/// Allows only `[A-Za-z0-9._-]` to prevent path-traversal / key-namespace pollution.
+fn validate_path_component(value: &str, field: &str, max_len: usize) -> Result<(), (StatusCode, String)> {
+    if value.is_empty() || value.len() > max_len {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("{field} must be 1–{max_len} bytes")));
+    }
+    if !value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("{field} must contain only [A-Za-z0-9._-]")));
+    }
+    Ok(())
 }
 
 /// Verify caller owns `did` via Bearer JWT `sub` claim.
@@ -91,16 +106,21 @@ pub async fn register_prekeys(
     Json(req): Json<RegisterPrekeysReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     validate_signal_did(&req.did, "did")?;
-    if req.device_id.is_empty() || req.device_id.len() > MAX_DEVICE_ID_LEN {
-        return Err((StatusCode::BAD_REQUEST,
-            format!("device_id must be 1–{MAX_DEVICE_ID_LEN} bytes")));
-    }
+    validate_path_component(&req.device_id, "device_id", MAX_DEVICE_ID_LEN)?;
     require_signal_auth(&headers, &req.did, &state.operator_did)?;
 
     let bundle_bytes = serde_json::to_vec(&req.prekey_bundle)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("prekey_bundle serialize: {e}")))?;
+    if bundle_bytes.len() > MAX_BUNDLE_BYTES {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE,
+            format!("prekey_bundle exceeds {MAX_BUNDLE_BYTES} bytes")));
+    }
     let ik_bytes = serde_json::to_vec(&req.identity_key)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("identity_key serialize: {e}")))?;
+    if ik_bytes.len() > MAX_BUNDLE_BYTES {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE,
+            format!("identity_key exceeds {MAX_BUNDLE_BYTES} bytes")));
+    }
 
     let key = format!("signal/bundle/{}/{}", req.did, req.device_id);
     state.shelf.put("KOTOBA_SIGNAL", key, bytes::Bytes::from(bundle_bytes)).await;
@@ -124,6 +144,7 @@ pub async fn get_prekey_bundle(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     validate_signal_did(&q.did, "did")?;
     let device_id = q.device_id.as_deref().unwrap_or("default");
+    validate_path_component(device_id, "device_id", MAX_DEVICE_ID_LEN)?;
     let bundle_key = format!("signal/bundle/{}/{}", q.did, device_id);
     let ik_key     = format!("signal/identity/{}/{}", q.did, device_id);
 
@@ -224,10 +245,8 @@ pub async fn send_group_message(
     headers: HeaderMap,
     Json(req): Json<SendGroupMessageReq>,
 ) -> impl IntoResponse {
-    if req.group_id.is_empty() || req.group_id.len() > MAX_GROUP_ID_LEN {
-        return (StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": format!("group_id must be 1–{MAX_GROUP_ID_LEN} bytes") })),
-        ).into_response();
+    if let Err((code, msg)) = validate_path_component(&req.group_id, "group_id", MAX_GROUP_ID_LEN) {
+        return (code, Json(serde_json::json!({ "error": msg }))).into_response();
     }
     if let Err((code, msg)) = validate_signal_did(&req.sender_did, "sender_did") {
         return (code, Json(serde_json::json!({ "error": msg }))).into_response();
@@ -281,10 +300,8 @@ pub async fn distribute_sender_key(
     if let Err((code, msg)) = validate_signal_did(&req.recipient_did, "recipient_did") {
         return (code, Json(serde_json::json!({ "error": msg }))).into_response();
     }
-    if req.recipient_device.is_empty() || req.recipient_device.len() > MAX_DEVICE_ID_LEN {
-        return (StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": format!("recipient_device must be 1–{MAX_DEVICE_ID_LEN} bytes") })),
-        ).into_response();
+    if let Err((code, msg)) = validate_path_component(&req.recipient_device, "recipient_device", MAX_DEVICE_ID_LEN) {
+        return (code, Json(serde_json::json!({ "error": msg }))).into_response();
     }
     let raw_len = serde_json::to_vec(&req.signal_message)
         .map(|v| v.len())
@@ -356,5 +373,60 @@ mod tests {
         for nsid in SIGNAL_NSIDS {
             assert!(seen.insert(*nsid), "duplicate NSID: {nsid}");
         }
+    }
+
+    // ── validate_path_component ───────────────────────────────────────────────
+
+    #[test]
+    fn path_component_accepts_valid_ids() {
+        assert!(validate_path_component("device-1", "device_id", 128).is_ok());
+        assert!(validate_path_component("abc.def_GHI-123", "device_id", 128).is_ok());
+        assert!(validate_path_component("default", "device_id", 128).is_ok());
+        assert!(validate_path_component("group-ABC_01.v2", "group_id", 128).is_ok());
+    }
+
+    #[test]
+    fn path_component_rejects_empty() {
+        let err = validate_path_component("", "device_id", 128).unwrap_err();
+        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("1–128"));
+    }
+
+    #[test]
+    fn path_component_rejects_too_long() {
+        let long = "a".repeat(129);
+        let err = validate_path_component(&long, "device_id", 128).unwrap_err();
+        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("1–128"));
+    }
+
+    #[test]
+    fn path_component_rejects_slash() {
+        let err = validate_path_component("foo/bar", "device_id", 128).unwrap_err();
+        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("[A-Za-z0-9._-]"));
+    }
+
+    #[test]
+    fn path_component_rejects_dotdot_traversal() {
+        // `..` contains only dots and would pass a naive charset check; verify combined path
+        // injection like `../../other` is caught at the slash.
+        let err = validate_path_component("../../etc/passwd", "device_id", 128).unwrap_err();
+        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("[A-Za-z0-9._-]"));
+    }
+
+    #[test]
+    fn path_component_rejects_space_and_special_chars() {
+        for bad in &["hello world", "id@host", "id#1", "id\x00null"] {
+            let err = validate_path_component(bad, "device_id", 128).unwrap_err();
+            assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn bundle_bytes_cap_constant_is_smaller_than_payload_cap() {
+        assert!(MAX_BUNDLE_BYTES < MAX_PAYLOAD_BYTES,
+            "bundle cap should be tighter than general payload cap");
     }
 }

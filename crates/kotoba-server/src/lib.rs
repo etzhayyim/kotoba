@@ -301,7 +301,8 @@ pub fn build_router(state: Arc<KotobaState>) -> Router {
         // ── Signal Protocol E2E (ai.gftd.signal.*) ─────────────────────────
         .route(
             &format!("/xrpc/{}", signal_xrpc::NSID_SIGNAL_REGISTER_PREKEYS),
-            post(signal_xrpc::register_prekeys),
+            // 256 KiB: two 64 KiB bundles + DID/device_id fields + JSON framing
+            post(signal_xrpc::register_prekeys).layer(DefaultBodyLimit::max(256 * 1024)),
         )
         .route(
             &format!("/xrpc/{}", signal_xrpc::NSID_SIGNAL_GET_PREKEY_BUNDLE),
