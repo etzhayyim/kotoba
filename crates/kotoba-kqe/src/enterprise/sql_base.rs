@@ -318,9 +318,9 @@ fn apply_join_on(
             let r_is_pk = r_sch.is_entity_col(&rc);
 
             let r_is_fk = r_sch.attr(&rc)
-                .map_or(false, |a| a.kind == AttrKind::Entity);
+                .is_some_and(|a| a.kind == AttrKind::Entity);
             let l_is_fk = l_sch.attr(&lc)
-                .map_or(false, |a| a.kind == AttrKind::Entity);
+                .is_some_and(|a| a.kind == AttrKind::Entity);
 
             match (l_is_pk, r_is_fk, r_is_pk, l_is_fk) {
                 // left.pk = right.fk  → `right/fk(E_r, E_l)`

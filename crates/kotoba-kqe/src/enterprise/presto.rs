@@ -99,17 +99,15 @@ fn preprocess_presto(sql: &str) -> String {
         }
     }
 
-    // UNNEST(col) WITH ORDINALITY → col
+    // UNNEST(col) WITH ORDINALITY → col (first occurrence only)
     let upper = s.to_uppercase();
-    while let Some(idx) = upper.find("UNNEST(") {
+    if let Some(idx) = upper.find("UNNEST(") {
         if let Some(end) = find_paren(&s, idx + 6) {
             let inner = s[idx + 7..end].to_string();
-            // Also strip trailing " WITH ORDINALITY"
             let after = &s[end + 1..];
             let trim_extra = if after.to_uppercase().starts_with(" WITH ORDINALITY") { 16 } else { 0 };
             s.replace_range(idx..end + 1 + trim_extra, &inner);
-        } else { break; }
-        break; // reprocess in next iteration if needed
+        }
     }
 
     // TRY(expr) → expr

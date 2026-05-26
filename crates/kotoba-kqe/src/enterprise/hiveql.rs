@@ -87,12 +87,11 @@ fn preprocess_hiveql(sql: &str) -> (String, HiveExtra) {
         }
     }
 
-    // LATERAL VIEW EXPLODE(col) t AS item → strip
+    // LATERAL VIEW EXPLODE(col) t AS item → strip (first occurrence)
     let upper = s.to_uppercase();
-    while let Some(idx) = upper.find("LATERAL VIEW ") {
+    if let Some(idx) = upper.find("LATERAL VIEW ") {
         let end = s[idx..].find('\n').map(|i| idx + i).unwrap_or(s.len());
         s.replace_range(idx..end, "");
-        break;
     }
 
     // DISTRIBUTE BY col → strip

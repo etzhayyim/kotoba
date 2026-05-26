@@ -109,7 +109,7 @@ impl ProllyTree {
     ///   1. Sort entries by key.
     ///   2. Split into Leaf chunks at probabilistic boundaries
     ///      (`is_boundary` fires ~1/256 of the time with BOUNDARY_MASK=0xFF,
-    ///       giving chunks of ~256 entries on average).
+    ///      giving chunks of ~256 entries on average).
     ///   3. Persist each Leaf; collect (max_key, leaf_cid) pairs.
     ///   4. If >1 leaf, recursively build Internal levels until a single root
     ///      remains — each level applies the same boundary split to child keys.

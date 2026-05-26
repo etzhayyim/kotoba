@@ -176,7 +176,7 @@ fn preprocess_oracle(sql: &str) -> String {
     let upper = s.to_uppercase();
     if let Some(idx) = upper.find("ROWNUM") {
         // Remove the entire "AND ROWNUM <= N" or "WHERE ROWNUM <= N" fragment
-        let clause_start = s[..idx].rfind(|c: char| c == 'W' || c == 'A')
+        let clause_start = s[..idx].rfind(['W', 'A'])
             .unwrap_or(idx);
         s.replace_range(clause_start..idx + 20.min(s.len() - idx), "");
     }

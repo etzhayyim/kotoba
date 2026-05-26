@@ -421,7 +421,7 @@ impl VarMap {
 // ── Lexer helpers ─────────────────────────────────────────────────────────────
 
 fn skip_whitespace(chars: &mut std::iter::Peekable<std::str::Chars>) {
-    while chars.peek().map_or(false, |c| c.is_whitespace()) {
+    while chars.peek().is_some_and(|c| c.is_whitespace()) {
         chars.next();
     }
 }
@@ -436,7 +436,7 @@ fn expect_char(chars: &mut std::iter::Peekable<std::str::Chars>, expected: char)
 
 fn read_identifier(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
     let mut s = String::new();
-    while chars.peek().map_or(false, |c| c.is_alphanumeric() || *c == '_') {
+    while chars.peek().is_some_and(|c| c.is_alphanumeric() || *c == '_') {
         s.push(chars.next().unwrap());
     }
     s
@@ -445,7 +445,7 @@ fn read_identifier(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
 /// Read a relation type — allow alphanumeric, `_`, and `-` (e.g. KNOWS, HAS-TYPE).
 fn read_relation_type(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
     let mut s = String::new();
-    while chars.peek().map_or(false, |c| c.is_alphanumeric() || *c == '_' || *c == '-') {
+    while chars.peek().is_some_and(|c| c.is_alphanumeric() || *c == '_' || *c == '-') {
         s.push(chars.next().unwrap());
     }
     s

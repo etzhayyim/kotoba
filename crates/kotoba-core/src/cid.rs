@@ -34,8 +34,8 @@ impl<'de> Deserialize<'de> for KotobaCid {
             }
             fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<KotobaCid, A::Error> {
                 let mut arr = [0u8; 36];
-                for i in 0..36 {
-                    arr[i] = seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
+                for (i, slot) in arr.iter_mut().enumerate() {
+                    *slot = seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
                 }
                 Ok(KotobaCid(arr))
             }
