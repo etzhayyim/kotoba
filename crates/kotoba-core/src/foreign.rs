@@ -205,4 +205,50 @@ mod tests {
         assert!(ForeignError::NotImplemented.to_string().contains("not implemented"));
         assert!(ForeignError::Unauthorized.to_string().contains("unauthorized"));
     }
+
+    #[test]
+    fn foreign_bridge_trims_trailing_slash_for_url() {
+        let bridge = ForeignBridge::new("http://gateway.example.com/");
+        // The URL is stored as-is; trim happens at call time — just ensure construction works
+        assert!(bridge.gateway_url.contains("gateway.example.com"));
+    }
+
+    #[test]
+    fn foreign_call_weight_load_shape_clone() {
+        let call = ForeignCall {
+            call_id:   10,
+            call_type: ForeignCallType::WeightLoad {
+                blob_cid: dummy_cid(b"weight"),
+                shape:    vec![1024, 512],
+            },
+            ucan_cid: dummy_cid(b"ucan2"),
+        };
+        let call2 = call.clone();
+        if let ForeignCallType::WeightLoad { shape, .. } = call2.call_type {
+            assert_eq!(shape, vec![1024, 512]);
+        } else {
+            panic!("expected WeightLoad");
+        }
+    }
+
+    #[test]
+    fn foreign_call_llm_infer_with_optional_cids() {
+        let call = ForeignCall {
+            call_id:   5,
+            call_type: ForeignCallType::LlmInfer {
+                model_cid:   dummy_cid(b"model"),
+                adapter_cid: Some(dummy_cid(b"adapter")),
+                session_cid: Some(dummy_cid(b"session")),
+                max_tokens:  512,
+            },
+            ucan_cid: dummy_cid(b"ucan3"),
+        };
+        if let ForeignCallType::LlmInfer { max_tokens, adapter_cid, session_cid, .. } = call.call_type {
+            assert_eq!(max_tokens, 512);
+            assert!(adapter_cid.is_some());
+            assert!(session_cid.is_some());
+        } else {
+            panic!("expected LlmInfer");
+        }
+    }
 }

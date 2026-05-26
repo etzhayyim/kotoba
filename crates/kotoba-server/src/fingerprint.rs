@@ -200,4 +200,57 @@ mod tests {
         let quads   = build_request_quads(graph, subject, "GET", "/health", "deadbeef", 42, None);
         assert_eq!(quads.len(), 4);
     }
+
+    #[test]
+    fn request_cid_differs_by_method() {
+        let node = [1u8; 32];
+        let c1 = request_cid("GET",  "/xrpc/foo", 1000, &node);
+        let c2 = request_cid("POST", "/xrpc/foo", 1000, &node);
+        assert_ne!(c1.0, c2.0, "CID should differ when method changes");
+    }
+
+    #[test]
+    fn request_cid_differs_by_timestamp() {
+        let node = [2u8; 32];
+        let c1 = request_cid("GET", "/xrpc/foo", 1000, &node);
+        let c2 = request_cid("GET", "/xrpc/foo", 1001, &node);
+        assert_ne!(c1.0, c2.0, "CID should differ when timestamp changes");
+    }
+
+    #[test]
+    fn request_cid_differs_by_node_id() {
+        let node_a = [0u8; 32];
+        let node_b = [1u8; 32];
+        let c1 = request_cid("GET", "/xrpc/foo", 1000, &node_a);
+        let c2 = request_cid("GET", "/xrpc/foo", 1000, &node_b);
+        assert_ne!(c1.0, c2.0, "CID should differ when node_id changes");
+    }
+
+    #[test]
+    fn request_cid_is_deterministic() {
+        let node = [0xABu8; 32];
+        let c1 = request_cid("PUT", "/mcp", 9999, &node);
+        let c2 = request_cid("PUT", "/mcp", 9999, &node);
+        assert_eq!(c1.0, c2.0, "same inputs must produce same CID");
+    }
+
+    #[test]
+    fn build_quads_have_expected_predicates() {
+        let graph   = audit_graph_cid();
+        let subject = KotobaCid::from_bytes(b"pred-test");
+        let quads   = build_request_quads(graph, subject, "DELETE", "/path", "ff00", 100, Some("10.0.0.1"));
+
+        let predicates: Vec<&str> = quads.iter().map(|q| q.predicate.as_str()).collect();
+        assert!(predicates.contains(&"request/method"),  "should have request/method quad");
+        assert!(predicates.contains(&"request/path"),    "should have request/path quad");
+        assert!(predicates.contains(&"request/node_id"), "should have request/node_id quad");
+        assert!(predicates.contains(&"request/ts_unix"), "should have request/ts_unix quad");
+        assert!(predicates.contains(&"request/peer_ip"), "should have request/peer_ip quad when IP provided");
+    }
+
+    #[test]
+    fn max_audit_constants_values() {
+        assert_eq!(MAX_AUDIT_IP_LEN, 64);
+        assert_eq!(MAX_AUDIT_PATH_LEN, 512);
+    }
 }

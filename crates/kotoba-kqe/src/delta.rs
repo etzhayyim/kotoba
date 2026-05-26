@@ -94,4 +94,37 @@ mod tests {
         assert!(!d.is_assert());
         assert_eq!(d.mult, Multiplicity::Retract);
     }
+
+    #[test]
+    fn delta_preserves_quad_predicate() {
+        let d = Delta::assert(make_quad());
+        assert_eq!(d.quad.predicate, "test/pred");
+    }
+
+    #[test]
+    fn delta_preserves_quad_object_text() {
+        let d = Delta::assert(make_quad());
+        if let crate::quad::QuadObject::Text(ref s) = d.quad.object {
+            assert_eq!(s, "value");
+        } else {
+            panic!("expected Text object");
+        }
+    }
+
+    #[test]
+    fn assert_and_retract_ts_monotonic() {
+        let d1 = Delta::assert(make_quad());
+        let d2 = Delta::retract(make_quad());
+        // Timestamps should be >= 0 and d2.ts >= d1.ts
+        assert!(d1.ts > 0);
+        assert!(d2.ts >= d1.ts, "retract timestamp should be >= assert timestamp");
+    }
+
+    #[test]
+    fn multiplicity_debug_format() {
+        let s = format!("{:?}", Multiplicity::Assert);
+        assert!(s.contains("Assert"), "Debug for Assert should contain 'Assert'");
+        let s2 = format!("{:?}", Multiplicity::Retract);
+        assert!(s2.contains("Retract"), "Debug for Retract should contain 'Retract'");
+    }
 }

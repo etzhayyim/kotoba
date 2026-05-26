@@ -596,4 +596,144 @@ mod tests {
 
         assert_eq!(cid1, cid2, "checkpoint CID must be deterministic regardless of insertion order");
     }
+
+    #[test]
+    fn test_default_equals_new() {
+        let g1 = PregelGraph::new();
+        let g2 = PregelGraph::default();
+        assert_eq!(g1.vertex_count(), g2.vertex_count());
+        assert_eq!(g1.current_superstep(), g2.current_superstep());
+    }
+
+    #[test]
+    fn test_empty_graph_superstep_all_halted() {
+        let mut graph = PregelGraph::new();
+        let compute: ComputeFn = Box::new(|_, _| ComputeOutput {
+            new_state: vec![], messages: vec![], vote_halt: true,
+        });
+        let r = graph.superstep(&compute);
+        assert!(r.all_halted, "empty graph with no pending messages should be all_halted");
+        assert_eq!(r.active_count, 0);
+        assert_eq!(r.msg_delivered, 0);
+    }
+
+    #[test]
+    fn test_vertex_count_after_add_and_auto_create() {
+        let mut graph = PregelGraph::new();
+        graph.add_vertex(VertexId::from("a"), Vec::new());
+        graph.add_vertex(VertexId::from("b"), Vec::new());
+        assert_eq!(graph.vertex_count(), 2);
+
+        // inject a message to a non-existent vertex; it should be auto-created in superstep
+        graph.inject_message(make_msg("src", "c", b"hi"));
+        let compute: ComputeFn = Box::new(|_, _| ComputeOutput {
+            new_state: b"ok".to_vec(), messages: vec![], vote_halt: true,
+        });
+        graph.superstep(&compute);
+        assert_eq!(graph.vertex_count(), 3, "auto-created vertex c should be counted");
+    }
+
+    #[test]
+    fn test_run_max_zero_returns_empty() {
+        let mut graph = PregelGraph::new();
+        graph.add_vertex(VertexId::from("v"), Vec::new());
+        graph.inject_message(make_msg("s", "v", b"go"));
+        let compute: ComputeFn = Box::new(|_, _| ComputeOutput {
+            new_state: vec![], messages: vec![], vote_halt: true,
+        });
+        let results = graph.run(&compute, 0);
+        assert!(results.is_empty(), "run(max=0) should return no results");
+    }
+
+    #[test]
+    fn test_checkpoint_chained_prev_none_differs_from_some() {
+        use kotoba_store::MemoryBlockStore;
+
+        let mut graph = PregelGraph::new();
+        graph.add_vertex(VertexId::from("x"), b"state".to_vec());
+
+        let s1 = MemoryBlockStore::new();
+        let s2 = MemoryBlockStore::new();
+
+        let cid_no_prev = graph.checkpoint_chained(&s1, None).unwrap();
+
+        // Chain with a fake prev CID
+        let prev = kotoba_core::cid::KotobaCid::from_bytes(b"prev-checkpoint");
+        let cid_with_prev = graph.checkpoint_chained(&s2, Some(&prev)).unwrap();
+
+        assert_ne!(
+            cid_no_prev, cid_with_prev,
+            "chained CID with prev must differ from no-prev"
+        );
+    }
+
+    #[test]
+    fn test_graph_from_deltas_creates_vertices_and_messages() {
+        use kotoba_kqe::delta::Delta;
+        use kotoba_kqe::quad::{Quad, QuadObject};
+        use kotoba_core::cid::KotobaCid;
+
+        let subj_a = KotobaCid::from_bytes(b"subject-a");
+        let subj_b = KotobaCid::from_bytes(b"subject-b");
+        let graph_cid = KotobaCid::from_bytes(b"graph");
+
+        let deltas = vec![
+            Delta::assert(Quad {
+                graph: graph_cid.clone(),
+                subject: subj_a.clone(),
+                predicate: "pred/one".to_string(),
+                object: QuadObject::Text("val1".to_string()),
+            }),
+            Delta::assert(Quad {
+                graph: graph_cid.clone(),
+                subject: subj_b.clone(),
+                predicate: "pred/two".to_string(),
+                object: QuadObject::Text("val2".to_string()),
+            }),
+            // Second delta for subj_a — should NOT add a second vertex
+            Delta::assert(Quad {
+                graph: graph_cid.clone(),
+                subject: subj_a.clone(),
+                predicate: "pred/three".to_string(),
+                object: QuadObject::Text("val3".to_string()),
+            }),
+        ];
+
+        let g = graph_from_deltas(&deltas);
+        // Unique subjects: subj_a and subj_b → 2 vertices
+        assert_eq!(g.vertex_count(), 2, "should create one vertex per unique subject");
+    }
+
+    #[test]
+    fn test_vertex_id_from_str_parses() {
+        let vid: VertexId = "hello".into();
+        let vid2 = VertexId::from("hello");
+        assert_eq!(vid, vid2);
+    }
+
+    #[test]
+    fn test_superstep_result_fields_populated() {
+        let mut graph = PregelGraph::new();
+        graph.add_vertex(VertexId::from("v"), Vec::new());
+        graph.inject_message(make_msg("s", "v", b"x"));
+
+        let compute: ComputeFn = Box::new(|v, _inbox| {
+            let out_msg = Message {
+                src: v.id.clone(),
+                dst: VertexId::from("w"),
+                payload: b"reply".to_vec(),
+            };
+            ComputeOutput {
+                new_state: b"done".to_vec(),
+                messages: vec![out_msg],
+                vote_halt: true,
+            }
+        });
+
+        let r = graph.superstep(&compute);
+        assert_eq!(r.superstep, 0);
+        assert_eq!(r.active_count, 1);
+        assert_eq!(r.msg_sent, 1);
+        assert_eq!(r.msg_delivered, 1);
+    }
 }

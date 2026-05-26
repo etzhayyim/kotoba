@@ -583,4 +583,66 @@ mod tests {
         let b = attest_graph_cid();
         assert_eq!(a.0, b.0);
     }
+
+    #[test]
+    fn audit_graph_cid_is_stable() {
+        let a = audit_graph_cid();
+        let b = audit_graph_cid();
+        assert_eq!(a.0, b.0);
+    }
+
+    #[test]
+    fn attest_and_audit_graph_cids_differ() {
+        let attest = attest_graph_cid();
+        let audit  = audit_graph_cid();
+        assert_ne!(attest.0, audit.0, "attestation and audit graphs must have different CIDs");
+    }
+
+    #[test]
+    fn quad_object_text_returns_text_clone() {
+        let obj = QuadObject::Text("hello world".to_string());
+        assert_eq!(quad_object_text(&obj), "hello world");
+    }
+
+    #[test]
+    fn quad_object_text_returns_cid_multibase() {
+        let cid = KotobaCid::from_bytes(b"test-cid-seed");
+        let obj = QuadObject::Cid(cid.clone());
+        let result = quad_object_text(&obj);
+        assert_eq!(result, cid.to_multibase());
+        assert!(!result.is_empty(), "multibase should be non-empty");
+    }
+
+    #[test]
+    fn quad_object_text_returns_empty_for_integer() {
+        let obj = QuadObject::Integer(42);
+        assert_eq!(quad_object_text(&obj), "", "Integer variant should yield empty string");
+    }
+
+    #[test]
+    fn max_constants_values() {
+        assert_eq!(MAX_ATTEST_DID_LEN, 512);
+        assert_eq!(MAX_ATTEST_CLAIM_TYPE, 64);
+        assert_eq!(MAX_ATTEST_EVIDENCE_LEN, 2_048);
+        assert_eq!(MAX_ATTEST_REASON_LEN, 4_096);
+        assert_eq!(MAX_ATTEST_CID_LEN, 256);
+    }
+
+    #[test]
+    fn verified_entity_stake_exceeds_self_attested() {
+        assert!(MIN_STAKE_VERIFIED_ENTITY > MIN_STAKE_SELF_ATTESTED,
+            "verified_entity stake threshold must be higher than self-attested");
+    }
+
+    #[test]
+    fn nsids_are_distinct() {
+        let nsids = [
+            NSID_ATTEST_CLAIM,
+            NSID_ATTEST_CHALLENGE,
+            NSID_ATTEST_QUERY,
+            NSID_REQUEST_LOG,
+        ];
+        let unique: std::collections::HashSet<&&str> = nsids.iter().collect();
+        assert_eq!(unique.len(), nsids.len(), "all NSIDs must be distinct");
+    }
 }

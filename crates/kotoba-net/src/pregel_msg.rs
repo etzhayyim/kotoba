@@ -54,4 +54,54 @@ mod tests {
         assert!(json.contains("\"dst\""));
         assert!(json.contains("\"payload_b64\""));
     }
+
+    #[test]
+    fn empty_src_and_dst_roundtrip() {
+        let msg = PregelNetMessage {
+            src:         "".to_string(),
+            dst:         "".to_string(),
+            payload_b64: "".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: PregelNetMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.src, "");
+        assert_eq!(back.dst, "");
+        assert_eq!(back.payload_b64, "");
+    }
+
+    #[test]
+    fn large_payload_b64_roundtrip() {
+        // 1 KB of 'A' characters as payload_b64
+        let big = "A".repeat(1024);
+        let msg = PregelNetMessage {
+            src:         "bsrcbig".to_string(),
+            dst:         "bdstbig".to_string(),
+            payload_b64: big.clone(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: PregelNetMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.payload_b64, big);
+    }
+
+    #[test]
+    fn deserialize_from_handcrafted_json() {
+        let json = r#"{"src":"bsrc1","dst":"bdst1","payload_b64":"dGVzdA=="}"#;
+        let msg: PregelNetMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.src, "bsrc1");
+        assert_eq!(msg.dst, "bdst1");
+        assert_eq!(msg.payload_b64, "dGVzdA==");
+    }
+
+    #[test]
+    fn clone_produces_equal_message() {
+        let msg = PregelNetMessage {
+            src:         "bclone".to_string(),
+            dst:         "bdst".to_string(),
+            payload_b64: "cGF5bG9hZA==".to_string(),
+        };
+        let cloned = msg.clone();
+        assert_eq!(cloned.src, msg.src);
+        assert_eq!(cloned.dst, msg.dst);
+        assert_eq!(cloned.payload_b64, msg.payload_b64);
+    }
 }

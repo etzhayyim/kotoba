@@ -107,4 +107,41 @@ mod tests {
         assert_eq!(classify("kotoba://graph/unknown-custom"), GraphVisibility::Authenticated);
         assert_eq!(classify("some-arbitrary-string"), GraphVisibility::Authenticated);
     }
+
+    #[test]
+    fn private_graphs_for_different_dids_have_different_cids() {
+        let g1 = NamedGraph::private_for("did:key:zA");
+        let g2 = NamedGraph::private_for("did:key:zB");
+        assert_ne!(g1.cid, g2.cid, "different DIDs should produce different CIDs");
+    }
+
+    #[test]
+    fn new_graph_cid_matches_name_hash() {
+        let name = "kotoba://graph/custom";
+        let g = NamedGraph::new(name, GraphVisibility::Public);
+        let expected = KotobaCid::from_bytes(name.as_bytes());
+        // We can only assert stability since CID is blake3 of name
+        let g2 = NamedGraph::new(name, GraphVisibility::Public);
+        assert_eq!(g.cid, g2.cid, "same name should produce same CID");
+        assert_eq!(g.cid, expected);
+    }
+
+    #[test]
+    fn graph_visibility_equality() {
+        assert_eq!(GraphVisibility::Public, GraphVisibility::Public);
+        assert_eq!(GraphVisibility::Authenticated, GraphVisibility::Authenticated);
+        assert_eq!(
+            GraphVisibility::Private { owner_did: "did:key:zX".to_string() },
+            GraphVisibility::Private { owner_did: "did:key:zX".to_string() }
+        );
+        assert_ne!(
+            GraphVisibility::Private { owner_did: "did:key:zA".to_string() },
+            GraphVisibility::Private { owner_did: "did:key:zB".to_string() }
+        );
+    }
+
+    #[test]
+    fn classify_empty_string_defaults_to_authenticated() {
+        assert_eq!(classify(""), GraphVisibility::Authenticated);
+    }
 }

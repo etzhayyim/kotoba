@@ -136,4 +136,37 @@ mod tests {
         let b = AgentIdentity::generate_ephemeral();
         assert_ne!(a.did, b.did);
     }
+
+    #[test]
+    fn verifying_key_matches_signing_key() {
+        let id = AgentIdentity::generate_ephemeral();
+        let vk = id.verifying_key();
+        // The verifying key derived from signing_key must equal verifying_key()
+        let expected = VerifyingKey::from(&id.signing_key);
+        assert_eq!(vk.as_bytes(), expected.as_bytes());
+    }
+
+    #[test]
+    fn did_slug_is_stable_across_calls() {
+        let id = AgentIdentity::generate_ephemeral();
+        let slug1 = id.did_slug();
+        let slug2 = id.did_slug();
+        assert_eq!(slug1, slug2, "did_slug must be deterministic");
+    }
+
+    #[test]
+    fn from_env_with_no_vars_is_ephemeral() {
+        // Ensure env vars are not set (unset them for this test)
+        std::env::remove_var("KOTOBA_AGENT_ED25519_HEX");
+        std::env::remove_var("KOTOBA_AGENT_X25519_HEX");
+        std::env::remove_var("KOTOBA_AGENT_DID");
+        let id = AgentIdentity::from_env();
+        assert!(id.ephemeral, "from_env with no vars should be ephemeral");
+    }
+
+    #[test]
+    fn ephemeral_did_starts_with_did_key() {
+        let id = AgentIdentity::generate_ephemeral();
+        assert!(id.did.starts_with("did:key:z"), "ephemeral DID should start with did:key:z");
+    }
 }

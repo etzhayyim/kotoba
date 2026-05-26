@@ -140,4 +140,55 @@ mod tests {
         let extracted = doc.x25519_public_key().expect("should extract");
         assert_eq!(extracted, key);
     }
+
+    #[test]
+    fn default_equals_new() {
+        let r1 = InMemoryDidResolver::new();
+        let r2 = InMemoryDidResolver::default();
+        // Both should fail to resolve an unknown DID
+        assert!(r1.resolve("did:key:zUnknown").is_err());
+        assert!(r2.resolve("did:key:zUnknown").is_err());
+    }
+
+    #[test]
+    fn insert_overwrites_existing_did() {
+        let resolver = InMemoryDidResolver::new();
+        let did = "did:key:zOverwrite";
+        let key1 = [1u8; 32];
+        let key2 = [2u8; 32];
+
+        resolver.insert(did, make_doc_with_x25519(did, key1));
+        resolver.insert(did, make_doc_with_x25519(did, key2));
+
+        // Second insert should overwrite the first
+        let got = resolver.x25519_key(did).unwrap();
+        assert_eq!(got, key2, "second insert should overwrite first");
+    }
+
+    #[test]
+    fn multiple_dids_resolved_independently() {
+        let resolver = InMemoryDidResolver::new();
+        let dids = ["did:key:zA", "did:key:zB", "did:key:zC"];
+        let keys = [[10u8; 32], [20u8; 32], [30u8; 32]];
+
+        for (did, key) in dids.iter().zip(keys.iter()) {
+            resolver.insert(*did, make_doc_with_x25519(did, *key));
+        }
+
+        for (did, expected_key) in dids.iter().zip(keys.iter()) {
+            let got = resolver.x25519_key(did).unwrap();
+            assert_eq!(&got, expected_key);
+        }
+    }
+
+    #[test]
+    fn error_display_messages() {
+        let e1 = DidResolverError::NotFound("did:key:zFoo".to_string());
+        assert!(e1.to_string().contains("DID not found"));
+        assert!(e1.to_string().contains("did:key:zFoo"));
+
+        let e2 = DidResolverError::NoX25519Key("did:key:zBar".to_string());
+        assert!(e2.to_string().contains("X25519"));
+        assert!(e2.to_string().contains("did:key:zBar"));
+    }
 }
