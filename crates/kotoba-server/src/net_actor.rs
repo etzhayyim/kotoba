@@ -105,14 +105,20 @@ pub async fn run(
                                 serde_json::from_slice::<kotoba_net::PregelNetMessage>(&data)
                             {
                                 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
-                                let payload = B64.decode(&pnet.payload_b64).unwrap_or_default();
-                                pregel_inbound_tx
-                                    .try_send(DistributedMessage {
-                                        src: pnet.src,
-                                        dst: pnet.dst,
-                                        payload,
-                                    })
-                                    .ok();
+                                match B64.decode(&pnet.payload_b64) {
+                                    Ok(payload) => {
+                                        pregel_inbound_tx
+                                            .try_send(DistributedMessage {
+                                                src: pnet.src,
+                                                dst: pnet.dst,
+                                                payload,
+                                            })
+                                            .ok();
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(src = %pnet.src, err = %e, "pregel gossip: bad base64 payload — skipped");
+                                    }
+                                }
                             }
                         } else {
                             let kse_name = topic
