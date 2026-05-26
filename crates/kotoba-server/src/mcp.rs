@@ -614,6 +614,8 @@ async fn call_tool(
             use kotoba_kqe::quad::QuadObject;
 
             let owner_did = get_str("owner_did")?;
+            crate::graph_auth::validate_did(&owner_did, "owner_did", 512)
+                .map_err(|(_, msg)| (ERR_INVALID_PARAMS, msg))?;
             let limit  = args.get("limit").and_then(Value::as_u64).unwrap_or(50).min(200) as usize;
             let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
 
@@ -673,6 +675,8 @@ async fn call_tool(
 
             let email_cid_str = get_str("email_cid")?;
             let owner_did     = get_str("owner_did")?;
+            crate::graph_auth::validate_did(&owner_did, "owner_did", 512)
+                .map_err(|(_, msg)| (ERR_INVALID_PARAMS, msg))?;
 
             let crypto = state.crypto.as_ref().ok_or_else(|| {
                 (ERR_INTERNAL, "crypto not initialised".to_string())
@@ -733,6 +737,8 @@ async fn call_tool(
 
             let wasm_b64     = get_str("wasm_b64")?;
             let agent_did    = get_str("agent_did")?;
+            crate::graph_auth::validate_did(&agent_did, "agent_did", 512)
+                .map_err(|(_, msg)| (ERR_INVALID_PARAMS, msg))?;
             let ctx_b64      = get_str("ctx_cbor_b64")?;
             const MAX_SUPERSTEPS: u64 = 256;
             const MAX_WASM_B64_LEN: usize = 50 * 1024 * 1024;

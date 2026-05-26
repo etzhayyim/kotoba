@@ -64,8 +64,8 @@ async fn cross_node_message_arrives_at_remote_vertex() {
     let (in2_tx, _out2_rx, mut runner2) = DistributedPregelRunner::channel_pair(64);
 
     // node1 owns vertex-A, node2 owns vertex-B
-    let vid_a = VertexId::from_str("vertex-A");
-    let vid_b = VertexId::from_str("vertex-B");
+    let vid_a = VertexId::from("vertex-A");
+    let vid_b = VertexId::from("vertex-B");
 
     runner1.add_local_vertex(vid_a.clone(), Vec::new());
     runner2.add_local_vertex(vid_b.clone(), Vec::new());
@@ -95,7 +95,7 @@ async fn cross_node_message_arrives_at_remote_vertex() {
     });
 
     runner1.graph.inject_message(Message {
-        src:     VertexId::from_str("seed"),
+        src:     VertexId::from("seed"),
         dst:     vid_a.clone(),
         payload: b"go".to_vec(),
     });
@@ -170,8 +170,8 @@ async fn cross_node_bidirectional_exchange() {
     let (in1_tx, out1_rx, mut runner1) = DistributedPregelRunner::channel_pair(64);
     let (in2_tx, out2_rx, mut runner2) = DistributedPregelRunner::channel_pair(64);
 
-    let vid_a = VertexId::from_str("ping-A");
-    let vid_b = VertexId::from_str("pong-B");
+    let vid_a = VertexId::from("ping-A");
+    let vid_b = VertexId::from("pong-B");
 
     runner1.add_local_vertex(vid_a.clone(), Vec::new());
     runner2.add_local_vertex(vid_b.clone(), Vec::new());
@@ -187,7 +187,7 @@ async fn cross_node_bidirectional_exchange() {
 
     // Seed node1 with an initial message (counter=0)
     runner1.graph.inject_message(Message {
-        src:     VertexId::from_str("tester"),
+        src:     VertexId::from("tester"),
         dst:     vid_a.clone(),
         payload: vec![0],
     });
@@ -241,13 +241,13 @@ async fn cross_node_bidirectional_exchange() {
 async fn outbound_message_to_unknown_dst_is_forwarded() {
     let (_in_tx, mut out_rx, mut runner) = DistributedPregelRunner::channel_pair(16);
 
-    let local_vid  = VertexId::from_str("local-only");
-    let remote_vid = VertexId::from_str("somewhere-else");
+    let local_vid  = VertexId::from("local-only");
+    let remote_vid = VertexId::from("somewhere-else");
 
     runner.add_local_vertex(local_vid.clone(), Vec::new());
 
     runner.graph.inject_message(Message {
-        src:     VertexId::from_str("seed"),
+        src:     VertexId::from("seed"),
         dst:     local_vid.clone(),
         payload: b"activate".to_vec(),
     });
