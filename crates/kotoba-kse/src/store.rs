@@ -37,6 +37,11 @@ impl KseStore {
         self.inner.head(&self.path(key)).await.is_ok()
     }
 
+    /// Delete the object at `{prefix}{key}`.
+    pub async fn delete_key(&self, key: &str) -> object_store::Result<()> {
+        self.inner.delete(&self.path(key)).await
+    }
+
     /// List all keys under `{prefix}{sub_prefix}`, returning them relative to `self.prefix`.
     ///
     /// E.g. with `self.prefix = "journal/"` and `sub_prefix = "seq/"`, returns strings like

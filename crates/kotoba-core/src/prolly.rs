@@ -178,6 +178,52 @@ impl ProllyTree {
         }
     }
 
+    /// Return all `(key, value)` pairs whose key starts with `prefix`.
+    ///
+    /// Because the ProllyTree is lexicographically sorted, all matching entries
+    /// are contiguous. Traversal skips subtrees whose max_key precedes `prefix`
+    /// and stops as soon as a subtree's entries no longer start with `prefix`.
+    ///
+    /// Cost: O(log N + M) block loads, where M = number of matching leaf entries.
+    pub fn scan_prefix(
+        root:   &KotobaCid,
+        prefix: &[u8],
+        store:  &dyn BlockStore,
+    ) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let Some(node) = Self::load_node(root, store)? else {
+            return Ok(vec![]);
+        };
+        match node {
+            ProllyNode::Leaf { entries, .. } => {
+                Ok(entries.into_iter()
+                    .filter(|(k, _)| k.starts_with(prefix))
+                    .collect())
+            }
+            ProllyNode::Internal { children, .. } => {
+                let mut result = Vec::new();
+                let mut found_any = false;
+                for (max_key, child_cid) in children {
+                    // Skip subtrees entirely before our prefix range.
+                    if max_key.as_slice() < prefix {
+                        continue;
+                    }
+                    let batch = Self::scan_prefix(&child_cid, prefix, store)?;
+                    if batch.is_empty() {
+                        // If we've already found matches, the first empty batch
+                        // means we've passed the prefix range — stop.
+                        if found_any {
+                            break;
+                        }
+                    } else {
+                        found_any = true;
+                        result.extend(batch);
+                    }
+                }
+                Ok(result)
+            }
+        }
+    }
+
     fn build_internal_level(
         children: Vec<(Vec<u8>, KotobaCid)>,
         store:    &dyn BlockStore,
@@ -346,5 +392,59 @@ mod tests {
         let root = tree.flush(&store).unwrap();
         assert!(root.is_none());
         assert_eq!(store.block_count(), 0);
+    }
+
+    // ── scan_prefix ──────────────────────────────────────────────────────────
+
+    /// scan_prefix returns all entries whose key starts with the given prefix.
+    #[test]
+    fn scan_prefix_returns_matching_entries() {
+        let store = MemoryBlockStore::new();
+        // Keys: "alice:name", "alice:knows", "bob:name", "charlie:name"
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = vec![
+            (b"alice:knows".to_vec(), b"bob".to_vec()),
+            (b"alice:name".to_vec(),  b"Alice".to_vec()),
+            (b"bob:name".to_vec(),    b"Bob".to_vec()),
+            (b"charlie:name".to_vec(), b"Charlie".to_vec()),
+        ];
+        let root = ProllyTree::build_tree(entries, &store).unwrap();
+
+        let matches = ProllyTree::scan_prefix(&root, b"alice:", &store).unwrap();
+        assert_eq!(matches.len(), 2, "expected 2 entries for alice prefix");
+        let keys: std::collections::HashSet<Vec<u8>> =
+            matches.iter().map(|(k, _)| k.clone()).collect();
+        assert!(keys.contains(b"alice:knows".as_ref() as &[u8]),
+            "alice:knows must be found");
+        assert!(keys.contains(b"alice:name".as_ref() as &[u8]),
+            "alice:name must be found");
+    }
+
+    /// scan_prefix with no matching entries returns empty vec.
+    #[test]
+    fn scan_prefix_empty_result_for_absent_prefix() {
+        let store = MemoryBlockStore::new();
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = (0u64..100)
+            .map(|i| (format!("x{i:04}").into_bytes(), b"v".to_vec()))
+            .collect();
+        let root = ProllyTree::build_tree(entries, &store).unwrap();
+        let matches = ProllyTree::scan_prefix(&root, b"zzz", &store).unwrap();
+        assert!(matches.is_empty(), "no entries should match absent prefix");
+    }
+
+    /// scan_prefix on a larger tree (1K entries) terminates and finds correct entries.
+    #[test]
+    fn scan_prefix_larger_tree() {
+        let store = MemoryBlockStore::new();
+        // prefix "b" entries: "b000".."b049" (50 entries) interleaved with "a*" and "c*"
+        let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        for i in 0u32..500 { entries.push((format!("a{i:04}").into_bytes(), b"va".to_vec())); }
+        for i in 0u32..50  { entries.push((format!("b{i:04}").into_bytes(), b"vb".to_vec())); }
+        for i in 0u32..450 { entries.push((format!("c{i:04}").into_bytes(), b"vc".to_vec())); }
+        entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+        let root = ProllyTree::build_tree(entries, &store).unwrap();
+
+        let matches = ProllyTree::scan_prefix(&root, b"b", &store).unwrap();
+        assert_eq!(matches.len(), 50, "expected 50 'b' entries");
+        assert!(matches.iter().all(|(k, _)| k.starts_with(b"b")));
     }
 }

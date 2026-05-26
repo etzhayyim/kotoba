@@ -12,6 +12,7 @@ use kotoba_graph::QuadStore;
 use kotoba_kse::SecureVault;
 use kotoba_store::{BudgetedBlockStore, IpfsPinClient, LayeredBlockStore};
 use kotoba_runtime::{host::InferenceFn, UdfExecutor, WasmExecutor};
+use kotoba_ingest::embed_client::{EmbedClient, HttpEmbedClient};
 use kotoba_vm::{distributed::DistributedPregelRunner, InvokeRouter};
 use kotoba_core::store::BlockStore;
 
@@ -57,6 +58,9 @@ pub struct KotobaState {
     // ── Agent Sessions ───────────────────────────────────────────────────────
     /// Active SyncWindow sessions keyed by session_id.
     pub agent_sessions: Arc<tokio::sync::RwLock<HashMap<String, SyncWindow>>>,
+    // ── CC Vector Search ─────────────────────────────────────────────────────
+    /// Optional embed client for CC vector search (KOTOBA_EMBED_URL).
+    pub cc_embed_client: Option<Arc<dyn EmbedClient>>,
 }
 
 impl KotobaState {
@@ -211,6 +215,13 @@ impl KotobaState {
             tracing::info!("KOTOBA_VAULT_KEY not set — email features disabled");
         }
 
+        // CC embed client — optional; enables vector search over Common Crawl data
+        let cc_embed_client: Option<Arc<dyn EmbedClient>> =
+            HttpEmbedClient::from_env().ok().map(|c| Arc::new(c) as Arc<dyn EmbedClient>);
+        if cc_embed_client.is_some() {
+            tracing::info!("CC embed client enabled (KOTOBA_EMBED_URL)");
+        }
+
         Ok(Self {
             version: env!("CARGO_PKG_VERSION"),
             journal,
@@ -229,7 +240,8 @@ impl KotobaState {
             ipfs_pin,
             secure_vault,
             vault_key,
-            agent_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            agent_sessions:  Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            cc_embed_client,
         })
     }
 

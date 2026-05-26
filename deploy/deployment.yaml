@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kotoba
+  namespace: kotoba
+  labels:
+    app: kotoba
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: kotoba
+  template:
+    metadata:
+      labels:
+        app: kotoba
+    spec:
+      # Pull secret for ghcr.io/gftdcojp
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+
+      containers:
+        - name: kotoba
+          image: ghcr.io/gftdcojp/kotoba:latest
+          imagePullPolicy: Always
+
+          envFrom:
+            - configMapRef:
+                name: kotoba-config
+
+          # Vault key injected from Secret (never put in ConfigMap)
+          env:
+            - name: KOTOBA_VAULT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kotoba-secrets
+                  key: vault-key
+                  optional: true
+
+          ports:
+            - name: xrpc
+              containerPort: 8080
+              protocol: TCP
+            - name: quic
+              containerPort: 4001
+              protocol: UDP
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: xrpc
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: xrpc
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+
+          volumeMounts:
+            - name: sled-data
+              mountPath: /data/sled
+
+      volumes:
+        - name: sled-data
+          persistentVolumeClaim:
+            claimName: kotoba-sled

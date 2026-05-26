@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kotoba-config
+  namespace: kotoba
+data:
+  KOTOBA_PORT: "8080"
+  RUST_LOG: "info"
+  # Set to disable libp2p swarm (single-node mode)
+  # KOTOBA_NO_SWARM: "1"
+
+  # HTTP inference endpoint (OpenAI-compat: Ollama / vLLM / Vultr A16)
+  # KOTOBA_INFERENCE_URL: "http://keiei-llm-pool:11434/v1/chat/completions"
+  # KOTOBA_INFERENCE_MODEL: "gemma4:e4b"
+
+  # CC embedding endpoint
+  # KOTOBA_EMBED_URL: "http://keiei-llm-pool:11434/v1/embeddings"
+  # KOTOBA_EMBED_MODEL: "nomic-embed-text"
+  # KOTOBA_EMBED_DIM: "768"
+  # KOTOBA_EMBED_BATCH: "64"
+
+  # Sled block store LRU budget (bytes)
+  KOTOBA_STORAGE_BUDGET_BYTES: "4294967296"   # 4 GiB
+
+  # libp2p QUIC listen port (0 = ephemeral)
+  # KOTOBA_P2P_PORT: "4001"
+
+  # AT Protocol firehose ingest
+  # KOTOBA_JETSTREAM: "1"
+  # KOTOBA_SUBSCRIBE_REPOS: "1"
+
+  # IPFS Pinning Service (PSA-compatible: Pinata / web3.storage / Filebase)
+  # Set these to make kotoba publish CIDs to IPFS on every kotobase.pin.create.
+  # B2 cold-storage is kotobase CF Worker's responsibility (ADR-2605260001).
+  # To run kotoba with IPFS-only (no B2): remove KOTOBA_B2_* from kotoba-secrets,
+  # and set these vars.  The PVC (Sled) provides local durability.
+  # KOTOBA_IPFS_PIN_ENDPOINT: "https://api.pinata.cloud/psa"
+  # KOTOBA_IPFS_PIN_JWT: "set-via-wrangler-secret"

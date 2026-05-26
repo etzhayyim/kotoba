@@ -22,7 +22,11 @@ tracing.workspace        = true
 blake3.workspace         = true
 base64                   = "0.22"
 mail-parser              = "0.9"
+parquet                  = { version = "53", default-features = false, features = ["arrow"] }
+arrow                    = { version = "53", default-features = false, features = ["ipc"] }
+futures                  = "0.3"
 
 [dev-dependencies]
 kotoba-store             = { path = "../kotoba-store" }
-tokio                    = { workspace = true, features = ["macros", "rt"] }
+tokio                    = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+tracing-subscriber       = { workspace = true }

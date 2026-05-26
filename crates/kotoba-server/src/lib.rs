@@ -1,7 +1,9 @@
 pub mod attestation;
+pub mod cc_xrpc;
 pub mod email_xrpc;
 pub mod fingerprint;
 pub mod kg;
+pub mod kotobase_xrpc;
 pub mod mcp;
 pub mod net_actor;
 pub mod server;
@@ -54,6 +56,11 @@ mod tests {
         super::attestation::NSID_ATTEST_CHALLENGE,
         super::attestation::NSID_ATTEST_QUERY,
         super::attestation::NSID_REQUEST_LOG,
+        // cc vector search
+        super::cc_xrpc::NSID_CC_SEARCH,
+        super::cc_xrpc::NSID_CC_RAG,
+        super::cc_xrpc::NSID_CC_INGEST,
+        super::cc_xrpc::NSID_CC_STATUS,
     ];
 
     #[test]
@@ -81,6 +88,26 @@ mod tests {
                 nsid.chars().all(|c| c.is_ascii_lowercase() || c == '.'),
                 "NSID must be lowercase+dots: {nsid}"
             );
+        }
+    }
+
+    // ── kotobase NSID invariants ───────────────────────────────────────────
+
+    #[test]
+    fn kotobase_nsids_have_kotobase_prefix() {
+        for nsid in super::kotobase_xrpc::ALL_NSIDS {
+            assert!(
+                nsid.starts_with("ai.gftd.apps.kotobase."),
+                "kotobase NSID does not start with ai.gftd.apps.kotobase.: {nsid}"
+            );
+        }
+    }
+
+    #[test]
+    fn kotobase_nsids_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for nsid in super::kotobase_xrpc::ALL_NSIDS {
+            assert!(seen.insert(*nsid), "duplicate kotobase NSID: {nsid}");
         }
     }
 
@@ -207,6 +234,48 @@ pub fn build_router(state: Arc<KotobaState>) -> Router {
             post(kg::kg_delete),
         )
         .route("/mcp", post(mcp::mcp_handler))
+        // ── kotobase multi-tenant pinning service (ADR-2605260001) ──────────
+        .route(
+            &format!("/xrpc/{}", kotobase_xrpc::NSID_ACCOUNT_CREATE),
+            post(kotobase_xrpc::handle_account_create),
+        )
+        .route(
+            &format!("/xrpc/{}", kotobase_xrpc::NSID_ACCOUNT_STATUS),
+            post(kotobase_xrpc::handle_account_status),
+        )
+        .route(
+            &format!("/xrpc/{}", kotobase_xrpc::NSID_PIN_CREATE),
+            post(kotobase_xrpc::handle_pin_create),
+        )
+        .route(
+            &format!("/xrpc/{}", kotobase_xrpc::NSID_PIN_LIST),
+            post(kotobase_xrpc::handle_pin_list),
+        )
+        .route(
+            &format!("/xrpc/{}", kotobase_xrpc::NSID_PIN_DELETE),
+            post(kotobase_xrpc::handle_pin_delete),
+        )
+        .route(
+            &format!("/xrpc/{}", kotobase_xrpc::NSID_USAGE_GET),
+            post(kotobase_xrpc::handle_usage_get),
+        )
+        // ── Common Crawl vector search / RAG ───────────────────────────────
+        .route(
+            &format!("/xrpc/{}", cc_xrpc::NSID_CC_SEARCH),
+            get(cc_xrpc::cc_search),
+        )
+        .route(
+            &format!("/xrpc/{}", cc_xrpc::NSID_CC_RAG),
+            post(cc_xrpc::cc_rag),
+        )
+        .route(
+            &format!("/xrpc/{}", cc_xrpc::NSID_CC_INGEST),
+            post(cc_xrpc::cc_ingest),
+        )
+        .route(
+            &format!("/xrpc/{}", cc_xrpc::NSID_CC_STATUS),
+            get(cc_xrpc::cc_status),
+        )
         // ── Email E2E XRPC ──────────────────────────────────────────────────
         .route(
             &format!("/xrpc/{}", email_xrpc::NSID_EMAIL_LIST),

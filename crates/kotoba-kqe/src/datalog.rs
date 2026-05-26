@@ -6,6 +6,7 @@
 /// Ground identifiers are hashed to KotobaCid via `cid_of_str`.
 
 use std::collections::{HashMap, HashSet};
+use serde::{Deserialize, Serialize};
 use kotoba_core::cid::KotobaCid;
 use crate::quad::{Quad, QuadObject};
 use crate::delta::{Delta, Multiplicity};
@@ -14,33 +15,33 @@ use crate::delta::{Delta, Multiplicity};
 // Public types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatalogRule {
     pub head: Atom,
     pub body: Vec<BodyLiteral>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Atom {
     pub relation: String,
     /// Exactly 2 Terms — mirrors Quad (subject, object).
     pub args: Vec<Term>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BodyLiteral {
     Positive(Atom),
     Negative(Atom),  // stratified negation only
     Comparison(Term, CmpOp, Term),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Term {
     Variable(String),
     Constant(String),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum CmpOp { Eq, Ne, Lt, Le, Gt, Ge }
 
 #[derive(Debug, Default, Clone)]

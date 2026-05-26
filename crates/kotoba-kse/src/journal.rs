@@ -208,6 +208,59 @@ impl Journal {
             }
         }
     }
+
+    /// Delete seq-index keys (`seq/{seq:020}`) **and** the associated `{cid_mb}.cbor` blob
+    /// entries for all entries with `seq < before` from the persistent store.
+    ///
+    /// Both deletes are best-effort (errors are silently ignored).  Total count of
+    /// deleted keys (seq-index + cbor blobs) is logged at debug level.
+    ///
+    /// Runs to completion; callers should `tokio::spawn` if fire-and-forget is preferred.
+    pub async fn trim_persistent_before(&self, before: u64) {
+        let store = match &self.store {
+            Some(s) => Arc::clone(s),
+            None    => return,
+        };
+        let keys = store.list_prefix("seq/").await;
+        let mut deleted = 0usize;
+        for key in keys {
+            let Some(seq_str) = key.strip_prefix("seq/") else { continue };
+            let Ok(seq) = seq_str.trim().parse::<u64>() else { continue };
+            if seq < before {
+                // Read the seq key value to obtain the CID multibase string.
+                if let Ok(cid_bytes) = store.get(&key).await {
+                    let cid_mb = String::from_utf8_lossy(&cid_bytes).into_owned();
+                    // Best-effort: delete the {cid_mb}.cbor blob.
+                    let blob_key = format!("{}.cbor", cid_mb);
+                    let _ = store.delete_key(&blob_key).await;
+                    deleted += 1;
+                }
+                // Best-effort: delete the seq/{N} key.
+                let _ = store.delete_key(&key).await;
+                deleted += 1;
+            }
+        }
+        if deleted > 0 {
+            tracing::debug!(deleted, before, "Journal: trimmed persistent seq-index and cbor blob entries");
+        }
+    }
+
+    /// Persist a checkpoint blob at `checkpoint/heads` in the backing store.
+    /// Overwrites any previous checkpoint (latest wins).
+    pub async fn write_checkpoint(&self, data: bytes::Bytes) {
+        if let Some(store) = &self.store {
+            if let Err(e) = store.put("checkpoint/heads", data).await {
+                tracing::warn!("Journal: checkpoint write failed: {e}");
+            }
+        }
+    }
+
+    /// Read the latest checkpoint blob from `checkpoint/heads`.
+    /// Returns `None` if the backing store is absent or the key does not exist.
+    pub async fn read_checkpoint(&self) -> Option<bytes::Bytes> {
+        let store = self.store.as_ref()?;
+        store.get("checkpoint/heads").await.ok()
+    }
 }
 
 impl Default for Journal {

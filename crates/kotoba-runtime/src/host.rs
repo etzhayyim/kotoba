@@ -16,6 +16,14 @@ use kotoba_auth::delegation::DelegationChain;
 /// by removing the direct kotoba-runtime → kotoba-llm edge.
 pub type InferenceFn = Arc<dyn Fn(&str, usize) -> anyhow::Result<String> + Send + Sync>;
 
+/// Type alias for a synchronous dense embedding function.
+///
+/// Signature: `(text: &str) -> Result<Vec<f32>>`
+///
+/// Wired in from `kotoba-ingest::embed_client::EmbedClient` by `kotoba-server`.
+/// Type-erased to avoid kotoba-runtime → kotoba-ingest dependency.
+pub type EmbedFn = Arc<dyn Fn(&str) -> anyhow::Result<Vec<f32>> + Send + Sync>;
+
 /// WIT record type for kotoba:kais/kqe.quad.
 ///
 /// `func_wrap` requires an exact Rust type that mirrors the WIT record layout.
@@ -68,6 +76,12 @@ pub struct HostState {
     pub head_commits: std::collections::HashMap<String, String>,
     /// Inbox for `kse.drain` — pre-populated by the caller with (topic, payload) entries.
     pub kse_inbox: Vec<(String, Vec<u8>)>,
+    /// Head CID of the current agent's Source Chain — pre-populated before execution
+    /// so that `chain.head-cid` can return it synchronously.
+    pub source_chain_head: Option<String>,
+    /// Dense embedding function — routes to HttpEmbedClient when configured.
+    /// Type-erased to avoid kotoba-runtime → kotoba-ingest dependency.
+    pub embed_fn: Option<EmbedFn>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,7 +109,21 @@ impl HostState {
             pending_lora_loads: Vec::new(),
             head_commits: std::collections::HashMap::new(),
             kse_inbox: Vec::new(),
+            source_chain_head: None,
+            embed_fn: None,
         }
+    }
+
+    /// Set the Source Chain head CID for `chain.head-cid` lookups.
+    pub fn with_source_chain_head(mut self, head: Option<String>) -> Self {
+        self.source_chain_head = head;
+        self
+    }
+
+    /// Wire in a real embedding function (e.g. from HttpEmbedClient).
+    pub fn with_embed_fn(mut self, f: EmbedFn) -> Self {
+        self.embed_fn = Some(f);
+        self
     }
 
     /// Pre-populate the quad snapshot for `kqe.query` lookups during WASM execution.
@@ -296,6 +324,63 @@ fn bind_kqe(linker: &mut Linker<HostState>) -> Result<()> {
         },
     )?;
 
+    // evaluate-rules: func(rules-cbor: list<u8>) -> result<list<quad>, string>
+    // CBOR-decode Vec<DatalogRule>, seed fact_base from quad_snapshot, run evaluate_delta.
+    inst.func_wrap(
+        "evaluate-rules",
+        |mut ctx: wasmtime::StoreContextMut<HostState>,
+         (rules_cbor,): (Vec<u8>,)|
+         -> Result<(Result<Vec<WitQuad>, String>,)> {
+            ctx.data_mut().charge_gas(500)?;
+            let result = (|| -> anyhow::Result<Vec<WitQuad>> {
+                use kotoba_kqe::{DatalogProgram, DatalogRule, Delta};
+                use kotoba_kqe::quad::{Quad, QuadObject};
+                use kotoba_core::cid::KotobaCid;
+
+                // Deserialize rules from CBOR
+                let rules: Vec<DatalogRule> = ciborium::de::from_reader(rules_cbor.as_slice())
+                    .map_err(|e| anyhow::anyhow!("rule deserialize: {e}"))?;
+
+                let mut program = DatalogProgram::new();
+                for rule in rules { program.add_rule(rule); }
+
+                // Build input deltas from quad_snapshot (all treated as assert facts)
+                let snapshot = ctx.data().quad_snapshot.clone();
+                let mut input_deltas: Vec<Delta> = Vec::with_capacity(snapshot.len());
+                for wit_q in &snapshot {
+                    let object: QuadObject = ciborium::de::from_reader(wit_q.object_cbor.as_slice())
+                        .unwrap_or(QuadObject::Text(wit_q.predicate.clone()));
+                    input_deltas.push(Delta::assert(Quad {
+                        subject:   KotobaCid::from_bytes(wit_q.subject.as_bytes()),
+                        predicate: wit_q.predicate.clone(),
+                        object,
+                        graph:     KotobaCid::from_bytes(wit_q.graph.as_bytes()),
+                    }));
+                }
+
+                // Run semi-naive bottom-up derivation
+                let derived = program.evaluate_delta(&input_deltas);
+
+                // Convert derived deltas to WitQuad (only asserts)
+                let mut out = Vec::new();
+                for d in derived {
+                    if !d.is_assert() { continue; }
+                    let mut obj_cbor = Vec::new();
+                    ciborium::ser::into_writer(&d.quad.object, &mut obj_cbor)
+                        .map_err(|e| anyhow::anyhow!("object serialize: {e}"))?;
+                    out.push(WitQuad {
+                        graph:       d.quad.graph.to_multibase(),
+                        subject:     d.quad.subject.to_multibase(),
+                        predicate:   d.quad.predicate,
+                        object_cbor: obj_cbor,
+                    });
+                }
+                Ok(out)
+            })();
+            Ok((result.map_err(|e| e.to_string()),))
+        },
+    )?;
+
     Ok(())
 }
 
@@ -367,10 +452,15 @@ fn bind_auth(linker: &mut Linker<HostState>) -> Result<()> {
     inst.func_wrap(
         "has-capability",
         |mut ctx: wasmtime::StoreContextMut<HostState>,
-         (_resource_uri, _ability): (String, String)|
+         (resource_uri, ability): (String, String)|
          -> Result<(bool,)> {
             ctx.data_mut().charge_gas(10)?;
-            Ok((false,))
+            let agent_did = ctx.data().agent_did.clone();
+            // Convention: subject=agent_did, predicate="auth/capability/{resource_uri}/{ability}"
+            let predicate = format!("auth/capability/{resource_uri}/{ability}");
+            let has = ctx.data().quad_snapshot.iter()
+                .any(|q| q.subject == agent_did && q.predicate == predicate);
+            Ok((has,))
         },
     )?;
 
@@ -416,14 +506,20 @@ fn bind_llm(linker: &mut Linker<HostState>) -> Result<()> {
          (_model_cid, text): (String, String)|
          -> Result<(Result<Vec<u8>, String>,)> {
             ctx.data_mut().charge_gas(200)?;
-            let engine_opt = ctx.data().inference_engine.clone();
-            if let Some(engine_fn) = engine_opt {
-                return match engine_fn(&format!("embed:{text}"), 256) {
-                    Ok(text_out) => Ok((Ok(text_out.into_bytes()),)),
-                    Err(e)       => Ok((Err(e.to_string()),)),
+            // Prefer real embed_fn (HttpEmbedClient) when available
+            let embed_fn_opt = ctx.data().embed_fn.clone();
+            if let Some(embed_fn) = embed_fn_opt {
+                return match embed_fn(&text) {
+                    Ok(floats) => {
+                        let bytes: Vec<u8> = floats.iter()
+                            .flat_map(|f| f.to_le_bytes())
+                            .collect();
+                        Ok((Ok(bytes),))
+                    }
+                    Err(e) => Ok((Err(e.to_string()),)),
                 };
             }
-            Ok((Err("no inference engine".to_string()),))
+            Ok((Err("no embed function configured — call HostState::with_embed_fn()".to_string()),))
         },
     )?;
 
@@ -465,7 +561,7 @@ fn bind_chain(linker: &mut Linker<HostState>) -> Result<()> {
         |mut ctx: wasmtime::StoreContextMut<HostState>,
          (): ()| -> Result<(Option<String>,)> {
             ctx.data_mut().charge_gas(1)?;
-            Ok((None,))
+            Ok((ctx.data().source_chain_head.clone(),))
         },
     )?;
 

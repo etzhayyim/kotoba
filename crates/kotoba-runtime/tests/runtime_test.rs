@@ -1,5 +1,11 @@
 /// kotoba-runtime integration tests
 ///
+/// Phase 3: host stub fix verification (pure Rust, no WASM component)
+///   - chain.head-cid  → HostState::source_chain_head
+///   - auth.has-capability → quad_snapshot predicate scan
+///   - llm.embed → EmbedFn dispatch
+///   - kqe.evaluate-rules → DatalogProgram::evaluate_delta via CBOR rules
+///
 /// Phase 1: infrastructure verification (no WASM component required)
 ///   - Engine / Linker / Store setup
 ///   - All 5 WIT host interface bindings
@@ -12,9 +18,10 @@
 ///   - `guest_wasm_gas_exhaustion_errors` verifies gas accounting traps
 ///   - Skips gracefully when cargo-component or wasm32-wasip2 target is unavailable
 
+use std::sync::Arc;
 use kotoba_runtime::{
     HostState, KotobaEngine, UdfExecutor, WasmExecutor,
-    host::KotobaLinker,
+    host::{KotobaLinker, WitQuad, EmbedFn},
     program::ProgramStore,
 };
 
@@ -138,6 +145,180 @@ fn host_state_pending_quads_empty_on_new() {
     assert!(state.pending_retracts.is_empty());
     assert_eq!(state.agent_did, "did:plc:alice");
     assert_eq!(state.gas_remaining, 5000);
+}
+
+// ── Phase 3: host stub fix verification ───────────────────────────────────
+
+#[test]
+fn chain_head_cid_returns_pre_populated_head() {
+    let state = HostState::new("did:plc:alice", 5000)
+        .with_source_chain_head(Some("bafy2bzace123".to_string()));
+    assert_eq!(
+        state.source_chain_head.as_deref(),
+        Some("bafy2bzace123"),
+        "source_chain_head should be returned by chain.head-cid"
+    );
+}
+
+#[test]
+fn chain_head_cid_none_when_not_set() {
+    let state = HostState::new("did:plc:alice", 5000);
+    assert!(state.source_chain_head.is_none());
+}
+
+#[test]
+fn auth_has_capability_matches_quad_snapshot() {
+    // Build a quad snapshot granting did:plc:alice the "cc/index" "write" capability
+    let cap_quad = WitQuad {
+        graph:       "kotoba/auth".to_string(),
+        subject:     "did:plc:alice".to_string(),
+        predicate:   "auth/capability/cc%2Findex/write".to_string(),
+        object_cbor: vec![0xf5], // CBOR true
+    };
+    let state = HostState::new("did:plc:alice", 5000)
+        .with_snapshot(vec![cap_quad]);
+
+    let agent_did   = &state.agent_did;
+    let resource_uri = "cc%2Findex";
+    let ability      = "write";
+    let predicate    = format!("auth/capability/{resource_uri}/{ability}");
+
+    let has = state.quad_snapshot.iter()
+        .any(|q| &q.subject == agent_did && q.predicate == predicate);
+    assert!(has, "capability predicate scan should find the quad");
+}
+
+#[test]
+fn auth_has_capability_miss_on_wrong_did() {
+    let cap_quad = WitQuad {
+        graph:       "kotoba/auth".to_string(),
+        subject:     "did:plc:bob".to_string(),   // different DID
+        predicate:   "auth/capability/resource/read".to_string(),
+        object_cbor: vec![0xf5],
+    };
+    let state = HostState::new("did:plc:alice", 5000)
+        .with_snapshot(vec![cap_quad]);
+
+    let predicate = "auth/capability/resource/read";
+    let has = state.quad_snapshot.iter()
+        .any(|q| q.subject == state.agent_did && q.predicate == predicate);
+    assert!(!has, "capability check should fail for wrong DID");
+}
+
+#[test]
+fn auth_has_capability_miss_on_wrong_ability() {
+    let cap_quad = WitQuad {
+        graph:       "kotoba/auth".to_string(),
+        subject:     "did:plc:alice".to_string(),
+        predicate:   "auth/capability/resource/read".to_string(),
+        object_cbor: vec![0xf5],
+    };
+    let state = HostState::new("did:plc:alice", 5000)
+        .with_snapshot(vec![cap_quad]);
+
+    let predicate = "auth/capability/resource/write"; // different ability
+    let has = state.quad_snapshot.iter()
+        .any(|q| q.subject == state.agent_did && q.predicate == predicate);
+    assert!(!has, "capability check should fail for wrong ability");
+}
+
+#[test]
+fn llm_embed_fn_dispatches_and_returns_f32_bytes() {
+    let embed_fn: EmbedFn = Arc::new(|text: &str| {
+        // Return a 3-element embedding proportional to text length
+        let v = text.len() as f32;
+        Ok(vec![v, v * 2.0, v * 3.0])
+    });
+    let state = HostState::new("did:plc:alice", 5000)
+        .with_embed_fn(embed_fn);
+
+    let f = state.embed_fn.as_ref().expect("embed_fn should be set");
+    let floats = f("hello").expect("embed should succeed");
+    assert_eq!(floats.len(), 3);
+    assert!((floats[0] - 5.0).abs() < 1e-6, "f[0] = text.len() = 5");
+    assert!((floats[1] - 10.0).abs() < 1e-6);
+    assert!((floats[2] - 15.0).abs() < 1e-6);
+
+    // Also verify raw byte encoding (little-endian f32)
+    let expected_bytes: Vec<u8> = floats.iter().flat_map(|f| f.to_le_bytes()).collect();
+    assert_eq!(expected_bytes.len(), 12, "3 × 4 bytes");
+}
+
+#[test]
+fn llm_embed_fn_none_without_configuration() {
+    let state = HostState::new("did:plc:alice", 5000);
+    assert!(state.embed_fn.is_none(), "embed_fn should default to None");
+}
+
+#[test]
+fn kqe_evaluate_rules_datalog_cbor_roundtrip() {
+    use kotoba_kqe::{DatalogProgram, DatalogRule};
+    use kotoba_kqe::datalog::{Atom, BodyLiteral, Term};
+
+    // Rule: knows(X, Z) :- knows(X, Y), knows(Y, Z)  (transitivity)
+    let rule = DatalogRule {
+        head: Atom { relation: "knows".to_string(), args: vec![Term::Variable("X".to_string()), Term::Variable("Z".to_string())] },
+        body: vec![
+            BodyLiteral::Positive(Atom { relation: "knows".to_string(), args: vec![Term::Variable("X".to_string()), Term::Variable("Y".to_string())] }),
+            BodyLiteral::Positive(Atom { relation: "knows".to_string(), args: vec![Term::Variable("Y".to_string()), Term::Variable("Z".to_string())] }),
+        ],
+    };
+
+    // CBOR roundtrip
+    let rules = vec![rule];
+    let mut cbor_bytes = Vec::new();
+    ciborium::ser::into_writer(&rules, &mut cbor_bytes).expect("CBOR serialize");
+
+    let decoded: Vec<DatalogRule> = ciborium::de::from_reader(cbor_bytes.as_slice())
+        .expect("CBOR deserialize");
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0].head.relation, "knows");
+    assert_eq!(decoded[0].body.len(), 2);
+}
+
+#[test]
+fn kqe_evaluate_rules_derives_transitive_facts() {
+    use kotoba_kqe::{DatalogProgram, DatalogRule, Delta};
+    use kotoba_kqe::datalog::{Atom, BodyLiteral, Term};
+    use kotoba_kqe::quad::{Quad, QuadObject};
+    use kotoba_core::cid::KotobaCid;
+
+    fn cid(s: &str) -> KotobaCid { KotobaCid::from_bytes(s.as_bytes()) }
+
+    // Rule: knows(X,Z) :- knows(X,Y), knows(Y,Z)
+    let rule = DatalogRule {
+        head: Atom { relation: "knows".to_string(), args: vec![Term::Variable("X".to_string()), Term::Variable("Z".to_string())] },
+        body: vec![
+            BodyLiteral::Positive(Atom { relation: "knows".to_string(), args: vec![Term::Variable("X".to_string()), Term::Variable("Y".to_string())] }),
+            BodyLiteral::Positive(Atom { relation: "knows".to_string(), args: vec![Term::Variable("Y".to_string()), Term::Variable("Z".to_string())] }),
+        ],
+    };
+
+    let mut program = DatalogProgram::new();
+    program.add_rule(rule);
+
+    // Base facts: alice knows bob, bob knows carol
+    let graph = cid("g");
+    let input = vec![
+        Delta::assert(Quad { graph: graph.clone(), subject: cid("alice"), predicate: "knows".into(), object: QuadObject::Cid(cid("bob")) }),
+        Delta::assert(Quad { graph: graph.clone(), subject: cid("bob"),   predicate: "knows".into(), object: QuadObject::Cid(cid("carol")) }),
+    ];
+
+    let derived = program.evaluate_delta(&input);
+
+    // Should derive: alice knows carol
+    let derived_text: Vec<String> = derived.iter()
+        .filter(|d| d.is_assert())
+        .map(|d| format!("{} -> {}", d.quad.subject, d.quad.predicate))
+        .collect();
+    assert!(!derived.is_empty(), "expected at least 1 derived fact, derived: {derived_text:?}");
+    let alice_knows_carol = derived.iter().any(|d| {
+        d.is_assert()
+            && d.quad.subject == cid("alice")
+            && d.quad.predicate == "knows"
+            && d.quad.object == QuadObject::Cid(cid("carol"))
+    });
+    assert!(alice_knows_carol, "expected derived fact alice-knows-carol; got: {derived_text:?}");
 }
 
 // ── Phase 2: end-to-end WASM guest execution ──────────────────────────────
