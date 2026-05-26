@@ -27,15 +27,17 @@ fn stub_engine() -> kotoba_runtime::host::InferenceFn {
 // ── Server fixture ────────────────────────────────────────────────────────────
 
 struct TestServer {
-    base_url: String,
-    handle:   tokio::task::JoinHandle<()>,
-    client:   reqwest::Client,
+    base_url:     String,
+    operator_did: String,
+    handle:       tokio::task::JoinHandle<()>,
+    client:       reqwest::Client,
 }
 
 impl TestServer {
     async fn start(with_inference: bool) -> Self {
         let engine = if with_inference { Some(stub_engine()) } else { None };
         let state  = KotobaState::new(engine).expect("KotobaState::new");
+        let operator_did = state.operator_did.clone();
         let app    = build_router(Arc::new(state));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -53,6 +55,7 @@ impl TestServer {
 
         Self {
             base_url,
+            operator_did,
             handle,
             client: reqwest::Client::new(),
         }
@@ -1106,9 +1109,10 @@ async fn kg_entity_missing_param_returns_400() {
 
 #[tokio::test]
 async fn kg_ingest_and_entity_roundtrip() {
-    let s = TestServer::start(false).await;
+    let s   = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zKgRoundtrip1");
 
-    let (status, put) = s.post(
+    let (status, put) = s.post_auth(
         "/xrpc/ai.gftd.apps.yata.kg.ingest",
         json!({
             "id":        "ingest-e2e-001",
@@ -1125,6 +1129,7 @@ async fn kg_ingest_and_entity_roundtrip() {
             ],
             "relations": []
         }),
+        &tok,
     ).await;
     assert_eq!(status, 200, "{put}");
     assert!(put["ok"].as_bool().unwrap_or(false), "ingest failed: {put}");
@@ -1154,16 +1159,18 @@ async fn kg_ingest_and_entity_roundtrip() {
 
 #[tokio::test]
 async fn kg_ingest_with_relations() {
-    let s = TestServer::start(false).await;
+    let s   = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zKgRelations1");
 
     // Ingest target entity first (needed for relation dst)
-    s.post(
+    s.post_auth(
         "/xrpc/ai.gftd.apps.yata.kg.ingest",
         json!({ "id": "rel-dst-001", "type": "City", "labelEn": "Tokyo" }),
+        &tok,
     ).await;
 
     // Ingest source entity with relation to target
-    let (status, put) = s.post(
+    let (status, put) = s.post_auth(
         "/xrpc/ai.gftd.apps.yata.kg.ingest",
         json!({
             "id":      "rel-src-001",
@@ -1173,6 +1180,7 @@ async fn kg_ingest_with_relations() {
                 { "pred": "locatedIn", "dstId": "rel-dst-001" }
             ]
         }),
+        &tok,
     ).await;
     assert_eq!(status, 200, "{put}");
     assert!(put["ok"].as_bool().unwrap_or(false));
@@ -1189,13 +1197,15 @@ async fn kg_ingest_with_relations() {
 
 #[tokio::test]
 async fn kg_catalog_reflects_ingested_entities() {
-    let s = TestServer::start(false).await;
+    let s   = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zKgCatalog1");
 
     // Ingest two entities
     for (id, label) in &[("cat-e1", "EntityOne"), ("cat-e2", "EntityTwo")] {
-        let (st, _) = s.post(
+        let (st, _) = s.post_auth(
             "/xrpc/ai.gftd.apps.yata.kg.ingest",
             json!({ "id": id, "type": "Thing", "labelEn": label, "sourceId": "cat-test-src" }),
+            &tok,
         ).await;
         assert_eq!(st, 200);
     }
@@ -2019,7 +2029,8 @@ async fn kg_search_empty_returns_empty_results() {
 
 #[tokio::test]
 async fn kg_search_after_ingest_returns_entity() {
-    let s = TestServer::start(false).await;
+    let s   = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zKgSearch1");
 
     // Ingest an entity with a label so the search index has data
     let (status, _) = s.post_auth(
@@ -2030,7 +2041,7 @@ async fn kg_search_after_ingest_returns_entity() {
             "labelEn": "Tokyo",
             "type":    "Place",
         }),
-        "test-token",
+        &tok,
     ).await;
     assert_eq!(status, 200, "ingest failed");
 
@@ -2073,11 +2084,12 @@ async fn kg_query_unknown_lang_returns_400() {
 
 #[tokio::test]
 async fn kg_delete_nonexistent_entity_returns_ok_zero_retracted() {
-    let s = TestServer::start(false).await;
+    let s   = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zKgDel1");
     let (status, body) = s.post_auth(
         "/xrpc/ai.gftd.apps.yata.kg.delete",
         json!({ "id": "ent-does-not-exist" }),
-        "test-token",
+        &tok,
     ).await;
     assert_eq!(status, 200, "{body}");
     assert!(body["ok"].as_bool().unwrap_or(false), "{body}");
@@ -2086,13 +2098,14 @@ async fn kg_delete_nonexistent_entity_returns_ok_zero_retracted() {
 
 #[tokio::test]
 async fn kg_ingest_then_delete_removes_entity() {
-    let s = TestServer::start(false).await;
+    let s   = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zKgDel2");
 
     // Ingest an entity
     let (status, _) = s.post_auth(
         "/xrpc/ai.gftd.apps.yata.kg.ingest",
         json!({ "id": "ent-delete-me", "type": "Thing", "labelEn": "Delete Target" }),
-        "test-token",
+        &tok,
     ).await;
     assert_eq!(status, 200);
 
@@ -2107,7 +2120,7 @@ async fn kg_ingest_then_delete_removes_entity() {
     let (status, body) = s.post_auth(
         "/xrpc/ai.gftd.apps.yata.kg.delete",
         json!({ "id": "ent-delete-me" }),
-        "test-token",
+        &tok,
     ).await;
     assert_eq!(status, 200, "{body}");
     assert!(body["ok"].as_bool().unwrap_or(false), "{body}");
@@ -2216,15 +2229,41 @@ async fn cc_rag_without_real_embed_endpoint_returns_error() {
 #[tokio::test]
 async fn cc_ingest_trigger_returns_started_job_id() {
     let s = TestServer::start(false).await;
+    let tok = tenant_jwt(&s.operator_did);
     // Even with a non-existent parquet_dir, the ingest endpoint accepts the request
     // and spawns the job asynchronously; the response must include job_id + status=started
-    let (status, body) = s.post(
+    let (status, body) = s.post_auth(
         "/xrpc/ai.gftd.apps.kotoba.cc.ingest",
         json!({ "parquetDir": "/tmp/no-such-dir", "mode": "chunks" }),
+        &tok,
     ).await;
     assert_eq!(status, 200, "{body}");
     assert!(body["job_id"].as_str().is_some(), "job_id missing: {body}");
     assert_eq!(body["status"], "started", "{body}");
+}
+
+#[tokio::test]
+async fn cc_ingest_without_auth_returns_401() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post(
+        "/xrpc/ai.gftd.apps.kotoba.cc.ingest",
+        json!({ "parquetDir": "/tmp/test", "mode": "chunks" }),
+    ).await;
+    assert_eq!(status, 401, "{body}");
+    assert!(body["error"].as_str().is_some(), "{body}");
+}
+
+#[tokio::test]
+async fn cc_ingest_with_non_operator_did_returns_403() {
+    let s = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zNotTheOperator");
+    let (status, body) = s.post_auth(
+        "/xrpc/ai.gftd.apps.kotoba.cc.ingest",
+        json!({ "parquetDir": "/tmp/test", "mode": "chunks" }),
+        &tok,
+    ).await;
+    assert_eq!(status, 403, "{body}");
+    assert!(body["error"].as_str().is_some(), "{body}");
 }
 
 #[tokio::test]
@@ -2238,9 +2277,11 @@ async fn cc_search_empty_query_returns_400() {
 #[tokio::test]
 async fn cc_ingest_invalid_mode_returns_400() {
     let s = TestServer::start(false).await;
-    let (status, body) = s.post(
+    let tok = tenant_jwt(&s.operator_did);
+    let (status, body) = s.post_auth(
         "/xrpc/ai.gftd.apps.kotoba.cc.ingest",
         json!({ "parquetDir": "/tmp/test", "mode": "invalid" }),
+        &tok,
     ).await;
     assert_eq!(status, 400, "{body}");
     assert!(body["error"].as_str().is_some(), "{body}");
@@ -2286,20 +2327,22 @@ async fn agent_sync_open_oversized_session_id_returns_400() {
 
 #[tokio::test]
 async fn kg_ingest_empty_id_returns_400() {
-    let s = TestServer::start(false).await;
+    let s   = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zKgVal1");
     let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.ingest", json!({
         "id": "",
-    }), "test-token").await;
+    }), &tok).await;
     assert_eq!(status, 400, "{body}");
 }
 
 #[tokio::test]
 async fn kg_embed_empty_text_returns_400() {
-    let s = TestServer::start(false).await;
+    let s   = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zKgVal2");
     let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.embed", json!({
         "entityId": "ent-1",
         "text": "",
-    }), "test-token").await;
+    }), &tok).await;
     assert_eq!(status, 400, "{body}");
 }
 
@@ -2312,10 +2355,11 @@ async fn kg_search_empty_query_returns_400() {
 
 #[tokio::test]
 async fn kg_delete_empty_id_returns_400() {
-    let s = TestServer::start(false).await;
+    let s   = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zKgVal3");
     let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.delete", json!({
         "id": "",
-    }), "test-token").await;
+    }), &tok).await;
     assert_eq!(status, 400, "{body}");
 }
 
@@ -2330,12 +2374,13 @@ async fn kg_query_empty_query_returns_400() {
 
 #[tokio::test]
 async fn kg_ingest_too_many_claims_returns_400() {
-    let s = TestServer::start(false).await;
+    let s   = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zKgVal4");
     let claims: Vec<_> = (0..1025).map(|i| json!({"pred": format!("p{i}"), "value": "v"})).collect();
     let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.ingest", json!({
         "id": "ent-overflow",
         "claims": claims,
-    }), "test-token").await;
+    }), &tok).await;
     assert_eq!(status, 400, "{body}");
 }
 
@@ -2490,4 +2535,64 @@ async fn attest_challenge_empty_reason_returns_400() {
         "reason":         "",
     }), &tok).await;
     assert_eq!(status, 400, "{body}");
+}
+
+// ── kg write-endpoint auth tests ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn kg_ingest_without_auth_returns_401() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post("/xrpc/ai.gftd.apps.yata.kg.ingest", json!({
+        "id": "ent-noauth",
+        "labelEn": "Test Entity",
+    })).await;
+    assert_eq!(status, 401, "{body}");
+    assert_eq!(body["ok"], false, "{body}");
+}
+
+#[tokio::test]
+async fn kg_delete_without_auth_returns_401() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post("/xrpc/ai.gftd.apps.yata.kg.delete", json!({
+        "id": "ent-noauth-del",
+    })).await;
+    assert_eq!(status, 401, "{body}");
+    assert_eq!(body["ok"], false, "{body}");
+}
+
+#[tokio::test]
+async fn kg_embed_without_auth_returns_401() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post("/xrpc/ai.gftd.apps.yata.kg.embed", json!({
+        "entityId": "ent-embed-noauth",
+        "text": "some text",
+    })).await;
+    assert_eq!(status, 401, "{body}");
+}
+
+#[tokio::test]
+async fn kg_ingest_with_auth_succeeds() {
+    let s   = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zKgWriter1");
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.ingest", json!({
+        "id":      "ent-auth-ok",
+        "labelEn": "Authenticated Entity",
+        "labelJa": "認証済みエンティティ",
+    }), &tok).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["ok"], true, "{body}");
+    assert!(body["subjectCid"].as_str().is_some(), "{body}");
+    assert!(body["quadCount"].as_u64().unwrap_or(0) > 0, "{body}");
+}
+
+#[tokio::test]
+async fn kg_delete_with_auth_on_missing_entity_returns_ok_zero() {
+    let s   = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zKgWriter2");
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.delete", json!({
+        "id": "ent-does-not-exist-auth",
+    }), &tok).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["ok"], true, "{body}");
+    assert_eq!(body["retractedCount"], 0, "{body}");
 }

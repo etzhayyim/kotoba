@@ -32,6 +32,24 @@ use kotoba_kqe::quad::QuadObject;
 use crate::server::KotobaState;
 use crate::graph_auth::{AccessDenied, check_read_access};
 
+/// Require a valid, non-expired Bearer JWT to authorise KG write operations.
+/// Any authenticated principal with a `sub` claim and a valid `exp` is accepted.
+fn require_kg_write_auth(headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED,
+            "Authorization: Bearer <token> required for KG write operations".to_string()))?;
+    if crate::graph_auth::jwt_exp_elapsed(token) {
+        return Err((StatusCode::UNAUTHORIZED, "Bearer token has expired".to_string()));
+    }
+    crate::graph_auth::jwt_sub(token)
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED,
+            "Bearer token missing sub claim".to_string()))?;
+    Ok(())
+}
+
 pub const NSID_KG_ENTITY:  &str = "ai.gftd.apps.yata.kg.entity";
 pub const NSID_KG_CATALOG: &str = "ai.gftd.apps.yata.kg.catalog";
 pub const NSID_KG_EMBED:   &str = "ai.gftd.apps.yata.kg.embed";
@@ -96,8 +114,20 @@ pub async fn kg_entity(
         .map_err(AccessDenied::into_response)?;
 
     let (lookup_pred, lookup_val) = match (&q.id, &q.qid) {
-        (Some(id), _)  => ("kg/id",  id.as_str()),
-        (_, Some(qid)) => ("kg/qid", qid.as_str()),
+        (Some(id), _) => {
+            if id.len() > MAX_KG_ID_LEN {
+                return Err((StatusCode::BAD_REQUEST,
+                    format!("id must be ≤{MAX_KG_ID_LEN} bytes")));
+            }
+            ("kg/id", id.as_str())
+        }
+        (_, Some(qid)) => {
+            if qid.len() > MAX_KG_ID_LEN {
+                return Err((StatusCode::BAD_REQUEST,
+                    format!("qid must be ≤{MAX_KG_ID_LEN} bytes")));
+            }
+            ("kg/qid", qid.as_str())
+        }
         _ => return Err((StatusCode::BAD_REQUEST, "missing `id` or `qid` query param".into())),
     };
 
@@ -148,7 +178,7 @@ pub async fn kg_entity(
                 }));
             }
             _ if pred.starts_with("kg/relation/") && q.include_relations
-                && relations.len() < q.max_relations =>
+                && relations.len() < q.max_relations.min(MAX_KG_LIMIT) =>
             {
                 let rel_pred = &pred["kg/relation/".len()..];
                 relations.push(serde_json::json!({
@@ -265,8 +295,10 @@ pub struct KgEmbedResp {
 /// VectorF32 quad for the entity.  Uses the inference engine when available.
 pub async fn kg_embed(
     State(state): State<Arc<KotobaState>>,
+    headers:      HeaderMap,
     Json(req):    Json<KgEmbedReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_kg_write_auth(&headers)?;
     use kotoba_kqe::quad::Quad;
     if req.entity_id.is_empty() || req.entity_id.len() > MAX_KG_ID_LEN {
         return Err((StatusCode::BAD_REQUEST,
@@ -481,8 +513,12 @@ const MAX_KG_FIELD_LEN:   usize = 4_096;
 
 pub async fn kg_ingest(
     State(state): State<Arc<KotobaState>>,
+    headers:      HeaderMap,
     Json(req):    Json<KgIngestReq>,
 ) -> impl IntoResponse {
+    if let Err((code, msg)) = require_kg_write_auth(&headers) {
+        return (code, axum::Json(serde_json::json!({"ok": false, "error": msg}))).into_response();
+    }
     use axum::Json as AxumJson;
     if req.id.is_empty() || req.id.len() > MAX_KG_ID_LEN {
         return (StatusCode::BAD_REQUEST,
@@ -596,8 +632,12 @@ pub struct KgDeleteReq {
 /// Publishes a retract event to the Journal for each quad (WAL + GossipSub).
 pub async fn kg_delete(
     State(state): State<Arc<KotobaState>>,
+    headers:      HeaderMap,
     Json(req):    Json<KgDeleteReq>,
 ) -> impl IntoResponse {
+    if let Err((code, msg)) = require_kg_write_auth(&headers) {
+        return (code, Json(serde_json::json!({"ok": false, "error": msg}))).into_response();
+    }
     if req.id.is_empty() || req.id.len() > MAX_KG_ID_LEN {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
             "ok": false, "error": format!("id must be 1–{MAX_KG_ID_LEN} bytes"),
