@@ -793,6 +793,8 @@ pub struct GraphQueryReq {
     pub rules:     Option<String>,
     /// CACAO delegation chain for private graphs (DAG-CBOR, base64-standard encoded).
     pub cacao_b64: Option<String>,
+    /// Maximum number of quads to return (1–1000; default 100).
+    pub limit:     Option<u64>,
 }
 
 /// GET /xrpc/ai.gftd.apps.kotoba.graph.query
@@ -821,6 +823,9 @@ pub async fn graph_query(
         Some(a) => a,
     };
 
+    const MAX_QUERY_RESULTS: u64 = 1_000;
+    let limit = req.limit.unwrap_or(100).min(MAX_QUERY_RESULTS) as usize;
+
     let mut quads = arrangement.quads(&graph_cid);
 
     // Subject filter (accept multibase CID or raw string → hash to CID)
@@ -835,10 +840,15 @@ pub async fn graph_query(
         quads.retain(|q| &q.predicate == p);
     }
 
+    let truncated = quads.len() > limit;
+    quads.truncate(limit);
+
     Ok(Json(serde_json::json!({
-        "graph": req.graph,
-        "count": quads.len(),
-        "quads": quads,
+        "graph":     req.graph,
+        "count":     quads.len(),
+        "quads":     quads,
+        "limit":     limit,
+        "truncated": truncated,
         "note":  if req.rules.is_some() { "use invoke.run for Datalog evaluation" } else { "" },
     })))
 }
@@ -1511,6 +1521,25 @@ pub async fn agent_sync_open(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     use kotoba_core::cid::KotobaCid;
     use kotoba_kse::sync_window::SyncWindow;
+
+    // Validate session_id: non-empty, ≤256 bytes, printable ASCII.
+    const MAX_SESSION_ID_LEN: usize = 256;
+    if req.session_id.is_empty() || req.session_id.len() > MAX_SESSION_ID_LEN
+        || !req.session_id.bytes().all(|b| b.is_ascii_graphic())
+    {
+        return Err((StatusCode::BAD_REQUEST,
+            "session_id must be 1–256 printable ASCII characters".into()));
+    }
+
+    // Cap total concurrent sessions to prevent HashMap memory exhaustion.
+    const MAX_CONCURRENT_SESSIONS: usize = 1_000;
+    {
+        let sessions = state.agent_sessions.read().await;
+        if sessions.len() >= MAX_CONCURRENT_SESSIONS {
+            return Err((StatusCode::TOO_MANY_REQUESTS,
+                format!("too many open sessions (limit {MAX_CONCURRENT_SESSIONS})")));
+        }
+    }
 
     let graph_cid = KotobaCid::from_multibase(&req.graph_cid)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid graph_cid".into()))?;

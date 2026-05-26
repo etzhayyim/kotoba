@@ -699,19 +699,6 @@ async fn agent_sync_advance_updates_watermark() {
 }
 
 #[tokio::test]
-async fn agent_sync_advance_unknown_session_returns_404() {
-    let s = TestServer::start(false).await;
-    use kotoba_core::cid::KotobaCid;
-    let head_cid = KotobaCid::from_bytes(b"h").to_multibase();
-
-    let (status, _) = s.post(
-        "/xrpc/ai.gftd.apps.kotoba.agent.syncadvance",
-        json!({ "session_id": "no-such", "new_head_cid": head_cid, "new_seq": 1 }),
-    ).await;
-    assert_eq!(status, 404);
-}
-
-#[tokio::test]
 async fn agent_sync_close_removes_session() {
     let s = TestServer::start(false).await;
     use kotoba_core::cid::KotobaCid;
@@ -2065,4 +2052,111 @@ async fn cc_rag_empty_query_returns_400() {
     ).await;
     assert_eq!(status, 400, "{body}");
     assert!(body["error"].as_str().is_some(), "{body}");
+}
+
+// ── agent.sync security tests ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn agent_sync_open_empty_session_id_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post("/xrpc/ai.gftd.apps.kotoba.agent.syncopen", json!({
+        "session_id": "",
+        "graph_cid":  "bafybeisync000000000000000000000000000000000000000",
+        "since_seq":  0u64,
+    })).await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn agent_sync_open_oversized_session_id_returns_400() {
+    let s = TestServer::start(false).await;
+    let long_id = "x".repeat(257); // > 256 bytes
+    let (status, body) = s.post("/xrpc/ai.gftd.apps.kotoba.agent.syncopen", json!({
+        "session_id": long_id,
+        "graph_cid":  "bafybeisync000000000000000000000000000000000000000",
+        "since_seq":  0u64,
+    })).await;
+    assert_eq!(status, 400, "{body}");
+}
+
+// ── kg input-validation tests ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn kg_ingest_empty_id_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.ingest", json!({
+        "id": "",
+    }), "test-token").await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn kg_embed_empty_text_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.embed", json!({
+        "entityId": "ent-1",
+        "text": "",
+    }), "test-token").await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn kg_search_empty_query_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.get("/xrpc/ai.gftd.apps.yata.kg.search?q=").await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn kg_delete_empty_id_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.delete", json!({
+        "id": "",
+    }), "test-token").await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn kg_query_empty_query_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.query", json!({
+        "lang": "sparql", "query": "",
+    }), "test-token").await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn kg_ingest_too_many_claims_returns_400() {
+    let s = TestServer::start(false).await;
+    let claims: Vec<_> = (0..1025).map(|i| json!({"pred": format!("p{i}"), "value": "v"})).collect();
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.ingest", json!({
+        "id": "ent-overflow",
+        "claims": claims,
+    }), "test-token").await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn agent_sync_open_non_ascii_session_id_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post("/xrpc/ai.gftd.apps.kotoba.agent.syncopen", json!({
+        "session_id": "セッション",  // non-ASCII
+        "graph_cid":  "bafybeisync000000000000000000000000000000000000000",
+        "since_seq":  0u64,
+    })).await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
+async fn agent_sync_advance_unknown_session_returns_404() {
+    let s = TestServer::start(false).await;
+    use kotoba_core::cid::KotobaCid;
+    let graph_cid = KotobaCid::from_bytes(b"adv-graph").to_multibase();
+    let head_cid  = KotobaCid::from_bytes(b"head-adv").to_multibase();
+    let (status, body) = s.post("/xrpc/ai.gftd.apps.kotoba.agent.syncadvance", json!({
+        "session_id":   "no-such-session",
+        "new_head_cid": head_cid,
+        "new_seq":      0u64,
+    })).await;
+    assert_eq!(status, 404, "{body}");
 }
