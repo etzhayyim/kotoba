@@ -499,4 +499,97 @@ mod tests {
         let token   = format!("{header}.{payload}.sig");
         assert!(jwt_sub(&token).is_none());
     }
+
+    // ── validate_did ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn validate_did_rejects_empty_string() {
+        let err = validate_did("", "tenant_did", 512).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("must not be empty"), "got: {}", err.1);
+    }
+
+    #[test]
+    fn validate_did_rejects_no_did_prefix() {
+        let err = validate_did("not-a-did", "entity_did", 512).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("did:"), "got: {}", err.1);
+    }
+
+    #[test]
+    fn validate_did_accepts_exactly_max_len() {
+        // Build a DID that is exactly max_len bytes.
+        let max_len: usize = 32;
+        let did = format!("did:key:{}", "z".repeat(max_len - "did:key:".len()));
+        assert_eq!(did.len(), max_len);
+        assert!(validate_did(&did, "f", max_len).is_ok());
+    }
+
+    #[test]
+    fn validate_did_rejects_over_max_len() {
+        let max_len: usize = 32;
+        let did = format!("did:key:{}", "z".repeat(max_len - "did:key:".len() + 1));
+        assert_eq!(did.len(), max_len + 1);
+        let err = validate_did(&did, "f", max_len).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("exceeds"), "got: {}", err.1);
+    }
+
+    #[test]
+    fn validate_did_accepts_valid_did_key() {
+        assert!(validate_did("did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuias8sitwN1s", "did", 512).is_ok());
+    }
+
+    #[test]
+    fn validate_did_accepts_valid_did_plc() {
+        assert!(validate_did("did:plc:abcdefghijklmnopqrstuvwxy", "did", 512).is_ok());
+    }
+
+    // ── require_any_bearer_auth ───────────────────────────────────────────────
+
+    #[test]
+    fn require_any_bearer_auth_rejects_no_header() {
+        let err = require_any_bearer_auth(&HeaderMap::new(), "test").unwrap_err();
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn require_any_bearer_auth_rejects_basic_auth() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            "Basic dXNlcjpwYXNz".parse().unwrap(),
+        );
+        let err = require_any_bearer_auth(&h, "test").unwrap_err();
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn require_any_bearer_auth_rejects_expired_jwt() {
+        let token = jwt_with_exp(1);
+        let h = bearer_headers(&token);
+        let err = require_any_bearer_auth(&h, "test").unwrap_err();
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        assert!(err.1.contains("expired"), "expected 'expired' in: {}", err.1);
+    }
+
+    #[test]
+    fn require_any_bearer_auth_rejects_missing_sub() {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        let far_future: u64 = 4_102_444_800;
+        let header  = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{far_future}}}"#));
+        let token   = format!("{header}.{payload}.sig");
+        let h = bearer_headers(&token);
+        let err = require_any_bearer_auth(&h, "test").unwrap_err();
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        assert!(err.1.to_lowercase().contains("sub"), "expected 'sub' in: {}", err.1);
+    }
+
+    #[test]
+    fn require_any_bearer_auth_accepts_valid_jwt_any_sub() {
+        let far_future: u64 = 4_102_444_800;
+        let h = bearer_headers(&jwt_with_exp(far_future));
+        assert!(require_any_bearer_auth(&h, "test").is_ok());
+    }
 }
