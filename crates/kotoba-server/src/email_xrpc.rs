@@ -70,10 +70,7 @@ pub async fn email_list(
     headers: HeaderMap,
     Query(q): Query<EmailListQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    if q.owner_did.is_empty() || q.owner_did.len() > MAX_OWNER_DID_LEN {
-        return Err((StatusCode::BAD_REQUEST,
-            format!("owner_did must be 1–{MAX_OWNER_DID_LEN} bytes")));
-    }
+    crate::graph_auth::validate_did(&q.owner_did, "owner_did", MAX_OWNER_DID_LEN)?;
     require_email_auth(&headers, &q.owner_did, &state.operator_did)?;
 
     let graph_cid = graph_cid_for(&q.owner_did);
@@ -126,9 +123,8 @@ pub async fn email_read(
     headers: HeaderMap,
     Query(q): Query<EmailReadQuery>,
 ) -> impl IntoResponse {
-    if q.owner_did.is_empty() || q.owner_did.len() > MAX_OWNER_DID_LEN {
-        return (StatusCode::BAD_REQUEST,
-            Json(json!({ "error": format!("owner_did must be 1–{MAX_OWNER_DID_LEN} bytes") }))).into_response();
+    if let Err((code, msg)) = crate::graph_auth::validate_did(&q.owner_did, "owner_did", MAX_OWNER_DID_LEN) {
+        return (code, Json(json!({ "error": msg }))).into_response();
     }
     if q.email_cid.is_empty() || q.email_cid.len() > MAX_EMAIL_CID_LEN {
         return (StatusCode::BAD_REQUEST,
@@ -227,9 +223,8 @@ pub async fn email_ingest(
     headers: HeaderMap,
     Json(body): Json<EmailIngestBody>,
 ) -> impl IntoResponse {
-    if body.owner_did.is_empty() || body.owner_did.len() > MAX_OWNER_DID_LEN {
-        return (StatusCode::BAD_REQUEST,
-            Json(json!({ "error": format!("owner_did must be 1–{MAX_OWNER_DID_LEN} bytes") }))).into_response();
+    if let Err((code, msg)) = crate::graph_auth::validate_did(&body.owner_did, "owner_did", MAX_OWNER_DID_LEN) {
+        return (code, Json(json!({ "error": msg }))).into_response();
     }
     if body.raw_b64.is_empty() {
         return (StatusCode::BAD_REQUEST,

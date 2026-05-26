@@ -28,18 +28,9 @@ const MAX_DEVICE_ID_LEN: usize = 128;
 const MAX_GROUP_ID_LEN:  usize = 128;
 const MAX_PAYLOAD_BYTES: usize = 256 * 1024; // 256 KiB per encrypted message
 
-/// Validate a DID string: non-empty, `did:` prefix, within max length.
+/// Thin wrapper — delegates to the shared validator in `graph_auth`.
 fn validate_signal_did(did: &str, field: &str) -> Result<(), (StatusCode, String)> {
-    if did.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, format!("{field} must not be empty")));
-    }
-    if !did.starts_with("did:") {
-        return Err((StatusCode::BAD_REQUEST, format!("{field} is not a valid DID (must start with 'did:')")));
-    }
-    if did.len() > MAX_DID_LEN {
-        return Err((StatusCode::BAD_REQUEST, format!("{field} exceeds {MAX_DID_LEN} bytes")));
-    }
-    Ok(())
+    crate::graph_auth::validate_did(did, field, MAX_DID_LEN)
 }
 
 /// Verify caller owns `did` via Bearer JWT `sub` claim.

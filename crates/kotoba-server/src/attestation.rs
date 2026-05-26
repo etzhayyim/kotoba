@@ -193,13 +193,11 @@ pub async fn attest_claim(
     headers: HeaderMap,
     Json(req): Json<AttestClaimReq>,
 ) -> impl IntoResponse {
-    if req.entity_did.is_empty() || req.entity_did.len() > MAX_ATTEST_DID_LEN {
-        return (StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": format!("entity_did must be 1–{MAX_ATTEST_DID_LEN} bytes") }))).into_response();
+    if let Err((code, msg)) = crate::graph_auth::validate_did(&req.entity_did, "entity_did", MAX_ATTEST_DID_LEN) {
+        return (code, Json(serde_json::json!({ "error": msg }))).into_response();
     }
-    if req.attester_did.is_empty() || req.attester_did.len() > MAX_ATTEST_DID_LEN {
-        return (StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": format!("attester_did must be 1–{MAX_ATTEST_DID_LEN} bytes") }))).into_response();
+    if let Err((code, msg)) = crate::graph_auth::validate_did(&req.attester_did, "attester_did", MAX_ATTEST_DID_LEN) {
+        return (code, Json(serde_json::json!({ "error": msg }))).into_response();
     }
     if req.claim_type.is_empty() || req.claim_type.len() > MAX_ATTEST_CLAIM_TYPE {
         return (StatusCode::BAD_REQUEST,
@@ -325,9 +323,8 @@ pub async fn attest_challenge(
         return (StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": format!("claim_cid must be 1–{MAX_ATTEST_CID_LEN} bytes") }))).into_response();
     }
-    if req.challenger_did.is_empty() || req.challenger_did.len() > MAX_ATTEST_DID_LEN {
-        return (StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": format!("challenger_did must be 1–{MAX_ATTEST_DID_LEN} bytes") }))).into_response();
+    if let Err((code, msg)) = crate::graph_auth::validate_did(&req.challenger_did, "challenger_did", MAX_ATTEST_DID_LEN) {
+        return (code, Json(serde_json::json!({ "error": msg }))).into_response();
     }
     if req.reason.is_empty() || req.reason.len() > MAX_ATTEST_REASON_LEN {
         return (StatusCode::BAD_REQUEST,

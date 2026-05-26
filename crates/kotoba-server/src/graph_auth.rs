@@ -192,6 +192,22 @@ pub(crate) fn require_any_bearer_auth(
         })
 }
 
+/// Validate a DID string: non-empty, `did:` prefix, within `max_len` bytes.
+///
+/// Returns a `(StatusCode::BAD_REQUEST, message)` error tuple on failure.
+pub(crate) fn validate_did(did: &str, field: &str, max_len: usize) -> Result<(), (StatusCode, String)> {
+    if did.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, format!("{field} must not be empty")));
+    }
+    if !did.starts_with("did:") {
+        return Err((StatusCode::BAD_REQUEST, format!("{field} is not a valid DID (must start with 'did:')")));
+    }
+    if did.len() > max_len {
+        return Err((StatusCode::BAD_REQUEST, format!("{field} exceeds {max_len} bytes")));
+    }
+    Ok(())
+}
+
 /// Check read access for a named graph.
 ///
 /// - `Public`        → always `Ok(())`

@@ -452,6 +452,9 @@ pub async fn invoke_run(
     Json(req):    Json<InvokeRunReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     crate::graph_auth::require_operator_auth(&headers, &state.operator_did)?;
+    const MAX_AGENT_DID_LEN: usize = 512;
+    crate::graph_auth::validate_did(&req.agent_did, "agent_did", MAX_AGENT_DID_LEN)?;
+
     use kotoba_dht::source_chain::ProgramType;
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 

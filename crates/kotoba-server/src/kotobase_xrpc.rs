@@ -80,16 +80,7 @@ const MAX_OBJECT_LEN:    usize = 65_536; // 64 KiB per triple value
 const MAX_TRIPLES_PER_PIN: usize = 1_024; // prevent DoS via unbounded triple arrays
 
 fn validate_did(did: &str) -> Result<(), (StatusCode, String)> {
-    if did.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "tenant_did must not be empty".into()));
-    }
-    if !did.starts_with("did:") {
-        return Err((StatusCode::BAD_REQUEST, format!("tenant_did is not a valid DID: {did:?}")));
-    }
-    if did.len() > MAX_DID_LEN {
-        return Err((StatusCode::BAD_REQUEST, format!("tenant_did exceeds {MAX_DID_LEN} bytes")));
-    }
-    Ok(())
+    crate::graph_auth::validate_did(did, "tenant_did", MAX_DID_LEN)
 }
 
 fn validate_name(name: &str) -> Result<(), (StatusCode, String)> {
