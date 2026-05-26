@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kotoba
+  namespace: kotoba
+spec:
+  selector:
+    app.kubernetes.io/name: kotoba
+  type: ClusterIP
+  ports:
+    - name: xrpc
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+# Public XRPC endpoint for kotobase CF Worker (ADR-2605260001)
+# KOTOBA_BACKEND_URL=http://<LB-IP>:8080
+apiVersion: v1
+kind: Service
+metadata:
+  name: kotoba-api
+  namespace: kotoba
+spec:
+  selector:
+    app.kubernetes.io/name: kotoba
+  type: LoadBalancer
+  ports:
+    - name: xrpc
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+# Expose QUIC for p2p (optional — comment out for single-node)
+apiVersion: v1
+kind: Service
+metadata:
+  name: kotoba-p2p
+  namespace: kotoba
+spec:
+  selector:
+    app.kubernetes.io/name: kotoba
+  type: LoadBalancer
+  ports:
+    - name: quic
+      port: 4001
+      targetPort: 4001
+      protocol: UDP

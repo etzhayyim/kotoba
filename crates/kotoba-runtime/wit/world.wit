@@ -35,6 +35,11 @@ interface kqe {
 
     /// Read Commit CID for a named graph head
     get-head: func(graph-name: string) -> option<string>;
+
+    /// Evaluate a set of Datalog rules against the current quad snapshot.
+    /// rules-cbor: CBOR-encoded list<DatalogRule> (ciborium serialised).
+    /// Returns newly derived quads (subject/predicate from head relation).
+    evaluate-rules: func(rules-cbor: list<u8>) -> result<list<quad>, string>;
 }
 
 /// KSE (Kotoba Stream Engine) — Journal topic publish/subscribe interface

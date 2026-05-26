@@ -1,5 +1,8 @@
+pub mod cc;
+pub mod embed_client;
 pub mod gmail;
 pub mod ingest;
+pub mod ivf;
 
 pub use gmail::GmailClient;
 pub use ingest::{EmailIngestor, graph_cid_for};
