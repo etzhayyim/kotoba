@@ -33,17 +33,40 @@ impl EmailIngestor {
         Self { crypto, vault, quad_store, graph_cid, owner_did }
     }
 
+    /// Maximum raw email size accepted by `ingest_raw`.
+    /// RFC 5321 §4.5.3.1 mandates servers accept at least 10 MiB; 25 MiB is the
+    /// widely-used limit (e.g. Gmail). Larger messages must be split by the caller.
+    pub const MAX_EMAIL_BYTES: usize = 25 * 1024 * 1024; // 25 MiB
+
     /// Ingest a single raw RFC 2822 message.  Returns the email's CID.
     ///
     /// Idempotent: the same Message-ID always maps to the same CID so
     /// re-ingesting a message is a no-op at the QuadStore level.
     pub async fn ingest_raw(&self, raw: &[u8], thread_id: &str) -> Result<KotobaCid> {
+        // ── 0. Input validation ───────────────────────────────────────────────
+        anyhow::ensure!(
+            raw.len() <= Self::MAX_EMAIL_BYTES,
+            "email too large ({} bytes, limit {})", raw.len(), Self::MAX_EMAIL_BYTES
+        );
+        // thread_id is an internal correlation key — keep it bounded.
+        anyhow::ensure!(
+            thread_id.len() <= 256,
+            "thread_id too long ({} bytes, limit 256)", thread_id.len()
+        );
+
         let msg = MessageParser::default()
             .parse(raw)
             .ok_or_else(|| anyhow::anyhow!("mail-parser: failed to parse message"))?;
 
         // Stable CID: prefer Message-ID; fallback to blake3 of raw bytes
-        let message_id = msg.message_id().unwrap_or("").to_string();
+        let raw_message_id = msg.message_id().unwrap_or("");
+        // RFC 5322 §2.1.1 limits a single header line to 998 chars (excluding CRLF).
+        // Truncate rather than reject so a malformed Message-ID still produces a CID.
+        let message_id = if raw_message_id.len() > 998 {
+            raw_message_id[..998].to_string()
+        } else {
+            raw_message_id.to_string()
+        };
         let email_cid = if message_id.is_empty() {
             KotobaCid::from_bytes(blake3::hash(raw).as_bytes())
         } else {
@@ -61,9 +84,11 @@ impl EmailIngestor {
         let blob_ref = self.vault.put(Bytes::from(enc_body)).await;
 
         // ── 2. PII fields → signal:v1: envelope ─────────────────────────────
-        let from_str    = addr_header(msg.from());
-        let to_str      = addr_header(msg.to());
-        let subject_str = msg.subject().unwrap_or("").to_string();
+        // Truncate header fields to RFC 5322 limits before encryption so quad
+        // objects stay within the 8 KiB bound enforced by the XRPC layer.
+        let from_str    = truncate_addr(addr_header(msg.from()), 4096);
+        let to_str      = truncate_addr(addr_header(msg.to()),   4096);
+        let subject_str = truncate_str(msg.subject().unwrap_or(""), 998);
 
         let enc_from = self.crypto
             .seal_field(b"email/from", &from_str)
@@ -158,6 +183,25 @@ fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// Truncate a String at a UTF-8 character boundary ≤ `max_bytes`.
+fn truncate_str(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        s.to_string()
+    } else {
+        // Walk back from max_bytes to find a valid char boundary.
+        let mut end = max_bytes;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s[..end].to_string()
+    }
+}
+
+/// Same as `truncate_str` but accepts an owned String (avoids clone for the common case).
+fn truncate_addr(s: String, max_bytes: usize) -> String {
+    if s.len() <= max_bytes { s } else { truncate_str(&s, max_bytes) }
 }
 
 #[cfg(test)]
@@ -267,5 +311,56 @@ mod tests {
         } else {
             panic!("expected Text for body_cid");
         }
+    }
+
+    // ── Bounds tests ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn oversized_email_is_rejected() {
+        let ing = make_ingestor();
+        // One byte over the limit
+        let huge = vec![b'X'; EmailIngestor::MAX_EMAIL_BYTES + 1];
+        let err = ing.ingest_raw(&huge, "t").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("too large"), "expected 'too large' in: {msg}");
+    }
+
+    #[tokio::test]
+    async fn exactly_max_email_size_is_accepted() {
+        let ing = make_ingestor();
+        // A raw buffer of exactly MAX_EMAIL_BYTES may not be a valid RFC 2822 message,
+        // but the size guard must pass and the parse error is different.
+        let at_limit = vec![b'A'; EmailIngestor::MAX_EMAIL_BYTES];
+        let result = ing.ingest_raw(&at_limit, "t").await;
+        // Either parse failure or success — neither should be "too large".
+        if let Err(e) = result {
+            assert!(!e.to_string().contains("too large"), "should not be 'too large': {e}");
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_thread_id_is_rejected() {
+        let ing = make_ingestor();
+        let long_thread = "x".repeat(257);
+        let err = ing.ingest_raw(SAMPLE_EMAIL, &long_thread).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("too long"), "expected 'too long' in: {msg}");
+    }
+
+    #[test]
+    fn truncate_str_at_boundary() {
+        let s = "hello world";
+        assert_eq!(truncate_str(s, 5), "hello");
+        assert_eq!(truncate_str(s, 100), "hello world"); // no truncation needed
+        assert_eq!(truncate_str(s, 0), "");
+    }
+
+    #[test]
+    fn truncate_str_respects_utf8_boundary() {
+        let s = "日本語"; // 3 chars × 3 bytes each = 9 bytes
+        // max_bytes = 4 → can't split inside a 3-byte char, steps back to boundary 3
+        let r = truncate_str(s, 4);
+        assert!(s.is_char_boundary(r.len()), "result must end on a char boundary");
+        assert_eq!(r, "日"); // 3 bytes, fits in 4
     }
 }

@@ -30,3 +30,4 @@ futures                  = "0.3"
 kotoba-store             = { path = "../kotoba-store" }
 tokio                    = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 tracing-subscriber       = { workspace = true }
+zeroize                  = { workspace = true }

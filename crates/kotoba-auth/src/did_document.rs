@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+const X25519_KEY_TYPE: &str  = "X25519KeyAgreementKey2020";
+const ED25519_KEY_TYPE_2020: &str = "Ed25519VerificationKey2020";
+const ED25519_KEY_TYPE_2018: &str = "Ed25519VerificationKey2018";
+
 /// DID Document — Kotoba Vertex declaration
 /// capabilityInvocation key → Source Chain write right
 /// capabilityDelegation key → CACAO delegation issuance
@@ -66,5 +70,42 @@ impl DidDocument {
                 _ => None,
             })
             .unwrap_or_default()
+    }
+
+    /// Extract the X25519 key agreement public key from `verificationMethod`.
+    ///
+    /// Returns `None` if no `X25519KeyAgreementKey2020` entry is present or
+    /// if the multibase-encoded key cannot be decoded to exactly 32 bytes.
+    pub fn x25519_public_key(&self) -> Option<[u8; 32]> {
+        let vm = self.verification_method
+            .iter()
+            .find(|vm| vm.key_type == X25519_KEY_TYPE)?;
+
+        let (_base, raw) = multibase::decode(&vm.public_key_multibase).ok()?;
+        if raw.len() != 32 {
+            return None;
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&raw);
+        Some(key)
+    }
+
+    /// Extract the Ed25519 verification public key from `verificationMethod`.
+    ///
+    /// Searches for `Ed25519VerificationKey2020` or `Ed25519VerificationKey2018`.
+    /// Returns `None` if no matching entry is present or the multibase-encoded
+    /// key cannot be decoded to exactly 32 bytes.
+    pub fn ed25519_public_key(&self) -> Option<[u8; 32]> {
+        let vm = self.verification_method.iter().find(|vm| {
+            vm.key_type == ED25519_KEY_TYPE_2020 || vm.key_type == ED25519_KEY_TYPE_2018
+        })?;
+
+        let (_base, raw) = multibase::decode(&vm.public_key_multibase).ok()?;
+        if raw.len() != 32 {
+            return None;
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&raw);
+        Some(key)
     }
 }

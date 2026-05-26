@@ -77,6 +77,22 @@ impl ProllyTree {
         }
     }
 
+    /// Walk the ProllyTree from `root` and return all referenced block CIDs (root inclusive).
+    ///
+    /// Recursively follows all `Internal` node children.  Leaf entries are not followed
+    /// (their values are opaque bytes, not CID references).  Used by GC to compute the
+    /// live set reachable from a commit's ProllyTree roots.
+    pub fn walk_all_cids(root: &KotobaCid, store: &dyn BlockStore) -> anyhow::Result<Vec<KotobaCid>> {
+        let mut out = vec![root.clone()];
+        let Some(node) = Self::load_node(root, store)? else { return Ok(out); };
+        if let ProllyNode::Internal { children, .. } = node {
+            for (_, child_cid) in children {
+                out.extend(Self::walk_all_cids(&child_cid, store)?);
+            }
+        }
+        Ok(out)
+    }
+
     /// Flush all in-memory nodes to the block store.
     /// Returns the root CID if the tree has a root.
     pub fn flush(&self, store: &dyn BlockStore) -> anyhow::Result<Option<KotobaCid>> {

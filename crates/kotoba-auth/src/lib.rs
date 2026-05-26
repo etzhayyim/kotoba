@@ -2,11 +2,21 @@ pub mod did_document;
 pub mod cacao;
 pub mod delegation;
 pub mod eth;
+pub mod did_key;
+pub mod resolver;
+pub mod passkey;
 
 pub use did_document::{DidDocument, VerificationMethod, ServiceEndpoint};
 pub use cacao::{Cacao, CacaoHeader, CacaoPayload, CacaoSig, CacaoError};
 pub use delegation::{DelegationChain, DelegationError};
 pub use eth::{eth_address_to_erc725_did, personal_sign_hash, recover_eth_address};
+pub use did_key::{parse_ed25519_did_key, ed25519_pubkey_to_did_key};
+pub use resolver::{DidDocumentResolver, DidResolverError, InMemoryDidResolver};
+pub use passkey::{
+    PasskeyAssertion, PasskeyGate, PasskeyGateError,
+    KeyOpKind, AuthLevel, KeyOpPolicy, Authorization,
+    KeyHierarchy,
+};
 
 #[cfg(test)]
 mod tests {
@@ -162,7 +172,7 @@ mod tests {
         let cacao = Cacao {
             h: CacaoHeader { t: "eip4361".into() },
             p: test_payload(vec![]),
-            s: CacaoSig { t: "EdDSA".into(), s: "deaddead".into() },
+            s: CacaoSig { t: "secp256r1".into(), s: "deaddead".into() },
         };
         let err = cacao.verify_signature().unwrap_err();
         assert!(matches!(err, CacaoError::UnsupportedSigType(_)));
@@ -237,6 +247,43 @@ mod tests {
         assert!(result.is_ok(), "verify_signature failed: {:?}", result.err());
     }
 
+    // ── Cacao::verify_signature — EdDSA roundtrip ─────────────────────────
+
+    #[test]
+    fn verify_signature_eddsa_roundtrip() {
+        use ed25519_dalek::{Signer, SigningKey};
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+
+        let sk = SigningKey::from_bytes(&[13u8; 32]);
+        let pk = sk.verifying_key();
+        let did = did_key::ed25519_pubkey_to_did_key(pk.as_bytes());
+
+        let payload = CacaoPayload {
+            iss: did.clone(),
+            aud: "kotoba://test".into(),
+            issued_at: "2026-05-26T00:00:00Z".into(),
+            expiry: None,
+            nonce: "eddsa-nonce".into(),
+            domain: "kotoba.test".into(),
+            statement: None,
+            version: "1".into(),
+            resources: vec!["kotoba://can/quad:write".into()],
+        };
+        let mut cacao = Cacao {
+            h: CacaoHeader { t: "caip122".into() },
+            p: payload,
+            s: CacaoSig { t: "EdDSA".into(), s: String::new() },
+        };
+
+        let msg = cacao.siwe_message();
+        let sig = sk.sign(msg.as_bytes());
+        cacao.s.s = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+
+        let result = cacao.verify_signature();
+        assert!(result.is_ok(), "EdDSA verify failed: {:?}", result.err());
+        assert_eq!(result.unwrap(), did);
+    }
+
     // ── DelegationChain ────────────────────────────────────────────────────
 
     #[test]
@@ -257,6 +304,23 @@ mod tests {
     }
 
     #[test]
+    fn delegation_verify_chain_depth_exceeded_errors() {
+        let cacao1 = Cacao {
+            h: CacaoHeader { t: "eip4361".into() },
+            p: test_payload(vec![]),
+            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+        };
+        let cacao2 = cacao1.clone();
+        let mut chain = delegation::DelegationChain::new(cacao1);
+        chain.chain.push(cacao2); // forge a second link
+        let err = chain.verify("graph_cid", "quad:write").unwrap_err();
+        assert!(
+            matches!(err, DelegationError::ChainDepthExceeded(2)),
+            "expected ChainDepthExceeded(2), got {err:?}"
+        );
+    }
+
+    #[test]
     fn delegation_verify_expired_returns_expired_error() {
         let mut p = test_payload(vec![]);
         p.expiry = Some("2020-01-01T00:00:00Z".into()); // clearly in the past
@@ -268,6 +332,112 @@ mod tests {
         let chain = delegation::DelegationChain::new(cacao);
         let err = chain.verify("graph_cid", "quad:write").unwrap_err();
         assert!(matches!(err, DelegationError::Expired), "expected Expired, got {err:?}");
+    }
+
+    #[test]
+    fn delegation_verify_non_utc_exp_returns_invalid_expiry() {
+        let mut p = test_payload(vec![]);
+        // +09:00 offset: would corrupt lexicographic comparison against `...Z` now_iso
+        p.expiry = Some("2099-01-01T09:00:00+09:00".into());
+        let cacao = Cacao {
+            h: CacaoHeader { t: "eip4361".into() },
+            p,
+            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+        };
+        let chain = delegation::DelegationChain::new(cacao);
+        let err = chain.verify("graph_cid", "quad:write").unwrap_err();
+        assert!(matches!(err, DelegationError::InvalidExpiry(_)),
+            "expected InvalidExpiry, got {err:?}");
+    }
+
+    #[test]
+    fn delegation_verify_old_cacao_without_exp_is_rejected() {
+        let mut p = test_payload(vec![]);
+        // issued more than 7 days ago — should be rejected by max-age check
+        p.issued_at = "2020-01-01T00:00:00Z".into();
+        p.expiry = None;
+        let cacao = Cacao {
+            h: CacaoHeader { t: "eip4361".into() },
+            p,
+            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+        };
+        let chain = delegation::DelegationChain::new(cacao);
+        let err = chain.verify("graph_cid", "quad:write").unwrap_err();
+        assert!(matches!(err, DelegationError::Expired),
+            "expected Expired (max-age), got {err:?}");
+    }
+
+    #[test]
+    fn delegation_verify_invalid_iat_format_is_rejected() {
+        let mut p = test_payload(vec![]);
+        p.issued_at = "not-a-date".into();
+        p.expiry = None;
+        let cacao = Cacao {
+            h: CacaoHeader { t: "eip4361".into() },
+            p,
+            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+        };
+        let chain = delegation::DelegationChain::new(cacao);
+        let err = chain.verify("graph_cid", "quad:write").unwrap_err();
+        assert!(matches!(err, DelegationError::InvalidExpiry(_)),
+            "expected InvalidExpiry, got {err:?}");
+    }
+
+    #[test]
+    fn delegation_verify_with_aud_wrong_audience_returns_mismatch() {
+        let p = test_payload(vec![]);
+        // test_payload sets aud = "kotoba://test"
+        let cacao = Cacao {
+            h: CacaoHeader { t: "eip4361".into() },
+            p,
+            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+        };
+        let chain = delegation::DelegationChain::new(cacao);
+        let err = chain.verify_with_aud("graph_cid", "quad:read", "kotoba://different-node").unwrap_err();
+        assert!(
+            matches!(err, DelegationError::AudienceMismatch { .. }),
+            "expected AudienceMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn delegation_verify_with_aud_matching_audience_proceeds_to_verify() {
+        // With matching aud the audience gate passes and verify() is called next.
+        // The CACAO will fail expiry (iat = 2026-05-25 > 7 days ago as of test time
+        // is still valid, but the sig is fake "00" so it fails at sig verification).
+        // We just assert we get past AudienceMismatch into a different error.
+        let mut p = test_payload(vec![]);
+        p.expiry = Some("2099-12-31T23:59:59Z".into()); // far future
+        let cacao = Cacao {
+            h: CacaoHeader { t: "eip4361".into() },
+            p,
+            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+        };
+        let chain = delegation::DelegationChain::new(cacao);
+        let err = chain.verify_with_aud("graph_cid", "quad:read", "kotoba://test").unwrap_err();
+        assert!(
+            !matches!(err, DelegationError::AudienceMismatch { .. }),
+            "should have passed audience gate; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn delegation_verify_with_aud_empty_aud_is_rejected() {
+        // A CACAO with no audience binding must be rejected by verify_with_aud.
+        // Accepting an empty aud would let bearer tokens bypass replay protection.
+        let mut p = test_payload(vec![]);
+        p.aud = String::new(); // no audience binding
+        let cacao = Cacao {
+            h: CacaoHeader { t: "eip4361".into() },
+            p,
+            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+        };
+        let chain = delegation::DelegationChain::new(cacao);
+        let err = chain.verify_with_aud("graph_cid", "quad:read", "kotoba://test").unwrap_err();
+        assert!(
+            matches!(err, DelegationError::AudienceMismatch { .. }),
+            "expected AudienceMismatch for empty aud, got {err:?}"
+        );
     }
 
     // ── DidDocument ────────────────────────────────────────────────────────
@@ -330,5 +500,62 @@ mod tests {
         let doc2: DidDocument = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(doc.id, doc2.id);
         assert_eq!(doc.service.len(), doc2.service.len());
+    }
+
+    // ── Cacao::is_expired UTC format validation ─────────────────────────────
+
+    fn make_cacao(expiry: Option<&str>, issued_at: &str) -> Cacao {
+        let mut p = test_payload(vec![]);
+        p.issued_at = issued_at.into();
+        p.expiry = expiry.map(|s| s.into());
+        Cacao {
+            h: CacaoHeader { t: "eip4361".into() },
+            p,
+            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+        }
+    }
+
+    #[test]
+    fn is_expired_past_utc_is_true() {
+        let c = make_cacao(Some("2020-01-01T00:00:00Z"), "2019-01-01T00:00:00Z");
+        assert!(c.is_expired());
+    }
+
+    #[test]
+    fn is_expired_future_utc_is_false() {
+        let c = make_cacao(Some("2099-12-31T23:59:59Z"), "2026-01-01T00:00:00Z");
+        assert!(!c.is_expired());
+    }
+
+    #[test]
+    fn is_expired_none_expiry_is_false() {
+        let c = make_cacao(None, "2026-05-26T00:00:00Z");
+        assert!(!c.is_expired());
+    }
+
+    #[test]
+    fn is_expired_non_utc_offset_treated_as_expired() {
+        // +09:00 offset: corrupt lexicographic comparison — fail-safe: treat as expired
+        let c = make_cacao(Some("2099-01-01T09:00:00+09:00"), "2026-01-01T00:00:00Z");
+        assert!(c.is_expired(), "non-UTC offset must be treated as expired");
+    }
+
+    #[test]
+    fn is_expired_wrong_length_exp_treated_as_expired() {
+        let c = make_cacao(Some("2099-01-01"), "2026-01-01T00:00:00Z");
+        assert!(c.is_expired(), "short/malformed exp must be treated as expired");
+    }
+
+    #[test]
+    fn issued_at_secs_valid_roundtrip() {
+        let c = make_cacao(None, "2026-05-26T00:00:00Z");
+        let secs = c.issued_at_secs().expect("valid iat");
+        assert!(secs > 0);
+    }
+
+    #[test]
+    fn issued_at_secs_malformed_returns_none() {
+        let c = make_cacao(None, "not-a-date");
+        assert!(c.issued_at_secs().is_none());
     }
 }

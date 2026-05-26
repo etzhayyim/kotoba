@@ -9,6 +9,7 @@ description = "Kotoba Stream Engine: Journal, Topic, Shelf, Vault"
 kotoba-core.workspace  = true
 kotoba-store.workspace = true
 kotoba-crypto.workspace = true
+kotoba-auth            = { path = "../kotoba-auth" }
 rand.workspace         = true
 rand_core.workspace    = true
 tokio.workspace        = true
@@ -29,4 +30,5 @@ async-trait.workspace   = true
 zeroize.workspace       = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile    = "3"
+base64      = "0.22"

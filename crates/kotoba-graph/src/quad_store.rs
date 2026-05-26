@@ -7,11 +7,19 @@ use kotoba_kqe::delta::Delta;
 use kotoba_kqe::arrangement::Arrangement;
 use kotoba_kse::journal::Journal;
 use kotoba_kse::topic::Topic;
+use kotoba_auth::delegation::{DelegationChain, DelegationError};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::commit::{Commit, CommitDag};
+
+/// Error returned when a CACAO-gated quad write fails.
+#[derive(Debug, thiserror::Error)]
+pub enum AccessError {
+    #[error("delegation: {0}")]
+    Delegation(#[from] DelegationError),
+}
 
 /// QuadStore — Quad write/read API with 3-index Journal publish + ProllyTree commit
 pub struct QuadStore {
@@ -57,6 +65,21 @@ impl QuadStore {
         let mut arrs = self.arrangements.write().await;
         arrs.entry(g).or_insert_with(Arrangement::new).insert(&quad);
         delta
+    }
+
+    /// CACAO-gated quad assert.
+    ///
+    /// Verifies that `chain` grants `"quad:write"` on the quad's **graph** CID before
+    /// delegating to `assert()`. Compute functions should call this instead of `assert()`
+    /// whenever the write originates from an actor rather than the server itself.
+    pub async fn assert_authed(
+        &self,
+        quad: Quad,
+        chain: &DelegationChain,
+    ) -> Result<Delta, AccessError> {
+        let graph_mb = quad.graph.to_multibase();
+        chain.verify(&graph_mb, "quad:write")?;
+        Ok(self.assert(quad).await)
     }
 
     pub async fn retract(&self, quad: Quad) -> Delta {
@@ -550,6 +573,60 @@ impl QuadStore {
         tracing::info!(%cid, author, seq, "QuadStore committed (4-index)");
         Ok(cid)
     }
+
+    /// Mark-sweep GC: delete blocks in the store not reachable from any commit in the DAG.
+    ///
+    /// Walk strategy: every commit stored in the in-memory CommitDag is treated as a GC root.
+    /// Each commit's 4 ProllyTree roots are recursively walked to collect all live block CIDs.
+    /// Blocks returned by `block_store.all_cids()` but absent from the live set are deleted.
+    ///
+    /// Stores that don't implement `all_cids()` (S3, iroh) return an empty vec — in that case
+    /// this function safely returns 0 without modifying anything.
+    ///
+    /// Returns the count of deleted blocks.
+    pub async fn gc_dead_blocks(&self) -> anyhow::Result<usize> {
+        let live = {
+            let dag = self.commit_dag.read().await;
+            dag.all_live_cids(&*self.block_store)?
+        };
+        let all = self.block_store.all_cids();
+        let mut deleted = 0usize;
+        for cid in all {
+            if !live.contains(&cid) {
+                if let Err(e) = self.block_store.delete(&cid) {
+                    tracing::warn!("gc_dead_blocks: delete failed for {}: {e}", cid.to_multibase());
+                } else {
+                    deleted += 1;
+                }
+            }
+        }
+        if deleted > 0 {
+            tracing::info!(deleted, "gc_dead_blocks: collected {deleted} unreachable blocks");
+        }
+        Ok(deleted)
+    }
+
+    /// Prune historical (non-HEAD) commit entries from the in-memory CommitDag where
+    /// `commit.seq < before_seq`.  HEAD commits are always preserved.
+    ///
+    /// This bounds CommitDag memory growth in long-running nodes that commit frequently.
+    /// Typically called after `gc_dead_blocks()` so that block GC runs first while all
+    /// historical commits are still visible as GC roots.
+    ///
+    /// Returns the count of commit entries removed.
+    pub async fn prune_old_commits(&self, before_seq: u64) -> usize {
+        let mut dag = self.commit_dag.write().await;
+        let pruned = dag.prune_non_head(before_seq);
+        if pruned > 0 {
+            tracing::info!(pruned, before_seq, "prune_old_commits: removed {pruned} historical commits");
+        }
+        pruned
+    }
+
+    /// Return the number of commits currently held in the in-memory CommitDag.
+    pub async fn commit_dag_size(&self) -> usize {
+        self.commit_dag.read().await.commit_count()
+    }
 }
 
 #[cfg(test)]
@@ -689,5 +766,69 @@ mod tests {
             quads.iter().map(|q| q.predicate.as_str()).collect();
         assert!(predicates.contains("name"),  "name predicate expected");
         assert!(predicates.contains("knows"), "knows predicate expected");
+    }
+
+    #[tokio::test]
+    async fn gc_dead_blocks_removes_orphaned_blocks_and_keeps_live() {
+        let journal     = Arc::new(Journal::new());
+        let block_store = Arc::new(MemoryBlockStore::new());
+        let qs = QuadStore::new(Arc::clone(&journal), Arc::clone(&block_store) as _);
+        let graph = KotobaCid::from_bytes(b"gc-graph");
+
+        // Commit 1 — writes ProllyTree blocks + 1 CAR bundle per commit
+        qs.assert(make_quad("gc-graph", "a", "p", "v1")).await;
+        qs.commit("did:test", graph.clone(), 1).await.unwrap();
+
+        // Commit 2 — writes another set of ProllyTree blocks + CAR bundle
+        qs.assert(make_quad("gc-graph", "b", "p", "v2")).await;
+        qs.commit("did:test", graph.clone(), 2).await.unwrap();
+
+        // Record the live-only count: all_cids minus CAR bundles
+        // (CAR bundles stored per commit are fire-and-forget and not reachable via DAG traversal)
+        let count_before_orphan = block_store.block_count();
+
+        // Inject a truly orphaned block — not referenced by any commit or tree
+        let orphan_cid = KotobaCid::from_bytes(b"orphan-data");
+        block_store.put(&orphan_cid, b"orphan payload").unwrap();
+        assert_eq!(block_store.block_count(), count_before_orphan + 1);
+
+        // GC: deletes our explicit orphan + the per-commit CAR bundles (also unreachable)
+        let deleted = qs.gc_dead_blocks().await.unwrap();
+        assert!(deleted >= 1, "at least the explicit orphan should be deleted");
+        assert!(!block_store.has(&orphan_cid), "explicit orphan must be gone");
+
+        // ProllyTree blocks + commit blocks must remain (all in CommitDag live set)
+        let remaining = block_store.block_count();
+        // We deleted CAR bundles (2 commits × 1 CAR each) + 1 explicit orphan = ≥3 removed
+        // Exact count depends on how many tree blocks commit() builds — just assert invariants.
+        assert!(remaining > 0, "live blocks must survive GC");
+        // Running GC a second time on an already-clean store is idempotent
+        let deleted2 = qs.gc_dead_blocks().await.unwrap();
+        assert_eq!(deleted2, 0, "second GC pass on clean store removes nothing");
+    }
+
+    #[tokio::test]
+    async fn prune_old_commits_removes_historical_keeps_head() {
+        let journal     = Arc::new(Journal::new());
+        let block_store = Arc::new(MemoryBlockStore::new());
+        let qs = QuadStore::new(Arc::clone(&journal), Arc::clone(&block_store) as _);
+        let graph = KotobaCid::from_bytes(b"prune-graph");
+
+        // Three commits — each bumps committed_seq.
+        for i in 0u64..3 {
+            qs.assert(make_quad("prune-graph", &format!("s{i}"), "p", "v")).await;
+            qs.commit("did:test", graph.clone(), i + 1).await.unwrap();
+        }
+        // After 3 commits the CommitDag holds 3 entries.
+        assert_eq!(qs.commit_dag_size().await, 3);
+
+        // Prune commits where seq < committed_seq (i.e. keep only the HEAD at seq=3).
+        let pruned = qs.prune_old_commits(3).await;
+        assert_eq!(pruned, 2, "two historical commits should be pruned");
+        assert_eq!(qs.commit_dag_size().await, 1, "only HEAD survives");
+
+        // HEAD is still reachable for GC and queries.
+        let dag = qs.commit_dag.read().await;
+        assert!(dag.head(&graph).is_some(), "HEAD must survive prune");
     }
 }

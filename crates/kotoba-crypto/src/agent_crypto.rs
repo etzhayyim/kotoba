@@ -42,8 +42,11 @@ pub trait AgentCrypto: Send + Sync + 'static {
     /// Decrypt a `signal:v1:<base64>` envelope and return the UTF-8 text.
     async fn open_field(&self, scope: &[u8], envelope: &str) -> Result<String, CryptoError> {
         let ct = decode_envelope(envelope)?;
-        let pt = self.decrypt(scope, &ct).await?;
-        String::from_utf8(pt.to_vec())
+        let mut pt = self.decrypt(scope, &ct).await?;
+        // Move the inner Vec out without cloning to avoid an extra plaintext copy.
+        // `pt` is left holding an empty Vec (zeroized on drop — no-op for empty).
+        let inner = std::mem::take(&mut *pt);
+        String::from_utf8(inner)
             .map_err(|e| CryptoError::InvalidEnvelope(format!("UTF-8 decode: {e}")))
     }
 

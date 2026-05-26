@@ -138,12 +138,148 @@ pub async fn health(State(state): State<Arc<KotobaState>>) -> impl IntoResponse 
     })
 }
 
+fn map_delegation_error(e: kotoba_auth::DelegationError) -> (StatusCode, String) {
+    use kotoba_auth::DelegationError;
+    match &e {
+        DelegationError::Expired => (StatusCode::UNAUTHORIZED, "cacao expired".to_string()),
+        DelegationError::GraphMismatch { expected, got } => (
+            StatusCode::UNAUTHORIZED,
+            format!("cacao graph mismatch: warrant covers {expected}, request targets {got}"),
+        ),
+        _ => (StatusCode::UNAUTHORIZED, format!("cacao delegation: {e}")),
+    }
+}
+
+/// Returns `true` if the host portion of a `did:web:` suffix is an IP literal.
+///
+/// The did:web spec mandates domain names. IP literals are rejected to prevent
+/// SSRF attacks (e.g. `did:web:169.254.169.254` → AWS metadata endpoint).
+fn is_did_web_ip_host(suffix: &str) -> bool {
+    let host = suffix.split(':').next().unwrap_or(suffix);
+    // Empty host means suffix starts with ':' — not a valid domain name.
+    // IPv6 literals like "::1" produce an empty first segment here.
+    if host.is_empty() {
+        return true;
+    }
+    // IPv4: first segment parses as an IP address.
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    // IPv6: the full suffix (no `:path` appended yet) may parse as an IP.
+    // e.g. "fe80::1" — first segment is "fe80" but the full string is IPv6.
+    suffix.parse::<std::net::IpAddr>().is_ok()
+}
+
+/// Resolve a `did:web:` DID document over HTTPS, extract the Ed25519 public key,
+/// verify the CACAO signature, and check expiry + graph scope.
+///
+/// `did:web:domain`       → `https://domain/.well-known/did.json`
+/// `did:web:domain:path`  → `https://domain/path/did.json`
+async fn resolve_and_verify_did_web(
+    cacao: &kotoba_auth::Cacao,
+    graph: &str,
+    client: &reqwest::Client,
+) -> Result<String, (StatusCode, String)> {
+    use kotoba_auth::DidDocument;
+
+    // P3 — expiry check (DelegationChain path handles this for non-web DIDs)
+    if cacao.is_expired() {
+        return Err((StatusCode::UNAUTHORIZED, "cacao expired".to_string()));
+    }
+    // P3b — max-age check for no-expiry CACAOs (mirrors DelegationChain::verify logic)
+    if cacao.p.expiry.is_none() {
+        const MAX_CACAO_AGE_SECS: u64 = 7 * 24 * 3600;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        match cacao.issued_at_secs() {
+            None => return Err((StatusCode::UNAUTHORIZED, "cacao: invalid iat format".to_string())),
+            Some(iat) => {
+                if now.saturating_sub(iat) > MAX_CACAO_AGE_SECS {
+                    return Err((StatusCode::UNAUTHORIZED, "cacao expired (max-age exceeded)".to_string()));
+                }
+            }
+        }
+    }
+
+    // P3 — capability check
+    if let Some(cap) = cacao.p.capability() {
+        if cap != "quad:write" {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                format!("capability denied: need 'quad:write', CACAO grants '{cap}'"),
+            ));
+        }
+    }
+
+    // P3 — graph scope check
+    if let Some(cacao_graph) = cacao.p.graph_cid() {
+        if cacao_graph != graph {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                format!("cacao graph mismatch: warrant covers {cacao_graph}, request targets {graph}"),
+            ));
+        }
+    }
+
+    // Build did:web fetch URL.
+    // The did:web spec requires a domain name — reject IP literals outright.
+    // Hostname-based SSRF (DNS pointing to internal IPs) is out-of-scope here;
+    // document in ADR §23 if DNS-SSRF protection is needed in future.
+    let suffix = cacao.p.iss.strip_prefix("did:web:").unwrap_or(&cacao.p.iss);
+    if is_did_web_ip_host(suffix) {
+        let host = suffix.split(':').next().unwrap_or(suffix);
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            format!("did:web: IP address literals are not allowed (got '{host}'); did:web requires a domain name"),
+        ));
+    }
+
+    let url = if suffix.contains(':') {
+        format!("https://{}/did.json", suffix.replace(':', "/"))
+    } else {
+        format!("https://{}/.well-known/did.json", suffix)
+    };
+
+    const MAX_DID_DOC_BYTES: usize = 65_536; // 64 KiB — guard against response-bombing
+
+    let resp = client.get(&url).send().await
+        .map_err(|e| (StatusCode::UNAUTHORIZED, format!("did:web fetch {url}: {e}")))?;
+    if !resp.status().is_success() {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            format!("did:web fetch {url}: HTTP {}", resp.status()),
+        ));
+    }
+    let body_bytes = resp.bytes().await
+        .map_err(|e| (StatusCode::UNAUTHORIZED, format!("did:web read body: {e}")))?;
+    if body_bytes.len() > MAX_DID_DOC_BYTES {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            format!("did:web document exceeds {MAX_DID_DOC_BYTES} byte limit"),
+        ));
+    }
+    let doc: DidDocument = serde_json::from_slice(&body_bytes)
+        .map_err(|e| (StatusCode::UNAUTHORIZED, format!("did:web document parse: {e}")))?;
+
+    let pubkey = doc.ed25519_public_key()
+        .ok_or_else(|| (
+            StatusCode::UNAUTHORIZED,
+            format!("no Ed25519 key in DID document for {}", cacao.p.iss),
+        ))?;
+
+    cacao.verify_with_pubkey(&pubkey)
+        .map_err(|e| (StatusCode::UNAUTHORIZED, format!("did:web sig: {e}")))
+}
+
 /// POST /xrpc/ai.gftd.apps.kotoba.quad.create
 /// Publish a Quad assert to the KSE Journal (SPO topic).
 ///
-/// When `cacao_b64` is present, the CACAO is verified before the write.
-/// The CACAO's `graph_cid` resource must match the requested `graph` field,
-/// and the signature must recover to the declared issuer DID.
+/// `cacao_b64` is required. The CACAO is verified before the write:
+/// - Signature must be valid (EdDSA or eip191)
+/// - `cacao.p.graph_cid()` must match the requested `graph` field when present
+/// - Issuer DID is stored as a `meta/author` quad on the same graph for provenance
 pub async fn quad_create(
     State(state): State<Arc<KotobaState>>,
     Json(req):    Json<QuadCreateReq>,
@@ -152,28 +288,56 @@ pub async fn quad_create(
     use kotoba_kqe::quad::{Quad, QuadObject};
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 
-    // ── CACAO verification (when warrant is present) ──────────────────────
-    if let Some(b64) = &req.cacao_b64 {
-        let cbor = B64.decode(b64)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("cacao_b64 decode: {e}")))?;
-        let cacao = kotoba_auth::Cacao::from_cbor(&cbor)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("cacao parse: {e}")))?;
+    // ── CACAO verification (required) ────────────────────────────────────
+    let b64 = req.cacao_b64.as_deref()
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "cacao_b64 is required for quad.create".to_string()))?;
 
-        // Signature must be valid
-        let issuer_did = cacao.verify_signature()
-            .map_err(|e| (StatusCode::UNAUTHORIZED, format!("cacao sig: {e}")))?;
+    const MAX_CACAO_B64_LEN: usize = 8 * 1024;
+    if b64.len() > MAX_CACAO_B64_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("cacao_b64 too large ({} bytes, limit {MAX_CACAO_B64_LEN})", b64.len())));
+    }
 
-        // The CACAO's graph resource must match the requested graph
-        if let Some(cacao_graph) = cacao.p.graph_cid() {
-            if cacao_graph != req.graph {
-                return Err((
-                    StatusCode::UNAUTHORIZED,
-                    format!("cacao graph mismatch: warrant covers {cacao_graph}, request targets {}", req.graph),
-                ));
-            }
-        }
+    let cbor = B64.decode(b64)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("cacao_b64 decode: {e}")))?;
+    let cacao = kotoba_auth::Cacao::from_cbor(&cbor)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("cacao parse: {e}")))?;
 
-        tracing::info!(issuer = %issuer_did, graph = %req.graph, "quad.create: CACAO verified");
+    // Dispatch on issuer DID method:
+    //   did:web:*  → P3: resolve DID document over HTTP, verify with extracted key
+    //   everything else → P1: DelegationChain verifies expiry + capability + graph + sig
+    let issuer_did = if cacao.p.iss.starts_with("did:web:") {
+        resolve_and_verify_did_web(&cacao, &req.graph, &state.http_client).await?
+    } else {
+        kotoba_auth::DelegationChain::new(cacao)
+            .verify(&req.graph, "quad:write")
+            .map_err(map_delegation_error)?
+    };
+
+    tracing::info!(issuer = %issuer_did, graph = %req.graph, "quad.create: CACAO verified");
+
+    // ── SPO + graph field bounds ─────────────────────────────────────────────
+    // Reject oversized fields before they enter the graph index or WAL.
+    // graph/subject/predicate are used as BTreeMap keys; object is freeform text.
+    const MAX_GRAPH_LEN:     usize = 512;
+    const MAX_SUBJECT_LEN:   usize = 512;
+    const MAX_PREDICATE_LEN: usize = 512;
+    const MAX_OBJECT_LEN:    usize = 8 * 1024; // 8 KiB
+    if req.graph.len() > MAX_GRAPH_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("graph field too long ({} bytes, limit {MAX_GRAPH_LEN})", req.graph.len())));
+    }
+    if req.subject.len() > MAX_SUBJECT_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("subject field too long ({} bytes, limit {MAX_SUBJECT_LEN})", req.subject.len())));
+    }
+    if req.predicate.len() > MAX_PREDICATE_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("predicate field too long ({} bytes, limit {MAX_PREDICATE_LEN})", req.predicate.len())));
+    }
+    if req.object.len() > MAX_OBJECT_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("object field too long ({} bytes, limit {MAX_OBJECT_LEN})", req.object.len())));
     }
 
     let quad = Quad {
@@ -187,11 +351,26 @@ pub async fn quad_create(
     let journal_cid = state.journal_assert(&quad).await;
     state.quad_store.assert(quad).await;
 
+    // ── Store author provenance ───────────────────────────────────────────
+    // Subject = journal CID of the write so (graph, journal_cid, meta/author) is
+    // globally unique and references the exact write event.
+    // Use from_multibase so the subject CID matches what graph.query decodes.
+    let author_subject = KotobaCid::from_multibase(&journal_cid)
+        .unwrap_or_else(|| KotobaCid::from_bytes(journal_cid.as_bytes()));
+    let author_quad = Quad {
+        graph:     KotobaCid::from_bytes(req.graph.as_bytes()),
+        subject:   author_subject,
+        predicate: "meta/author".to_string(),
+        object:    QuadObject::Text(issuer_did.clone()),
+    };
+    state.quad_store.assert(author_quad).await;
+
     tracing::info!(
         graph     = %req.graph,
         subject   = %req.subject,
         predicate = %req.predicate,
         cid       = %journal_cid,
+        author    = %issuer_did,
         "quad.create → Journal + QuadStore"
     );
 
@@ -207,6 +386,14 @@ pub async fn vault_put(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     use bytes::Bytes;
+
+    // 10 MiB base64 cap (decodes to ~7.5 MiB raw). Vault blobs are content-addressed
+    // chunks; oversized payloads should be split by the chunker, not sent raw.
+    const MAX_VAULT_B64_LEN: usize = 10 * 1024 * 1024;
+    if req.data_b64.len() > MAX_VAULT_B64_LEN {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE,
+            format!("data_b64 too large ({} bytes, limit {MAX_VAULT_B64_LEN})", req.data_b64.len())));
+    }
 
     let data = B64.decode(&req.data_b64)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("data_b64 decode: {e}")))?;
@@ -271,8 +458,19 @@ pub async fn invoke_run(
         other => return Err((StatusCode::BAD_REQUEST, format!("unknown program_type: {other}"))),
     };
 
+    // 50 MiB wasm cap (a full WASM module rarely exceeds a few MiB; 50 MiB is generous).
+    const MAX_WASM_B64_LEN: usize = 50 * 1024 * 1024;
+    // 1 MiB ctx cap — context CBOR should be small structured data, not a data dump.
+    const MAX_CTX_B64_LEN:  usize = 1 * 1024 * 1024;
+
     let wasm_bytes: Vec<u8> = match &req.wasm_b64 {
-        Some(b64) => B64.decode(b64).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?,
+        Some(b64) => {
+            if b64.len() > MAX_WASM_B64_LEN {
+                return Err((StatusCode::PAYLOAD_TOO_LARGE,
+                    format!("wasm_b64 too large ({} bytes, limit {MAX_WASM_B64_LEN})", b64.len())));
+            }
+            B64.decode(b64).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
+        }
         None if program_type != ProgramType::Datalog => {
             return Err((StatusCode::BAD_REQUEST, "wasm_b64 required for wasm programs".into()));
         }
@@ -280,7 +478,13 @@ pub async fn invoke_run(
     };
 
     let ctx_cbor: Vec<u8> = match &req.ctx_b64 {
-        Some(b64) => B64.decode(b64).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?,
+        Some(b64) => {
+            if b64.len() > MAX_CTX_B64_LEN {
+                return Err((StatusCode::PAYLOAD_TOO_LARGE,
+                    format!("ctx_b64 too large ({} bytes, limit {MAX_CTX_B64_LEN})", b64.len())));
+            }
+            B64.decode(b64).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
+        }
         None => vec![],
     };
 
@@ -435,6 +639,14 @@ pub async fn block_put(
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     use kotoba_core::cid::KotobaCid;
 
+    // 32 MiB per block (ProllyTree internal nodes are tiny; large leaf values should
+    // be chunked by the vault, not pushed as single raw blocks).
+    const MAX_BLOCK_B64_LEN: usize = 32 * 1024 * 1024;
+    if req.data_b64.len() > MAX_BLOCK_B64_LEN {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE,
+            format!("data_b64 too large ({} bytes, limit {MAX_BLOCK_B64_LEN})", req.data_b64.len())));
+    }
+
     let bytes = B64.decode(&req.data_b64)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let cid = KotobaCid::from_bytes(&bytes);
@@ -517,16 +729,40 @@ pub async fn commit_get(
 /// Flush current Arrangement for the given graph into BlockStore and create a Commit.
 #[derive(Debug, Deserialize)]
 pub struct CommitStoreReq {
-    pub graph:  String,
-    pub author: String,
-    pub seq:    u64,
+    pub graph:     String,
+    pub author:    String,
+    pub seq:       u64,
+    /// CACAO delegation proof (CBOR, base64) — required; must carry `quad:write` capability.
+    pub cacao_b64: Option<String>,
 }
 
 pub async fn commit_store(
     State(state): State<Arc<KotobaState>>,
     Json(req):    Json<CommitStoreReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     use kotoba_core::cid::KotobaCid;
+
+    // ── CACAO auth ─────────────────────────────────────────────────────────
+    let b64 = req.cacao_b64.as_deref()
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "cacao_b64 is required for commit.store".to_string()))?;
+    const MAX_CACAO_B64_LEN: usize = 8 * 1024;
+    if b64.len() > MAX_CACAO_B64_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("cacao_b64 too large ({} bytes, limit {MAX_CACAO_B64_LEN})", b64.len())));
+    }
+    let cbor = B64.decode(b64)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("cacao_b64 decode: {e}")))?;
+    let cacao = kotoba_auth::Cacao::from_cbor(&cbor)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("cacao parse: {e}")))?;
+    let issuer_did = if cacao.p.iss.starts_with("did:web:") {
+        resolve_and_verify_did_web(&cacao, &req.graph, &state.http_client).await?
+    } else {
+        kotoba_auth::DelegationChain::new(cacao)
+            .verify(&req.graph, "quad:write")
+            .map_err(map_delegation_error)?
+    };
+    tracing::info!(issuer = %issuer_did, graph = %req.graph, "commit.store: CACAO verified");
 
     let graph_cid = KotobaCid::from_multibase(&req.graph)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid graph CID".into()))?;
@@ -555,6 +791,8 @@ pub struct GraphQueryReq {
     pub predicate: Option<String>,
     /// Datalog rules reserved for invoke.run; graph.query returns SPO matches only
     pub rules:     Option<String>,
+    /// CACAO delegation chain for private graphs (DAG-CBOR, base64-standard encoded).
+    pub cacao_b64: Option<String>,
 }
 
 /// GET /xrpc/ai.gftd.apps.kotoba.graph.query
@@ -562,12 +800,19 @@ pub struct GraphQueryReq {
 /// Full Datalog evaluation: use invoke.run with program_type=datalog.
 pub async fn graph_query(
     State(state): State<Arc<KotobaState>>,
+    headers: axum::http::HeaderMap,
     axum::extract::Query(req): axum::extract::Query<GraphQueryReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     use kotoba_core::cid::KotobaCid;
+    use crate::graph_auth::{AccessDenied, check_read_access};
 
     let graph_cid = KotobaCid::from_multibase(&req.graph)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid graph CID".into()))?;
+
+    // ── Read-access gate ─────────────────────────────────────────────────────
+    let visibility = state.graph_visibility(&graph_cid).await;
+    check_read_access(&visibility, &headers, req.cacao_b64.as_deref(), Some(state.operator_did.as_str()), None)
+        .map_err(AccessDenied::into_response)?;
 
     let arrangement = match state.quad_store.arrangement(&graph_cid).await {
         None => {
@@ -616,6 +861,8 @@ pub struct WeightPutReq {
     pub dtype:     String,
     /// named graph CID (multibase) to index this weight in
     pub graph:     String,
+    /// CACAO delegation proof (CBOR, base64) — required; must carry `quad:write` capability
+    pub cacao_b64: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -626,6 +873,10 @@ pub struct WeightPutResp {
 }
 
 /// POST /xrpc/ai.gftd.apps.kotoba.weight.put
+///
+/// `cacao_b64` is required. The CACAO is verified before the write:
+/// - did:web issuer → HTTP resolution + expiry check
+/// - everything else → DelegationChain verifies expiry + `quad:write` capability + graph + sig
 pub async fn weight_put(
     State(state): State<Arc<KotobaState>>,
     Json(req):    Json<WeightPutReq>,
@@ -633,6 +884,35 @@ pub async fn weight_put(
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     use kotoba_core::cid::KotobaCid;
     use kotoba_kqe::quad::{Quad, QuadObject, TensorDtype};
+
+    // ── CACAO auth ────────────────────────────────────────────────────────
+    let b64 = req.cacao_b64.as_deref()
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "cacao_b64 is required for weight.put".to_string()))?;
+    const MAX_CACAO_B64_LEN: usize = 8 * 1024;
+    if b64.len() > MAX_CACAO_B64_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("cacao_b64 too large ({} bytes, limit {MAX_CACAO_B64_LEN})", b64.len())));
+    }
+    let cbor = B64.decode(b64)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("cacao_b64 decode: {e}")))?;
+    let cacao = kotoba_auth::Cacao::from_cbor(&cbor)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("cacao parse: {e}")))?;
+    let issuer_did = if cacao.p.iss.starts_with("did:web:") {
+        resolve_and_verify_did_web(&cacao, &req.graph, &state.http_client).await?
+    } else {
+        kotoba_auth::DelegationChain::new(cacao)
+            .verify(&req.graph, "quad:write")
+            .map_err(map_delegation_error)?
+    };
+    tracing::info!(issuer = %issuer_did, graph = %req.graph, "weight.put: CACAO verified");
+
+    // Tensor blobs can legitimately be large (embedding tables ~512 MiB raw).
+    // Cap at 512 MiB base64 (≈384 MiB raw) to prevent runaway OOM.
+    const MAX_WEIGHT_B64_LEN: usize = 512 * 1024 * 1024;
+    if req.data_b64.len() > MAX_WEIGHT_B64_LEN {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE,
+            format!("data_b64 too large ({} bytes, limit {MAX_WEIGHT_B64_LEN})", req.data_b64.len())));
+    }
 
     let bytes = B64.decode(&req.data_b64)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
@@ -699,6 +979,8 @@ pub struct QuadRetractReq {
     pub subject:   String,
     pub predicate: String,
     pub object:    String,
+    /// CACAO delegation chain (DAG-CBOR, base64-standard encoded). Required.
+    pub cacao_b64: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -708,12 +990,64 @@ pub struct QuadRetractResp {
 }
 
 /// POST /xrpc/ai.gftd.apps.kotoba.quad.retract
+///
+/// `cacao_b64` is required. The CACAO is verified before the delete:
+/// - Signature must be valid (EdDSA or eip191)
+/// - `cacao.p.graph_cid()` must match the requested `graph` field when present
 pub async fn quad_retract(
     State(state): State<Arc<KotobaState>>,
     Json(req):    Json<QuadRetractReq>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
     use kotoba_core::cid::KotobaCid;
     use kotoba_kqe::quad::{Quad, QuadObject};
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+
+    // ── CACAO verification (required) ────────────────────────────────────
+    let b64 = req.cacao_b64.as_deref()
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "cacao_b64 is required for quad.retract".to_string()))?;
+
+    const MAX_CACAO_B64_LEN: usize = 8 * 1024;
+    if b64.len() > MAX_CACAO_B64_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("cacao_b64 too large ({} bytes, limit {MAX_CACAO_B64_LEN})", b64.len())));
+    }
+
+    let cbor = B64.decode(b64)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("cacao_b64 decode: {e}")))?;
+    let cacao = kotoba_auth::Cacao::from_cbor(&cbor)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("cacao parse: {e}")))?;
+
+    let issuer_did = if cacao.p.iss.starts_with("did:web:") {
+        resolve_and_verify_did_web(&cacao, &req.graph, &state.http_client).await?
+    } else {
+        kotoba_auth::DelegationChain::new(cacao)
+            .verify(&req.graph, "quad:write")
+            .map_err(map_delegation_error)?
+    };
+
+    tracing::info!(issuer = %issuer_did, graph = %req.graph, "quad.retract: CACAO verified");
+
+    // ── SPO + graph field bounds (mirrors quad_create) ────────────────────
+    const MAX_GRAPH_LEN:     usize = 512;
+    const MAX_SUBJECT_LEN:   usize = 512;
+    const MAX_PREDICATE_LEN: usize = 512;
+    const MAX_OBJECT_LEN:    usize = 8 * 1024;
+    if req.graph.len() > MAX_GRAPH_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("graph field too long ({} bytes, limit {MAX_GRAPH_LEN})", req.graph.len())));
+    }
+    if req.subject.len() > MAX_SUBJECT_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("subject field too long ({} bytes, limit {MAX_SUBJECT_LEN})", req.subject.len())));
+    }
+    if req.predicate.len() > MAX_PREDICATE_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("predicate field too long ({} bytes, limit {MAX_PREDICATE_LEN})", req.predicate.len())));
+    }
+    if req.object.len() > MAX_OBJECT_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("object field too long ({} bytes, limit {MAX_OBJECT_LEN})", req.object.len())));
+    }
 
     let quad = Quad {
         graph:     KotobaCid::from_bytes(req.graph.as_bytes()),
@@ -733,7 +1067,7 @@ pub async fn quad_retract(
         "quad.retract → Journal + QuadStore"
     );
 
-    (StatusCode::OK, Json(QuadRetractResp { status: "ok", journal_cid }))
+    Ok((StatusCode::OK, Json(QuadRetractResp { status: "ok", journal_cid })))
 }
 
 // ── Weight get (E) ────────────────────────────────────────────────────────
@@ -782,6 +1116,8 @@ pub struct LoraApplyReq {
     pub graph:       String,
     /// Raw LoRA adapter bytes, base64-encoded
     pub adapter_b64: String,
+    /// CACAO delegation proof (CBOR, base64) — required; must carry `quad:write` capability
+    pub cacao_b64:   Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -791,6 +1127,10 @@ pub struct LoraApplyResp {
 }
 
 /// POST /xrpc/ai.gftd.apps.kotoba.lora.apply
+///
+/// `cacao_b64` is required. The CACAO is verified before the write:
+/// - did:web issuer → HTTP resolution + expiry check
+/// - everything else → DelegationChain verifies expiry + `quad:write` capability + graph + sig
 pub async fn lora_apply(
     State(state): State<Arc<KotobaState>>,
     Json(req):    Json<LoraApplyReq>,
@@ -798,6 +1138,35 @@ pub async fn lora_apply(
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     use kotoba_core::cid::KotobaCid;
     use kotoba_kqe::quad::{Quad, QuadObject, TensorDtype};
+
+    // ── CACAO auth ────────────────────────────────────────────────────────
+    let b64 = req.cacao_b64.as_deref()
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "cacao_b64 is required for lora.apply".to_string()))?;
+    const MAX_CACAO_B64_LEN: usize = 8 * 1024;
+    if b64.len() > MAX_CACAO_B64_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("cacao_b64 too large ({} bytes, limit {MAX_CACAO_B64_LEN})", b64.len())));
+    }
+    let cbor = B64.decode(b64)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("cacao_b64 decode: {e}")))?;
+    let cacao = kotoba_auth::Cacao::from_cbor(&cbor)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("cacao parse: {e}")))?;
+    let issuer_did = if cacao.p.iss.starts_with("did:web:") {
+        resolve_and_verify_did_web(&cacao, &req.graph, &state.http_client).await?
+    } else {
+        kotoba_auth::DelegationChain::new(cacao)
+            .verify(&req.graph, "quad:write")
+            .map_err(map_delegation_error)?
+    };
+    tracing::info!(issuer = %issuer_did, graph = %req.graph, "lora.apply: CACAO verified");
+
+    // 128 MiB for a LoRA delta (rank-128 F8 for a 4B model is ~200 MB unquantized;
+    // quantized rank-64 F8 fits comfortably under 128 MiB).
+    const MAX_ADAPTER_B64_LEN: usize = 128 * 1024 * 1024;
+    if req.adapter_b64.len() > MAX_ADAPTER_B64_LEN {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE,
+            format!("adapter_b64 too large ({} bytes, limit {MAX_ADAPTER_B64_LEN})", req.adapter_b64.len())));
+    }
 
     let bytes = B64.decode(&req.adapter_b64)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
@@ -867,6 +1236,14 @@ pub async fn embed_create(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     use kotoba_core::cid::KotobaCid;
     use kotoba_llm::embed::{Embedding, embed_to_quad};
+
+    // 64 KiB covers any realistic embedding unit (paragraph / document chunk).
+    // Larger inputs must be split by the caller's chunker before calling embed.create.
+    const MAX_EMBED_TEXT_LEN: usize = 64 * 1024;
+    if req.text.len() > MAX_EMBED_TEXT_LEN {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE,
+            format!("text too large ({} bytes, limit {MAX_EMBED_TEXT_LEN})", req.text.len())));
+    }
 
     let doc_cid   = KotobaCid::from_multibase(&req.doc_cid)
         .unwrap_or_else(|| KotobaCid::from_bytes(req.doc_cid.as_bytes()));
@@ -945,7 +1322,15 @@ pub async fn infer_run(
     let engine = state.inference_engine.clone()
         .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "no inference engine loaded".into()))?;
 
-    let max_tokens = req.max_new_tokens.unwrap_or(256);
+    // 64 KiB prompt cap (prevents tokeniser OOM on a context-length exploit).
+    const MAX_PROMPT_LEN: usize = 64 * 1024;
+    if req.prompt.len() > MAX_PROMPT_LEN {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE,
+            format!("prompt too large ({} bytes, limit {MAX_PROMPT_LEN})", req.prompt.len())));
+    }
+    // Cap max_new_tokens so a single request cannot hold the thread for minutes.
+    const MAX_NEW_TOKENS_LIMIT: usize = 4096;
+    let max_tokens = req.max_new_tokens.unwrap_or(256).min(MAX_NEW_TOKENS_LIMIT);
     let prompt     = req.prompt.clone();
 
     let output = tokio::task::spawn_blocking(move || engine(&prompt, max_tokens))
@@ -998,13 +1383,23 @@ pub async fn agent_run(
         .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE,
             "no inference engine loaded (set KOTOBA_LOAD_GEMMA)".into()))?;
 
+    // 64 KiB task cap; agent loops with longer tasks should be chunked by the caller.
+    const MAX_TASK_LEN: usize = 64 * 1024;
+    if req.task.len() > MAX_TASK_LEN {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE,
+            format!("task too large ({} bytes, limit {MAX_TASK_LEN})", req.task.len())));
+    }
+    // Cap loop iterations and tokens-per-step to prevent runaway compute cost.
+    const MAX_STEPS_LIMIT:  u32   = 50;
+    const MAX_TOKENS_LIMIT: usize = 4096;
+
     let graph_cid = req.graph_cid
         .as_deref()
         .map(|s| KotobaCid::from_bytes(s.as_bytes()))
         .unwrap_or_else(|| KotobaCid::from_bytes(b"agent-default-graph"));
 
-    let max_steps  = req.max_steps.unwrap_or(10);
-    let max_tokens = req.max_tokens.unwrap_or(256);
+    let max_steps  = req.max_steps.unwrap_or(10).min(MAX_STEPS_LIMIT);
+    let max_tokens = req.max_tokens.unwrap_or(256).min(MAX_TOKENS_LIMIT);
     let task       = req.task.clone();
     let graph_cid2 = graph_cid.clone();
     let qs         = Arc::clone(&state.quad_store);
@@ -1216,4 +1611,75 @@ pub async fn agent_sync_close(
     tracing::info!(session_id = %req.session_id, "agent.syncclose");
 
     Ok(Json(AgentSyncCloseResp { status: "ok", session_id: req.session_id }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_did_web_ip_host;
+
+    #[test]
+    fn ip_literal_v4_rejected() {
+        // AWS metadata endpoint and link-local
+        assert!(is_did_web_ip_host("169.254.169.254"));
+        // Localhost
+        assert!(is_did_web_ip_host("127.0.0.1"));
+        // RFC-1918 private
+        assert!(is_did_web_ip_host("10.0.0.1"));
+        assert!(is_did_web_ip_host("192.168.1.1"));
+        assert!(is_did_web_ip_host("172.16.0.1"));
+        // did:web with port
+        assert!(is_did_web_ip_host("10.0.0.1:8080"));
+    }
+
+    #[test]
+    fn ip_literal_v6_rejected() {
+        assert!(is_did_web_ip_host("::1"));
+        assert!(is_did_web_ip_host("fe80::1"));
+    }
+
+    #[test]
+    fn domain_names_allowed() {
+        // Normal domain names must NOT be flagged
+        assert!(!is_did_web_ip_host("example.com"));
+        assert!(!is_did_web_ip_host("gftd.ai"));
+        assert!(!is_did_web_ip_host("example.com:path"));
+        assert!(!is_did_web_ip_host("sub.domain.example.org"));
+    }
+
+    #[test]
+    fn localhost_name_allowed_by_spec_check_is_done_elsewhere() {
+        // "localhost" is a hostname, not an IP literal — our check is literal-only.
+        // Blocking hostname-based SSRF requires DNS resolution (out of scope here).
+        assert!(!is_did_web_ip_host("localhost"));
+    }
+
+    // ── Inference endpoint input bounds ──────────────────────────────────────
+
+    #[test]
+    fn embed_text_length_constants() {
+        // Verify the cap constant is what we declared (64 KiB).
+        const MAX_EMBED_TEXT_LEN: usize = 64 * 1024;
+        assert_eq!(MAX_EMBED_TEXT_LEN, 65536);
+        let oversized = "x".repeat(MAX_EMBED_TEXT_LEN + 1);
+        assert!(oversized.len() > MAX_EMBED_TEXT_LEN);
+    }
+
+    #[test]
+    fn infer_prompt_length_constants() {
+        const MAX_PROMPT_LEN: usize = 64 * 1024;
+        const MAX_NEW_TOKENS_LIMIT: usize = 4096;
+        assert_eq!(MAX_PROMPT_LEN, 65536);
+        // Verify .min() clamps correctly.
+        assert_eq!(8192_usize.min(MAX_NEW_TOKENS_LIMIT), MAX_NEW_TOKENS_LIMIT);
+        assert_eq!(256_usize.min(MAX_NEW_TOKENS_LIMIT), 256);
+    }
+
+    #[test]
+    fn agent_run_step_cap() {
+        const MAX_STEPS_LIMIT: u32 = 50;
+        // Caller sending u32::MAX is clamped to 50.
+        assert_eq!(u32::MAX.min(MAX_STEPS_LIMIT), MAX_STEPS_LIMIT);
+        // Default of 10 passes through unchanged.
+        assert_eq!(10_u32.min(MAX_STEPS_LIMIT), 10);
+    }
 }

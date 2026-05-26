@@ -6,6 +6,7 @@ pub mod distributed;
 pub mod agent;
 pub mod wasm_pregel;
 pub mod state_graph;
+pub mod auth_actor;
 
 pub use executor::{KotobaVm, ExecResult, ExecStatus};
 pub use foreign::{ForeignBridge, ForeignCall, ForeignCallType};
@@ -18,3 +19,4 @@ pub use state_graph::{
     StateGraph, CompiledGraph, State, StateSchema, Reducer,
     NodeKind, NodeOutput, EdgeTarget, RouterFn, NodeFn, Thread,
 };
+pub use auth_actor::{Actor, AuthMessage, AuthOutMessage, AuthQuad, ActorOutput, ActorComputeFn};

@@ -98,6 +98,12 @@ pub struct CcSearchQuery {
 fn default_top_k()  -> usize { 10 }
 fn default_nprobe() -> usize { 8 }
 
+const MAX_QUERY_LEN:   usize = 8_192;  // 8 KiB — prevents embed-client DoS
+const MAX_LANG_LEN:    usize =   16;
+const MAX_SYSTEM_LEN:  usize = 4_096;
+const MAX_TOP_K:       usize =  100;
+const MAX_PARQUET_DIR: usize = 1_024;
+
 #[derive(Serialize)]
 pub struct CcSearchResult {
     pub url:    String,
@@ -111,6 +117,16 @@ pub async fn cc_search(
     State(state): State<Arc<KotobaState>>,
     Query(q): Query<CcSearchQuery>,
 ) -> impl IntoResponse {
+    if q.q.is_empty() || q.q.len() > MAX_QUERY_LEN {
+        return (StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("q must be 1–{MAX_QUERY_LEN} bytes")}))).into_response();
+    }
+    if let Some(ref lang) = q.lang {
+        if lang.len() > MAX_LANG_LEN {
+            return (StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("lang exceeds {MAX_LANG_LEN} characters")}))).into_response();
+        }
+    }
     let embed_client = match state.cc_embed_client.as_ref() {
         Some(c) => Arc::clone(c),
         None => return (
@@ -195,6 +211,16 @@ pub async fn cc_rag(
     State(state): State<Arc<KotobaState>>,
     Json(body): Json<CcRagBody>,
 ) -> impl IntoResponse {
+    if body.query.is_empty() || body.query.len() > MAX_QUERY_LEN {
+        return (StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("query must be 1–{MAX_QUERY_LEN} bytes")}))).into_response();
+    }
+    if let Some(ref sys) = body.system {
+        if sys.len() > MAX_SYSTEM_LEN {
+            return (StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("system prompt exceeds {MAX_SYSTEM_LEN} characters")}))).into_response();
+        }
+    }
     let embed_client = match state.cc_embed_client.as_ref() {
         Some(c) => Arc::clone(c),
         None => return (StatusCode::SERVICE_UNAVAILABLE,
@@ -283,6 +309,15 @@ pub async fn cc_ingest(
     use kotoba_ingest::cc::{CcPageIngestor, CcChunkIngestor};
     use kotoba_ingest::embed_client::Blake3EmbedClient;
 
+    if body.parquet_dir.is_empty() || body.parquet_dir.len() > MAX_PARQUET_DIR {
+        return (StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("parquetDir must be 1–{MAX_PARQUET_DIR} bytes")}))).into_response();
+    }
+    if !matches!(body.mode.as_str(), "chunks" | "pages" | "both") {
+        return (StatusCode::BAD_REQUEST,
+            Json(json!({"error": "mode must be 'chunks', 'pages', or 'both'"}))).into_response();
+    }
+
     let quad_store   = Arc::clone(&state.quad_store);
     let embed_client = state.cc_embed_client.clone();
     let parquet_dir  = body.parquet_dir.clone();
@@ -320,7 +355,7 @@ pub async fn cc_ingest(
         "status":      "started",
         "parquet_dir": body.parquet_dir,
         "mode":        body.mode,
-    }))
+    })).into_response()
 }
 
 // ── cc.status ────────────────────────────────────────────────────────────────

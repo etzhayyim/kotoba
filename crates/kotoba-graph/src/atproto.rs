@@ -26,21 +26,27 @@ pub fn collection_to_cid(collection: &str) -> KotobaCid {
 
 /// Parse an AT Protocol CID multibase string → KotobaCid.
 ///
-/// AT CIDs are CIDv1 dag-cbor blake3-256 (36 bytes).
+/// Accepts both kotoba-internal blake3 CIDs and real Bluesky sha2-256 CIDs:
 /// - `b` prefix → base32lower (RFC 4648 no-pad)
-/// - `z` prefix → base58btc (not supported yet; logs a warning and returns None)
+/// - `z` prefix → base58btc
 pub fn at_cid_str_to_kotoba(s: &str) -> Option<KotobaCid> {
+    if s.is_empty() {
+        return None;
+    }
     let (prefix, rest) = s.split_at(1);
     match prefix {
         "b" => {
             // base32lower — data_encoding expects uppercase; convert first
             let upper = rest.to_uppercase();
             let bytes = data_encoding::BASE32_NOPAD.decode(upper.as_bytes()).ok()?;
-            validate_cid_bytes(&bytes)
+            validate_at_cid_bytes(&bytes)
         }
         "z" => {
-            tracing::warn!("at_cid_str_to_kotoba: base58btc (z prefix) not yet supported: {}", s);
-            None
+            // base58btc — real Bluesky CIDs use sha2-256 under this prefix
+            let (_, bytes) = multibase::decode(s)
+                .map_err(|e| tracing::warn!("at_cid_str_to_kotoba: base58btc decode: {e}"))
+                .ok()?;
+            validate_at_cid_bytes(&bytes)
         }
         other => {
             tracing::warn!("at_cid_str_to_kotoba: unknown multibase prefix {:?}", other);
@@ -49,17 +55,28 @@ pub fn at_cid_str_to_kotoba(s: &str) -> Option<KotobaCid> {
     }
 }
 
-fn validate_cid_bytes(bytes: &[u8]) -> Option<KotobaCid> {
+/// Validate raw CID bytes for AT Protocol CIDv1 dag-cbor.
+///
+/// Accepts both sha2-256 (0x12, real Bluesky CIDs) and blake3 (0x1e, kotoba-internal).
+fn validate_at_cid_bytes(bytes: &[u8]) -> Option<KotobaCid> {
     if bytes.len() != 36 {
         tracing::warn!("at_cid_str_to_kotoba: expected 36 bytes, got {}", bytes.len());
         return None;
     }
-    // CIDv1 dag-cbor blake3-256 layout:
-    //   [0] = 1 (version)  [1] = 0x71 (dag-cbor)  [2] = 0x1e (blake3)  [3] = 32 (hash len)
-    if bytes[0] != 1 || bytes[1] != KotobaCid::CODEC_DAG_CBOR || bytes[2] != KotobaCid::MH_BLAKE3 || bytes[3] != 32 {
+    if bytes[0] != 1 || bytes[1] != KotobaCid::CODEC_DAG_CBOR {
         tracing::warn!(
-            "at_cid_str_to_kotoba: invalid CID header {:02x} {:02x} {:02x} {:02x}",
-            bytes[0], bytes[1], bytes[2], bytes[3]
+            "at_cid_str_to_kotoba: expected CIDv1 dag-cbor, got {:02x} {:02x}",
+            bytes[0], bytes[1]
+        );
+        return None;
+    }
+    // Multihash: [2]=code [3]=len; accept sha2-256 (0x12) or blake3 (0x1e), digest 32 bytes
+    let mh_code = bytes[2];
+    let mh_len  = bytes[3];
+    let valid = (mh_code == 0x12 || mh_code == KotobaCid::MH_BLAKE3) && mh_len == 32;
+    if !valid {
+        tracing::warn!(
+            "at_cid_str_to_kotoba: unsupported multihash {:02x} len={}", mh_code, mh_len
         );
         return None;
     }
@@ -336,6 +353,35 @@ mod tests {
     #[test]
     fn at_cid_invalid_prefix_returns_none() {
         assert!(at_cid_str_to_kotoba("mINVALIDSTUFF").is_none());
+    }
+
+    #[test]
+    fn at_cid_z_prefix_sha2_256_roundtrip() {
+        // Build a synthetic CIDv1 dag-cbor sha2-256 (36 bytes) and encode as base58btc (z prefix)
+        let mut cid_bytes = [0u8; 36];
+        cid_bytes[0] = 1;                      // CIDv1
+        cid_bytes[1] = KotobaCid::CODEC_DAG_CBOR; // dag-cbor 0x71
+        cid_bytes[2] = 0x12;                   // sha2-256 multihash code
+        cid_bytes[3] = 32;                     // 32-byte digest
+        // fill digest with deterministic bytes
+        for i in 0..32 { cid_bytes[4 + i] = (i as u8).wrapping_mul(7); }
+
+        let encoded = multibase::encode(multibase::Base::Base58Btc, &cid_bytes);
+        assert!(encoded.starts_with('z'));
+
+        let parsed = at_cid_str_to_kotoba(&encoded)
+            .expect("z-prefix sha2-256 CID should parse");
+        assert_eq!(parsed.0, cid_bytes);
+    }
+
+    #[test]
+    fn at_cid_z_prefix_blake3_roundtrip() {
+        // KotobaCid blake3 encoded as base58btc
+        let cid = KotobaCid::from_bytes(b"test-blake3");
+        let encoded = multibase::encode(multibase::Base::Base58Btc, &cid.0);
+        assert!(encoded.starts_with('z'));
+        let parsed = at_cid_str_to_kotoba(&encoded).expect("z-prefix blake3 CID should parse");
+        assert_eq!(parsed, cid);
     }
 
     #[test]

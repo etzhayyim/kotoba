@@ -309,10 +309,12 @@ impl Arrangement {
 
 fn object_key(obj: &QuadObject) -> String {
     match obj {
-        QuadObject::Cid(c)     => c.to_multibase(),
-        QuadObject::Text(s)    => s.clone(),
-        QuadObject::Integer(n) => n.to_string(),
-        _                      => "?".to_string(),
+        QuadObject::Cid(c)              => c.to_multibase(),
+        QuadObject::Text(s)             => s.clone(),
+        QuadObject::Integer(n)          => n.to_string(),
+        // Encrypted objects are not indexed by value in AVET; ct_cid used for identity only.
+        QuadObject::Encrypted { ct_cid, .. } => format!("enc:{}", ct_cid.to_multibase()),
+        _                               => "?".to_string(),
     }
 }
 

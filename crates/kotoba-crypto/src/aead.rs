@@ -39,8 +39,8 @@ pub fn seal_with_nonce(
     plaintext: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CryptoError::SealFailed)?;
-    let n = aes_gcm::Nonce::from_slice(nonce);
-    let ct = cipher.encrypt(n, plaintext).map_err(|_| CryptoError::SealFailed)?;
+    let n = aes_gcm::Nonce::from(*nonce);
+    let ct = cipher.encrypt(&n, plaintext).map_err(|_| CryptoError::SealFailed)?;
     let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
     out.extend_from_slice(nonce);
     out.extend_from_slice(&ct);
@@ -54,8 +54,10 @@ pub fn open(key: &[u8; KEY_LEN], data: &[u8]) -> Result<Zeroizing<Vec<u8>>, Cryp
         return Err(CryptoError::TooShort(NONCE_LEN + TAG_LEN));
     }
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CryptoError::OpenFailed)?;
-    let nonce = aes_gcm::Nonce::from_slice(&data[..NONCE_LEN]);
-    let pt = cipher.decrypt(nonce, &data[NONCE_LEN..]).map_err(|_| CryptoError::OpenFailed)?;
+    let nonce_arr: [u8; NONCE_LEN] = data[..NONCE_LEN].try_into()
+        .map_err(|_| CryptoError::TooShort(NONCE_LEN))?;
+    let nonce = aes_gcm::Nonce::from(nonce_arr);
+    let pt = cipher.decrypt(&nonce, &data[NONCE_LEN..]).map_err(|_| CryptoError::OpenFailed)?;
     Ok(Zeroizing::new(pt))
 }
 

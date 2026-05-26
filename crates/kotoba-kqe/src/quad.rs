@@ -10,7 +10,7 @@ pub struct Quad {
     pub object:    QuadObject,  // O = value (≅ Datom V)
 }
 
-/// Typed object — CID reference, scalar literal, or vector (for embeddings/weights)
+/// Typed object — CID reference, scalar literal, vector, or encrypted value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum QuadObject {
     Cid(KotobaCid),
@@ -23,6 +23,15 @@ pub enum QuadObject {
     VectorF32(Vec<f32>),
     /// FP8 tensor reference (dim > 1024 → Vault blob CID)
     TensorCid { cid: KotobaCid, shape: Vec<u32>, dtype: TensorDtype },
+    /// Encrypted value — the actual content is AES-GCM ciphertext at `ct_cid`.
+    /// The symmetric key is delivered via PRE after CACAO authorisation.
+    /// VAET (reverse-ref index) does NOT index this variant — encrypted refs stay private.
+    Encrypted {
+        /// CID of the AES-GCM ciphertext block (iroh-public, safe to distribute).
+        ct_cid: KotobaCid,
+        /// CID of the PRE key-registry entry for this value.
+        policy_cid: KotobaCid,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -34,9 +43,11 @@ impl Quad {
         let mut key = Vec::new();
         key.extend_from_slice(&self.subject.0);
         key.extend_from_slice(self.predicate.as_bytes());
-        // object hash for dedup
-        if let QuadObject::Cid(ref c) = self.object {
-            key.extend_from_slice(&c.0);
+        match &self.object {
+            QuadObject::Cid(c) => key.extend_from_slice(&c.0),
+            // Encrypted: use ct_cid for dedup so each ciphertext is a distinct fact.
+            QuadObject::Encrypted { ct_cid, .. } => key.extend_from_slice(&ct_cid.0),
+            _ => {}
         }
         key
     }

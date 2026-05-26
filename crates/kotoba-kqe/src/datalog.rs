@@ -8,6 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use kotoba_core::cid::KotobaCid;
+use crate::citation::{CitationLedger, DatomKey};
 use crate::quad::{Quad, QuadObject};
 use crate::delta::{Delta, Multiplicity};
 
@@ -91,16 +92,20 @@ impl DatalogProgram {
     /// Given a batch of input `deltas` (new/retracted facts), derive all new
     /// facts by repeatedly applying rules until fixpoint.
     /// Returns output `Delta`s for every newly derived fact.
-    ///
-    /// Algorithm:
-    ///   1. Seed `fact_base` from assert deltas.
-    ///   2. Per round: for each rule, enumerate body positions where the literal
-    ///      could come from `new_facts` (Δ-fan-out); join remaining literals
-    ///      against `fact_base`.  This structurally enforces "at least one new
-    ///      fact used" without a mutable flag.
-    ///   3. Newly derived facts become `new_facts` for the next round.
-    ///   4. Stop when no new facts are derived (fixpoint).
     pub fn evaluate_delta(&self, deltas: &[Delta]) -> Vec<Delta> {
+        let mut _sink = CitationLedger::new();
+        self.evaluate_delta_inner(deltas, &mut _sink)
+    }
+
+    /// Economy-aware variant: records one citation per join hit into `ledger`.
+    ///
+    /// Call `ledger.flush_epoch(pool_mkoto)` after evaluation to compute
+    /// royalties, then `CitationLedger::royalty_quads()` to emit ledger Quads.
+    pub fn evaluate_delta_cited(&self, deltas: &[Delta], ledger: &mut CitationLedger) -> Vec<Delta> {
+        self.evaluate_delta_inner(deltas, ledger)
+    }
+
+    fn evaluate_delta_inner(&self, deltas: &[Delta], ledger: &mut CitationLedger) -> Vec<Delta> {
         if self.rules.is_empty() || deltas.is_empty() {
             return vec![];
         }
@@ -145,12 +150,18 @@ impl DatalogProgram {
                 let mut rule_heads: HashSet<(KotobaCid, KotobaCid)> = HashSet::new();
 
                 for &delta_pos in &pos_indices {
+                    let mut cited_keys: Vec<DatomKey> = Vec::new();
                     let heads = self.eval_rule_with_delta_at(
                         rule,
                         &fact_base,
                         &new_facts,
                         delta_pos,
+                        &mut cited_keys,
                     );
+                    // Record citations for every join hit that contributed to this rule
+                    for key in cited_keys {
+                        ledger.cite(&key);
+                    }
                     rule_heads.extend(heads);
                 }
 
@@ -194,14 +205,15 @@ impl DatalogProgram {
     /// Evaluate `rule` with the body literal at `delta_pos` (a Positive literal)
     /// drawn from `new_facts`; all other Positive literals from `fact_base`.
     /// Returns candidate head (subject, object) pairs.
+    /// Appends a DatomKey for every successful join hit into `cited`.
     fn eval_rule_with_delta_at(
         &self,
-        rule: &DatalogRule,
+        rule:      &DatalogRule,
         fact_base: &HashMap<String, HashSet<(KotobaCid, KotobaCid)>>,
         new_facts: &HashMap<String, HashSet<(KotobaCid, KotobaCid)>>,
         delta_pos: usize,
+        cited:     &mut Vec<DatomKey>,
     ) -> Vec<(KotobaCid, KotobaCid)> {
-        // Start with an empty binding; recurse through body literals in order.
         let initial: Binding = HashMap::new();
         let mut results = Vec::new();
 
@@ -214,6 +226,7 @@ impl DatalogProgram {
             new_facts,
             delta_pos,
             &mut results,
+            cited,
         );
 
         results
@@ -224,6 +237,8 @@ impl DatalogProgram {
     /// `delta_pos`: the index of the Positive literal that MUST be satisfied
     /// from `new_facts` (for semi-naive correctness). All other Positive
     /// literals are satisfied from `fact_base` (which is a superset of new_facts).
+    ///
+    /// `cited`: accumulates a DatomKey for each successful positive join hit.
     #[allow(clippy::too_many_arguments)]
     fn match_body(
         &self,
@@ -235,6 +250,7 @@ impl DatalogProgram {
         new_facts:  &HashMap<String, HashSet<(KotobaCid, KotobaCid)>>,
         delta_pos:  usize,
         out:        &mut Vec<(KotobaCid, KotobaCid)>,
+        cited:      &mut Vec<DatomKey>,
     ) {
         if idx == body.len() {
             // All body literals matched — ground the head
@@ -256,9 +272,11 @@ impl DatalogProgram {
 
                 for (subj, obj) in pairs {
                     if let Some(new_binding) = self.unify_atom(atom, subj, obj, &binding) {
+                        // Citation: record that this subject entity was used in a join
+                        cited.push(DatomKey::from_cid(subj));
                         self.match_body(
                             rule, body, idx + 1, new_binding,
-                            fact_base, new_facts, delta_pos, out,
+                            fact_base, new_facts, delta_pos, out, cited,
                         );
                     }
                 }
@@ -274,7 +292,7 @@ impl DatalogProgram {
                     if !present {
                         self.match_body(
                             rule, body, idx + 1, binding,
-                            fact_base, new_facts, delta_pos, out,
+                            fact_base, new_facts, delta_pos, out, cited,
                         );
                     }
                 }
@@ -297,7 +315,7 @@ impl DatalogProgram {
                     if ok {
                         self.match_body(
                             rule, body, idx + 1, binding,
-                            fact_base, new_facts, delta_pos, out,
+                            fact_base, new_facts, delta_pos, out, cited,
                         );
                     }
                 }
@@ -524,5 +542,84 @@ mod tests {
             .filter(|d| has_relation(std::slice::from_ref(d), "path", "a", "c"))
             .count();
         assert_eq!(count, 1, "path(a,c) should be derived exactly once");
+    }
+
+    // ── Citation tracking (evaluate_delta_cited) ──────────────────────────────
+
+    #[test]
+    fn evaluate_delta_cited_records_join_hits() {
+        // path(X, Z) :- edge(X, Y), edge(Y, Z).
+        // Two join hits (a→b, b→c) should produce ≥2 citations.
+        use crate::citation::CitationLedger;
+
+        let mut prog = DatalogProgram::new();
+        prog.add_rule(DatalogRule {
+            head: head_atom("path", &["X", "Z"]),
+            body: vec![pos("edge", &["X", "Y"]), pos("edge", &["Y", "Z"])],
+        });
+
+        let input = vec![fact("edge", &["a", "b"]), fact("edge", &["b", "c"])];
+        let mut ledger = CitationLedger::new();
+        let derived = prog.evaluate_delta_cited(&input, &mut ledger);
+
+        assert!(!derived.is_empty(), "should derive path(a,c)");
+        assert!(ledger.total_citations() > 0,
+            "at least one citation must be recorded for join hits");
+    }
+
+    #[test]
+    fn evaluate_delta_cited_no_derivation_but_citations_for_partial_joins() {
+        // With a 2-hop rule and only one edge, no derivation is produced BUT
+        // citations ARE recorded for each positive literal that successfully
+        // unifies — the data was accessed, even if the join didn't complete.
+        use crate::citation::CitationLedger;
+
+        let mut prog = DatalogProgram::new();
+        prog.add_rule(DatalogRule {
+            head: head_atom("reachable", &["X", "Z"]),
+            body: vec![pos("edge", &["X", "Y"]), pos("edge", &["Y", "Z"])],
+        });
+
+        let input = vec![fact("edge", &["x", "y"])]; // no transitive pair
+        let mut ledger = CitationLedger::new();
+        let derived = prog.evaluate_delta_cited(&input, &mut ledger);
+
+        assert!(derived.is_empty(), "no derivation expected for single edge");
+        // x is cited once per delta position (2 positive literals → 2 access events).
+        assert!(ledger.total_citations() > 0,
+            "data accessed during join attempts must be cited even without derivation");
+    }
+
+    #[test]
+    fn evaluate_delta_cited_flush_epoch_produces_royalty_quads() {
+        // Verify the full gap 1+3 pipeline: join hits → citations → royalty Quads.
+        use crate::citation::CitationLedger;
+
+        let mut prog = DatalogProgram::new();
+        prog.add_rule(DatalogRule {
+            head: head_atom("knows", &["X", "Z"]),
+            body: vec![pos("friend", &["X", "Y"]), pos("friend", &["Y", "Z"])],
+        });
+
+        let input = vec![
+            fact("friend", &["alice", "bob"]),
+            fact("friend", &["bob",   "carol"]),
+        ];
+        let mut ledger = CitationLedger::new();
+        let _derived = prog.evaluate_delta_cited(&input, &mut ledger);
+
+        assert!(ledger.total_citations() > 0, "citations expected");
+        let epoch = ledger.epoch();
+        let entries = ledger.flush_epoch(1_000_000);
+        assert!(!entries.is_empty(), "flush must yield royalty entries");
+
+        let quads = CitationLedger::royalty_quads(&entries, epoch);
+        assert!(!quads.is_empty(), "royalty quads must be non-empty after join hits");
+        // royalty_quads emits 2 quads per entry: citation/count + citation/royalty_mkoto.
+        let predicates: Vec<&str> = quads.iter().map(|q| q.predicate.as_str()).collect();
+        assert!(predicates.contains(&"citation/royalty_mkoto"),
+            "must include citation/royalty_mkoto predicate");
+        assert!(predicates.contains(&"citation/count"),
+            "must include citation/count predicate");
     }
 }

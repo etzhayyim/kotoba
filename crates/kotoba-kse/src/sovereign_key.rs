@@ -194,6 +194,25 @@ impl SovereignCrypto {
 
         Ok(Self { inner: VaultKeyedCrypto::new(raw_key) })
     }
+
+    /// Re-encrypt a blob after key rotation.
+    ///
+    /// Decrypts `old_ciphertext` with `old_crypto` (the pre-rotation instance),
+    /// then encrypts the result with `self` (the post-rotation instance).
+    /// The intermediate plaintext is held in a `Zeroizing` buffer and wiped on drop.
+    ///
+    /// Typical call pattern:
+    // let new_crypto = old_crypto.rotate(&id, &kse, &blk).await?;
+    // let new_ct = new_crypto.reencrypt_blob(&old_crypto, b"blob", &old_ct).await?;
+    pub async fn reencrypt_blob(
+        &self,
+        old_crypto: &SovereignCrypto,
+        scope: &[u8],
+        old_ciphertext: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let plaintext = old_crypto.inner.decrypt(scope, old_ciphertext).await?;
+        self.inner.encrypt(scope, &plaintext).await
+    }
 }
 
 // ── AgentCrypto delegation ────────────────────────────────────────────────────
@@ -320,5 +339,32 @@ mod tests {
             &kse.get(&format!("agent/crypto/{slug}/current.json")).await.unwrap()
         ).unwrap();
         assert_eq!(data.version, 2);
+    }
+
+    #[tokio::test]
+    async fn rotate_and_reencrypt_blob_is_accessible_with_new_key() {
+        let dir = tmp_dir("reencrypt");
+        let (kse, blk) = make_stores(&dir);
+        let id = AgentIdentity::generate_ephemeral();
+
+        let old_crypto = SovereignCrypto::load_or_genesis(&id, &kse, &blk).await.unwrap();
+
+        // Encrypt with old key
+        let plaintext = b"sensitive payload";
+        let old_ct = old_crypto.encrypt(b"blob", plaintext).await.unwrap();
+
+        // Rotate
+        let new_crypto = old_crypto.rotate(&id, &kse, &blk).await.unwrap();
+
+        // Old ciphertext not decryptable with new key
+        assert!(new_crypto.decrypt(b"blob", &old_ct).await.is_err());
+
+        // Re-encrypt produces ciphertext decryptable with new key
+        let new_ct = new_crypto.reencrypt_blob(&old_crypto, b"blob", &old_ct).await.unwrap();
+        let recovered = new_crypto.decrypt(b"blob", &new_ct).await.unwrap();
+        assert_eq!(recovered.as_slice(), plaintext);
+
+        // New ciphertext is NOT the same bytes as old (different key)
+        assert_ne!(new_ct, old_ct);
     }
 }

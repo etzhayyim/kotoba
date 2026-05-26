@@ -4187,12 +4187,14 @@ name = "kotoba-auth"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "bytes",
  "ciborium",
  "ed25519-dalek",
  "hex",
  "k256",
  "kotoba-core",
+ "multibase",
  "serde",
  "serde_json",
  "sha3",
@@ -4274,6 +4276,7 @@ dependencies = [
  "kotoba-kse",
  "kotoba-store",
  "libc",
+ "multibase",
  "serde",
  "serde_json",
  "spargebra",
@@ -4316,6 +4319,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
@@ -4338,11 +4342,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "blake3",
  "bytes",
  "ciborium",
  "ed25519-dalek",
  "hex",
+ "kotoba-auth",
  "kotoba-core",
  "kotoba-crypto",
  "kotoba-store",
@@ -4438,6 +4444,7 @@ dependencies = [
  "blake3",
  "bytes",
  "ciborium",
+ "ed25519-dalek",
  "hex",
  "kotoba-auth",
  "kotoba-core",
@@ -4453,15 +4460,18 @@ dependencies = [
  "kotoba-signal",
  "kotoba-store",
  "kotoba-vm",
+ "multibase",
  "object_store",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "subtle",
  "thiserror 1.0.69",
  "tokio",
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
+ "x25519-dalek",
 ]
 
 [[package]]

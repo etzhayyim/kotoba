@@ -14,7 +14,6 @@
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
-use zeroize::Zeroizing;
 
 /// Layer-1 identity keys for the Kotoba agent.
 pub struct AgentIdentity {

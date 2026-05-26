@@ -8,6 +8,7 @@ pub mod sync_window;
 pub mod secure_vault;
 pub mod agent_identity;
 pub mod sovereign_key;
+pub mod pre_key_registry;
 
 pub use topic::{Topic, TopicPattern};
 pub use journal::{Journal, JournalEntry, Cursor, CursorAck};
@@ -18,3 +19,4 @@ pub use sync_window::SyncWindow;
 pub use secure_vault::SecureVault;
 pub use agent_identity::AgentIdentity;
 pub use sovereign_key::SovereignCrypto;
+pub use pre_key_registry::{PreKeyRegistry, PreKeyError, RekeyRevocationRecord, RULE_REKEY_REVOKED};
