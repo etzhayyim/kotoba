@@ -8,6 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use kotoba_core::cid::KotobaCid;
+use crate::citation::{CitationLedger, DatomKey};
 use crate::quad::{Quad, QuadObject};
 use crate::delta::{Delta, Multiplicity};
 
@@ -91,16 +92,20 @@ impl DatalogProgram {
     /// Given a batch of input `deltas` (new/retracted facts), derive all new
     /// facts by repeatedly applying rules until fixpoint.
     /// Returns output `Delta`s for every newly derived fact.
-    ///
-    /// Algorithm:
-    ///   1. Seed `fact_base` from assert deltas.
-    ///   2. Per round: for each rule, enumerate body positions where the literal
-    ///      could come from `new_facts` (Δ-fan-out); join remaining literals
-    ///      against `fact_base`.  This structurally enforces "at least one new
-    ///      fact used" without a mutable flag.
-    ///   3. Newly derived facts become `new_facts` for the next round.
-    ///   4. Stop when no new facts are derived (fixpoint).
     pub fn evaluate_delta(&self, deltas: &[Delta]) -> Vec<Delta> {
+        let mut _sink = CitationLedger::new();
+        self.evaluate_delta_inner(deltas, &mut _sink)
+    }
+
+    /// Economy-aware variant: records one citation per join hit into `ledger`.
+    ///
+    /// Call `ledger.flush_epoch(pool_mkoto)` after evaluation to compute
+    /// royalties, then `CitationLedger::royalty_quads()` to emit ledger Quads.
+    pub fn evaluate_delta_cited(&self, deltas: &[Delta], ledger: &mut CitationLedger) -> Vec<Delta> {
+        self.evaluate_delta_inner(deltas, ledger)
+    }
+
+    fn evaluate_delta_inner(&self, deltas: &[Delta], ledger: &mut CitationLedger) -> Vec<Delta> {
         if self.rules.is_empty() || deltas.is_empty() {
             return vec![];
         }
@@ -145,12 +150,18 @@ impl DatalogProgram {
                 let mut rule_heads: HashSet<(KotobaCid, KotobaCid)> = HashSet::new();
 
                 for &delta_pos in &pos_indices {
+                    let mut cited_keys: Vec<DatomKey> = Vec::new();
                     let heads = self.eval_rule_with_delta_at(
                         rule,
                         &fact_base,
                         &new_facts,
                         delta_pos,
+                        &mut cited_keys,
                     );
+                    // Record citations for every join hit that contributed to this rule
+                    for key in cited_keys {
+                        ledger.cite(&key);
+                    }
                     rule_heads.extend(heads);
                 }
 
@@ -194,14 +205,15 @@ impl DatalogProgram {
     /// Evaluate `rule` with the body literal at `delta_pos` (a Positive literal)
     /// drawn from `new_facts`; all other Positive literals from `fact_base`.
     /// Returns candidate head (subject, object) pairs.
+    /// Appends a DatomKey for every successful join hit into `cited`.
     fn eval_rule_with_delta_at(
         &self,
-        rule: &DatalogRule,
+        rule:      &DatalogRule,
         fact_base: &HashMap<String, HashSet<(KotobaCid, KotobaCid)>>,
         new_facts: &HashMap<String, HashSet<(KotobaCid, KotobaCid)>>,
         delta_pos: usize,
+        cited:     &mut Vec<DatomKey>,
     ) -> Vec<(KotobaCid, KotobaCid)> {
-        // Start with an empty binding; recurse through body literals in order.
         let initial: Binding = HashMap::new();
         let mut results = Vec::new();
 
@@ -214,6 +226,7 @@ impl DatalogProgram {
             new_facts,
             delta_pos,
             &mut results,
+            cited,
         );
 
         results
@@ -224,6 +237,8 @@ impl DatalogProgram {
     /// `delta_pos`: the index of the Positive literal that MUST be satisfied
     /// from `new_facts` (for semi-naive correctness). All other Positive
     /// literals are satisfied from `fact_base` (which is a superset of new_facts).
+    ///
+    /// `cited`: accumulates a DatomKey for each successful positive join hit.
     #[allow(clippy::too_many_arguments)]
     fn match_body(
         &self,
@@ -235,6 +250,7 @@ impl DatalogProgram {
         new_facts:  &HashMap<String, HashSet<(KotobaCid, KotobaCid)>>,
         delta_pos:  usize,
         out:        &mut Vec<(KotobaCid, KotobaCid)>,
+        cited:      &mut Vec<DatomKey>,
     ) {
         if idx == body.len() {
             // All body literals matched — ground the head
@@ -256,9 +272,11 @@ impl DatalogProgram {
 
                 for (subj, obj) in pairs {
                     if let Some(new_binding) = self.unify_atom(atom, subj, obj, &binding) {
+                        // Citation: record that this subject entity was used in a join
+                        cited.push(DatomKey::from_cid(subj));
                         self.match_body(
                             rule, body, idx + 1, new_binding,
-                            fact_base, new_facts, delta_pos, out,
+                            fact_base, new_facts, delta_pos, out, cited,
                         );
                     }
                 }
@@ -274,7 +292,7 @@ impl DatalogProgram {
                     if !present {
                         self.match_body(
                             rule, body, idx + 1, binding,
-                            fact_base, new_facts, delta_pos, out,
+                            fact_base, new_facts, delta_pos, out, cited,
                         );
                     }
                 }
@@ -297,7 +315,7 @@ impl DatalogProgram {
                     if ok {
                         self.match_body(
                             rule, body, idx + 1, binding,
-                            fact_base, new_facts, delta_pos, out,
+                            fact_base, new_facts, delta_pos, out, cited,
                         );
                     }
                 }
