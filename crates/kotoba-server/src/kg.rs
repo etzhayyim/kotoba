@@ -764,3 +764,132 @@ pub async fn kg_query(
         "elapsedMs": t0.elapsed().as_millis(),
     })))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kotoba_kqe::quad::QuadObject;
+    use kotoba_core::cid::KotobaCid;
+
+    // ── kg_graph_cid ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn kg_graph_cid_is_stable() {
+        let a = kg_graph_cid();
+        let b = kg_graph_cid();
+        assert_eq!(a, b);
+    }
+
+    // ── obj_to_json ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn obj_to_json_text() {
+        let v = obj_to_json(&QuadObject::Text("hello".to_string()));
+        assert_eq!(v, serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn obj_to_json_integer() {
+        let v = obj_to_json(&QuadObject::Integer(42));
+        assert_eq!(v, serde_json::json!(42));
+    }
+
+    #[test]
+    fn obj_to_json_float() {
+        let v = obj_to_json(&QuadObject::Float(3.14));
+        assert!((v.as_f64().unwrap() - 3.14).abs() < 1e-10);
+    }
+
+    #[test]
+    fn obj_to_json_bool() {
+        assert_eq!(obj_to_json(&QuadObject::Bool(true)),  serde_json::json!(true));
+        assert_eq!(obj_to_json(&QuadObject::Bool(false)), serde_json::json!(false));
+    }
+
+    #[test]
+    fn obj_to_json_cid_is_multibase_string() {
+        let cid = KotobaCid::from_bytes(b"test-cid");
+        let v   = obj_to_json(&QuadObject::Cid(cid.clone()));
+        assert_eq!(v.as_str().unwrap(), cid.to_multibase());
+    }
+
+    #[test]
+    fn obj_to_json_bytes_is_null() {
+        let v = obj_to_json(&QuadObject::Bytes(b"raw".to_vec()));
+        assert_eq!(v, serde_json::Value::Null);
+    }
+
+    // ── blake3_pseudo_vector ──────────────────────────────────────────────────
+
+    #[test]
+    fn blake3_pseudo_vector_has_correct_dims() {
+        let v = blake3_pseudo_vector("hello world", 64);
+        assert_eq!(v.len(), 64);
+    }
+
+    #[test]
+    fn blake3_pseudo_vector_values_in_minus1_plus1() {
+        let v = blake3_pseudo_vector("test", 128);
+        for x in &v { assert!(*x >= -1.0 && *x <= 1.0, "value out of range: {x}"); }
+    }
+
+    #[test]
+    fn blake3_pseudo_vector_is_deterministic() {
+        let a = blake3_pseudo_vector("kotoba", 32);
+        let b = blake3_pseudo_vector("kotoba", 32);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn blake3_pseudo_vector_differs_for_different_inputs() {
+        let a = blake3_pseudo_vector("foo", 32);
+        let b = blake3_pseudo_vector("bar", 32);
+        assert_ne!(a, b);
+    }
+
+    // ── cosine ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cosine_identical_vectors_is_one() {
+        let v = vec![1.0f32, 2.0, 3.0];
+        let s = cosine(&v, &v);
+        assert!((s - 1.0).abs() < 1e-6, "cosine of identical vectors must be 1.0, got {s}");
+    }
+
+    #[test]
+    fn cosine_orthogonal_vectors_is_zero() {
+        let a = vec![1.0f32, 0.0];
+        let b = vec![0.0f32, 1.0];
+        let s = cosine(&a, &b);
+        assert!(s.abs() < 1e-6, "cosine of orthogonal vectors must be 0.0, got {s}");
+    }
+
+    #[test]
+    fn cosine_zero_vector_returns_zero() {
+        let a = vec![0.0f32, 0.0];
+        let b = vec![1.0f32, 0.0];
+        assert_eq!(cosine(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn cosine_opposite_vectors_is_minus_one() {
+        let a = vec![1.0f32, 0.0];
+        let b = vec![-1.0f32, 0.0];
+        let s = cosine(&a, &b);
+        assert!((s + 1.0).abs() < 1e-6, "cosine of opposite vectors must be -1.0, got {s}");
+    }
+
+    #[test]
+    fn cosine_mismatched_lengths_clips_dot_product() {
+        // dot = a[..2]·b[..2] = 1*1 + 0*0 = 1
+        // na  = ||a||_full = sqrt(1 + 0 + 99²) ≈ 99.005
+        // nb  = ||b||_full = 1.0
+        // cosine ≈ 1 / (99.005 * 1) ≈ 0.0101 (clearly not 1.0)
+        let a = vec![1.0f32, 0.0, 99.0];
+        let b = vec![1.0f32, 0.0];
+        let s = cosine(&a, &b);
+        // The norms use the full vectors; dot uses only the shorter prefix.
+        let expected = 1.0 / (f32::sqrt(1.0 + 0.0 + 99.0_f32 * 99.0) * 1.0);
+        assert!((s - expected).abs() < 1e-5, "got {s}, expected {expected}");
+    }
+}
