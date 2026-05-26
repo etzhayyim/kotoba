@@ -39,13 +39,21 @@ impl EnterpriseDialect for SnowflakeDialect {
 
         let mut features = Vec::new();
 
-        if upper.contains("QUALIFY") {
+        // Strip single-line comments before keyword detection to avoid false positives
+        let stripped_upper: String = upper.lines()
+            .map(|line| {
+                if let Some(idx) = line.find("--") { &line[..idx] } else { line }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if stripped_upper.contains("QUALIFY") {
             features.push(EnterpriseFeature::OlapWindow);
         }
-        if upper.contains("FLATTEN") {
+        if stripped_upper.contains("FLATTEN") {
             features.push(EnterpriseFeature::SemiStructured);
         }
-        if upper.contains("LATERAL") {
+        if stripped_upper.contains("LATERAL") {
             features.push(EnterpriseFeature::Lateral);
         }
 

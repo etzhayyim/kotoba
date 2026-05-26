@@ -264,18 +264,21 @@ mod tests {
         assert_eq!(prog.rules.len(), 2);
 
         // Base rule: anchor root → self
-        let input = vec![fact("employees/manager_id", "e1", "NULL")];
+        // compile_connect_by uses alias "e" from CONNECT BY clause → predicate "e/manager_id"
+        let input = vec![fact("e/manager_id", "e1", "NULL")];
         let derived = prog.evaluate_delta(&input);
         assert!(has(&derived, "ancestor", "e1", "e1"));
 
         // Recursive rule: e1 → e2 when e2.manager = e1
         let input2 = vec![
-            fact("employees/manager_id", "e1", "NULL"),
-            fact("employees/manager_id", "e2", "e1"),
+            fact("e/manager_id", "e1", "NULL"),
+            fact("e/manager_id", "e2", "e1"),
         ];
         let derived2 = prog.evaluate_delta(&input2);
+        // e2's manager is e1, and e1 is a root → ancestor(e2, e1)
         assert!(has(&derived2, "ancestor", "e2", "e1"));
-        assert!(has(&derived2, "ancestor", "e2", "e2"), "e2 self via transitivity with e1→e2");
+        // e1 remains its own root → ancestor(e1, e1)
+        assert!(has(&derived2, "ancestor", "e1", "e1"));
     }
 
     #[test]

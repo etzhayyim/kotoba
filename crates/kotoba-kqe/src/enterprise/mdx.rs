@@ -443,14 +443,15 @@ mod tests {
         let q = parse(mdx).unwrap();
         let prog = compile_mdx(&q, "cell").unwrap();
 
-        // Facts: measure/Revenue(mdx:Region:APAC, revenue_cid)
-        //        dim/Region/APAC(mdx:Measures:Revenue, apac_cid)
+        // The compiled rule requires:
+        //   measure/Revenue(Constant("mdx:Measures:Revenue"), ColV)  ← col subject = col.cid_key()
+        //   dim/Region/APAC(Constant("mdx:Region:APAC"),     RowV)  ← row subject = row.cid_key()
         let col_member = &q.columns[0];
         let row_member = &q.rows[0];
 
         let input = vec![
-            fact(&col_member.predicate(), &row_member.cid_key(), "rev_val"),
-            fact(&row_member.predicate(), &col_member.cid_key(), "apac_val"),
+            fact(&col_member.predicate(), &col_member.cid_key(), "rev_val"),
+            fact(&row_member.predicate(), &row_member.cid_key(), "apac_val"),
         ];
         let derived = prog.evaluate_delta(&input);
         // At least one derived cell
