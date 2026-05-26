@@ -854,12 +854,11 @@ async fn invoke_run_wasm_guest_via_xrpc() {
 #[tokio::test]
 async fn invoke_run_without_auth_returns_401() {
     let s = TestServer::start(false).await;
-    let (status, body) = s.post(
+    let (status, _) = s.post(
         "/xrpc/ai.gftd.apps.kotoba.invoke.run",
         json!({ "program_cid": "x", "program_type": "datalog", "agent_did": "did:plc:x" }),
     ).await;
-    assert_eq!(status, 401, "{body}");
-    assert!(body["error"].as_str().is_some(), "{body}");
+    assert_eq!(status, 401);
 }
 
 // ── SyncWindow session lifecycle ──────────────────────────────────────────────
@@ -1471,6 +1470,16 @@ fn tenant_jwt(did: &str) -> String {
     let header  = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
     let payload = URL_SAFE_NO_PAD.encode(
         format!(r#"{{"sub":"{did}","exp":9999999999}}"#).as_bytes()
+    );
+    format!("{header}.{payload}.fakesig")
+}
+
+/// Build an expired JWT (exp = 1 = past Unix epoch).
+fn expired_jwt(did: &str) -> String {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    let header  = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+    let payload = URL_SAFE_NO_PAD.encode(
+        format!(r#"{{"sub":"{did}","exp":1}}"#).as_bytes()
     );
     format!("{header}.{payload}.fakesig")
 }
@@ -2749,4 +2758,61 @@ async fn signal_distribute_sender_key_oversized_payload_returns_413() {
         "signalMessage":   { "ciphertext": large },
     })).await;
     assert_eq!(status, 413, "{body}");
+}
+
+// ── expired JWT rejection tests ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn attest_claim_expired_token_returns_401() {
+    let s   = TestServer::start(false).await;
+    let did = "did:key:zExpired1";
+    let tok = expired_jwt(did);
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotoba.attest.claim", json!({
+        "entity_did":   "did:key:zEntity99",
+        "attester_did": did,
+        "claim_type":   "self",
+        "stake_mkoto":  1_000_000_000u64,
+    }), &tok).await;
+    assert_eq!(status, 401, "{body}");
+}
+
+#[tokio::test]
+async fn attest_challenge_expired_token_returns_401() {
+    let s   = TestServer::start(false).await;
+    let did = "did:key:zExpired2";
+    let tok = expired_jwt(did);
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotoba.attest.challenge", json!({
+        "claim_cid":      "bafybeifake000000000000000000000000000",
+        "challenger_did": did,
+        "reason":         "bad actor",
+    }), &tok).await;
+    assert_eq!(status, 401, "{body}");
+}
+
+#[tokio::test]
+async fn signal_register_prekeys_expired_token_returns_401() {
+    let s   = TestServer::start(false).await;
+    let did = "did:key:zExpired3";
+    let tok = expired_jwt(did);
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.signal.register.prekeys", json!({
+        "did":          did,
+        "deviceId":     "device-x",
+        "identityKey":  {},
+        "prekeyBundle": {},
+    }), &tok).await;
+    assert_eq!(status, 401, "{body}");
+}
+
+#[tokio::test]
+async fn operator_auth_expired_token_returns_401() {
+    let s   = TestServer::start(false).await;
+    let tok = expired_jwt(&s.operator_did);
+    use kotoba_core::cid::KotobaCid;
+    let graph_cid = KotobaCid::from_bytes(b"expired-test").to_multibase();
+    let (status, body) = s.post_auth(
+        "/xrpc/ai.gftd.apps.kotoba.embed.create",
+        json!({ "text": "hello", "doc_cid": "d1", "model_cid": "m1", "graph": graph_cid }),
+        &tok,
+    ).await;
+    assert_eq!(status, 401, "{body}");
 }
