@@ -233,12 +233,22 @@ impl request_response::Codec for BitswapCodec {
     }
 }
 
+/// Maximum bitswap message size (32 MiB). A peer advertising a larger payload
+/// is either faulty or malicious — reject immediately to prevent OOM allocation.
+const MAX_BITSWAP_MSG_BYTES: usize = 32 * 1024 * 1024;
+
 async fn read_cbor<T: AsyncRead + Unpin + Send, D: serde::de::DeserializeOwned>(
     io: &mut T,
 ) -> std::io::Result<D> {
     let mut len_buf = [0u8; 4];
     io.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_BITSWAP_MSG_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("bitswap message too large ({len} bytes, limit {MAX_BITSWAP_MSG_BYTES})"),
+        ));
+    }
     let mut buf = vec![0u8; len];
     io.read_exact(&mut buf).await?;
     ciborium::from_reader(&buf[..])
