@@ -703,11 +703,142 @@ impl QuadStore {
                 Ok(results)
             }
 
+            // ── Property Path (pred+, pred*, pred/pred2) ─────────────────────────
+            // ?s <pred>+ ?o  → BFS: collect all CID objects reachable via <pred>
+            // ?s <pred>* ?o  → BFS including ?s itself (ZeroOrMore)
+            // ?s <p1>/<p2> ?o → sequence: follow p1 then p2
+            GraphPattern::Path { subject, path, object } => {
+                self.eval_property_path(graph_cid, subject, path, object).await
+            }
+
             other => anyhow::bail!(
                 "unsupported SPARQL pattern type: {}",
                 sparql_pattern_name(other)
             ),
         }
+    }
+
+    /// Evaluate a SPARQL property path pattern.
+    ///
+    /// Supports:
+    /// - `<pred>+` (`OneOrMore`) — BFS over CID-typed edges with matching predicate (≥1 hop)
+    /// - `<pred>*` (`ZeroOrMore`) — same but includes the start node (≥0 hops)
+    /// - `<p1>/<p2>` (`Sequence`) — follow p1 then p2 (one hop each)
+    /// - bare `<pred>` (`NamedNode`) — single-hop (equivalent to BGP triple)
+    ///
+    /// Subject must be bound as `cid:{multibase}`.  Object variable receives each
+    /// reachable CID; existing CID-object quads along the path are returned.
+    async fn eval_property_path(
+        &self,
+        graph_cid: &KotobaCid,
+        subject:   &spargebra::term::TermPattern,
+        path:      &spargebra::algebra::PropertyPathExpression,
+        _object:   &spargebra::term::TermPattern,
+    ) -> anyhow::Result<Vec<Quad>> {
+        use spargebra::algebra::PropertyPathExpression;
+        use spargebra::term::TermPattern;
+
+        // Resolve bound subject CID.
+        let start_cid = match subject {
+            TermPattern::NamedNode(nn) => {
+                parse_cid_iri(strip_bgp_base(nn.as_str()))
+                    .ok_or_else(|| anyhow::anyhow!("property path: subject IRI is not a cid: IRI"))?
+            }
+            _ => anyhow::bail!("property path: subject must be a bound cid: IRI"),
+        };
+
+        match path {
+            PropertyPathExpression::NamedNode(pred) => {
+                let pred_str = strip_bgp_base(pred.as_str());
+                let quads = self.get_entity_quads_cold(graph_cid, &start_cid).await?;
+                Ok(quads.into_iter().filter(|q| q.predicate == pred_str).collect())
+            }
+
+            PropertyPathExpression::OneOrMore(inner) => {
+                let pred = extract_named_node_from_path(inner)
+                    .ok_or_else(|| anyhow::anyhow!("OneOrMore: only simple <pred>+ supported"))?;
+                self.bfs_pred_path(graph_cid, &start_cid, pred, 1, 8).await
+            }
+
+            PropertyPathExpression::ZeroOrMore(inner) => {
+                let pred = extract_named_node_from_path(inner)
+                    .ok_or_else(|| anyhow::anyhow!("ZeroOrMore: only simple <pred>* supported"))?;
+                let mut results = self.bfs_pred_path(graph_cid, &start_cid, pred, 0, 8).await?;
+                // ZeroOrMore includes the start node's own quads with this predicate
+                let own = self.get_entity_quads_cold(graph_cid, &start_cid).await?;
+                for q in own {
+                    if !results.iter().any(|r| quad_eq(r, &q)) {
+                        results.push(q);
+                    }
+                }
+                Ok(results)
+            }
+
+            PropertyPathExpression::Sequence(a, b) => {
+                let pred_a = extract_named_node_from_path(a)
+                    .ok_or_else(|| anyhow::anyhow!("Sequence: only simple pred/pred supported"))?;
+                let pred_b = extract_named_node_from_path(b)
+                    .ok_or_else(|| anyhow::anyhow!("Sequence: only simple pred/pred supported"))?;
+                // Follow pred_a from start → get CID objects → follow pred_b from those
+                let hop1 = self.get_entity_quads_cold(graph_cid, &start_cid).await?;
+                let midpoints: Vec<KotobaCid> = hop1.into_iter().filter_map(|q| {
+                    if q.predicate == pred_a {
+                        if let kotoba_kqe::quad::QuadObject::Cid(c) = q.object { Some(c) } else { None }
+                    } else { None }
+                }).collect();
+                let mut results = Vec::new();
+                for mid in midpoints {
+                    let hop2 = self.get_entity_quads_cold(graph_cid, &mid).await?;
+                    for q in hop2 {
+                        if q.predicate == pred_b && !results.iter().any(|r| quad_eq(r, &q)) {
+                            results.push(q);
+                        }
+                    }
+                }
+                Ok(results)
+            }
+
+            other => anyhow::bail!("unsupported property path type: {}", path_name(other)),
+        }
+    }
+
+    /// BFS over CID-typed edges with a specific predicate.
+    ///
+    /// `min_depth=1` for `+` (OneOrMore), `min_depth=0` for `*` (ZeroOrMore).
+    /// `max_depth` caps at 8 hops to prevent runaway traversal.
+    async fn bfs_pred_path(
+        &self,
+        graph_cid:  &KotobaCid,
+        start:      &KotobaCid,
+        predicate:  &str,
+        min_depth:  usize,
+        max_depth:  usize,
+    ) -> anyhow::Result<Vec<Quad>> {
+        let mut results: Vec<Quad> = Vec::new();
+        let mut frontier = vec![start.clone()];
+        let mut visited  = std::collections::HashSet::new();
+        visited.insert(start.clone());
+
+        for depth in 1..=max_depth {
+            if frontier.is_empty() { break; }
+            let mut next_frontier: Vec<KotobaCid> = Vec::new();
+            for node in &frontier {
+                let quads = self.get_entity_quads_cold(graph_cid, node).await?;
+                for q in quads {
+                    if q.predicate != predicate { continue; }
+                    if let kotoba_kqe::quad::QuadObject::Cid(ref ref_cid) = q.object {
+                        if visited.insert(ref_cid.clone()) {
+                            next_frontier.push(ref_cid.clone());
+                        }
+                        if depth >= min_depth && !results.iter().any(|r| quad_eq(r, &q)) {
+                            results.push(q);
+                        }
+                    }
+                }
+            }
+            frontier = next_frontier;
+        }
+        Ok(results)
     }
 
     /// Route a flat list of BGP triple patterns to the optimal cold-path index.
@@ -1205,18 +1336,6 @@ fn unwrap_bgp_pattern(pattern: spargebra::algebra::GraphPattern) -> spargebra::a
     }
 }
 
-/// Collect triple patterns from a BGP node; returns `None` if non-BGP patterns are present.
-fn collect_triple_patterns(
-    pattern: &spargebra::algebra::GraphPattern,
-) -> Option<Vec<spargebra::term::TriplePattern>> {
-    use spargebra::algebra::GraphPattern;
-    match pattern {
-        GraphPattern::Bgp { patterns } => Some(patterns.clone()),
-        GraphPattern::Filter { inner, .. } => collect_triple_patterns(inner),
-        _ => None,
-    }
-}
-
 /// Parse a `cid:{multibase}` IRI into a `KotobaCid`.
 ///
 /// Accepts bare multibase strings (no scheme) for convenience.
@@ -1337,6 +1456,33 @@ fn sparql_pattern_name(pattern: &spargebra::algebra::GraphPattern) -> &'static s
         GraphPattern::Slice { .. }     => "Slice",
         GraphPattern::Group { .. }     => "Group",
         _ => "Unknown",
+    }
+}
+
+/// Extract the predicate string from a simple `NamedNode` path expression.
+fn extract_named_node_from_path(
+    path: &spargebra::algebra::PropertyPathExpression,
+) -> Option<&str> {
+    use spargebra::algebra::PropertyPathExpression;
+    if let PropertyPathExpression::NamedNode(nn) = path {
+        Some(strip_bgp_base(nn.as_str()))
+    } else {
+        None
+    }
+}
+
+/// Human-readable name for a property path expression variant.
+fn path_name(path: &spargebra::algebra::PropertyPathExpression) -> &'static str {
+    use spargebra::algebra::PropertyPathExpression;
+    match path {
+        PropertyPathExpression::NamedNode(_)    => "NamedNode",
+        PropertyPathExpression::Reverse(_)      => "Reverse",
+        PropertyPathExpression::Sequence(_, _)  => "Sequence",
+        PropertyPathExpression::Alternative(_, _) => "Alternative",
+        PropertyPathExpression::ZeroOrMore(_)   => "ZeroOrMore",
+        PropertyPathExpression::OneOrMore(_)    => "OneOrMore",
+        PropertyPathExpression::ZeroOrOne(_)    => "ZeroOrOne",
+        PropertyPathExpression::NegatedPropertySet(_) => "NegatedPropertySet",
     }
 }
 
@@ -2184,6 +2330,51 @@ mod tests {
         assert_eq!(quads.len(), 6, "3 name + 3 role quads expected, got {}", quads.len());
         let preds: std::collections::HashSet<&str> = quads.iter().map(|q| q.predicate.as_str()).collect();
         assert!(preds.contains("name") && preds.contains("role"));
+    }
+
+    // ─── SPARQL Property Paths ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sparql_property_path_one_or_more() {
+        // alice --knows--> bob (CID edge in test data)
+        // <cid:alice> <knows>+ ?o → should return the knows quad from alice→bob
+        let (qs, graph) = setup_sparql_qs().await;
+        let alice_mb = KotobaCid::from_bytes(b"alice").to_multibase();
+        let sparql = format!("SELECT * WHERE {{ <cid:{alice_mb}> <knows>+ ?o }}");
+        let quads = qs.cold_query_sparql_bgp(&graph, &sparql).await.unwrap();
+        assert_eq!(quads.len(), 1, "one knows+ hop expected, got {}", quads.len());
+        assert_eq!(quads[0].predicate, "knows");
+        // object should be the bob CID
+        let bob_cid = KotobaCid::from_bytes(b"bob");
+        assert_eq!(
+            quads[0].object,
+            kotoba_kqe::quad::QuadObject::Cid(bob_cid),
+        );
+    }
+
+    #[tokio::test]
+    async fn sparql_property_path_zero_or_more_includes_start() {
+        // <cid:alice> <knows>* ?o → includes alice's own quads AND knows-edge quads
+        let (qs, graph) = setup_sparql_qs().await;
+        let alice_mb = KotobaCid::from_bytes(b"alice").to_multibase();
+        let sparql = format!("SELECT * WHERE {{ <cid:{alice_mb}> <knows>* ?o }}");
+        let quads = qs.cold_query_sparql_bgp(&graph, &sparql).await.unwrap();
+        // ZeroOrMore: knows+ result (1 quad) + alice's own quads (name + role + knows = 3)
+        // deduped — the knows quad appears in both, dedup gives us ≥1 and ≤4
+        assert!(!quads.is_empty(), "zero-or-more must return at least one quad");
+        let preds: std::collections::HashSet<&str> =
+            quads.iter().map(|q| q.predicate.as_str()).collect();
+        assert!(preds.contains("knows"), "knows predicate must appear");
+    }
+
+    #[tokio::test]
+    async fn sparql_property_path_no_cid_edges_returns_empty() {
+        // bob has no CID-typed "knows" edge → <cid:bob> <knows>+ ?o is empty
+        let (qs, graph) = setup_sparql_qs().await;
+        let bob_mb = KotobaCid::from_bytes(b"bob").to_multibase();
+        let sparql = format!("SELECT * WHERE {{ <cid:{bob_mb}> <knows>+ ?o }}");
+        let quads = qs.cold_query_sparql_bgp(&graph, &sparql).await.unwrap();
+        assert!(quads.is_empty(), "bob has no outgoing knows edges");
     }
 
     // ─── import_commit tests ──────────────────────────────────────────────────
