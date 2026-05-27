@@ -5,10 +5,10 @@
 ///
 /// Design:
 ///   hot: small + fast (BudgetedBlockStore<MemoryBlockStore>)
-///   cold: large + persistent (IrohBlockStore — iroh-blobs fs::Store)
+///   cold: large + persistent (KuboBlockStore — Kubo/IPFS HTTP, SHA2-256 dual-CID)
 ///
 /// Each node keeps its working set in hot memory while the full dataset is
-/// stored persistently in the iroh cold tier.  Remote durability is handled by
+/// stored persistently in the Kubo cold tier.  Remote durability is handled by
 /// IpfsPinClient (fire-and-forget pin to the local IPFS node after put).
 use std::sync::Arc;
 use bytes::Bytes;

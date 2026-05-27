@@ -138,7 +138,7 @@ impl KotobaState {
         // Hot block cache — BudgetedBlockStore<MemoryBlockStore>.
         // Capacity: KOTOBA_HOT_CACHE_BYTES (default 256 MiB) or
         //           KOTOBA_STORAGE_BUDGET_BYTES (legacy alias, same meaning).
-        // Persistence: iroh cold tier (IrohBlockStore) if KOTOBA_STORE_PATH is set; remote pin via kotobase.
+        // Persistence: KuboBlockStore cold tier (Kubo/IPFS HTTP, SHA2-256 dual-CID) if KOTOBA_STORE_PATH is set.
         // All KSE components (Journal, Vault, SecureVault) share the same store.
         let store_path: Option<String> = std::env::var("KOTOBA_STORE_PATH").ok();
 
@@ -154,26 +154,19 @@ impl KotobaState {
                 kotoba_store::MemoryBlockStore::new(),
                 hot_cache_bytes,
             );
-            if let Some(ref path) = store_path {
-                let iroh_path = format!("{path}-iroh");
-                match kotoba_store::IrohBlockStore::open(&iroh_path) {
-                    Ok(cold) => {
-                        tracing::info!(
-                            hot_cache_mib = hot_cache_bytes / (1024 * 1024),
-                            iroh_path = %iroh_path,
-                            "BlockStore: TieredBlockStore<BudgetedMemory, IrohFs> — IPFS persistence enabled"
-                        );
-                        Arc::new(kotoba_store::TieredBlockStore::new(hot, cold))
-                    }
-                    Err(e) => {
-                        tracing::warn!(err = %e, iroh_path = %iroh_path, "IrohBlockStore::open failed — falling back to memory-only hot cache");
-                        tracing::info!(
-                            hot_cache_mib = hot_cache_bytes / (1024 * 1024),
-                            "BlockStore: BudgetedBlockStore<MemoryBlockStore> hot cache (fallback)"
-                        );
-                        Arc::new(hot)
-                    }
-                }
+            // Cold tier: KuboBlockStore (Kubo/IPFS HTTP, SHA2-256 CIDv1).
+            // Enabled when KOTOBA_STORE_PATH is set (signals persistent mode).
+            // Endpoint from KOTOBA_IPFS_ENDPOINT (default: http://localhost:5001).
+            if store_path.is_some() {
+                let cold = kotoba_store::KuboBlockStore::from_env();
+                let endpoint = std::env::var("KOTOBA_IPFS_ENDPOINT")
+                    .unwrap_or_else(|_| "http://localhost:5001".into());
+                tracing::info!(
+                    hot_cache_mib = hot_cache_bytes / (1024 * 1024),
+                    ipfs_endpoint = %endpoint,
+                    "BlockStore: TieredBlockStore<BudgetedMemory, KuboIpfs> — dual-CID IPFS cold tier enabled"
+                );
+                Arc::new(kotoba_store::TieredBlockStore::new(hot, cold))
             } else {
                 tracing::info!(
                     hot_cache_mib = hot_cache_bytes / (1024 * 1024),

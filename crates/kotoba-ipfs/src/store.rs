@@ -1,7 +1,4 @@
-use anyhow::Result;
 use cid::Cid;
-use co_libp2p_bitswap::{BitswapStore, Block, Token};
-use libp2p::PeerId;
 use multihash::Multihash;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -30,10 +27,16 @@ impl MemBlockStore {
         Self::default()
     }
 
+    /// Compute CID and store block; returns the CID.
     pub fn put(&self, data: Vec<u8>) -> Cid {
         let cid = cid_for(&data);
         self.inner.write().unwrap().insert(cid, data);
         cid
+    }
+
+    /// Store block under an already-known CID (received from remote).
+    pub fn insert(&self, cid: Cid, data: Vec<u8>) {
+        self.inner.write().unwrap().insert(cid, data);
     }
 
     pub fn get_local(&self, cid: &Cid) -> Option<Vec<u8>> {
@@ -42,42 +45,5 @@ impl MemBlockStore {
 
     pub fn contains_local(&self, cid: &Cid) -> bool {
         self.inner.read().unwrap().contains_key(cid)
-    }
-
-    fn missing_refs(&self, cid: &Cid) -> Vec<Cid> {
-        // For raw blocks there are no links; return the CID itself if absent.
-        if self.contains_local(cid) {
-            vec![]
-        } else {
-            vec![*cid]
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl BitswapStore for MemBlockStore {
-    async fn contains(&mut self, cid: &Cid, _peer: &PeerId, _tokens: &[Token]) -> Result<bool> {
-        Ok(self.contains_local(cid))
-    }
-
-    async fn get(
-        &mut self,
-        cid: &Cid,
-        _peer: &PeerId,
-        _tokens: &[Token],
-    ) -> Result<Option<Vec<u8>>> {
-        Ok(self.get_local(cid))
-    }
-
-    async fn insert(&mut self, block: &Block, _peer: &PeerId, _tokens: &[Token]) -> Result<()> {
-        self.inner
-            .write()
-            .unwrap()
-            .insert(*block.cid(), block.data().to_vec());
-        Ok(())
-    }
-
-    async fn missing_blocks(&mut self, cid: &Cid, _tokens: &[Token]) -> Result<Vec<Cid>> {
-        Ok(self.missing_refs(cid))
     }
 }

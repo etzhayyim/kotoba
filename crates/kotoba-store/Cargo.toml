@@ -3,7 +3,7 @@ name = "kotoba-store"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Kotoba content-addressed block store (memory + iroh/IPFS + tiered + IPFS pin)"
+description = "Kotoba content-addressed block store (memory + Kubo IPFS + tiered + IPFS pin)"
 
 [dependencies]
 kotoba-core.workspace = true
@@ -12,10 +12,10 @@ serde.workspace  = true
 thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
-reqwest          = { workspace = true }
+reqwest          = { workspace = true, features = ["multipart"] }
 tokio            = { workspace = true, features = ["rt"] }
-iroh-blobs       = { version = "0.30" }
-iroh-io          = { version = "0.6" }
+sha2             = { workspace = true }
+data-encoding    = "2"
 
 [dev-dependencies]
 criterion.workspace = true

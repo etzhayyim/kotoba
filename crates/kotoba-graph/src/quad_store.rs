@@ -585,7 +585,7 @@ impl QuadStore {
     /// Each commit's 4 ProllyTree roots are recursively walked to collect all live block CIDs.
     /// Blocks returned by `block_store.all_cids()` but absent from the live set are deleted.
     ///
-    /// Stores that don't implement `all_cids()` (S3, iroh) return an empty vec — in that case
+    /// Stores that don't implement `all_cids()` (S3, kubo) return an empty vec — in that case
     /// this function safely returns 0 without modifying anything.
     ///
     /// Returns the count of deleted blocks.

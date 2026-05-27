@@ -1,49 +1,94 @@
 use crate::store::MemBlockStore;
 use anyhow::{anyhow, Result};
+use async_trait::async_trait;
 use cid::Cid;
-use co_libp2p_bitswap::{Bitswap, BitswapConfig, BitswapEvent, QueryId};
 use futures::StreamExt;
 use libp2p::{
-    identify, noise,
+    noise,
+    request_response::{self, Behaviour as RRBehaviour, Codec, ProtocolSupport},
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, Swarm,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io;
 use tokio::sync::{mpsc, oneshot};
 use tracing::debug;
 
-// ── Combined behaviour ────────────────────────────────────────────────────────
+// ── Protocol codec ─────────────────────────────────────────────────────────────
+
+const PROTOCOL_NAME: &str = "/kotoba/ipfs/1.0.0";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BlockRequest {
+    Want { cid: Vec<u8> },   // CID bytes
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BlockResponse {
+    Block { cid: Vec<u8>, data: Vec<u8> },
+    NotFound { cid: Vec<u8> },
+}
+
+#[derive(Clone, Default)]
+struct IpfsCodec;
+
+#[async_trait]
+impl Codec for IpfsCodec {
+    type Protocol = &'static str;
+    type Request = BlockRequest;
+    type Response = BlockResponse;
+
+    async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Request>
+    where T: futures::AsyncRead + Unpin + Send {
+        let mut buf = Vec::new();
+        futures::AsyncReadExt::read_to_end(io, &mut buf).await?;
+        ciborium::from_reader(&buf[..]).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
+    async fn read_response<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Response>
+    where T: futures::AsyncRead + Unpin + Send {
+        let mut buf = Vec::new();
+        futures::AsyncReadExt::read_to_end(io, &mut buf).await?;
+        ciborium::from_reader(&buf[..]).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
+    async fn write_request<T>(&mut self, _: &Self::Protocol, io: &mut T, req: Self::Request) -> io::Result<()>
+    where T: futures::AsyncWrite + Unpin + Send {
+        let mut buf = Vec::new();
+        ciborium::into_writer(&req, &mut buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        futures::AsyncWriteExt::write_all(io, &buf).await
+    }
+
+    async fn write_response<T>(&mut self, _: &Self::Protocol, io: &mut T, resp: Self::Response) -> io::Result<()>
+    where T: futures::AsyncWrite + Unpin + Send {
+        let mut buf = Vec::new();
+        ciborium::into_writer(&resp, &mut buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        futures::AsyncWriteExt::write_all(io, &buf).await
+    }
+}
+
+// ── Combined behaviour ──────────────────────────────────────────────────────────
 
 #[derive(NetworkBehaviour)]
-struct KotobaBehaviour {
-    bitswap: Bitswap,
-    identify: identify::Behaviour,
-    // ping is included via identify for now; add explicit ping if needed
+struct IpfsBehaviour {
+    rr: RRBehaviour<IpfsCodec>,
+    identify: libp2p::identify::Behaviour,
 }
 
-// ── Command bus ──────────────────────────────────────────────────────────────
+// ── Command bus ─────────────────────────────────────────────────────────────────
+
+type GetResp = oneshot::Sender<Result<Vec<u8>>>;
 
 enum Cmd {
-    PutBlock {
-        data: Vec<u8>,
-        resp: oneshot::Sender<Cid>,
-    },
-    GetBlock {
-        cid: Cid,
-        peers: Vec<PeerId>,
-        resp: oneshot::Sender<Result<Vec<u8>>>,
-    },
-    Dial {
-        addr: Multiaddr,
-    },
-    Peers {
-        resp: oneshot::Sender<Vec<PeerId>>,
-    },
+    PutBlock { data: Vec<u8>, resp: oneshot::Sender<Cid> },
+    GetBlock { cid: Cid, peer: PeerId, resp: GetResp },
+    Dial     { addr: Multiaddr },
+    Peers    { resp: oneshot::Sender<Vec<PeerId>> },
 }
 
-// ── Public handle (clone-able) ────────────────────────────────────────────────
+// ── Public handle ───────────────────────────────────────────────────────────────
 
-/// Cheap clone handle for interacting with the IPFS node from outside the event loop.
 #[derive(Clone)]
 pub struct KotobaIpfsNode {
     tx: mpsc::UnboundedSender<Cmd>,
@@ -51,26 +96,24 @@ pub struct KotobaIpfsNode {
 }
 
 impl KotobaIpfsNode {
-    /// Add a raw block to the local store and return its CIDv1 SHA2-256.
+    /// Store a block locally; returns its CIDv1 SHA2-256.
     pub async fn put_block(&self, data: Vec<u8>) -> Result<Cid> {
         let (resp, rx) = oneshot::channel();
         self.tx.send(Cmd::PutBlock { data, resp })?;
         Ok(rx.await?)
     }
 
-    /// Get a block by CID from the local store, or fetch it from `peers` via Bitswap.
-    pub async fn get_block(&self, cid: Cid, peers: Vec<PeerId>) -> Result<Vec<u8>> {
+    /// Get a block from local store or fetch from `peer` via the block-exchange protocol.
+    pub async fn get_block(&self, cid: Cid, peer: PeerId) -> Result<Vec<u8>> {
         let (resp, rx) = oneshot::channel();
-        self.tx.send(Cmd::GetBlock { cid, peers, resp })?;
+        self.tx.send(Cmd::GetBlock { cid, peer, resp })?;
         rx.await?
     }
 
-    /// Dial a remote peer by multiaddr.
     pub fn dial(&self, addr: Multiaddr) -> Result<()> {
         Ok(self.tx.send(Cmd::Dial { addr })?)
     }
 
-    /// List currently connected peers.
     pub async fn connected_peers(&self) -> Result<Vec<PeerId>> {
         let (resp, rx) = oneshot::channel();
         self.tx.send(Cmd::Peers { resp })?;
@@ -82,68 +125,54 @@ impl KotobaIpfsNode {
     }
 }
 
-// ── Config ───────────────────────────────────────────────────────────────────
+// ── Config ───────────────────────────────────────────────────────────────────────
 
 pub struct IpfsConfig {
-    /// TCP listen address. Defaults to `/ip4/127.0.0.1/tcp/0` (random port).
     pub listen: Multiaddr,
 }
 
 impl Default for IpfsConfig {
     fn default() -> Self {
-        Self {
-            listen: "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
-        }
+        Self { listen: "/ip4/127.0.0.1/tcp/0".parse().unwrap() }
     }
 }
 
 impl IpfsConfig {
-    pub fn new() -> Self {
-        Self::default()
-    }
+    pub fn new() -> Self { Self::default() }
 
-    /// Spawn the IPFS event loop on the current Tokio runtime.
-    /// Returns a handle; the background task runs until all handles are dropped.
     pub async fn start(self) -> Result<KotobaIpfsNode> {
         let store = MemBlockStore::new();
         let store_clone = store.clone();
 
-        let swarm = libp2p::SwarmBuilder::with_new_identity()
+        let swarm: Swarm<IpfsBehaviour> = libp2p::SwarmBuilder::with_new_identity()
             .with_tokio()
-            .with_tcp(
-                tcp::Config::default(),
-                noise::Config::new,
-                yamux::Config::default,
-            )?
+            .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
             .with_behaviour(|kp| {
-                let bitswap = Bitswap::new(
-                    BitswapConfig::new(),
-                    store_clone,
-                    Box::new(|fut| {
-                        tokio::spawn(fut);
-                    }),
+                let rr = RRBehaviour::new(
+                    [(PROTOCOL_NAME, ProtocolSupport::Full)],
+                    request_response::Config::default(),
                 );
-                let identify = identify::Behaviour::new(identify::Config::new(
-                    "/kotoba-ipfs/1.0.0".into(),
-                    kp.public(),
-                ));
-                KotobaBehaviour { bitswap, identify }
+                let identify = libp2p::identify::Behaviour::new(
+                    libp2p::identify::Config::new("/kotoba-ipfs/1.0.0".into(), kp.public()),
+                );
+                IpfsBehaviour { rr, identify }
             })?
+            .with_swarm_config(|c| {
+                c.with_idle_connection_timeout(std::time::Duration::from_secs(30))
+            })
             .build();
 
         let peer_id = *swarm.local_peer_id();
         let (tx, rx) = mpsc::unbounded_channel();
-
-        tokio::spawn(event_loop(swarm, store, rx, self.listen));
-
+        tokio::spawn(event_loop(swarm, store_clone, rx, self.listen));
         Ok(KotobaIpfsNode { tx, peer_id })
     }
 }
 
-// ── Event loop ───────────────────────────────────────────────────────────────
+// ── Event loop ────────────────────────────────────────────────────────────────────
 
 async fn event_loop(
-    mut swarm: Swarm<KotobaBehaviour>,
+    mut swarm: Swarm<IpfsBehaviour>,
     store: MemBlockStore,
     mut rx: mpsc::UnboundedReceiver<Cmd>,
     listen: Multiaddr,
@@ -153,24 +182,26 @@ async fn event_loop(
         return;
     }
 
-    // pending Bitswap GET queries: QueryId → (cid, resp channel)
-    let mut pending: HashMap<QueryId, (Cid, oneshot::Sender<Result<Vec<u8>>>)> = HashMap::new();
+    // outbound requests: request_id → oneshot response channel
+    let mut pending: HashMap<request_response::OutboundRequestId, (Cid, GetResp)> = HashMap::new();
 
     loop {
         tokio::select! {
             cmd = rx.recv() => {
                 match cmd {
-                    None => break, // all handles dropped
+                    None => break,
                     Some(Cmd::PutBlock { data, resp }) => {
-                        let cid = store.put(data);
-                        let _ = resp.send(cid);
+                        let _ = resp.send(store.put(data));
                     }
-                    Some(Cmd::GetBlock { cid, peers, resp }) => {
+                    Some(Cmd::GetBlock { cid, peer, resp }) => {
                         if let Some(data) = store.get_local(&cid) {
                             let _ = resp.send(Ok(data));
                         } else {
-                            let qid = swarm.behaviour_mut().bitswap.get(cid, peers, []);
-                            pending.insert(qid, (cid, resp));
+                            let req_id = swarm.behaviour_mut().rr.send_request(
+                                &peer,
+                                BlockRequest::Want { cid: cid.to_bytes() },
+                            );
+                            pending.insert(req_id, (cid, resp));
                         }
                     }
                     Some(Cmd::Dial { addr }) => {
@@ -185,38 +216,55 @@ async fn event_loop(
                 }
             }
             event = swarm.next() => {
-                let Some(event) = event else { break };
-                handle_swarm_event(event, &store, &mut pending);
+                let Some(ev) = event else { break };
+                handle_event(ev, &store, &mut swarm, &mut pending);
             }
         }
     }
 }
 
-fn handle_swarm_event(
-    event: SwarmEvent<KotobaBehaviourEvent>,
+fn handle_event(
+    event: SwarmEvent<IpfsBehaviourEvent>,
     store: &MemBlockStore,
-    pending: &mut HashMap<QueryId, (Cid, oneshot::Sender<Result<Vec<u8>>>)>,
+    swarm: &mut Swarm<IpfsBehaviour>,
+    pending: &mut HashMap<request_response::OutboundRequestId, (Cid, GetResp)>,
 ) {
     match event {
-        SwarmEvent::Behaviour(KotobaBehaviourEvent::Bitswap(bs_event)) => match bs_event {
-            BitswapEvent::Progress(qid, remaining) => {
-                debug!(%qid, remaining, "bitswap progress");
-            }
-            BitswapEvent::Complete(qid, result) => {
-                if let Some((cid, resp)) = pending.remove(&qid) {
-                    let answer = result
-                        .map_err(|e| anyhow!("bitswap error: {e}"))
-                        .and_then(|_| {
-                            store
-                                .get_local(&cid)
-                                .ok_or_else(|| anyhow!("block missing after bitswap complete"))
-                        });
-                    let _ = resp.send(answer);
+        SwarmEvent::Behaviour(IpfsBehaviourEvent::Rr(rr_event)) => {
+            use request_response::Event as RRE;
+            match rr_event {
+                // Inbound: a remote wants a block from us
+                RRE::Message { message: request_response::Message::Request { request, channel, .. }, .. } => {
+                    let BlockRequest::Want { cid: cid_bytes } = request;
+                    let resp = match Cid::try_from(cid_bytes.as_slice()).ok().and_then(|c| store.get_local(&c)) {
+                        Some(data) => BlockResponse::Block { cid: cid_bytes, data },
+                        None       => BlockResponse::NotFound { cid: cid_bytes },
+                    };
+                    let _ = swarm.behaviour_mut().rr.send_response(channel, resp);
                 }
+                // Outbound: we received a response for a block we wanted
+                RRE::Message { message: request_response::Message::Response { request_id, response }, .. } => {
+                    if let Some((cid, sender)) = pending.remove(&request_id) {
+                        let answer = match response {
+                            BlockResponse::Block { data, .. } => {
+                                store.insert(cid, data.clone());
+                                Ok(data)
+                            }
+                            BlockResponse::NotFound { .. } => Err(anyhow!("remote: block not found")),
+                        };
+                        let _ = sender.send(answer);
+                    }
+                }
+                RRE::OutboundFailure { request_id, error, .. } => {
+                    if let Some((_, sender)) = pending.remove(&request_id) {
+                        let _ = sender.send(Err(anyhow!("outbound failure: {error}")));
+                    }
+                }
+                _ => {}
             }
-        },
-        SwarmEvent::Behaviour(KotobaBehaviourEvent::Identify(ev)) => {
-            debug!("identify event: {ev:?}");
+        }
+        SwarmEvent::Behaviour(IpfsBehaviourEvent::Identify(ev)) => {
+            debug!("identify: {ev:?}");
         }
         SwarmEvent::NewListenAddr { address, .. } => {
             tracing::info!(%address, "kotoba-ipfs listening");

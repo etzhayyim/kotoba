@@ -27,7 +27,7 @@ pub enum QuadObject {
     /// The symmetric key is delivered via PRE after CACAO authorisation.
     /// VAET (reverse-ref index) does NOT index this variant — encrypted refs stay private.
     Encrypted {
-        /// CID of the AES-GCM ciphertext block (iroh-public, safe to distribute).
+        /// CID of the AES-GCM ciphertext block (ipfs-public, safe to distribute).
         ct_cid: KotobaCid,
         /// CID of the PRE key-registry entry for this value.
         policy_cid: KotobaCid,

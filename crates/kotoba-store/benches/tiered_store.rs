@@ -5,8 +5,8 @@
 /// | Tier              | GET latency   | PUT latency   | Notes                        |
 /// |-------------------|---------------|---------------|------------------------------|
 /// | hot (memory)      | ~0 µs         | ~0 µs         | this file                    |
-/// | cold (iroh LAN)   | ~0.5–2 ms     | ~1–5 ms       | libp2p QUIC, same datacenter |
-/// | cold (iroh WAN)   | ~30–150 ms    | ~50–200 ms    | P2P, depends on peer prox.   |
+/// | cold (kubo LAN)   | ~0.5–2 ms     | ~1–5 ms       | Kubo HTTP, same datacenter |
+/// | cold (kubo WAN)   | ~30–150 ms    | ~50–200 ms    | Kubo daemon, depends on node prox.   |
 ///
 /// Simulated by a `SimulatedLatencyBlockStore` wrapper using `std::thread::sleep`.
 use std::time::Duration;
@@ -29,10 +29,10 @@ impl SimulatedLatencyBlockStore {
         Self { inner: MemoryBlockStore::new(), get_rtt, put_rtt }
     }
 
-    /// iroh/QUIC LAN: GET ~1 ms, PUT ~2 ms
-    fn iroh_lan() -> Self { Self::new(ms(1), ms(2)) }
-    /// iroh/QUIC WAN: GET ~80 ms, PUT ~100 ms
-    fn iroh_wan() -> Self { Self::new(ms(80), ms(100)) }
+    /// kubo/HTTP LAN: GET ~1 ms, PUT ~2 ms
+    fn kubo_lan() -> Self { Self::new(ms(1), ms(2)) }
+    /// kubo/HTTP WAN: GET ~80 ms, PUT ~100 ms
+    fn kubo_wan() -> Self { Self::new(ms(80), ms(100)) }
 }
 
 fn ms(n: u64) -> Duration { Duration::from_millis(n) }
@@ -88,8 +88,8 @@ fn bench_single_cold_get(c: &mut Criterion) {
     group.sample_size(20);
 
     let scenarios: &[(&str, Duration, Duration)] = &[
-        ("iroh_lan_1ms",   ms(1),  ms(2)),
-        ("iroh_wan_80ms",  ms(80), ms(100)),
+        ("kubo_lan_1ms",   ms(1),  ms(2)),
+        ("kubo_wan_80ms",  ms(80), ms(100)),
     ];
 
     for (name, get_rtt, put_rtt) in scenarios {
@@ -120,11 +120,11 @@ fn bench_cold_vs_hot_amortization(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(12));
     group.sample_size(20);
 
-    // iroh LAN: first access (cold miss + promote) vs repeat (hot hit)
+    // kubo LAN: first access (cold miss + promote) vs repeat (hot hit)
     {
-        group.bench_function("iroh_lan/first_access_50", |b| {
+        group.bench_function("kubo_lan/first_access_50", |b| {
             b.iter(|| {
-                let cold = SimulatedLatencyBlockStore::iroh_lan();
+                let cold = SimulatedLatencyBlockStore::kubo_lan();
                 for i in 0..50 { cold.inner.put(&make_cid(i), &make_block(i)).unwrap(); }
                 let s = TieredBlockStore::new(MemoryBlockStore::new(), cold);
                 for i in 0..50 { let _ = s.get(&make_cid(i)).unwrap(); }
@@ -132,12 +132,12 @@ fn bench_cold_vs_hot_amortization(c: &mut Criterion) {
         });
 
         // Pre-warm hot tier then measure repeat hot-hit cost
-        let cold2 = SimulatedLatencyBlockStore::iroh_lan();
+        let cold2 = SimulatedLatencyBlockStore::kubo_lan();
         for i in 0..50 { cold2.inner.put(&make_cid(i), &make_block(i)).unwrap(); }
         let store2 = TieredBlockStore::new(MemoryBlockStore::new(), cold2);
         for i in 0..50 { let _ = store2.get(&make_cid(i)).unwrap(); }
 
-        group.bench_function("iroh_lan/repeat_access_hot_50", |b| {
+        group.bench_function("kubo_lan/repeat_access_hot_50", |b| {
             b.iter(|| {
                 for i in 0..50 { let _ = store2.get(&make_cid(i)).unwrap(); }
             });

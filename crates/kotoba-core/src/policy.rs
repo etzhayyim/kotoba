@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 /// Access policy attached to any datum in kotoba.
 ///
-/// The CID always refers to the ciphertext block and is iroh-public regardless
+/// The CID always refers to the ciphertext block and is ipfs-public regardless
 /// of policy — the network carries ciphertext freely; only key holders can decrypt.
 ///
 /// `Open`      — plaintext; no key required.
@@ -14,7 +14,7 @@ pub enum DataPolicy {
     #[default]
     Open,
     Encrypted {
-        /// CID of the AES-GCM ciphertext block stored in BlockStore / iroh.
+        /// CID of the AES-GCM ciphertext block stored in BlockStore / kubo.
         ct_cid: KotobaCid,
         /// CID of the PRE key-registry entry: maps (owner_did, accessor_did) → re-key.
         policy_cid: KotobaCid,

@@ -125,13 +125,3 @@ kotoba-store-web = { path = "crates/kotoba-store-web" }
 kotoba-crypto  = { path = "crates/kotoba-crypto" }
 kotoba-signal  = { path = "crates/kotoba-signal" }
 kotoba-ipfs    = { path = "crates/kotoba-ipfs" }
-
-# ── Local patches ──────────────────────────────────────────────────────────────
-# netwatch 0.2.0 and 0.3.0 use socket2::Type::RAW without the "all" feature
-# and rely on From<Socket> for UnixStream which doesn't exist in socket2 0.5.x.
-# These local forks fix both issues for Darwin 25.x (macOS 16) compatibility.
-# [replace] is used instead of [patch] because we need to patch two semver-
-# incompatible versions of the same crate (0.2.x and 0.3.x).
-[replace]
-"netwatch:0.2.0" = { path = "crates/netwatch-fix-02" }
-"netwatch:0.3.0" = { path = "crates/netwatch-fix-03" }

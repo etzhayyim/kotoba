@@ -9,9 +9,9 @@
 /// read path**: ProllyTree node traversal through a `SimulatedLatencyBlockStore`.
 /// This simulates what happens when quads have been committed and the Arrangement
 /// is no longer hot:
-///   - iroh LAN  (1 ms GET)  → one ProllyTree level = 1 ms overhead
-///   - iroh WAN  (80 ms GET) → each node = 80 ms; multi-level = additive
-///   - S3 same-AZ (2 ms GET) → comparable to iroh LAN
+///   - kubo LAN  (1 ms GET)  → one ProllyTree level = 1 ms overhead
+///   - kubo WAN  (80 ms GET) → each node = 80 ms; multi-level = additive
+///   - S3 same-AZ (2 ms GET) → comparable to kubo LAN
 ///
 /// ## Key result interpretation
 ///
@@ -181,8 +181,8 @@ struct SimulatedLatencyBlockStore {
     put_rtt: Duration,
 }
 impl SimulatedLatencyBlockStore {
-    fn iroh_lan()       -> Self { Self { inner: MemoryBlockStore::new(), get_rtt: ms(1),  put_rtt: ms(2)  } }
-    fn iroh_wan()       -> Self { Self { inner: MemoryBlockStore::new(), get_rtt: ms(80), put_rtt: ms(100) } }
+    fn kubo_lan()       -> Self { Self { inner: MemoryBlockStore::new(), get_rtt: ms(1),  put_rtt: ms(2)  } }
+    fn kubo_wan()       -> Self { Self { inner: MemoryBlockStore::new(), get_rtt: ms(80), put_rtt: ms(100) } }
     fn s3_same_az()     -> Self { Self { inner: MemoryBlockStore::new(), get_rtt: ms(2),  put_rtt: ms(10) } }
 }
 fn ms(n: u64) -> Duration { Duration::from_millis(n) }
@@ -215,8 +215,8 @@ fn bench_query_cold_prolly(c: &mut Criterion) {
     let lookup_key = 500u64.to_le_bytes().to_vec();
 
     let scenarios: &[(&str, fn() -> SimulatedLatencyBlockStore)] = &[
-        ("iroh_lan_1ms_get",   SimulatedLatencyBlockStore::iroh_lan),
-        ("iroh_wan_80ms_get",  SimulatedLatencyBlockStore::iroh_wan),
+        ("kubo_lan_1ms_get",   SimulatedLatencyBlockStore::kubo_lan),
+        ("kubo_wan_80ms_get",  SimulatedLatencyBlockStore::kubo_wan),
         ("s3_same_az_2ms_get", SimulatedLatencyBlockStore::s3_same_az),
     ];
 

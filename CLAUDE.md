@@ -25,7 +25,7 @@ KOTOBA ≝ Datom[CID/T] × EAVT[KSE Topic] × Pregel[BSP] × Datalog[Δ]
 | kotoba-runtime | WASM Component Model host: WasmExecutor + UdfExecutor + WIT bindings |
 | kotoba-ingest | Gmail OAuth2 poll + RFC 2822 parse + E2E encrypt → QuadStore (ADR-2605252400); **EmailIngestor** now uses `Arc<dyn AgentCrypto>` + `Arc<Vault>` (raw vault_key removed 2026-05-26) |
 | kotoba-server | XRPC / MCP endpoints |
-| kotoba-store | BlockStore implementations: Memory (hot); IrohBlockStore (iroh-blobs 0.30, sole cold tier); BudgetedBlockStore<S> LRU eviction; TieredBlockStore<H,C> hot/cold tiering; **CapturingBlockStore** (pass-through + recorder for CAR bundling); **CarBundleWriter / CarBlockIndex** (CARv1 format: 72B header + blocks + 48B/entry index, 3.8 GiB/s serialize); **IpfsPinClient** (Kubo-compatible HTTP RPC: pin/add, pin/rm, pin/ls — kotoba 自体が IPFS node として自前 pin; 1GB 超の extended pin は kotobase.gftd.ai が担当). S3BlockStore + LayeredBlockStore + KotobasePinClient removed 2026-05-27. |
+| kotoba-store | BlockStore implementations: Memory (hot); **KuboBlockStore** (Kubo HTTP cold tier, Dual-CID: blake3 internal + SHA2-256 IPFS, 2026-05-27); BudgetedBlockStore<S> LRU eviction; TieredBlockStore<H,C> hot/cold tiering; **CapturingBlockStore** (pass-through + recorder for CAR bundling); **CarBundleWriter / CarBlockIndex** (CARv1 format: 72B header + blocks + 48B/entry index, 3.8 GiB/s serialize); **IpfsPinClient** (Kubo-compatible HTTP RPC: pin/add, pin/rm, pin/ls — kotoba 自体が IPFS node として自前 pin; 1GB 超の extended pin は kotobase.gftd.ai が担当). S3BlockStore + LayeredBlockStore + KotobasePinClient + IrohBlockStore removed 2026-05-27. |
 | kotoba-store-web | Browser IndexedDB block store (wasm32), AsyncBlockStore trait |
 
 ## 実装順序
@@ -168,24 +168,22 @@ bytemuck = { version = "1",  features = ["derive"], optional = true }
 - VAET は `QuadObject::Cid` のみインデックス — Text/Integer/Float 禁止
 - `CommitDag::Commit` に `index_roots: HashMap<String, KotobaCid>` 追加 (`serde(default, skip_serializing_if)` で旧 commit CID 安定)
 - `QuadStore::commit()` は EAVT/AEVT/AVET/VAET を **4 並列 64MB スタックスレッド** で同時ビルド (各スレッドは `CapturingBlockStore` でブロックを記録); 完了後 `CarBundleWriter` で全ブロックを単一 CAR ファイルにパック → ブロックストアに 1 PUT。実測: 3.1–3.8s/1Mquad commit (serial 4.7s → **28% 高速化**; MemoryBlockStore, M4 Mac)
-- `QuadStore::get_entity_quads_cold()`: hot Arrangement clear 後の cold 読み取り。ProllyTree `scan_prefix(subject_bytes)` → EAVT エントリ再構成。実測コスト: iroh LAN (1ms/GET) 3.1ms / iroh WAN (80ms/GET) 169ms / S3 same-AZ (2ms/GET) 5.9ms (1K entries, 2 tree levels)
+- `QuadStore::get_entity_quads_cold()`: hot Arrangement clear 後の cold 読み取り。ProllyTree `scan_prefix(subject_bytes)` → EAVT エントリ再構成。実測コスト: kubo LAN (1ms/GET) 3.1ms / kubo WAN (80ms/GET) 169ms / S3 same-AZ (2ms/GET) 5.9ms (1K entries, 2 tree levels)
 - Journal: 4 トピック SPO + PSO + POS + OSP に publish
 
-## TieredBlockStore / IrohBlockStore
+## TieredBlockStore / KuboBlockStore
 
-- `TieredBlockStore<H, C>`: hot (BudgetedBlockStore<MemoryBlockStore>) + cold (IrohBlockStore) の 2 層
+- `TieredBlockStore<H, C>`: hot (BudgetedBlockStore<MemoryBlockStore>) + cold (KuboBlockStore) の 2 層
   - put: hot に即時書き込み + cold に `tokio::spawn` fire-and-forget
   - get: hot ヒット → 即返却; hot miss → cold fetch + hot promote
   - pin/unpin: hot 層に委譲 (SyncWindow compatible)
-- `IrohBlockStore`: iroh-blobs 0.30 の in-process store (常時コンパイル、feature gate 廃止)
-  - `blake3 CIDv1 hash = cid.0[4..36]` → `iroh_blobs::Hash`
-  - daemon 不要、Kubo 不使用; `open(path)` で FsStore (永続), `new()` で MemStore (テスト)
+- `KuboBlockStore`: Kubo HTTP RPC cold store (Dual-CID, 2026-05-27)
+  - 内部キー = `KotobaCid` (blake3-256 CIDv1); ストレージ境界で SHA2-256 CIDv1 を計算
+  - インデックス: `HashMap<[u8;36], String>` (blake3 → SHA2-256 multibase)
+  - `KOTOBA_IPFS_ENDPOINT` (default `http://localhost:5001`); `KOTOBA_IPFS_TOKEN` optional Bearer
+  - `/api/v0/block/put?cid-codec=raw&mhtype=sha2-256` (multipart), `/api/v0/block/get`, `/api/v0/block/rm`
   - sync BlockStore は `tokio::task::block_in_place` でブリッジ
-- `KotobasePinClient`: kotobase.gftd.ai XRPC pin client
-  - `KOTOBA_PIN_TOKEN` (Bearer JWT) + `KOTOBA_PIN_ENDPOINT` (default `https://kotobase.gftd.ai`)
-  - `pin(cid)` → `POST /xrpc/ai.gftd.apps.kotobase.pin.create` (fire-and-forget)
-  - `status(cid)` → `GET /xrpc/ai.gftd.apps.kotobase.pin.list?cid=...`
-  - `unpin(cid)` → `POST /xrpc/ai.gftd.apps.kotobase.pin.delete`
+  - iroh-blobs / netwatch-fix-02 / netwatch-fix-03 依存を完全撤去
 
 ## criterion ベンチマーク
 
@@ -225,7 +223,7 @@ bytemuck = { version = "1",  features = ["derive"], optional = true }
 | `arrangement/*` | **含まない** | 純インメモリ Arrangement |
 | `quad_store/insert_*` | **含まない** | MemoryBlockStore、Arrangement のみ |
 | `quad_store/query_hot` | **含まない** | hot Arrangement (commit 後も in-memory) |
-| `quad_store/query_cold_prolly_1k` | **含む (模擬)** | ProllyTree 点引き、RTT = iroh LAN 1ms / iroh WAN 80ms / S3 same-AZ 2ms |
+| `quad_store/query_cold_prolly_1k` | **含む (模擬)** | ProllyTree 点引き、RTT = kubo LAN 1ms / kubo WAN 80ms / S3 same-AZ 2ms |
 | `tiered_store/*` | **含む (模擬)** | TieredBlockStore hot/cold 経路 |
 
 **cold-path クエリ (IPFS/S3) の特性**:  
@@ -234,10 +232,10 @@ bytemuck = { version = "1",  features = ["derive"], optional = true }
   (max_key による境界チェックは各レベルで同一キーが毎回 trigger → 無限再帰のため修正)  
 - 実測深さ (1K entries, 2026-05-25): **~3 レベル** → 3 RTTs  
 - 理論深さ: ceil(log256(N)) — 1K → 2-3 RTT、1M → 3-4 RTT、1B → 5-6 RTT  
-- **実測**: iroh LAN 1ms × 3 RTT = **3.3 ms**  
-- **実測**: iroh WAN 80ms × ~2 RTT = **175 ms**  
+- **実測**: kubo LAN 1ms × 3 RTT = **3.3 ms**  
+- **実測**: kubo WAN 80ms × ~2 RTT = **175 ms**  
 - **実測**: S3 same-AZ 2ms × 3 RTT = **6.0 ms**  
-- TieredBlockStore(hot=sled, cold=iroh): hot ヒット時は **µs オーダー**
+- TieredBlockStore(hot=memory, cold=kubo): hot ヒット時は **µs オーダー**
 
 ### 実測値 (2026-05-25, macOS aarch64, release build)
 
@@ -273,8 +271,8 @@ entities × 2 quads = 要素数 (throughput = quad/s)
 
 | シナリオ | p50 | RTT モデル | 実測 depth |
 |---|---|---|---|
-| iroh_lan_1ms_get | **3.3 ms** | iroh LAN 1ms/GET | ~3 RTT |
-| iroh_wan_80ms_get | **175 ms** | iroh WAN 80ms/GET | ~2 RTT |
+| kubo_lan_1ms_get | **3.3 ms** | kubo LAN 1ms/GET | ~3 RTT |
+| kubo_wan_80ms_get | **175 ms** | kubo WAN 80ms/GET | ~2 RTT |
 | s3_same_az_2ms_get | **6.0 ms** | S3 same-AZ 2ms/GET | ~3 RTT |
 
 - `build_internal_level` の境界チェックを max_key → **子 CID** に修正 (max_key は各レベルで同一 key が発火し無限再帰)
@@ -326,12 +324,12 @@ Run: `LOADTEST_MAX=10M LOADTEST_MEM_LIMIT_MB=8192 cargo run --release --example 
 | cold promote 100 blocks (memory→hot) | 73.8 µs | **1.35 M blocks/s** |
 | cold promote 1K blocks | 847 µs | **1.18 M blocks/s** |
 | budgeted eviction under pressure | 583 µs | 256×8KB blocks, 1MB budget |
-| iroh LAN first_access_50 (cold miss) | **65.7 ms** (50 blocks × 1.31ms) | → 1.31ms/block cold |
-| iroh LAN repeat_access_hot_50 | **12.1 µs** (50 blocks) | → 242 ns/block hot |
+| kubo LAN first_access_50 (cold miss) | **65.7 ms** (50 blocks × 1.31ms) | → 1.31ms/block cold |
+| kubo LAN repeat_access_hot_50 | **12.1 µs** (50 blocks) | → 242 ns/block hot |
 | S3 same-AZ first_access_10 (cold miss) | **25.6 ms** (10 blocks × 2.56ms) | → 2.56ms/block cold |
 | S3 same-AZ repeat_access_hot_10 | **2.55 µs** (10 blocks) | → 255 ns/block hot |
 
-hot キャッシュ効果: iroh LAN **5,413×**、S3 same-AZ **10,039×** 高速。
+hot キャッシュ効果: kubo LAN **5,413×**、S3 same-AZ **10,039×** 高速。
 
 #### CAR bundle flush (2026-05-25, macOS aarch64)
 
@@ -353,7 +351,7 @@ hot キャッシュ効果: iroh LAN **5,413×**、S3 same-AZ **10,039×** 高速
 |---|---|---|---|---|
 | S3 400 blocks | 38 µs (bench) | 4.98 ms (bench) | **4s** | **serialize 3ms + upload ~1-2s** |
 | S3 16K blocks | 1.77 ms (bench) | 163 ms (bench) | **163s** | **serialize 16ms + upload ~2-4s** |
-| iroh LAN 16K | 1.92 ms (bench) | 未計測 | **32s** | **serialize 16ms + transfer ~640ms** |
+| kubo LAN 16K | 1.92 ms (bench) | 未計測 | **32s** | **serialize 16ms + transfer ~640ms** |
 
 **Range GET** (cold: block index lookup → 単一 HTTP range GET で 4KB 取得):
 
@@ -361,7 +359,7 @@ hot キャッシュ効果: iroh LAN **5,413×**、S3 same-AZ **10,039×** 高速
 |---|---|
 | index lookup + extract (I/O なし) | **127 ns** |
 | S3 range GET (2ms simulated) | **2.52 ms** |
-| iroh LAN range GET (1ms simulated) | **1.28 ms** |
+| kubo LAN range GET (1ms simulated) | **1.28 ms** |
 
 range GET レイテンシは個別 block GET と同等 (帯域コスト削減が主目的)。  
 **CarBlockIndex 挿入**: 16K entries で **3.7ms** (HashMap 一括挿入)。

@@ -12,16 +12,16 @@ tracing.workspace   = true
 tokio = { workspace = true }
 futures.workspace   = true
 async-trait.workspace = true
+serde = { workspace = true }
+ciborium.workspace  = true
 
-sha2.workspace = true
+sha2.workspace  = true
 multihash = { workspace = true }
 cid = { workspace = true }
 
-libp2p = { version = "0.53", features = [
-    "quic", "tcp", "dns", "noise", "yamux",
-    "identify", "ping", "macros", "request-response",
-] }
-co-libp2p-bitswap = "0.27.0"
+# libp2p 0.53 — aligns with workspace; avoids hickory-resolver conflict with iroh 0.30
+# We implement block exchange over request_response with CBOR + SHA2-256 CIDs.
+libp2p = { workspace = true, features = ["tokio", "tcp", "noise", "yamux", "request-response", "macros", "identify"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

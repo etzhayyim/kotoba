@@ -6,7 +6,7 @@
 ///    (pure CPU: no I/O, no network). Models the serialization overhead of
 ///    `CarBundleWriter::finish()` per commit.
 ///
-/// 2. `car/flush_simulated`      — serialize + simulate a single PUT to S3/B2/iroh,
+/// 2. `car/flush_simulated`      — serialize + simulate a single PUT to S3/B2/kubo,
 ///    vs the same blocks sent as N individual PUTs.
 ///    Uses `std::thread::sleep` to model realistic network latency.
 ///
@@ -19,7 +19,7 @@
 /// Network latency model (same as tiered_store bench):
 ///   S3 same-AZ    : PUT ~10 ms,  GET ~2 ms  (range GET ≈ GET)
 ///   B2 same-AZ    : PUT ~15 ms,  GET ~3 ms
-///   iroh LAN      : PUT ~2 ms,   GET ~1 ms
+///   kubo LAN      : PUT ~2 ms,   GET ~1 ms
 use std::time::Duration;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use kotoba_core::cid::KotobaCid;
@@ -107,7 +107,7 @@ fn bench_flush_comparison(c: &mut Criterion) {
     // and report the extrapolated real-world estimate in comments.
     //
     // Real:  S3 PUT 10ms → bench sleep 10µs
-    //        iroh PUT 2ms → bench sleep 2µs
+    //        kubo PUT 2ms → bench sleep 2µs
     //
     // 400 blocks = representative single ProllyTree (100K quads)
     // 16K blocks = full 1M-quad commit (4 trees × 4K blocks)
@@ -116,8 +116,8 @@ fn bench_flush_comparison(c: &mut Criterion) {
         // (label, n_blocks, put_µs, network)
         ("400blk_s3",   400,  10, "S3 same-AZ 10ms/PUT → 4s serial → 10ms CAR"),
         ("16K blk_s3",  16_000,  10, "S3 same-AZ: 160s serial → 10ms CAR"),
-        ("400blk_iroh",  400,   2, "iroh LAN 2ms/PUT → 0.8s serial → 2ms CAR"),
-        ("16K blk_iroh", 16_000,   2, "iroh LAN: 32s serial → 2ms CAR"),
+        ("400blk_kubo",  400,   2, "kubo LAN 2ms/PUT → 0.8s serial → 2ms CAR"),
+        ("16K blk_kubo", 16_000,   2, "kubo LAN: 32s serial → 2ms CAR"),
     ];
 
     let mut group = c.benchmark_group("car/flush_simulated");
@@ -193,8 +193,8 @@ fn bench_range_get(c: &mut Criterion) {
         });
     });
 
-    // Simulated iroh LAN range GET (1ms)
-    group.bench_function("simulated_iroh_lan_1ms/range_get", |b| {
+    // Simulated kubo LAN range GET (1ms)
+    group.bench_function("simulated_kubo_lan_1ms/range_get", |b| {
         b.iter(|| {
             let (_, off, len) = index.get(&target_cid).unwrap();
             std::thread::sleep(Duration::from_millis(1));
