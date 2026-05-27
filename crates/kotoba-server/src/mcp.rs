@@ -36,6 +36,8 @@ pub const MCP_TOOL_NODE_REGISTER:   &str = "kotoba_node_register";
 pub const MCP_TOOL_NETWORK_PEERS:   &str = "kotoba_network_peers";
 pub const MCP_TOOL_GRAPH_GC:        &str = "kotoba_graph_gc";
 pub const MCP_TOOL_COMMIT_PRUNE:    &str = "kotoba_commit_prune";
+pub const MCP_TOOL_SPARQL_QUERY:    &str = "kotoba_sparql_query";
+pub const MCP_TOOL_MULTI_HOP:       &str = "kotoba_multi_hop";
 
 use std::sync::Arc;
 use axum::{
@@ -289,6 +291,33 @@ fn tools_list() -> Value {
                         }
                     },
                     "required": ["before_seq"]
+                }
+            },
+            {
+                "name": MCP_TOOL_SPARQL_QUERY,
+                "description": "Execute a SPARQL SELECT BGP query over the committed IPFS-backed ProllyTree indexes. Routes to the optimal cold-path index: EAVT (bound subject cid:…), AVET (predicate+literal), AEVT (predicate only), VAET (bound object cid:…), or a 2-triple AVET×AVET join. Predicates may be relative IRIs (e.g. <role>) or absolute IRIs. Optionally CACAO-gated with a base64-encoded CACAO chain.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "graph":      { "type": "string", "description": "Named graph CID (multibase) to query" },
+                        "sparql":     { "type": "string", "description": "SPARQL SELECT query (WHERE clause with 1 or 2 triple patterns)" },
+                        "cacao_b64":  { "type": "string", "description": "(optional) Base64-encoded CACAO delegation chain for quad:read authorisation" }
+                    },
+                    "required": ["graph", "sparql"]
+                }
+            },
+            {
+                "name": MCP_TOOL_MULTI_HOP,
+                "description": "BFS multi-hop traversal from a start entity following QuadObject::Cid references across the committed IPFS-backed ProllyTree (EAVT cold path per hop). Returns (depth, quad) pairs in BFS order. Optionally CACAO-gated.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "graph":     { "type": "string",  "description": "Named graph CID (multibase)" },
+                        "start":     { "type": "string",  "description": "Start entity CID (multibase) or identifier string (auto-hashed)" },
+                        "max_hops":  { "type": "integer", "description": "Maximum BFS depth (default 2, max 8)" },
+                        "cacao_b64": { "type": "string",  "description": "(optional) Base64-encoded CACAO delegation chain for quad:read authorisation" }
+                    },
+                    "required": ["graph", "start"]
                 }
             }
         ]
@@ -1059,8 +1088,100 @@ async fn call_tool(
             Ok(json!({ "status": "ok", "pruned_commits": pruned, "dag_size": dag_size }))
         }
 
+        // ── kotoba_sparql_query ──────────────────────────────────────────────
+        MCP_TOOL_SPARQL_QUERY => {
+            use kotoba_core::cid::KotobaCid;
+            use kotoba_auth::{Cacao, DelegationChain};
+
+            let graph_str = get_str("graph")?;
+            let sparql    = get_str("sparql")?;
+            if sparql.len() > 8 * 1024 {
+                return Err((ERR_INVALID_PARAMS, "sparql query too large (limit 8KiB)".into()));
+            }
+            let graph_cid = KotobaCid::from_bytes(graph_str.as_bytes());
+
+            let quads = if let Some(b64) = args.get("cacao_b64").and_then(Value::as_str) {
+                if b64.len() > 8 * 1024 {
+                    return Err((ERR_INVALID_PARAMS, "cacao_b64 too large".into()));
+                }
+                let cbor = decode_cacao_b64(b64)?;
+                let cacao = Cacao::from_cbor(&cbor)
+                    .map_err(|e| (ERR_INVALID_PARAMS, format!("CACAO parse error: {e}")))?;
+                let chain = DelegationChain::new(cacao);
+                state.quad_store
+                    .cold_query_sparql_bgp_authed(&graph_cid, &sparql, &chain)
+                    .await
+                    .map_err(|e| (ERR_AUTH, e.to_string()))?
+            } else {
+                state.quad_store
+                    .cold_query_sparql_bgp(&graph_cid, &sparql)
+                    .await
+                    .map_err(|e| (ERR_INTERNAL, e.to_string()))?
+            };
+
+            let result: Vec<Value> = quads.iter().map(|q| json!({
+                "graph":     q.graph.to_multibase(),
+                "subject":   q.subject.to_multibase(),
+                "predicate": q.predicate,
+                "object":    format!("{:?}", q.object),
+            })).collect();
+
+            Ok(json!({ "count": result.len(), "quads": result }))
+        }
+
+        // ── kotoba_multi_hop ─────────────────────────────────────────────────
+        MCP_TOOL_MULTI_HOP => {
+            use kotoba_core::cid::KotobaCid;
+            use kotoba_auth::{Cacao, DelegationChain};
+
+            let graph_str = get_str("graph")?;
+            let start_str = get_str("start")?;
+            let max_hops  = args.get("max_hops")
+                .and_then(Value::as_u64)
+                .unwrap_or(2)
+                .min(8) as usize;
+
+            let graph_cid = KotobaCid::from_bytes(graph_str.as_bytes());
+            let start_cid = KotobaCid::from_multibase(&start_str)
+                .unwrap_or_else(|| KotobaCid::from_bytes(start_str.as_bytes()));
+
+            let hops = if let Some(b64) = args.get("cacao_b64").and_then(Value::as_str) {
+                if b64.len() > 8 * 1024 {
+                    return Err((ERR_INVALID_PARAMS, "cacao_b64 too large".into()));
+                }
+                let cbor = decode_cacao_b64(b64)?;
+                let cacao = Cacao::from_cbor(&cbor)
+                    .map_err(|e| (ERR_INVALID_PARAMS, format!("CACAO parse error: {e}")))?;
+                let chain = DelegationChain::new(cacao);
+                state.quad_store
+                    .multi_hop_cold_authed(&graph_cid, &start_cid, max_hops, &chain)
+                    .await
+                    .map_err(|e| (ERR_AUTH, e.to_string()))?
+            } else {
+                state.quad_store
+                    .multi_hop_cold(&graph_cid, &start_cid, max_hops)
+                    .await
+                    .map_err(|e| (ERR_INTERNAL, e.to_string()))?
+            };
+
+            let result: Vec<Value> = hops.iter().map(|(depth, q)| json!({
+                "depth":     depth,
+                "graph":     q.graph.to_multibase(),
+                "subject":   q.subject.to_multibase(),
+                "predicate": q.predicate,
+                "object":    format!("{:?}", q.object),
+            })).collect();
+
+            Ok(json!({ "count": result.len(), "hops": result }))
+        }
+
         other => Err((ERR_NOT_FOUND, format!("unknown tool: {other}"))),
     }
+}
+
+fn decode_cacao_b64(b64: &str) -> Result<Vec<u8>, (i32, String)> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+    B64.decode(b64).map_err(|e| (ERR_INVALID_PARAMS, format!("cacao_b64 decode error: {e}")))
 }
 
 fn blake3_pseudo_vector(text: &str, dims: usize) -> Vec<f32> {
@@ -1169,7 +1290,7 @@ mod tests {
     fn tools_list_contains_all() {
         let list = tools_list();
         let tools = list["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 15);
+        assert_eq!(tools.len(), 17);
         let names: Vec<&str> = tools.iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
@@ -1186,6 +1307,8 @@ mod tests {
         assert!(names.contains(&MCP_TOOL_NETWORK_PEERS));
         assert!(names.contains(&MCP_TOOL_GRAPH_GC));
         assert!(names.contains(&MCP_TOOL_COMMIT_PRUNE));
+        assert!(names.contains(&MCP_TOOL_SPARQL_QUERY));
+        assert!(names.contains(&MCP_TOOL_MULTI_HOP));
     }
 
     #[test]
@@ -1766,5 +1889,124 @@ mod tests {
         // u32::MAX is accepted by try_from; u32::MAX + 1 is not
         assert!(u32::try_from(u32::MAX as u64).is_ok());
         assert!(u32::try_from(u32::MAX as u64 + 1).is_err());
+    }
+
+    // ── kotoba_sparql_query ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn call_tool_sparql_query_missing_graph_errors() {
+        let state = Arc::new(crate::server::KotobaState::new(None).expect("state"));
+        let result = call_tool(MCP_TOOL_SPARQL_QUERY, &json!({
+            "sparql": "SELECT ?s WHERE { ?s <role> \"admin\" }"
+        }), &state, None).await;
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, ERR_INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn call_tool_sparql_query_missing_sparql_errors() {
+        let state = Arc::new(crate::server::KotobaState::new(None).expect("state"));
+        let result = call_tool(MCP_TOOL_SPARQL_QUERY, &json!({
+            "graph": "bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }), &state, None).await;
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, ERR_INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn call_tool_sparql_query_oversized_sparql_errors() {
+        let state = Arc::new(crate::server::KotobaState::new(None).expect("state"));
+        let big = "x".repeat(8 * 1024 + 1);
+        let result = call_tool(MCP_TOOL_SPARQL_QUERY, &json!({
+            "graph":  "graph1",
+            "sparql": big
+        }), &state, None).await;
+        let (code, msg) = result.unwrap_err();
+        assert_eq!(code, ERR_INVALID_PARAMS);
+        assert!(msg.contains("sparql"), "expected 'sparql' in: {msg}");
+    }
+
+    #[tokio::test]
+    async fn call_tool_sparql_query_empty_graph_returns_empty() {
+        let state = Arc::new(crate::server::KotobaState::new(None).expect("state"));
+        let result = call_tool(MCP_TOOL_SPARQL_QUERY, &json!({
+            "graph":  "empty-graph-cid",
+            "sparql": "SELECT ?s WHERE { ?s <role> \"admin\" }"
+        }), &state, None).await;
+        assert!(result.is_ok(), "{result:?}");
+        let v = result.unwrap();
+        assert_eq!(v["count"], 0);
+        assert!(v["quads"].is_array());
+    }
+
+    #[tokio::test]
+    async fn call_tool_sparql_query_invalid_cacao_b64_errors() {
+        let state = Arc::new(crate::server::KotobaState::new(None).expect("state"));
+        let result = call_tool(MCP_TOOL_SPARQL_QUERY, &json!({
+            "graph":     "graph1",
+            "sparql":    "SELECT ?s WHERE { ?s <role> \"admin\" }",
+            "cacao_b64": "not-valid-base64!!!"
+        }), &state, None).await;
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, ERR_INVALID_PARAMS);
+    }
+
+    // ── kotoba_multi_hop ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn call_tool_multi_hop_missing_graph_errors() {
+        let state = Arc::new(crate::server::KotobaState::new(None).expect("state"));
+        let result = call_tool(MCP_TOOL_MULTI_HOP, &json!({
+            "start": "start-cid"
+        }), &state, None).await;
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, ERR_INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn call_tool_multi_hop_missing_start_errors() {
+        let state = Arc::new(crate::server::KotobaState::new(None).expect("state"));
+        let result = call_tool(MCP_TOOL_MULTI_HOP, &json!({
+            "graph": "graph1"
+        }), &state, None).await;
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, ERR_INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn call_tool_multi_hop_empty_graph_returns_empty() {
+        let state = Arc::new(crate::server::KotobaState::new(None).expect("state"));
+        let result = call_tool(MCP_TOOL_MULTI_HOP, &json!({
+            "graph": "empty-graph-cid",
+            "start": "start-cid"
+        }), &state, None).await;
+        assert!(result.is_ok(), "{result:?}");
+        let v = result.unwrap();
+        assert_eq!(v["count"], 0);
+        assert!(v["hops"].is_array());
+    }
+
+    #[tokio::test]
+    async fn call_tool_multi_hop_max_hops_clamped_to_8() {
+        let state = Arc::new(crate::server::KotobaState::new(None).expect("state"));
+        // max_hops=100 should be silently clamped to 8 (no error)
+        let result = call_tool(MCP_TOOL_MULTI_HOP, &json!({
+            "graph":    "empty-graph-cid",
+            "start":    "start-cid",
+            "max_hops": 100
+        }), &state, None).await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn call_tool_multi_hop_invalid_cacao_b64_errors() {
+        let state = Arc::new(crate::server::KotobaState::new(None).expect("state"));
+        let result = call_tool(MCP_TOOL_MULTI_HOP, &json!({
+            "graph":     "graph1",
+            "start":     "start-cid",
+            "cacao_b64": "!!not-base64!!"
+        }), &state, None).await;
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, ERR_INVALID_PARAMS);
     }
 }
