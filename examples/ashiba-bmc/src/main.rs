@@ -3,7 +3,7 @@
 //! This example encodes the ashiba Lean BMC as kotoba Quads, then runs
 //! a DatalogProgram to compute coverage % and per-block maturity scores.
 //!
-//! Data source: `60-apps/ai-gftd-project-jp-ashiba/docs/bmc/ashiba-lean-bmc-v20.toml`
+//! Data source: `60-apps/ai-gftd-project-jp-ashiba/docs/bmc/ashiba-lean-bmc-v30.toml`
 //! Rules source: `60-apps/ai-gftd-project-jp-ashiba/docs/bmc/coverage.dl`
 
 use anyhow::Result;
@@ -22,10 +22,10 @@ use std::sync::Arc;
 
 const BMC_BLOCKS: &[(&str, i64)] = &[
     ("problem",           5),
-    ("customer_segments", 4),
-    ("uvp",               5),
-    ("solution",          4),
-    ("channels",          4),
+    ("customer_segments", 5),
+    ("uvp",               4),
+    ("solution",          5),
+    ("channels",          5),
     ("revenue",           4),
     ("cost_structure",    5),
     ("key_metrics",       4),
@@ -38,58 +38,78 @@ const BMC_BLOCKS: &[(&str, i64)] = &[
 
 const HYPOTHESES: &[(&str, &str, &str, bool)] = &[
     // problem (5/5)
-    ("p_domestic",            "problem",           "国内ペイン普遍的 stable ✓", true),
-    ("p_apac",                "problem",           "APAC (韓国+台湾+タイ) 同一ペイン構造 stable ✓", true),
-    ("p_india_survey_started","problem",           "インド 8社 ヒアリング 2028-Q2 開始 — ペイン構造確認", false),
-    // customer_segments (4/5)
-    ("cs_korea_stable",       "customer_segments", "韓国 101社 active stable ✓", true),
-    ("cs_enterprise5",        "customer_segments", "国内 Enterprise 5社 stable ✓", true),
-    ("cs_taiwan_31",          "customer_segments", "台湾 31社 active stable ✓ (iter-19 確認)", true),
-    ("cs_thailand_10",        "customer_segments", "タイ 10社 (5社 pilot → +5社 拡大) 2028-Q2 — Thana Construction 紹介経由", false),
-    ("cs_india_survey_5",     "customer_segments", "インド 5社 ヒアリング完了 — ペイン確認後 2029-Q1 パイロット設計", false),
-    // uvp (5/5)
-    ("uvp_v3_multilingual",   "uvp",               "v3 AI 多言語 (日韓繁中) 88%+ stable ✓", true),
-    ("uvp_jis_mandatory",     "uvp",               "JIS A 8951:2026 義務化 仕様権保有 stable ✓", true),
-    ("uvp_v4_audit",          "uvp",               "v4 AI 動画施工 audit GA ✓ (精度 87%、SLA 99.9%)", true),
-    ("uvp_insurance_exclusive","uvp",              "東京海上日動 exclusive PoC ✓ — AI 安全スコア × 保険料割引 (1年独占)", true),
-    ("uvp_v4_upsell_value",   "uvp",               "v4 upsell 価値実証 — 100社中 30社が動画 audit オプション採択 (2028-Q2)", false),
-    // solution (4/5)
-    ("sol_v3_global",         "solution",          "v3 AI 多言語 本番 stable ✓ (日韓繁中)", true),
-    ("sol_v4_ga",             "solution",          "v4 AI GA 本番 stable ✓ (2028-Q1-15 deploy、SLA 99.9%)", true),
-    ("sol_v4_upsell_30",      "solution",          "v4 upsell 30社採択 × ¥50K = ¥1.5M/月 追加 (2028-Q2 初月)", false),
-    ("sol_thailand_api_beta", "solution",          "タイ版 API beta リリース (タイ語 UI / THB 決済 / タイ建設法令対応) 2028-Q2", false),
-    // channels (4/5)
-    ("ch_korea_stable",       "channels",          "韓国 チャネル stable ✓ (101社 active、月 +8社 pace)", true),
-    ("ch_seo_stable",         "channels",          "SEO organic 3,520/月 stable ✓ (月 40本 コンテンツ継続)", true),
-    ("ch_taiwan_stable",      "channels",          "台湾 BizDev stable ✓ (31社 active)", true),
-    ("ch_thailand_expand",    "channels",          "タイ Thana Construction 紹介チャネル — 10社拡大 2028-Q2", false),
-    ("ch_india_jetro",        "channels",          "インド JETRO + 建設協会 India office 経由 BizDev パートナー 1社確保 (2028-Q2)", false),
+    ("p_domestic",               "problem",           "国内ペイン普遍的 stable ✓", true),
+    ("p_apac",                   "problem",           "APAC (韓国+台湾+タイ) 同一ペイン構造 stable ✓", true),
+    ("p_india_full_8",           "problem",           "インド 8社全員ヒアリング完了 ✓ + 定量スコア 4.4/5.0", true),
+    ("p_india_pilot_poc",        "problem",           "インド pilot 2社 現場 PoC 完了 ✓ — ペイン深度 4.5/5.0 + IS 2750 適合性 確認", true),
+    ("p_india_scale_pain",       "problem",           "インド 10社 ヒアリング拡張 ✓ — CII 認定 8社 ペイン定量スコア 4.3/5.0 (2029-Q2-10)", true),
+    // customer_segments (5/5)
+    ("cs_korea_stable",          "customer_segments", "韓国 101社 active stable ✓", true),
+    ("cs_enterprise5",           "customer_segments", "国内 Enterprise 5社 stable ✓", true),
+    ("cs_taiwan_37",             "customer_segments", "台湾 37社 active ✓", true),
+    ("cs_thailand_20",           "customer_segments", "タイ 20社 ✓ (+1社 Q2 新規 API 申請)", true),
+    ("cs_india_pilot_ga",        "customer_segments", "インド pilot 2社 正式課金 stable ✓", true),
+    ("cs_india_10",              "customer_segments", "インド 10社 onboard ✓ — CII 紹介 8社 + BizDev 追加 2社 (2029-Q2-15)", true),
+    ("cs_india_20",              "customer_segments", "インド 20社 active (2029-Q2 末) — CII 追加紹介 10社 + 自己申請 API 利用", false),
+    // uvp (4/5)
+    ("uvp_v3_multilingual",      "uvp",               "v3 AI 多言語 (日韓繁中) 88%+ stable ✓", true),
+    ("uvp_jis_mandatory",        "uvp",               "JIS A 8951:2026 義務化 仕様権保有 stable ✓", true),
+    ("uvp_v4_audit",             "uvp",               "v4 AI 動画施工 audit GA stable ✓ (精度 87%)", true),
+    ("uvp_insurance_2co",        "uvp",               "東京海上日動 + 損保ジャパン exclusive Moat stable ✓", true),
+    ("uvp_v4_upsell_70",         "uvp",               "v4 upsell 70社 stable ✓ × ¥50K = ¥3.5M/月", true),
+    ("uvp_india_is2750",         "uvp",               "インド版 UVP stable ✓ — IS 2750 + ヒンディー語 UI", true),
+    ("uvp_india_insurance",      "uvp",               "インド損保連携 UVP stable ✓ (LIC/NIA PoC 稼働中)", true),
+    ("uvp_india_insurance_pricing","uvp",             "インド損保本格連携 — 保険スコア連動 dynamic pricing + 10社 適用 (2029-Q2 末)", false),
+    // solution (5/5)
+    ("sol_v3_global",            "solution",          "v3 AI 多言語 本番 stable ✓", true),
+    ("sol_v4_ga",                "solution",          "v4 AI GA 本番 stable ✓ (SLA 99.9%)", true),
+    ("sol_v4_upsell_70",         "solution",          "v4 upsell 70社 stable ✓ × ¥50K = ¥3.5M/月", true),
+    ("sol_thailand_api",         "solution",          "タイ版 API stable ✓ (20社 active)", true),
+    ("sol_india_pilot_ga",       "solution",          "インド版 pilot GA stable ✓ (SLA 99.5%+ / 正式課金中)", true),
+    ("sol_india_scale_infra",    "solution",          "インド 20社向け multi-tenant スケールインフラ ✓ — IS 2750 対応 SLA 99.5%+ / auto onboard (2029-Q2-15)", true),
+    ("sol_india_scale_30",       "solution",          "インド 30社向け自動 onboarding パイプライン全自動化 (2029-Q2 末) — CII API 連携完全自動", false),
+    // channels (5/5)
+    ("ch_korea_stable",          "channels",          "韓国 チャネル stable ✓", true),
+    ("ch_seo_5000",              "channels",          "SEO organic 5,000/月 ✓", true),
+    ("ch_taiwan_stable",         "channels",          "台湾 BizDev stable ✓ (37社 active)", true),
+    ("ch_thailand_api_eff",      "channels",          "タイ API 自己申請チャネル stable ✓ (20社 active)", true),
+    ("ch_india_3co",             "channels",          "インド BizDev 3社体制 stable ✓", true),
+    ("ch_india_gov_channel",     "channels",          "インド 建設省 / CII 経由 認定チャネル stable ✓", true),
+    ("ch_india_gov_10plus",      "channels",          "インド 建設省/CII チャネル 10社+ 紹介パイプライン稼働 ✓ (2029-Q2-20)", true),
+    ("ch_india_self_apply",      "channels",          "インド IS 2750 認定企業 自己申請 API チャネル (2029-Q2 末) — 月10社+ 申請", false),
     // revenue (4/5)
-    ("r_gmv_128m",            "revenue",           "GMV ¥128M/月 stable ✓ (iter-19 確認)", true),
-    ("r_ebitda_158",          "revenue",           "EBITDA 15.8% stable ✓ (iter-19 確認)", true),
-    ("r_v4_upsell_15m",       "revenue",           "v4 upsell 30社 × ¥50K = ¥1.5M/月 追加 (2028-Q2 初月)", false),
-    ("r_gmv_135m",            "revenue",           "GMV ¥135M/月 (2028-Q2) — v4 upsell + タイ 10社 + 台湾 35社 寄与", false),
+    ("r_gmv_160m",               "revenue",           "GMV ¥160M/月 stable ✓", true),
+    ("r_ebitda_172",             "revenue",           "EBITDA 17.5% ✓ (インド 10社 高 margin 寄与)", true),
+    ("r_v4_upsell_350m",         "revenue",           "v4 upsell 70社 × ¥50K = ¥3.5M/月 stable ✓", true),
+    ("r_india_rev_15m",          "revenue",           "インド 正式課金 ¥1.5M/月 stable ✓ (pilot 2社)", true),
+    ("r_gmv_175m",               "revenue",           "GMV ¥175M/月 ✓ — インド 10社 + タイ 20社 + v4 75社 寄与 (2029-Q2-20)", true),
+    ("r_india_10_rev",           "revenue",           "インド 10社 課金 ¥5M/月 ✓ (¥500K/社 × 10社、2029-Q2-20)", true),
+    ("r_gmv_200m",               "revenue",           "GMV ¥200M/月 (2029-Q2 末) — インド 20社 + CII 自己申請チャネル 本格化", false),
     // cost_structure (5/5)
-    ("cs_ebitda_model",       "cost_structure",    "OPEX ¥6.18M stable ✓ — margin 15% 維持しながら v4 upsell 投資", true),
-    ("cs_sea_agent",          "cost_structure",    "台湾 + タイ 代理店モデル stable ✓ (¥330K/月合計)", true),
-    ("cs_team_43",            "cost_structure",    "43名体制 stable ✓ — v4 AI 3名 + SEA BizDev 2名", true),
-    ("cs_india_budget",       "cost_structure",    "インド調査予算 ¥300K (JETRO 委託) 2028-Q2 実施 ✓", true),
-    ("cs_v4_upsell_infra",    "cost_structure",    "v4 upsell 追加インフラコスト ¥200K/月以内 ✓ (GPU 最適化 stable)", true),
+    ("cs_ebitda_model",          "cost_structure",    "OPEX ¥7.8M/月 ✓ (margin 17.5%+ 維持、インド 10社スケール + v4 75社 込み)", true),
+    ("cs_all_agents",            "cost_structure",    "台湾 + タイ + インド 3社 代理店モデル stable ✓ (¥600K/月合計)", true),
+    ("cs_team_55",               "cost_structure",    "55名体制 ✓ (インド拡大 BizDev/CS 5名追加済)", true),
+    ("cs_india_scale_ops",       "cost_structure",    "インド 10社 スケール運用コスト ¥480K/月 ✓ (予算 ¥600K 以内)", true),
+    ("cs_v4_scale_infra",        "cost_structure",    "v4 upsell 75社向け追加インフラコスト ¥340K/月 ✓", true),
     // key_metrics (4/5)
-    ("km_nrr_137",            "key_metrics",       "NRR 137% stable ✓ (iter-19 確認)", true),
-    ("km_d365_348",           "key_metrics",       "D365 34.8% stable ✓ (iter-19 確認)", true),
-    ("km_ebitda_158",         "key_metrics",       "EBITDA 15.8% stable ✓ (iter-19 確認)", true),
-    ("km_intl_156",           "key_metrics",       "海外 GMV 比率 15.6% stable ✓ (iter-19 確認)", true),
-    ("km_nrr_140",            "key_metrics",       "NRR 140% (2028-Q2) — v4 upsell 30社採択 + タイ 10社 寄与", false),
-    ("km_intl_20pct",         "key_metrics",       "海外 GMV 比率 20%+ (2028-Q2) — タイ 10社 + インド初売上 + 台湾 35社", false),
+    ("km_nrr_150",               "key_metrics",       "NRR 150% stable ✓", true),
+    ("km_d365_370",              "key_metrics",       "D365 37.0% ✓ (インド 10社 + タイ 20社 継続率向上)", true),
+    ("km_ebitda_175",            "key_metrics",       "EBITDA 17.5% ✓ (インド 10社 高 margin + v4 75社 寄与)", true),
+    ("km_intl_27pct",            "key_metrics",       "海外 GMV 比率 27% ✓ — インド 10社 + タイ 20社 + 台湾 37社 (2029-Q2-20)", true),
+    ("km_nrr_155",               "key_metrics",       "NRR 155% (2029-Q2 末) — インド 20社 本格課金 + v4 75社 継続率 99.5%+", false),
+    ("km_intl_30pct",            "key_metrics",       "海外 GMV 比率 30% (2029-Q2 末) — インド 20社 + タイ 20社 + 台湾 38社", false),
     // unfair_advantage (4/5)
-    ("ua_jis_mandatory",      "unfair_advantage",  "JIS 義務化 仕様権保有 stable ✓", true),
-    ("ua_did_6800",           "unfair_advantage",  "DID 6,800件+ stable ✓ (相関 0.87)", true),
-    ("ua_v3_patent",          "unfair_advantage",  "v3 AI 特許 stable ✓ (日本+韓国+PCT 出願完了)", true),
-    ("ua_v4_patent",          "unfair_advantage",  "v4 AI 動画施工 audit 特許 stable ✓ (日本+韓国+PCT 出願完了)", true),
-    ("ua_insurance_moat",     "unfair_advantage",  "東京海上日動 独占 Moat stable ✓ — AI 安全スコア × 保険料割引 exclusive 1年", true),
-    ("ua_insurance_renewal",  "unfair_advantage",  "東京海上 renewal + 損保ジャパン PoC 追加 (2028-Q3) — 損保 Moat 拡張", false),
-    ("ua_india_network",      "unfair_advantage",  "インド 建設業者ネットワーク MOU — JETRO 経由 1社 (2028-Q2)", false),
+    ("ua_jis_mandatory",         "unfair_advantage",  "JIS 義務化 仕様権保有 stable ✓", true),
+    ("ua_did_10000",             "unfair_advantage",  "DID 1万件+ stable ✓", true),
+    ("ua_did_12000",             "unfair_advantage",  "DID 1.2万件+ ✓ — インド 10社 本番登録 + タイ 20社 + 台湾 37社 (2029-Q2-20、相関 0.92)", true),
+    ("ua_v3_patent",             "unfair_advantage",  "v3 AI 特許 stable ✓ (日本+韓国+PCT)", true),
+    ("ua_v4_patent",             "unfair_advantage",  "v4 AI 動画施工 audit 特許 stable ✓ (日本+韓国+PCT)", true),
+    ("ua_insurance_moat_2",      "unfair_advantage",  "東京海上日動 + 損保ジャパン exclusive Moat stable ✓", true),
+    ("ua_india_moat_3co",        "unfair_advantage",  "インド Moat 3社独占 stable ✓ + CII 認定 10社パイプライン独占チャネル", true),
+    ("ua_india_is2750",          "unfair_advantage",  "インド IS 2750 仕様権申請 stable ✓", true),
+    ("ua_india_insurance_poc",   "unfair_advantage",  "インド損保 PoC stable ✓ (LIC / New India Assurance 稼働中)", true),
+    ("ua_india_insurance_scale", "unfair_advantage",  "インド損保 本格連携 — 保険スコア連動 pricing + 10社 適用 (2029-Q2 末)", false),
+    ("ua_did_15000",             "unfair_advantage",  "DID 1.5万件+ (2029-Q2 末) — インド 20社 本番登録 + タイ 20社 + 台湾 38社 (相関 0.93)", false),
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -98,7 +118,7 @@ const HYPOTHESES: &[(&str, &str, &str, bool)] = &[
 
 fn cid(s: &str) -> KotobaCid { KotobaCid::from_bytes(s.as_bytes()) }
 
-fn graph_cid() -> KotobaCid { cid("bmc:ashiba:v20") }
+fn graph_cid() -> KotobaCid { cid("bmc:ashiba:v30") }
 
 fn quad(subject: &str, predicate: &str, object: QuadObject) -> Quad {
     Quad { graph: graph_cid(), subject: cid(subject), predicate: predicate.to_string(), object }
@@ -112,7 +132,7 @@ fn build_bmc_facts() -> Vec<Delta> {
     let mut deltas = Vec::new();
 
     deltas.push(Delta::assert(quad(
-        "bmc:ashiba", "bmc/version", QuadObject::Text("v20".into()),
+        "bmc:ashiba", "bmc/version", QuadObject::Text("v30".into()),
     )));
     deltas.push(Delta::assert(quad(
         "bmc:ashiba", "bmc/product", QuadObject::Text("ashiba.gftd.ai".into()),
@@ -213,16 +233,11 @@ fn print_score_report(derived_covered: usize, derived_at_risk: usize) {
     let maturity_sum: i64 = BMC_BLOCKS.iter().map(|(_, m)| m).sum();
     let maturity_avg = maturity_sum as f64 / total as f64;
 
-    let mut below_target: Vec<&str> = Vec::new();
-    for (block, maturity) in BMC_BLOCKS {
-        if *maturity < 3 { below_target.push(block); }
-    }
-
     println!("╔══════════════════════════════════════════════════════════╗");
     println!("║     ashiba.gftd.ai Lean BMC — kotoba Scoring Report      ║");
     println!("╠══════════════════════════════════════════════════════════╣");
-    println!("║  Iteration : 20 (2026-05-27) [Deep Global 2028-Q2 月1]  ║");
-    println!("║  Model     : Lean Canvas Hybrid (9 blocks)               ║");
+    println!("║  Iteration : 30 (2026-05-28) [India Scale 2029-Q2 Phase Month 2]║");
+    println!("║  Model     : Lean Canvas Hybrid (9 blocks)                ║");
     println!("╠══════════════════════════════════════════════════════════╣");
     println!("║  Coverage  : {derived_covered}/{total} blocks = {coverage_pct}%                       ║");
     println!("║  Maturity  : {maturity_avg:.1} / 5.0 (avg)                          ║");
@@ -238,16 +253,15 @@ fn print_score_report(derived_covered: usize, derived_at_risk: usize) {
     println!("╠══════════════════════════════════════════════════════════╣");
     println!("║  Blocks below target (< 3): (none)                       ║");
     println!("╠══════════════════════════════════════════════════════════╣");
-    println!("║  Priority (2028-Q2 critical)                             ║");
-    println!("║    1. タイ 10社拡大 (Thana Construction 紹介経由)         ║");
-    println!("║    2. v4 upsell 30社採択 → ¥1.5M/月 追加                 ║");
-    println!("║    3. GMV ¥135M / NRR 140% 達成                          ║");
+    println!("║  Priority (2029-Q2 末 → iter-31)                         ║");
+    println!("║    1. インド 20社 + 損保 dynamic pricing → uvp/ua 5/5  ║");
+    println!("║    2. GMV ¥200M + NRR 155% + 海外 30% → rev/km 5/5    ║");
+    println!("║    3. DID 1.5万件+ → ua 5/5                             ║");
     println!("╠══════════════════════════════════════════════════════════╣");
-    println!("║  GMV ¥128M ✓ / EBITDA 15.8% ✓ / NRR 137% / DID 6,800+ ║");
-    println!("║  次: ¥135M + タイ 10社 + v4 upsell + インド調査          ║");
+    println!("║  GMV ¥175M ✓ / NRR 150% ✓ / 海外 27% ✓ / DID 1.2万 ✓ ║");
+    println!("║  (prior: ★★★★★ 2029-Q1 末 VALIDATED)                   ║");
     println!("╠══════════════════════════════════════════════════════════╣");
-    println!("║  Deep Global 2028-Q2 Phase Month 1                       ║");
-    println!("║  (prior: iter-19 ★★★ 2028-Q1 VALIDATED 5.0/5.0)        ║");
+    println!("║  India Scale 2029-Q2 Phase Month 2                       ║");
     println!("╚══════════════════════════════════════════════════════════╝");
 }
 

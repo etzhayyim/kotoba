@@ -92,6 +92,7 @@ fn rss_mb() -> f64 {
 // ─── Quad generators ─────────────────────────────────────────────────────────
 
 fn cid(n: u64) -> KotobaCid { KotobaCid::from_bytes(&n.to_le_bytes()) }
+fn cid_for(n: u64) -> KotobaCid { KotobaCid::from_bytes(&(0x0001_0000_0000u64.wrapping_add(n)).to_le_bytes()) }
 
 fn text_quad(g: u64, s: u64, p: &str, o: &str) -> Quad {
     Quad { graph: cid(g), subject: cid(s), predicate: p.to_string(),
@@ -223,6 +224,9 @@ async fn async_main() {
 
     // Phase 5: SPARQL BGP router + multi-hop + CACAO-authed cold queries
     phase5_sparql_multihop_cacao().await;
+
+    // Phase 6: SPARQL property paths + aggregates + CACAO-authed JOIN
+    phase6_sparql_advanced().await;
 }
 
 // ─── Phase 4: distributed block fetch (simulated 2-node cluster) ─────────────
@@ -598,6 +602,97 @@ async fn phase5_sparql_multihop_cacao() {
 
     println!("\n  Note: all cold queries use MemoryBlockStore (µs RTT).");
     println!("  Production with Kubo LAN (1ms/GET): multiply cold-path p50 by ~3×RTT_ms.");
+}
+
+// ─── Phase 6: SPARQL property paths + aggregates + CACAO-authed JOIN ─────────
+
+/// Benchmarks advanced SPARQL patterns over 10K entities:
+///   1. Property path `<knows>+` (OneOrMore BFS from one start node)
+///   2. Property path `<knows>*` (ZeroOrMore, includes start quads)
+///   3. GROUP BY COUNT(*) (aggregate by role over all entities)
+///   4. Global COUNT(*) (one aggregate row, total entities)
+///   5. Subquery JOIN (admin subjects joined with name subjects)
+///   6. CACAO-authed JOIN (via verify_skip_sig)
+async fn phase6_sparql_advanced() {
+    const N_ENTITIES: u64 = 10_000;
+    const ITERS: usize = 30;
+    const ROLES: &[&str] = &["admin", "viewer", "editor"];
+
+    println!("\n=== Phase 6: SPARQL property paths + aggregates ({} entities) ===", fmt_n(N_ENTITIES));
+    println!("{:<52}  {:>9}  {:>9}  {:>9}  {:>9}",
+        "query", "p50_µs", "p95_µs", "p99_µs", "result_n");
+
+    let journal     = Arc::new(Journal::new());
+    let block_store = Arc::new(MemoryBlockStore::new()) as Arc<dyn kotoba_core::store::BlockStore + Send + Sync>;
+    let qs          = QuadStore::new(journal, block_store);
+    let graph       = cid(6);
+    let n           = N_ENTITIES;
+
+    // Build graph: name + role + knows-chain
+    let knows_chain_len = 5usize;
+    for i in 0..n {
+        let s = cid_for(i);
+        qs.assert(Quad { graph: graph.clone(), subject: s.clone(),
+            predicate: "name".to_string(), object: QuadObject::Text(format!("Entity{i}")) }).await;
+        qs.assert(Quad { graph: graph.clone(), subject: s.clone(),
+            predicate: "role".to_string(),
+            object: QuadObject::Text(ROLES[(i % ROLES.len() as u64) as usize].to_string()) }).await;
+        // Build a linear knows-chain for the first knows_chain_len entities
+        if (i as usize) < knows_chain_len {
+            let next = cid_for(i + 1);
+            qs.assert(Quad { graph: graph.clone(), subject: s.clone(),
+                predicate: "knows".to_string(), object: QuadObject::Cid(next) }).await;
+        }
+    }
+    qs.commit("did:bench", graph.clone(), 6).await.unwrap();
+    qs.reset_arrangement(&graph).await;
+
+    let start_mb = cid_for(0).to_multibase();
+    let knows_one_sparql = format!("SELECT * WHERE {{ <cid:{start_mb}> <knows>+ ?o }}");
+    let knows_zero_sparql = format!("SELECT * WHERE {{ <cid:{start_mb}> <knows>* ?o }}");
+    let count_role_sparql = "SELECT ?r (COUNT(*) AS ?n) WHERE { ?s <role> ?r } GROUP BY ?r";
+    let count_all_sparql  = "SELECT (COUNT(*) AS ?total) WHERE { ?s <role> ?r }";
+    let join_sparql = r#"SELECT * WHERE { { SELECT ?s WHERE { ?s <role> "admin" } } { SELECT ?s WHERE { ?s <name> ?n } } }"#;
+
+    let chain = DelegationChain::new_for_test(&graph.to_multibase(), "quad:read");
+
+    macro_rules! bench_query {
+        ($label:expr, $body:expr) => {{
+            let mut times = Vec::with_capacity(ITERS);
+            let mut last_n = 0usize;
+            for _ in 0..ITERS {
+                let t = Instant::now();
+                let r: Vec<Quad> = $body;
+                times.push(t.elapsed());
+                last_n = r.len();
+            }
+            times.sort();
+            let p50 = times[times.len() / 2].as_micros();
+            let p95 = times[(times.len() * 95 / 100).min(times.len() - 1)].as_micros();
+            let p99 = times[(times.len() * 99 / 100).min(times.len() - 1)].as_micros();
+            println!("{:<52}  {:>9}  {:>9}  {:>9}  {:>9}",
+                $label, p50, p95, p99, last_n);
+        }};
+    }
+
+    bench_query!("property_path <knows>+ (BFS 1+)",
+        qs.cold_query_sparql_bgp(&graph, &knows_one_sparql).await.unwrap());
+    bench_query!("property_path <knows>* (BFS 0+, includes start)",
+        qs.cold_query_sparql_bgp(&graph, &knows_zero_sparql).await.unwrap());
+    bench_query!("aggregate COUNT(*) GROUP BY role",
+        qs.cold_query_sparql_bgp(&graph, count_role_sparql).await.unwrap());
+    bench_query!("aggregate COUNT(*) global",
+        qs.cold_query_sparql_bgp(&graph, count_all_sparql).await.unwrap());
+    bench_query!("subquery JOIN (admin ∩ name)",
+        qs.cold_query_sparql_bgp(&graph, join_sparql).await.unwrap());
+    bench_query!("CACAO-authed JOIN (verify_skip_sig + query)", {
+        chain.verify_skip_sig(&graph.to_multibase(), "quad:read").unwrap();
+        qs.cold_query_sparql_bgp(&graph, join_sparql).await.unwrap()
+    });
+
+    println!("  → property path BFS walks the knows-chain ({} links).", knows_chain_len);
+    println!("  → aggregate scans {} quads via AEVT index.", fmt_n(n));
+    println!("  → join uses subquery → Join node; inner-joins by subject.");
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

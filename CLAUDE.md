@@ -348,6 +348,17 @@ Node A: get_entity_quads_cold(&graph, &subject) → reads via ProllyTree
 loadtest Phase 4 (10K entities, MemoryBlockStore, 293 blocks replicated):
 - EAVT cold (post-import_commit) first: ~1.9ms, promoted: ~1.8ms
 
+#### loadtest Phase 6 — SPARQL property paths + aggregates (2026-05-28, 10K entities)
+
+| Query | p50_µs | result_n | Notes |
+|---|---|---|---|
+| `<knows>+` OneOrMore BFS | 11ms | 5 | 5-hop chain traversal |
+| `<knows>*` ZeroOrMore BFS | 14ms | 7 | includes start node quads |
+| `GROUP BY role COUNT(*)` | 26ms | 3 | AEVT scan 10K quads |
+| Global `COUNT(*)` | 24ms | 1 | AEVT scan 10K quads |
+| Subquery JOIN (admin ∩ name) | 205ms | 6668 | AVET(admin)+AEVT(name) inner join |
+| CACAO-authed JOIN (verify_skip_sig) | 215ms | 6668 | +10ms auth overhead on JOIN |
+
 Run: `cargo bench -p kotoba-kqe --bench arrangement`  
 Run: `cargo bench -p kotoba-graph --bench quad_store`  
 Run: `cargo bench -p kotoba-store --bench tiered_store`  
