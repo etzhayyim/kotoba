@@ -327,6 +327,15 @@ impl CacaoPayload {
             .map(|r| &r["kotoba://graph/".len()..])
     }
 
+    /// Return ALL authorized graph CIDs from `kotoba://graph/{cid}` resources.
+    /// Empty = no graph restriction (all graphs authorized).
+    pub fn all_graph_cids(&self) -> Vec<&str> {
+        self.resources.iter()
+            .filter(|r| r.starts_with("kotoba://graph/"))
+            .map(|r| &r["kotoba://graph/".len()..])
+            .collect()
+    }
+
     pub fn capability(&self) -> Option<&str> {
         self.resources.iter()
             .find(|r| r.starts_with("kotoba://can/"))

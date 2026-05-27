@@ -123,6 +123,15 @@ impl CommitDag {
             .collect()
     }
 
+    /// Return all committed graph CIDs (one per distinct named graph).
+    pub fn graph_cids(&self) -> Vec<KotobaCid> {
+        self.heads.values()
+            .filter_map(|commit_cid| {
+                self.commits.get(&commit_cid.to_multibase()).map(|c| c.graph.clone())
+            })
+            .collect()
+    }
+
     /// Compute the set of all live block CIDs referenced by every commit in the DAG.
     ///
     /// Includes: commit blocks + all ProllyTree block CIDs reachable from each commit's

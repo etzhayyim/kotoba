@@ -310,6 +310,43 @@ impl DelegationChain {
         }
         self.verify(graph_cid, required_cap)
     }
+
+    /// Return all graph CIDs authorized by this chain.
+    /// Empty = no graph restriction (CACAO covers all graphs).
+    pub fn authorized_graphs(&self) -> Vec<String> {
+        self.chain.iter()
+            .flat_map(|c| c.p.all_graph_cids())
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// Verify capability and temporal validity only (no graph-scope check).
+    /// Used when the caller will perform its own per-graph filter (e.g. GRAPH ?g queries).
+    pub fn verify_capability_only(&self, required_cap: &str) -> Result<String, DelegationError> {
+        if self.chain.is_empty() { return Err(DelegationError::EmptyChain); }
+        let cacao = &self.chain[0];
+        // Temporal check
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        if let Some(exp) = &cacao.p.expiry {
+            if !is_utc_iso8601(exp) { return Err(DelegationError::InvalidExpiry(exp.clone())); }
+            let now_iso = format_iso8601(now_secs);
+            if now_iso > *exp { return Err(DelegationError::Expired); }
+        }
+        // Capability check
+        if let Some(granted_cap) = cacao.p.capability() {
+            if granted_cap != required_cap {
+                return Err(DelegationError::CapabilityDenied(
+                    format!("need '{required_cap}', CACAO grants '{granted_cap}'"),
+                ));
+            }
+        }
+        // Signature — if using verify (not skip_sig), do full EdDSA verify here.
+        // For skip_sig paths this is called from verify_skip_sig context; for real
+        // sig paths we delegate to verify() which calls verify_signature internally.
+        // Here we just return iss (capability-only = no graph scope check, no sig here).
+        Ok(cacao.p.iss.clone())
+    }
 }
 
 #[cfg(test)]

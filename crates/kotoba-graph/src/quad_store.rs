@@ -240,6 +240,26 @@ impl QuadStore {
         self.arrangements.get(&graph_cid.to_multibase()).map(|r| r.clone())
     }
 
+    /// Return all known graph CIDs — union of committed (CommitDag) and in-memory (Arrangements).
+    pub async fn all_graph_cids(&self) -> Vec<KotobaCid> {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut cids: Vec<KotobaCid> = Vec::new();
+        for r in self.arrangements.iter() {
+            if seen.insert(r.key().clone()) {
+                if let Some(cid) = KotobaCid::from_multibase(r.key()) {
+                    cids.push(cid);
+                }
+            }
+        }
+        for c in self.commit_dag.read().await.graph_cids() {
+            let mb = c.to_multibase();
+            if seen.insert(mb) {
+                cids.push(c);
+            }
+        }
+        cids
+    }
+
     /// Return all Quads whose subject matches `subject`, optionally restricted to `graph_cid`.
     /// When `graph_cid` is None, scans every named graph in memory.
     pub async fn get_entity_quads(
@@ -645,6 +665,174 @@ impl QuadStore {
         self.execute_sparql_graph_pattern(graph_cid, &inner).await
     }
 
+    /// SPARQL ASK query — returns `true` if the WHERE pattern matches at least one quad.
+    ///
+    /// ```text
+    /// ASK { <cid:alice> <role> "admin" }   → true if Alice has role=admin
+    /// ASK { <cid:eve>   <role> "admin" }   → false if Eve doesn't exist
+    /// ```
+    pub async fn sparql_ask(
+        &self,
+        graph_cid: &KotobaCid,
+        sparql:    &str,
+    ) -> anyhow::Result<bool> {
+        let query = spargebra::SparqlParser::new()
+            .with_base_iri(SPARQL_BGP_BASE_IRI)
+            .map_err(|e| anyhow::anyhow!("base IRI error: {e}"))?
+            .parse_query(sparql)
+            .map_err(|e| anyhow::anyhow!("SPARQL parse error: {e}"))?;
+
+        let pattern = match query {
+            spargebra::Query::Ask { pattern, .. } => pattern,
+            _ => anyhow::bail!("sparql_ask: only ASK queries supported"),
+        };
+
+        let inner = unwrap_bgp_pattern(pattern);
+        let matched = self.execute_sparql_graph_pattern(graph_cid, &inner).await?;
+        Ok(!matched.is_empty())
+    }
+
+    /// CACAO-gated SPARQL ASK.  Verifies `quad:read` before executing.
+    pub async fn sparql_ask_authed(
+        &self,
+        graph_cid: &KotobaCid,
+        sparql:    &str,
+        chain:     &DelegationChain,
+    ) -> Result<bool, AccessError> {
+        chain.verify(&graph_cid.to_multibase(), "quad:read")?;
+        self.sparql_ask(graph_cid, sparql).await
+            .map_err(|e| AccessError::Internal(e.to_string()))
+    }
+
+    /// SPARQL CONSTRUCT query — materialises a triple template over WHERE results.
+    ///
+    /// ```text
+    /// CONSTRUCT { ?s <label> ?name }
+    /// WHERE     { ?s <name> ?name . ?s <role> "admin" }
+    /// ```
+    ///
+    /// Returns quads in `graph_cid` constructed by substituting WHERE bindings
+    /// (subject var → matched quad subject; object var → matched quad object)
+    /// into each CONSTRUCT triple pattern.  Predicates must be named nodes.
+    pub async fn sparql_construct(
+        &self,
+        graph_cid: &KotobaCid,
+        sparql:    &str,
+    ) -> anyhow::Result<Vec<Quad>> {
+        let query = spargebra::SparqlParser::new()
+            .with_base_iri(SPARQL_BGP_BASE_IRI)
+            .map_err(|e| anyhow::anyhow!("base IRI error: {e}"))?
+            .parse_query(sparql)
+            .map_err(|e| anyhow::anyhow!("SPARQL parse error: {e}"))?;
+
+        let (template, pattern) = match query {
+            spargebra::Query::Construct { template, pattern, .. } => (template, pattern),
+            _ => anyhow::bail!("sparql_construct: only CONSTRUCT queries supported"),
+        };
+
+        let inner = unwrap_bgp_pattern(pattern);
+        let matched = self.execute_sparql_graph_pattern(graph_cid, &inner).await?;
+
+        let mut result = Vec::new();
+        for triple_pat in &template {
+            for mq in &matched {
+                if let Some(q) = instantiate_quad_pattern(
+                    &triple_pat_to_quad_pattern(triple_pat, graph_cid),
+                    graph_cid,
+                    mq,
+                ) {
+                    result.push(q);
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// SPARQL DESCRIBE — returns all quads for every entity matched by the query.
+    ///
+    /// Supports two forms:
+    /// - `DESCRIBE <cid:…>` — explicit IRI list (no WHERE clause)
+    /// - `DESCRIBE ?s WHERE { ?s <role> "admin" }` — variable bound by WHERE pattern
+    ///
+    /// All quads stored under each matched subject in `graph_cid` are returned.
+    pub async fn sparql_describe(
+        &self,
+        graph_cid: &KotobaCid,
+        sparql:    &str,
+    ) -> anyhow::Result<Vec<Quad>> {
+        // spargebra's Describe variant embeds everything in `pattern`;
+        // we use string-level extraction for the DESCRIBE target list, then
+        // spargebra for the optional WHERE clause.
+        let sparql_up = sparql.to_uppercase();
+        let desc_pos  = sparql_up.find("DESCRIBE")
+            .ok_or_else(|| anyhow::anyhow!("DESCRIBE keyword missing"))?;
+        let after_desc = &sparql[desc_pos + 8..].trim_start();
+
+        // Extract resource IRIs/vars before the optional WHERE clause
+        let where_pos = sparql_up[desc_pos + 8..].find("WHERE").map(|p| p + desc_pos + 8);
+        let target_str = if let Some(wp) = where_pos {
+            &sparql[desc_pos + 8..wp]
+        } else {
+            after_desc
+        };
+
+        let mut subjects: Vec<KotobaCid> = Vec::new();
+
+        // Explicit IRIs: <cid:mb>
+        for cap in target_str.split('<').skip(1) {
+            if let Some(end) = cap.find('>') {
+                let iri = cap[..end].trim();
+                let s   = strip_bgp_base(iri);
+                if let Some(cid) = parse_cid_iri(s) {
+                    subjects.push(cid);
+                }
+            }
+        }
+
+        // WHERE clause variables: execute pattern, collect subject CIDs
+        if let Some(wp) = where_pos {
+            let where_clause = &sparql[wp..];
+            // Build a SELECT * with the same WHERE body so spargebra can parse it
+            let select_sparql = format!("SELECT * {where_clause}");
+            let query = spargebra::SparqlParser::new()
+                .with_base_iri(SPARQL_BGP_BASE_IRI)
+                .map_err(|e| anyhow::anyhow!("base IRI error: {e}"))?
+                .parse_query(&select_sparql)
+                .map_err(|e| anyhow::anyhow!("SPARQL parse error: {e}"))?;
+            let pattern = match query {
+                spargebra::Query::Select { pattern, .. } => pattern,
+                _ => anyhow::bail!("unexpected query form"),
+            };
+            let inner   = unwrap_bgp_pattern(pattern);
+            let matched = self.execute_sparql_graph_pattern(graph_cid, &inner).await?;
+            for q in matched {
+                if !subjects.contains(&q.subject) {
+                    subjects.push(q.subject);
+                }
+            }
+        }
+
+        // Fetch all quads for each subject
+        let mut result = Vec::new();
+        for subj in subjects {
+            let quads = self.get_entity_quads_cold(graph_cid, &subj).await?;
+            result.extend(quads);
+        }
+        Ok(result)
+    }
+
+    /// CACAO-authed DESCRIBE — requires `quad:read` capability.
+    pub async fn sparql_describe_authed(
+        &self,
+        graph_cid: &KotobaCid,
+        sparql:    &str,
+        chain:     &DelegationChain,
+    ) -> Result<Vec<Quad>, AccessError> {
+        chain.verify(&graph_cid.to_multibase(), "quad:read")?;
+        self.sparql_describe(graph_cid, sparql).await
+            .map_err(|e| AccessError::Internal(e.to_string()))
+    }
+
     /// Recursive SPARQL pattern executor.
     ///
     /// Handles: BGP, Filter, Union, LeftJoin (OPTIONAL).
@@ -665,6 +853,31 @@ impl QuadStore {
             // ── FILTER { inner WHERE expr } ─────────────────────────────────────
             // Execute the inner pattern, then apply the filter expression.
             GraphPattern::Filter { inner, expr } => {
+                use spargebra::algebra::Expression;
+                // FILTER EXISTS { <pattern> } — semi-join: keep outer quads whose
+                // subject appears in the inner pattern's results.
+                if let Expression::Exists(exists_pattern) = expr {
+                    let outer_quads = Box::pin(self.execute_sparql_graph_pattern(graph_cid, inner)).await?;
+                    let inner_quads = Box::pin(self.execute_sparql_graph_pattern(graph_cid, exists_pattern)).await?;
+                    let exists_subjects: std::collections::HashSet<String> =
+                        inner_quads.iter().map(|q| q.subject.to_multibase()).collect();
+                    return Ok(outer_quads.into_iter()
+                        .filter(|q| exists_subjects.contains(&q.subject.to_multibase()))
+                        .collect());
+                }
+                // FILTER NOT EXISTS { <pattern> } — anti-join: keep outer quads whose
+                // subject does NOT appear in the inner pattern's results.
+                if let Expression::Not(inner_expr) = expr {
+                    if let Expression::Exists(exists_pattern) = inner_expr.as_ref() {
+                        let outer_quads = Box::pin(self.execute_sparql_graph_pattern(graph_cid, inner)).await?;
+                        let inner_quads = Box::pin(self.execute_sparql_graph_pattern(graph_cid, exists_pattern)).await?;
+                        let exists_subjects: std::collections::HashSet<String> =
+                            inner_quads.iter().map(|q| q.subject.to_multibase()).collect();
+                        return Ok(outer_quads.into_iter()
+                            .filter(|q| !exists_subjects.contains(&q.subject.to_multibase()))
+                            .collect());
+                    }
+                }
                 let quads = Box::pin(self.execute_sparql_graph_pattern(graph_cid, inner)).await?;
                 Ok(quads.into_iter().filter(|q| eval_filter_expr(expr, q)).collect())
             }
@@ -720,10 +933,53 @@ impl QuadStore {
                 }).collect())
             }
 
-            // ── Join (inner join by shared subject) ─────────────────────────────
-            // Execute both sub-patterns (stripping any Project wrapper), then keep
-            // quads whose subject appears in both result sets.
+            // ── Join (VALUES filter -or- inner join by shared subject) ──────────
+            // Special case: `VALUES ?v { … }` on the left acts as an inline-data
+            // filter — keep right-side quads whose predicate matches a VALUES
+            // variable AND whose object is one of the allowed literal values.
+            //
+            // Normal case: execute both sub-patterns (stripping any Project
+            // wrapper), then keep quads whose subject appears in both result sets.
             GraphPattern::Join { left, right } => {
+                if let GraphPattern::Values { variables: _, bindings } = left.as_ref() {
+                    // Build the flat union of all allowed string values across all variables.
+                    // VALUES binds object values (e.g. `VALUES ?r { "admin" }` constrains the
+                    // quad object when `?r` appears as an object variable in the BGP).
+                    let mut all_allowed: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    for row in bindings {
+                        for val_opt in row {
+                            if let Some(gt) = val_opt {
+                                all_allowed.insert(ground_term_to_str(gt));
+                            }
+                        }
+                    }
+                    let right_inner = unwrap_bgp_pattern(*right.clone());
+                    let right_quads =
+                        Box::pin(self.execute_sparql_graph_pattern(graph_cid, &right_inner)).await?;
+                    return Ok(right_quads.into_iter().filter(|q| {
+                        match &q.object {
+                            kotoba_kqe::quad::QuadObject::Text(t) => all_allowed.contains(t.as_str()),
+                            // Non-text objects (CID references, etc.) are not constrained
+                            _ => true,
+                        }
+                    }).collect());
+                }
+
+                // Sub-SELECT on left: use left for subject filtering only; return right quads.
+                // `{ SELECT ?s WHERE { ... } } ?s <p> ?o` → only right-side quads that match
+                // the subjects projected by the sub-SELECT.
+                if matches!(left.as_ref(), GraphPattern::Project { .. }) {
+                    let left_quads  = Box::pin(self.execute_sparql_graph_pattern(graph_cid, left)).await?;
+                    let left_subjects: std::collections::HashSet<String> =
+                        left_quads.iter().map(|q| q.subject.to_multibase()).collect();
+                    let right_inner = unwrap_bgp_pattern(*right.clone());
+                    let right_quads = Box::pin(self.execute_sparql_graph_pattern(graph_cid, &right_inner)).await?;
+                    return Ok(right_quads.into_iter()
+                        .filter(|q| left_subjects.contains(&q.subject.to_multibase()))
+                        .collect());
+                }
+
                 let left_inner  = unwrap_bgp_pattern(*left.clone());
                 let right_inner = unwrap_bgp_pattern(*right.clone());
                 let left_quads  = Box::pin(self.execute_sparql_graph_pattern(graph_cid, &left_inner)).await?;
@@ -780,32 +1036,60 @@ impl QuadStore {
                 let mut results = Vec::new();
                 for (key, members) in groups {
                     use spargebra::algebra::{AggregateExpression, AggregateFunction};
-                    let agg_val = match agg_expr {
-                        Some(AggregateExpression::CountSolutions { .. }) => members.len() as u64,
-                        Some(AggregateExpression::FunctionCall {
-                            name: AggregateFunction::Count, ..
-                        }) => members.len() as u64,
-                        Some(AggregateExpression::FunctionCall {
-                            name: AggregateFunction::Sum, expr, ..
-                        }) => {
-                            let var_name = extract_var_name_from_expr(expr);
-                            members.iter().filter_map(|q| {
-                                let _ = &var_name;
-                                if let kotoba_kqe::quad::QuadObject::Text(t) = &q.object {
-                                    t.parse::<u64>().ok()
-                                } else { None }
-                            }).sum()
+                    // Extract text values from member quads for numeric aggregates
+                    let text_vals: Vec<&str> = members.iter().filter_map(|q| {
+                        if let kotoba_kqe::quad::QuadObject::Text(t) = &q.object { Some(t.as_str()) } else { None }
+                    }).collect();
+                    let agg_str = match agg_expr {
+                        Some(AggregateExpression::CountSolutions { .. }) |
+                        Some(AggregateExpression::FunctionCall { name: AggregateFunction::Count, .. }) => {
+                            members.len().to_string()
                         }
-                        _ => members.len() as u64,
+                        Some(AggregateExpression::FunctionCall { name: AggregateFunction::Sum, .. }) => {
+                            // Try integer sum, fall back to float sum
+                            let int_sum: Option<i64> = text_vals.iter().try_fold(0i64, |acc, s| {
+                                s.parse::<i64>().ok().map(|v| acc + v)
+                            });
+                            if let Some(s) = int_sum {
+                                s.to_string()
+                            } else {
+                                let f: f64 = text_vals.iter().filter_map(|s| s.parse::<f64>().ok()).sum();
+                                format!("{f}")
+                            }
+                        }
+                        Some(AggregateExpression::FunctionCall { name: AggregateFunction::Min, .. }) => {
+                            text_vals.iter().min_by(|a, b| cmp_values(a, b))
+                                .map(|s| s.to_string()).unwrap_or_default()
+                        }
+                        Some(AggregateExpression::FunctionCall { name: AggregateFunction::Max, .. }) => {
+                            text_vals.iter().max_by(|a, b| cmp_values(a, b))
+                                .map(|s| s.to_string()).unwrap_or_default()
+                        }
+                        Some(AggregateExpression::FunctionCall { name: AggregateFunction::Avg, .. }) => {
+                            let nums: Vec<f64> = text_vals.iter().filter_map(|s| s.parse().ok()).collect();
+                            if nums.is_empty() { String::new() }
+                            else { format!("{:.2}", nums.iter().sum::<f64>() / nums.len() as f64) }
+                        }
+                        Some(AggregateExpression::FunctionCall { name: AggregateFunction::Sample, .. }) => {
+                            text_vals.first().map(|s| s.to_string()).unwrap_or_default()
+                        }
+                        Some(AggregateExpression::FunctionCall {
+                            name: AggregateFunction::GroupConcat { separator },
+                            ..
+                        }) => {
+                            let sep = separator.as_deref().unwrap_or(" ");
+                            text_vals.join(sep)
+                        }
+                        _ => members.len().to_string(),
                     };
                     results.push(Quad {
                         graph:     graph_cid.clone(),
                         subject:   KotobaCid::from_bytes(key.as_bytes()),
                         predicate: agg_var.to_string(),
-                        object:    kotoba_kqe::quad::QuadObject::Text(agg_val.to_string()),
+                        object:    kotoba_kqe::quad::QuadObject::Text(agg_str),
                     });
                 }
-                // Sort by count descending for stable output
+                // Sort by numeric value descending for stable output (fallback to string order)
                 results.sort_by(|a, b| {
                     let va = if let kotoba_kqe::quad::QuadObject::Text(t) = &a.object { t.parse::<u64>().unwrap_or(0) } else { 0 };
                     let vb = if let kotoba_kqe::quad::QuadObject::Text(t) = &b.object { t.parse::<u64>().unwrap_or(0) } else { 0 };
@@ -820,6 +1104,135 @@ impl QuadStore {
             // ?s <p1>/<p2> ?o → sequence: follow p1 then p2
             GraphPattern::Path { subject, path, object } => {
                 self.eval_property_path(graph_cid, subject, path, object).await
+            }
+
+            // ── MINUS (set difference) ───────────────────────────────────────────
+            // Return left-side quads whose subject does NOT appear in the right side.
+            GraphPattern::Minus { left, right } => {
+                let left_quads  = Box::pin(self.execute_sparql_graph_pattern(graph_cid, left)).await?;
+                let right_quads = Box::pin(self.execute_sparql_graph_pattern(graph_cid, right)).await?;
+                let right_subjects: std::collections::HashSet<String> =
+                    right_quads.iter().map(|q| q.subject.to_multibase()).collect();
+                Ok(left_quads.into_iter()
+                    .filter(|q| !right_subjects.contains(&q.subject.to_multibase()))
+                    .collect())
+            }
+
+            // ── VALUES (standalone inline-data) ─────────────────────────────────
+            // Returns one synthetic Quad per (variable, binding) pair:
+            //   subject = CID(value_bytes), predicate = variable_name, object = Text(value)
+            // When VALUES appears as the left side of a Join the Join handler
+            // short-circuits above; this arm handles the rare standalone case.
+            GraphPattern::Values { variables, bindings } => {
+                let mut results = Vec::new();
+                for row in bindings {
+                    for (var, val_opt) in variables.iter().zip(row) {
+                        if let Some(gt) = val_opt {
+                            let val_str = ground_term_to_str(gt);
+                            results.push(Quad {
+                                graph:     graph_cid.clone(),
+                                subject:   KotobaCid::from_bytes(val_str.as_bytes()),
+                                predicate: var.as_str().to_string(),
+                                object:    kotoba_kqe::quad::QuadObject::Text(val_str),
+                            });
+                        }
+                    }
+                }
+                Ok(results)
+            }
+
+            // ── ORDER BY ────────────────────────────────────────────────────────
+            // Execute inner pattern then sort quads by object text value.
+            // Slice (LIMIT/OFFSET) wraps OrderBy and applies the window after sorting.
+            GraphPattern::OrderBy { inner, expression } => {
+                let mut quads = Box::pin(self.execute_sparql_graph_pattern(graph_cid, inner)).await?;
+                let descending = expression.first().map(|e| {
+                    matches!(e, spargebra::algebra::OrderExpression::Desc(_))
+                }).unwrap_or(false);
+                quads.sort_by(|a, b| {
+                    let av = match &a.object {
+                        kotoba_kqe::quad::QuadObject::Text(t) => t.clone(),
+                        _ => String::new(),
+                    };
+                    let bv = match &b.object {
+                        kotoba_kqe::quad::QuadObject::Text(t) => t.clone(),
+                        _ => String::new(),
+                    };
+                    if descending { bv.cmp(&av) } else { av.cmp(&bv) }
+                });
+                Ok(quads)
+            }
+
+            // ── SLICE (LIMIT / OFFSET) ────────────────────────────────────────
+            // Strips Project wrappers from the inner pattern, executes it
+            // (OrderBy is handled recursively above), then applies skip + take.
+            GraphPattern::Slice { inner, start, length } => {
+                let inner_p = unwrap_bgp_pattern(*inner.clone());
+                let quads = Box::pin(self.execute_sparql_graph_pattern(graph_cid, &inner_p)).await?;
+                let skip = *start;
+                Ok(quads.into_iter().skip(skip).take(length.unwrap_or(usize::MAX)).collect())
+            }
+
+            // ── DISTINCT ─────────────────────────────────────────────────────
+            // Deduplicate quads from the inner pattern by (subject, predicate, object).
+            // Deduplication ignores the graph CID so cross-graph identical triples
+            // are treated as the same solution.  This models SELECT DISTINCT projection
+            // onto the full triple (not a projected-variable subset).
+            GraphPattern::Distinct { inner } => {
+                let inner_p = unwrap_bgp_pattern(*inner.clone());
+                let quads = Box::pin(self.execute_sparql_graph_pattern(graph_cid, &inner_p)).await?;
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                Ok(quads.into_iter().filter(|q| {
+                    let obj_key = match &q.object {
+                        kotoba_kqe::quad::QuadObject::Text(t)    => t.clone(),
+                        kotoba_kqe::quad::QuadObject::Cid(c)     => c.to_multibase(),
+                        kotoba_kqe::quad::QuadObject::Integer(i) => i.to_string(),
+                        kotoba_kqe::quad::QuadObject::Float(f)   => format!("{f}"),
+                        kotoba_kqe::quad::QuadObject::Bool(b)    => b.to_string(),
+                        _ => format!("__opaque_{}_{}", q.subject.to_multibase(), q.predicate),
+                    };
+                    seen.insert(format!("{}|{}|{}",
+                        q.subject.to_multibase(), q.predicate, obj_key))
+                }).collect())
+            }
+
+            // ── GRAPH (named graph query) ────────────────────────────────────
+            // `GRAPH <iri>  { … }` — execute inner in a specific named graph.
+            //   IRI = multibase of KotobaCid, with optional `k:` base prefix.
+            // `GRAPH ?g { … }` — execute inner across every known graph; merge.
+            GraphPattern::Graph { name, inner } => {
+                use spargebra::term::NamedNodePattern;
+                match name {
+                    NamedNodePattern::NamedNode(nn) => {
+                        let iri = nn.as_str();
+                        let mb  = iri.strip_prefix(SPARQL_BGP_BASE_IRI).unwrap_or(iri);
+                        match KotobaCid::from_multibase(mb) {
+                            Some(target_graph) => {
+                                Box::pin(self.execute_sparql_graph_pattern(&target_graph, inner)).await
+                            }
+                            None => Ok(Vec::new()),
+                        }
+                    }
+                    NamedNodePattern::Variable(_) => {
+                        let graphs = self.all_graph_cids().await;
+                        let mut results: Vec<Quad> = Vec::new();
+                        for g in graphs {
+                            let mut quads =
+                                Box::pin(self.execute_sparql_graph_pattern(&g, inner)).await?;
+                            results.append(&mut quads);
+                        }
+                        Ok(results)
+                    }
+                }
+            }
+
+            // ── Sub-SELECT (Project in non-root position) ────────────────────
+            // When a sub-SELECT appears inside JOIN/UNION/FILTER context, spargebra
+            // wraps the inner pattern in Project.  Execute the inner pattern and
+            // return its results verbatim; variable projection is handled by the
+            // outer Project at the top-level SELECT.
+            GraphPattern::Project { inner, .. } => {
+                Box::pin(self.execute_sparql_graph_pattern(graph_cid, inner)).await
             }
 
             other => anyhow::bail!(
@@ -909,6 +1322,52 @@ impl QuadStore {
                 Ok(results)
             }
 
+            // <p1> | <p2> — Alternative: union of both path results
+            PropertyPathExpression::Alternative(a, b) => {
+                let mut results = Box::pin(self.eval_property_path(graph_cid, subject, a, _object)).await?;
+                let b_results = Box::pin(self.eval_property_path(graph_cid, subject, b, _object)).await?;
+                for q in b_results {
+                    if !results.iter().any(|r| quad_eq(r, &q)) {
+                        results.push(q);
+                    }
+                }
+                Ok(results)
+            }
+
+            // ^<pred> — Inverse: look up subjects that have pred → start_cid
+            PropertyPathExpression::Reverse(inner) => {
+                let pred = extract_named_node_from_path(inner)
+                    .ok_or_else(|| anyhow::anyhow!("Reverse: only simple ^<pred> supported"))?;
+                // Use AEVT scan with predicate prefix; filter by object == start_cid
+                let all = self.quads_by_predicate_prefix_cold(graph_cid, pred).await?;
+                Ok(all.into_iter().filter(|q| {
+                    matches!(&q.object, kotoba_kqe::quad::QuadObject::Cid(c) if *c == start_cid)
+                }).collect())
+            }
+
+            // <pred>? — ZeroOrOne: follow pred 0 or 1 times
+            PropertyPathExpression::ZeroOrOne(inner) => {
+                let pred = extract_named_node_from_path(inner)
+                    .ok_or_else(|| anyhow::anyhow!("ZeroOrOne: only simple <pred>? supported"))?;
+                // Zero hops: own quads of start_cid
+                let own = self.get_entity_quads_cold(graph_cid, &start_cid).await?;
+                // One hop: quads of the CID objects reachable via pred
+                let mut results: Vec<Quad> = own.clone();
+                for q in &own {
+                    if q.predicate == pred {
+                        if let kotoba_kqe::quad::QuadObject::Cid(target) = &q.object {
+                            let hop = self.get_entity_quads_cold(graph_cid, target).await?;
+                            for hq in hop {
+                                if !results.iter().any(|r| quad_eq(r, &hq)) {
+                                    results.push(hq);
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(results)
+            }
+
             other => anyhow::bail!("unsupported property path type: {}", path_name(other)),
         }
     }
@@ -970,7 +1429,49 @@ impl QuadStore {
                 let iri = nn.as_str();
                 let subj = parse_cid_iri(iri)
                     .ok_or_else(|| anyhow::anyhow!("subject IRI is not a valid cid: URI: {iri}"))?;
-                return self.get_entity_quads_cold(graph_cid, &subj).await;
+                let all = self.get_entity_quads_cold(graph_cid, &subj).await?;
+                // If predicate is also bound, filter by predicate (and object if bound too)
+                if let NamedNodePattern::NamedNode(pred_nn) = &tp.predicate {
+                    let pred = strip_bgp_base(pred_nn.as_str());
+                    let pred_filtered: Vec<Quad> = all.into_iter()
+                        .filter(|q| q.predicate == pred)
+                        .collect();
+                    // Additionally filter by bound object if present
+                    return match &tp.object {
+                        TermPattern::Literal(lit) => {
+                            let v = lit.value();
+                            Ok(pred_filtered.into_iter().filter(|q| match &q.object {
+                                kotoba_kqe::quad::QuadObject::Text(t) => t == v,
+                                kotoba_kqe::quad::QuadObject::Integer(i) => {
+                                    v.parse::<i64>().map_or(false, |n| *i == n)
+                                }
+                                kotoba_kqe::quad::QuadObject::Float(f) => {
+                                    v.parse::<f64>().map_or(false, |n| (*f - n).abs() < f64::EPSILON)
+                                }
+                                kotoba_kqe::quad::QuadObject::Bool(b) => {
+                                    v == "true" && *b || v == "false" && !b
+                                }
+                                _ => false,
+                            }).collect())
+                        }
+                        TermPattern::NamedNode(obj_nn) => {
+                            let obj_iri = strip_bgp_base(obj_nn.as_str());
+                            if let Some(obj_cid) = parse_cid_iri(obj_iri) {
+                                Ok(pred_filtered.into_iter().filter(|q| {
+                                    matches!(&q.object, kotoba_kqe::quad::QuadObject::Cid(c) if *c == obj_cid)
+                                }).collect())
+                            } else {
+                                // Named node that's not a CID — compare as text
+                                Ok(pred_filtered.into_iter().filter(|q| {
+                                    matches!(&q.object, kotoba_kqe::quad::QuadObject::Text(t) if t == obj_iri)
+                                }).collect())
+                            }
+                        }
+                        TermPattern::Variable(_) => Ok(pred_filtered), // unbound object
+                        _ => Ok(pred_filtered),
+                    };
+                }
+                return Ok(all);
             }
 
             // Bound predicate?
@@ -1061,7 +1562,41 @@ impl QuadStore {
             }
         }
 
-        anyhow::bail!("unsupported SPARQL BGP: only 1-triple or 2-triple join patterns are supported")
+        // ── N-triple inner join (general case) ────────────────────────────────
+        // Execute each triple independently as a 1-triple query, then keep only
+        // quads whose subject appears in every per-triple result set.
+        // This handles:
+        //   - 2-triple BGPs that don't fit the fast AVET×AVET path above
+        //   - 3+ triple BGPs
+        // Complexity: Σ(cost of each 1-triple query) + O(N × |result|) for intersection.
+        let mut per_triple: Vec<Vec<Quad>> = Vec::with_capacity(triples.len());
+        for tp in triples {
+            let single = std::slice::from_ref(tp);
+            let quads  = Box::pin(self.route_bgp_triples(graph_cid, single)).await?;
+            per_triple.push(quads);
+        }
+
+        // Intersect subject sets across all triples
+        let mut shared: std::collections::HashSet<String> =
+            per_triple[0].iter().map(|q| q.subject.to_multibase()).collect();
+        for quads in &per_triple[1..] {
+            let s: std::collections::HashSet<String> =
+                quads.iter().map(|q| q.subject.to_multibase()).collect();
+            shared = shared.intersection(&s).cloned().collect();
+        }
+
+        // Collect all quads for shared subjects (preserve order, deduplicate)
+        let mut results: Vec<Quad> = Vec::new();
+        for quads in per_triple {
+            for q in quads {
+                if shared.contains(&q.subject.to_multibase())
+                    && !results.iter().any(|r| quad_eq(r, &q))
+                {
+                    results.push(q);
+                }
+            }
+        }
+        Ok(results)
     }
 
     /// CACAO-gated SPARQL BGP cold query.
@@ -1073,6 +1608,161 @@ impl QuadStore {
     ) -> Result<Vec<Quad>, AccessError> {
         chain.verify(&graph_cid.to_multibase(), "quad:read")?;
         self.cold_query_sparql_bgp(graph_cid, sparql).await
+            .map_err(|e| AccessError::Internal(e.to_string()))
+    }
+
+    /// CACAO-gated multi-graph SPARQL query.
+    ///
+    /// Verifies the chain's `quad:read` capability, then executes the SPARQL.
+    /// When the CACAO contains multiple `kotoba://graph/{cid}` resources, the
+    /// result is additionally filtered to only include quads from authorized
+    /// named graphs.  A chain with no graph resources allows access to all graphs.
+    ///
+    /// Designed for `GRAPH ?g { … }` queries where a single token covers multiple
+    /// IPFS-backed named graphs (e.g. sharded dataset access).
+    pub async fn cold_query_sparql_bgp_multi_graph_authed(
+        &self,
+        default_graph: &KotobaCid,
+        sparql:        &str,
+        chain:         &DelegationChain,
+    ) -> Result<Vec<Quad>, AccessError> {
+        // Verify capability (no graph-scope check here — we filter results instead)
+        chain.verify_capability_only("quad:read")?;
+
+        // Execute query (may use GRAPH ?g to fan out across all committed graphs)
+        let quads = self.cold_query_sparql_bgp(default_graph, sparql).await
+            .map_err(|e| AccessError::Internal(e.to_string()))?;
+
+        // Filter by authorized graph CIDs (empty = no restriction)
+        let authorized = chain.authorized_graphs();
+        if authorized.is_empty() {
+            return Ok(quads);
+        }
+        let auth_set: std::collections::HashSet<&str> =
+            authorized.iter().map(String::as_str).collect();
+        Ok(quads.into_iter()
+            .filter(|q| auth_set.contains(q.graph.to_multibase().as_str()))
+            .collect())
+    }
+
+    // ── SPARQL UPDATE ─────────────────────────────────────────────────────────
+
+    /// Execute a SPARQL 1.1 UPDATE statement against the store.
+    ///
+    /// Supported operations:
+    /// - `INSERT DATA { <s> <p> "o" }` — asserts quads; uses `default_graph` for default graph.
+    /// - `DELETE DATA { <s> <p> "o" }` — retracts quads; uses `default_graph` for default graph.
+    /// - `INSERT DATA { GRAPH <cid> { ... } }` — inserts into the named graph.
+    /// - `DELETE DATA { GRAPH <cid> { ... } }` — deletes from the named graph.
+    /// - `INSERT { ?s <p> "v" } WHERE { ?s <q> "w" }` — pattern-driven insert.
+    /// - `DELETE { ?s <p> "v" } WHERE { ?s <q> "w" }` — pattern-driven delete.
+    ///
+    /// Variable binding in WHERE→INSERT/DELETE: subject variable `?s` is bound from matched
+    /// quad's subject CID; object variable binds from matched quad's object; predicates must
+    /// be concrete named nodes.
+    ///
+    /// Other operations (Clear, Load, Create, Drop) are not yet supported.
+    pub async fn sparql_update(
+        &self,
+        default_graph: &KotobaCid,
+        sparql:        &str,
+    ) -> anyhow::Result<usize> {
+        use spargebra::Update;
+        use spargebra::GraphUpdateOperation;
+
+        let update = Update::parse(sparql, Some(SPARQL_BGP_BASE_IRI))
+            .map_err(|e| anyhow::anyhow!("SPARQL UPDATE parse error: {e}"))?;
+
+        let mut count = 0usize;
+
+        for op in update.operations {
+            match op {
+                GraphUpdateOperation::InsertData { data } => {
+                    for sq in data {
+                        use spargebra::term::NamedOrBlankNode;
+                        let graph_cid = sparql_graph_name_to_cid(&sq.graph_name, default_graph)?;
+                        let subj_iri = match &sq.subject {
+                            NamedOrBlankNode::NamedNode(nn) => nn.as_str(),
+                            NamedOrBlankNode::BlankNode(_)  =>
+                                anyhow::bail!("UPDATE INSERT: blank node subjects not supported"),
+                        };
+                        let subject   = sparql_named_node_to_cid(subj_iri)?;
+                        let predicate = strip_bgp_base(sq.predicate.as_str()).to_string();
+                        let object    = sparql_term_to_quad_object(&sq.object)?;
+                        self.assert(Quad { graph: graph_cid, subject, predicate, object }).await;
+                        count += 1;
+                    }
+                }
+                GraphUpdateOperation::DeleteData { data } => {
+                    for sq in data {
+                        let graph_cid = sparql_graph_name_to_cid(&sq.graph_name, default_graph)?;
+                        let subject   = sparql_named_node_to_cid(sq.subject.as_str())?;
+                        let predicate = strip_bgp_base(sq.predicate.as_str()).to_string();
+                        let object    = sparql_term_to_quad_object_ground(&sq.object)?;
+                        self.retract(Quad { graph: graph_cid, subject, predicate, object }).await;
+                        count += 1;
+                    }
+                }
+                // INSERT { patterns } WHERE { graph_pattern }
+                // DELETE { patterns } WHERE { graph_pattern }  (delete=[], insert=[...] or vice versa)
+                GraphUpdateOperation::DeleteInsert { delete, insert, pattern, .. } => {
+                    // Execute WHERE clause on the default graph
+                    let matched = Box::pin(
+                        self.execute_sparql_graph_pattern(default_graph, &pattern)
+                    ).await?;
+
+                    // DELETE first (remove matched quads that match the delete patterns)
+                    for del_pat in &delete {
+                        let graph_cid = match &del_pat.graph_name {
+                            spargebra::term::GraphNamePattern::DefaultGraph => default_graph.clone(),
+                            spargebra::term::GraphNamePattern::NamedNode(nn) => {
+                                let s = strip_bgp_base(nn.as_str());
+                                parse_cid_iri(s).ok_or_else(|| anyhow::anyhow!("DELETE: graph IRI not a CID: {}", nn.as_str()))?
+                            }
+                            spargebra::term::GraphNamePattern::Variable(_) => default_graph.clone(),
+                        };
+                        for mq in &matched {
+                            if let Some(q) = instantiate_ground_quad_pattern(del_pat, &graph_cid, mq) {
+                                self.retract(q).await;
+                                count += 1;
+                            }
+                        }
+                    }
+
+                    // INSERT — materialise patterns for each matched quad
+                    for ins_pat in &insert {
+                        let graph_cid = match &ins_pat.graph_name {
+                            spargebra::term::GraphNamePattern::DefaultGraph => default_graph.clone(),
+                            spargebra::term::GraphNamePattern::NamedNode(nn) => {
+                                let s = strip_bgp_base(nn.as_str());
+                                parse_cid_iri(s).ok_or_else(|| anyhow::anyhow!("INSERT WHERE: graph IRI not a CID: {}", nn.as_str()))?
+                            }
+                            spargebra::term::GraphNamePattern::Variable(_) => default_graph.clone(),
+                        };
+                        for mq in &matched {
+                            if let Some(q) = instantiate_quad_pattern(ins_pat, &graph_cid, mq) {
+                                self.assert(q).await;
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+                other => anyhow::bail!("unsupported SPARQL UPDATE operation: {other:?}"),
+            }
+        }
+        Ok(count)
+    }
+
+    /// CACAO-gated SPARQL UPDATE. Verifies `quad:write` capability and graph scope
+    /// on the default graph (covers no-GRAPH-clause updates) before executing.
+    pub async fn sparql_update_authed(
+        &self,
+        default_graph: &KotobaCid,
+        sparql:        &str,
+        chain:         &DelegationChain,
+    ) -> Result<usize, AccessError> {
+        chain.verify(&default_graph.to_multibase(), "quad:write")?;
+        self.sparql_update(default_graph, sparql).await
             .map_err(|e| AccessError::Internal(e.to_string()))
     }
 
@@ -1436,14 +2126,15 @@ fn strip_bgp_base(iri: &str) -> &str {
     iri.strip_prefix(SPARQL_BGP_BASE_IRI).unwrap_or(iri)
 }
 
-/// Unwrap Project / Distinct / Reduced wrappers to expose the inner BGP pattern.
+/// Unwrap Project / Reduced wrappers to expose the inner BGP pattern.
+/// DISTINCT is intentionally preserved — `execute_sparql_graph_pattern` handles
+/// it via the `Distinct` arm and deduplicates the result set.
 fn unwrap_bgp_pattern(pattern: spargebra::algebra::GraphPattern) -> spargebra::algebra::GraphPattern {
     use spargebra::algebra::GraphPattern;
     match pattern {
-        GraphPattern::Project { inner, .. }  => unwrap_bgp_pattern(*inner),
-        GraphPattern::Distinct { inner }     => unwrap_bgp_pattern(*inner),
-        GraphPattern::Reduced  { inner }     => unwrap_bgp_pattern(*inner),
-        // Preserve Extend so execute_sparql_graph_pattern can rename aggregate vars
+        GraphPattern::Project { inner, .. } => unwrap_bgp_pattern(*inner),
+        GraphPattern::Reduced  { inner }    => unwrap_bgp_pattern(*inner),
+        // Preserve Distinct and Extend so execute can handle them
         other => other,
     }
 }
@@ -1454,6 +2145,28 @@ fn unwrap_bgp_pattern(pattern: spargebra::algebra::GraphPattern) -> spargebra::a
 fn parse_cid_iri(iri: &str) -> Option<KotobaCid> {
     let mb = iri.strip_prefix("cid:").unwrap_or(iri);
     KotobaCid::from_multibase(mb)
+}
+
+/// Extract the plain string value from a `GroundTerm` (used by VALUES bindings).
+///
+/// spargebra's `Display` for a `Literal` wraps the value in double-quotes
+/// (e.g. `"admin"`), so we strip them to recover the raw string.
+fn ground_term_to_str(gt: &spargebra::term::GroundTerm) -> String {
+    use spargebra::term::GroundTerm;
+    match gt {
+        GroundTerm::NamedNode(nn) => nn.as_str().to_string(),
+        GroundTerm::Literal(lit)  => lit.value().to_string(),
+        #[allow(unreachable_patterns)]
+        other => {
+            let s = other.to_string();
+            // Fallback: strip surrounding quotes if any
+            if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+                s[1..s.len()-1].to_string()
+            } else {
+                s
+            }
+        }
+    }
 }
 
 /// Structural equality check on two quads (ignores graph field — same graph assumed).
@@ -1478,6 +2191,74 @@ fn quad_eq(a: &Quad, b: &Quad) -> bool {
 ///   - `And(a, b)`                        → `eval(a) && eval(b)`
 ///   - `FunctionCall(Contains, [_, lit])` → `quad.object.as_text().contains(v)`
 ///   - `Exists` / other                   → `true` (pass through)
+// ── SPARQL UPDATE helpers ────────────────────────────────────────────────────
+
+fn sparql_graph_name_to_cid(
+    gn: &spargebra::term::GraphName,
+    default: &KotobaCid,
+) -> anyhow::Result<KotobaCid> {
+    match gn {
+        spargebra::term::GraphName::DefaultGraph => Ok(default.clone()),
+        spargebra::term::GraphName::NamedNode(nn) => {
+            let s = strip_bgp_base(nn.as_str());
+            parse_cid_iri(s)
+                .ok_or_else(|| anyhow::anyhow!("UPDATE: graph IRI is not a valid CID: {}", nn.as_str()))
+        }
+    }
+}
+
+fn sparql_named_node_to_cid(iri: &str) -> anyhow::Result<KotobaCid> {
+    // Strip base prefix (k:) or cid: prefix then parse as multibase KotobaCid
+    let s = strip_bgp_base(iri);
+    parse_cid_iri(s)
+        .ok_or_else(|| anyhow::anyhow!("UPDATE: subject IRI is not a valid CID: {iri}"))
+}
+
+fn sparql_term_to_quad_object(term: &spargebra::term::Term) -> anyhow::Result<kotoba_kqe::quad::QuadObject> {
+    use spargebra::term::Term;
+    match term {
+        Term::Literal(lit) => {
+            let v = lit.value();
+            if let Ok(i) = v.parse::<i64>() { return Ok(kotoba_kqe::quad::QuadObject::Integer(i)); }
+            if let Ok(f) = v.parse::<f64>() { return Ok(kotoba_kqe::quad::QuadObject::Float(f)); }
+            if v == "true" || v == "false" {
+                return Ok(kotoba_kqe::quad::QuadObject::Bool(v == "true"));
+            }
+            Ok(kotoba_kqe::quad::QuadObject::Text(v.to_string()))
+        }
+        Term::NamedNode(nn) => {
+            let s = strip_bgp_base(nn.as_str());
+            match KotobaCid::from_multibase(s) {
+                Some(c) => Ok(kotoba_kqe::quad::QuadObject::Cid(c)),
+                None    => Ok(kotoba_kqe::quad::QuadObject::Text(s.to_string())),
+            }
+        }
+        Term::BlankNode(_) => anyhow::bail!("UPDATE: blank node objects are not supported"),
+    }
+}
+
+fn sparql_term_to_quad_object_ground(term: &spargebra::term::GroundTerm) -> anyhow::Result<kotoba_kqe::quad::QuadObject> {
+    use spargebra::term::GroundTerm;
+    match term {
+        GroundTerm::Literal(lit) => {
+            let v = lit.value();
+            if let Ok(i) = v.parse::<i64>() { return Ok(kotoba_kqe::quad::QuadObject::Integer(i)); }
+            if let Ok(f) = v.parse::<f64>() { return Ok(kotoba_kqe::quad::QuadObject::Float(f)); }
+            if v == "true" || v == "false" {
+                return Ok(kotoba_kqe::quad::QuadObject::Bool(v == "true"));
+            }
+            Ok(kotoba_kqe::quad::QuadObject::Text(v.to_string()))
+        }
+        GroundTerm::NamedNode(nn) => {
+            let s = strip_bgp_base(nn.as_str());
+            match KotobaCid::from_multibase(s) {
+                Some(c) => Ok(kotoba_kqe::quad::QuadObject::Cid(c)),
+                None    => Ok(kotoba_kqe::quad::QuadObject::Text(s.to_string())),
+            }
+        }
+    }
+}
+
 fn eval_filter_expr(expr: &spargebra::algebra::Expression, quad: &Quad) -> bool {
     use spargebra::algebra::Expression;
     use spargebra::algebra::Function;
@@ -1502,7 +2283,15 @@ fn eval_filter_expr(expr: &spargebra::algebra::Expression, quad: &Quad) -> bool 
                 obj_text,
                 extract_literal_from_expr(left, right).or_else(|| extract_literal_from_expr(right, left)),
             ) {
-                obj > v.as_str()
+                cmp_values(obj, v.as_str()) == std::cmp::Ordering::Greater
+            } else { true }
+        }
+        Expression::GreaterOrEqual(left, right) => {
+            if let (Some(obj), Some(v)) = (
+                obj_text,
+                extract_literal_from_expr(left, right).or_else(|| extract_literal_from_expr(right, left)),
+            ) {
+                cmp_values(obj, v.as_str()) != std::cmp::Ordering::Less
             } else { true }
         }
         Expression::Less(left, right) => {
@@ -1510,7 +2299,15 @@ fn eval_filter_expr(expr: &spargebra::algebra::Expression, quad: &Quad) -> bool 
                 obj_text,
                 extract_literal_from_expr(left, right).or_else(|| extract_literal_from_expr(right, left)),
             ) {
-                obj < v.as_str()
+                cmp_values(obj, v.as_str()) == std::cmp::Ordering::Less
+            } else { true }
+        }
+        Expression::LessOrEqual(left, right) => {
+            if let (Some(obj), Some(v)) = (
+                obj_text,
+                extract_literal_from_expr(left, right).or_else(|| extract_literal_from_expr(right, left)),
+            ) {
+                cmp_values(obj, v.as_str()) != std::cmp::Ordering::Greater
             } else { true }
         }
 
@@ -1546,6 +2343,17 @@ fn extract_literal_from_expr(
         }
     }
     None
+}
+
+/// Compare two string values, preferring numeric comparison when both parse as i64.
+fn cmp_values(a: &str, b: &str) -> std::cmp::Ordering {
+    if let (Ok(ai), Ok(bi)) = (a.parse::<i64>(), b.parse::<i64>()) {
+        return ai.cmp(&bi);
+    }
+    if let (Ok(af), Ok(bf)) = (a.parse::<f64>(), b.parse::<f64>()) {
+        return af.partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Equal);
+    }
+    a.cmp(b)
 }
 
 /// Return a human-readable name for a GraphPattern variant (for error messages).
@@ -1606,6 +2414,112 @@ fn path_name(path: &spargebra::algebra::PropertyPathExpression) -> &'static str 
         PropertyPathExpression::ZeroOrOne(_)    => "ZeroOrOne",
         PropertyPathExpression::NegatedPropertySet(_) => "NegatedPropertySet",
     }
+}
+
+/// Convert a CONSTRUCT `TriplePattern` to a `QuadPattern` by adding the default graph.
+fn triple_pat_to_quad_pattern(
+    tp: &spargebra::term::TriplePattern,
+    graph_cid: &KotobaCid,
+) -> spargebra::term::QuadPattern {
+    use spargebra::term::GraphNamePattern;
+    // Use DefaultGraph so that instantiate_quad_pattern's graph_cid parameter is authoritative.
+    spargebra::term::QuadPattern {
+        subject:    tp.subject.clone(),
+        predicate:  tp.predicate.clone(),
+        object:     tp.object.clone(),
+        graph_name: GraphNamePattern::DefaultGraph,
+    }
+}
+
+/// Instantiate a `QuadPattern` (INSERT clause) by substituting variables from a matched quad.
+///
+/// Rules:
+/// - Subject `Variable(_)` → `matched.subject`
+/// - Subject `NamedNode(nn)` → parse as CID
+/// - Predicate `Variable(_)` → not supported, returns `None`
+/// - Predicate `NamedNode(nn)` → use directly
+/// - Object `Variable(_)` → `matched.object`
+/// - Object `Literal` / `NamedNode` → convert to QuadObject
+fn instantiate_quad_pattern(
+    pat: &spargebra::term::QuadPattern,
+    graph_cid: &KotobaCid,
+    matched: &Quad,
+) -> Option<Quad> {
+    use spargebra::term::{TermPattern, NamedNodePattern};
+    let subject = match &pat.subject {
+        TermPattern::Variable(_) => matched.subject.clone(),
+        TermPattern::NamedNode(nn) => {
+            let s = strip_bgp_base(nn.as_str());
+            parse_cid_iri(s)?
+        }
+        _ => return None,
+    };
+    let predicate = match &pat.predicate {
+        NamedNodePattern::NamedNode(nn) => strip_bgp_base(nn.as_str()).to_string(),
+        NamedNodePattern::Variable(_) => return None,
+    };
+    let object = match &pat.object {
+        TermPattern::Variable(_) => matched.object.clone(),
+        TermPattern::Literal(lit) => {
+            let v = lit.value();
+            if let Ok(i) = v.parse::<i64>() { kotoba_kqe::quad::QuadObject::Integer(i) }
+            else if let Ok(f) = v.parse::<f64>() { kotoba_kqe::quad::QuadObject::Float(f) }
+            else if v == "true" { kotoba_kqe::quad::QuadObject::Bool(true) }
+            else if v == "false" { kotoba_kqe::quad::QuadObject::Bool(false) }
+            else { kotoba_kqe::quad::QuadObject::Text(v.to_string()) }
+        }
+        TermPattern::NamedNode(nn) => {
+            let s = strip_bgp_base(nn.as_str());
+            match KotobaCid::from_multibase(s) {
+                Some(c) => kotoba_kqe::quad::QuadObject::Cid(c),
+                None    => kotoba_kqe::quad::QuadObject::Text(s.to_string()),
+            }
+        }
+        _ => return None,
+    };
+    Some(Quad { graph: graph_cid.clone(), subject, predicate, object })
+}
+
+/// Instantiate a `GroundQuadPattern` (DELETE clause) by substituting variables from a matched quad.
+fn instantiate_ground_quad_pattern(
+    pat: &spargebra::term::GroundQuadPattern,
+    graph_cid: &KotobaCid,
+    matched: &Quad,
+) -> Option<Quad> {
+    use spargebra::term::{GroundTermPattern, NamedNodePattern};
+    let subject = match &pat.subject {
+        GroundTermPattern::Variable(_) => matched.subject.clone(),
+        GroundTermPattern::NamedNode(nn) => {
+            let s = strip_bgp_base(nn.as_str());
+            parse_cid_iri(s)?
+        }
+        _ => return None,
+    };
+    let predicate = match &pat.predicate {
+        NamedNodePattern::NamedNode(nn) => strip_bgp_base(nn.as_str()).to_string(),
+        NamedNodePattern::Variable(_) => return None,
+    };
+    let object = match &pat.object {
+        GroundTermPattern::Variable(_) => matched.object.clone(),
+        GroundTermPattern::Literal(lit) => {
+            let v = lit.value();
+            if let Ok(i) = v.parse::<i64>() { kotoba_kqe::quad::QuadObject::Integer(i) }
+            else if let Ok(f) = v.parse::<f64>() { kotoba_kqe::quad::QuadObject::Float(f) }
+            else if v == "true" { kotoba_kqe::quad::QuadObject::Bool(true) }
+            else if v == "false" { kotoba_kqe::quad::QuadObject::Bool(false) }
+            else { kotoba_kqe::quad::QuadObject::Text(v.to_string()) }
+        }
+        GroundTermPattern::NamedNode(nn) => {
+            let s = strip_bgp_base(nn.as_str());
+            match KotobaCid::from_multibase(s) {
+                Some(c) => kotoba_kqe::quad::QuadObject::Cid(c),
+                None    => kotoba_kqe::quad::QuadObject::Text(s.to_string()),
+            }
+        }
+        #[allow(unreachable_patterns)]
+        _ => return None,
+    };
+    Some(Quad { graph: graph_cid.clone(), subject, predicate, object })
 }
 
 /// If `tp` is `?svar <pred> "literal"`, return `(pred, literal, svar_name)`.
@@ -2297,6 +3211,319 @@ mod tests {
         assert!(quads.is_empty(), "Alice is admin not user");
     }
 
+    // ─── N-triple BGP (general join) ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sparql_bgp_three_triple_intersection() {
+        // 3-triple BGP: ?s <role> "admin" . ?s <name> ?n . ?s <knows> ?o
+        // Only Alice has role=admin AND has a name AND has a knows edge.
+        // Carol has role=admin + name but NO knows edge → excluded.
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            r#"SELECT * WHERE { ?s <role> "admin" . ?s <name> ?n . ?s <knows> ?o }"#,
+        ).await.unwrap();
+        // Alice: role, name, knows = 3 quads
+        assert_eq!(quads.len(), 3, "Alice only (admin + name + knows = 3 quads), got {}", quads.len());
+        let preds: std::collections::HashSet<_> = quads.iter().map(|q| q.predicate.as_str()).collect();
+        assert!(preds.contains("role") && preds.contains("name") && preds.contains("knows"),
+            "all 3 predicates expected");
+        // All quads must be Alice's
+        let alice = KotobaCid::from_bytes(b"alice");
+        assert!(quads.iter().all(|q| q.subject == alice), "subject must be alice");
+    }
+
+    #[tokio::test]
+    async fn sparql_bgp_three_triple_no_match() {
+        // 3-triple BGP: ?s <role> "user" . ?s <name> ?n . ?s <knows> ?o
+        // Bob is user+name but has NO knows edge → empty result
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            r#"SELECT * WHERE { ?s <role> "user" . ?s <name> ?n . ?s <knows> ?o }"#,
+        ).await.unwrap();
+        assert!(quads.is_empty(), "Bob has no knows edge — intersection must be empty");
+    }
+
+    #[tokio::test]
+    async fn sparql_bgp_two_triple_general_path_pred_only() {
+        // 2-triple BGP where both triples have unbound objects (not pred+literal fast path)
+        // ?s <name> ?n . ?s <role> ?r → all 3 subjects, each with name + role = 6 quads
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            "SELECT * WHERE { ?s <name> ?n . ?s <role> ?r }",
+        ).await.unwrap();
+        // 3 subjects × 2 preds = 6 quads
+        assert_eq!(quads.len(), 6, "3 subjects × 2 preds = 6 quads, got {}", quads.len());
+        let preds: std::collections::HashSet<_> = quads.iter().map(|q| q.predicate.as_str()).collect();
+        assert!(preds.contains("name") && preds.contains("role"));
+    }
+
+    #[tokio::test]
+    async fn sparql_bgp_n_triple_with_cacao_auth() {
+        // Real EdDSA CACAO + 3-triple BGP
+        let (qs, graph) = setup_sparql_qs().await;
+        let chain = make_real_eddsa_cacao(&graph.to_multibase(), "quad:read");
+        let result = qs.cold_query_sparql_bgp_authed(
+            &graph,
+            r#"SELECT * WHERE { ?s <role> "admin" . ?s <name> ?n . ?s <knows> ?o }"#,
+            &chain,
+        ).await;
+        assert!(result.is_ok(), "real EdDSA + 3-triple BGP: {:?}", result.err());
+        let quads = result.unwrap();
+        assert_eq!(quads.len(), 3, "Alice only (3 quads), got {}", quads.len());
+    }
+
+    // ── GraphPattern::Graph tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sparql_graph_bound_named_graph_returns_quads() {
+        // GRAPH <cid_multibase> { ?s <role> "admin" } → same as direct AVET query
+        let (qs, graph) = setup_sparql_qs().await;
+        let graph_iri = graph.to_multibase();
+        let sparql = format!(r#"SELECT * WHERE {{ GRAPH <{}> {{ ?s <role> "admin" }} }}"#, graph_iri);
+        let quads = qs.cold_query_sparql_bgp(&graph, &sparql).await.unwrap();
+        assert_eq!(quads.len(), 2, "two admins in bound named graph, got {}", quads.len());
+        assert!(quads.iter().all(|q| q.predicate == "role"),
+            "all quads should have predicate=role");
+    }
+
+    #[tokio::test]
+    async fn sparql_graph_bound_unknown_iri_returns_empty() {
+        // GRAPH <unknown_cid> { ?s ?p ?o } → empty (graph not found)
+        let (qs, graph) = setup_sparql_qs().await;
+        let unknown = KotobaCid::from_bytes(b"unknown-graph-cid");
+        let sparql = format!("SELECT * WHERE {{ GRAPH <{}> {{ ?s <name> ?n }} }}", unknown.to_multibase());
+        let quads = qs.cold_query_sparql_bgp(&graph, &sparql).await.unwrap();
+        assert!(quads.is_empty(), "unknown graph IRI should return empty, got {}", quads.len());
+    }
+
+    #[tokio::test]
+    async fn sparql_graph_variable_multi_graph_returns_all() {
+        // Two committed graphs; GRAPH ?g { ?s <role> "admin" } returns quads from both.
+        let qs = QuadStore::new(
+            Arc::new(Journal::new()),
+            Arc::new(MemoryBlockStore::new()) as Arc<dyn BlockStore + Send + Sync>,
+        );
+        let graph_a = KotobaCid::from_bytes(b"multi-graph-a");
+        let graph_b = KotobaCid::from_bytes(b"multi-graph-b");
+        let alice = KotobaCid::from_bytes(b"alice-multi");
+        let dave  = KotobaCid::from_bytes(b"dave-multi");
+
+        qs.assert(Quad { graph: graph_a.clone(), subject: alice.clone(),
+            predicate: "role".into(), object: QuadObject::Text("admin".into()) }).await;
+        qs.assert(Quad { graph: graph_b.clone(), subject: dave.clone(),
+            predicate: "role".into(), object: QuadObject::Text("admin".into()) }).await;
+
+        qs.commit("did:test-a", graph_a.clone(), 1).await.unwrap();
+        qs.reset_arrangement(&graph_a).await;
+        qs.commit("did:test-b", graph_b.clone(), 2).await.unwrap();
+        qs.reset_arrangement(&graph_b).await;
+
+        // Use graph_a as the "outer" default graph (just satisfies the function signature)
+        let sparql = r#"SELECT * WHERE { GRAPH ?g { ?s <role> "admin" } }"#;
+        let quads = qs.cold_query_sparql_bgp(&graph_a, sparql).await.unwrap();
+        assert_eq!(quads.len(), 2,
+            "one admin per graph × 2 graphs = 2 quads, got {}", quads.len());
+        let graphs_seen: std::collections::HashSet<String> =
+            quads.iter().map(|q| q.graph.to_multibase()).collect();
+        assert_eq!(graphs_seen.len(), 2, "results should span both graphs");
+    }
+
+    #[tokio::test]
+    async fn sparql_graph_variable_with_real_eddsa_cacao() {
+        // Real EdDSA CACAO + GRAPH ?g { ?s <role> "admin" } spanning two graphs
+        let qs = QuadStore::new(
+            Arc::new(Journal::new()),
+            Arc::new(MemoryBlockStore::new()) as Arc<dyn BlockStore + Send + Sync>,
+        );
+        let graph_a = KotobaCid::from_bytes(b"cacao-graph-a");
+        let graph_b = KotobaCid::from_bytes(b"cacao-graph-b");
+
+        for (g, name) in [(&graph_a, "AdminA"), (&graph_b, "AdminB")] {
+            let s = KotobaCid::from_bytes(name.as_bytes());
+            qs.assert(Quad { graph: g.clone(), subject: s,
+                predicate: "role".into(), object: QuadObject::Text("admin".into()) }).await;
+            qs.commit(&format!("did:test-{name}"), g.clone(), 1).await.unwrap();
+            qs.reset_arrangement(g).await;
+        }
+
+        // Auth is scoped to graph_a (the outer default graph passed to cold_query_sparql_bgp_authed)
+        let chain = make_real_eddsa_cacao(&graph_a.to_multibase(), "quad:read");
+        let sparql = r#"SELECT * WHERE { GRAPH ?g { ?s <role> "admin" } }"#;
+        let result = qs.cold_query_sparql_bgp_authed(&graph_a, sparql, &chain).await;
+        assert!(result.is_ok(), "real EdDSA CACAO + GRAPH ?g: {:?}", result.err());
+        let quads = result.unwrap();
+        assert_eq!(quads.len(), 2, "2 admin quads across 2 graphs, got {}", quads.len());
+    }
+
+    // ── DISTINCT tests ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sparql_distinct_deduplicates_union_overlap() {
+        // UNION of two overlapping BGPs; DISTINCT removes duplicate quads
+        let (qs, graph) = setup_sparql_qs().await;
+        // Without DISTINCT: both sides of UNION produce admins → Alice+Carol appears twice
+        let no_distinct = r#"SELECT * WHERE {
+            { ?s <role> "admin" } UNION { ?s <role> "admin" }
+        }"#;
+        let quads_dup = qs.cold_query_sparql_bgp(&graph, no_distinct).await.unwrap();
+        // Our Union handler already deduplicates by quad_eq, so this is 2 even without DISTINCT
+        assert_eq!(quads_dup.len(), 2);
+
+        // With DISTINCT: explicit deduplication (same 2 unique quads)
+        let with_distinct = r#"SELECT DISTINCT * WHERE {
+            { ?s <role> "admin" } UNION { ?s <role> "admin" }
+        }"#;
+        let quads_dist = qs.cold_query_sparql_bgp(&graph, with_distinct).await.unwrap();
+        assert_eq!(quads_dist.len(), 2, "DISTINCT should keep 2 unique admin quads, got {}", quads_dist.len());
+    }
+
+    #[tokio::test]
+    async fn sparql_distinct_cross_graph() {
+        // GRAPH ?g + DISTINCT: cross-graph deduplication by (s, p, o) ignoring graph CID
+        let qs = QuadStore::new(
+            Arc::new(Journal::new()),
+            Arc::new(MemoryBlockStore::new()) as Arc<dyn BlockStore + Send + Sync>,
+        );
+        let ga = KotobaCid::from_bytes(b"dist-graph-a");
+        let gb = KotobaCid::from_bytes(b"dist-graph-b");
+        let s  = KotobaCid::from_bytes(b"shared-subject");
+
+        // Same triple in both graphs
+        for g in [&ga, &gb] {
+            qs.assert(Quad { graph: g.clone(), subject: s.clone(),
+                predicate: "role".into(), object: QuadObject::Text("admin".into()) }).await;
+            qs.commit("did:dist-test", g.clone(), 1).await.unwrap();
+            qs.reset_arrangement(g).await;
+        }
+
+        // Without DISTINCT: GRAPH ?g returns 2 quads (same triple in 2 graphs)
+        let no_dist = r#"SELECT * WHERE { GRAPH ?g { ?s <role> "admin" } }"#;
+        let all = qs.cold_query_sparql_bgp(&ga, no_dist).await.unwrap();
+        assert_eq!(all.len(), 2, "2 quads across 2 graphs without DISTINCT");
+
+        // With DISTINCT: deduplicates by (s, p, o) → 1 quad
+        let with_dist = r#"SELECT DISTINCT * WHERE { GRAPH ?g { ?s <role> "admin" } }"#;
+        let distinct = qs.cold_query_sparql_bgp(&ga, with_dist).await.unwrap();
+        assert_eq!(distinct.len(), 1, "DISTINCT across graphs deduplicates to 1 triple, got {}", distinct.len());
+    }
+
+    // ── HAVING tests (numeric filter on aggregate result) ─────────────────────
+
+    #[tokio::test]
+    async fn sparql_having_filters_aggregate_groups() {
+        // SELECT ?r (COUNT(*) AS ?n) WHERE { ?s <role> ?r } GROUP BY ?r HAVING (?n > 1)
+        // admin=2, user=1 → only admin passes HAVING
+        let (qs, graph) = setup_sparql_qs().await;
+        let sparql = "SELECT ?r (COUNT(*) AS ?n) WHERE { ?s <role> ?r } GROUP BY ?r HAVING (?n > 1)";
+        let quads = qs.cold_query_sparql_bgp(&graph, sparql).await.unwrap();
+        assert_eq!(quads.len(), 1, "only admin (count=2) passes HAVING > 1, got {}", quads.len());
+        let obj = if let QuadObject::Text(t) = &quads[0].object { t.clone() } else { panic!() };
+        assert_eq!(obj, "2", "count for admin should be 2, got {obj}");
+    }
+
+    #[tokio::test]
+    async fn sparql_having_ge_passes_all() {
+        // HAVING (?n >= 1) passes all 2 groups (admin=2, user=1)
+        let (qs, graph) = setup_sparql_qs().await;
+        let sparql = "SELECT ?r (COUNT(*) AS ?n) WHERE { ?s <role> ?r } GROUP BY ?r HAVING (?n >= 1)";
+        let quads = qs.cold_query_sparql_bgp(&graph, sparql).await.unwrap();
+        assert_eq!(quads.len(), 2, "both groups pass HAVING >= 1, got {}", quads.len());
+    }
+
+    // ── Multi-graph CACAO delegation tests ───────────────────────────────────
+
+    #[tokio::test]
+    async fn sparql_multi_graph_cacao_filters_unauthorized() {
+        // CACAO authorizes graph_a only; GRAPH ?g returns quads from graph_a+graph_b
+        // → multi-graph-authed should filter to graph_a only
+        let qs = QuadStore::new(
+            Arc::new(Journal::new()),
+            Arc::new(MemoryBlockStore::new()) as Arc<dyn BlockStore + Send + Sync>,
+        );
+        let graph_a = KotobaCid::from_bytes(b"multi-auth-a");
+        let graph_b = KotobaCid::from_bytes(b"multi-auth-b");
+
+        for (g, role) in [(&graph_a, "admin"), (&graph_b, "admin")] {
+            let s = KotobaCid::from_bytes(role.as_bytes());
+            qs.assert(Quad { graph: g.clone(), subject: s,
+                predicate: "role".into(), object: QuadObject::Text(role.into()) }).await;
+            qs.commit("did:auth-test", g.clone(), 1).await.unwrap();
+            qs.reset_arrangement(g).await;
+        }
+
+        // CACAO only authorizes graph_a
+        let chain = DelegationChain::new_for_test(&graph_a.to_multibase(), "quad:read");
+        let sparql = r#"SELECT * WHERE { GRAPH ?g { ?s <role> "admin" } }"#;
+        let result = qs.cold_query_sparql_bgp_multi_graph_authed(&graph_a, sparql, &chain).await;
+        assert!(result.is_ok());
+        let quads = result.unwrap();
+        assert_eq!(quads.len(), 1, "CACAO covers only graph_a → 1 quad, got {}", quads.len());
+        assert_eq!(quads[0].graph, graph_a, "quad should be from graph_a");
+    }
+
+    #[tokio::test]
+    async fn sparql_multi_graph_cacao_two_graphs_authorized() {
+        // CACAO with two kotoba://graph/ resources → both graphs accessible
+        let qs = QuadStore::new(
+            Arc::new(Journal::new()),
+            Arc::new(MemoryBlockStore::new()) as Arc<dyn BlockStore + Send + Sync>,
+        );
+        let graph_a = KotobaCid::from_bytes(b"two-auth-a");
+        let graph_b = KotobaCid::from_bytes(b"two-auth-b");
+
+        for g in [&graph_a, &graph_b] {
+            let s = KotobaCid::from_bytes(&g.to_multibase().as_bytes()[..36]);
+            qs.assert(Quad { graph: g.clone(), subject: s,
+                predicate: "role".into(), object: QuadObject::Text("admin".into()) }).await;
+            qs.commit("did:two-auth", g.clone(), 1).await.unwrap();
+            qs.reset_arrangement(g).await;
+        }
+
+        // Build a real-sig CACAO covering two graphs
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        use ed25519_dalek::{SigningKey, Signer};
+        use kotoba_auth::{Cacao, CacaoHeader, CacaoPayload, CacaoSig};
+        use kotoba_auth::did_key::ed25519_pubkey_to_did_key;
+
+        let sk  = SigningKey::from_bytes(&[77u8; 32]);
+        let pk  = sk.verifying_key();
+        let did = ed25519_pubkey_to_did_key(pk.as_bytes());
+        let template = Cacao {
+            h: CacaoHeader { t: "eip4361".to_string() },
+            p: CacaoPayload {
+                iss:       did,
+                aud:       "https://kotoba.bench".to_string(),
+                issued_at: "2026-01-01T00:00:00Z".to_string(),
+                expiry:    Some("2099-01-01T00:00:00Z".to_string()),
+                nonce:     "multi-graph-real-sig".to_string(),
+                domain:    "kotoba.bench".to_string(),
+                statement: None,
+                version:   "1".to_string(),
+                resources: vec![
+                    "kotoba://can/quad:read".to_string(),
+                    format!("kotoba://graph/{}", graph_a.to_multibase()),
+                    format!("kotoba://graph/{}", graph_b.to_multibase()),
+                ],
+            },
+            s: CacaoSig { t: "EdDSA".to_string(), s: String::new() },
+        };
+        let msg  = template.siwe_message();
+        let sig  = sk.sign(msg.as_bytes());
+        let chain = DelegationChain::new(Cacao {
+            s: CacaoSig { t: "EdDSA".to_string(), s: URL_SAFE_NO_PAD.encode(sig.to_bytes()) },
+            ..template
+        });
+
+        let sparql = r#"SELECT * WHERE { GRAPH ?g { ?s <role> "admin" } }"#;
+        let result = qs.cold_query_sparql_bgp_multi_graph_authed(&graph_a, sparql, &chain).await;
+        assert!(result.is_ok(), "multi-graph real EdDSA: {:?}", result.err());
+        let quads = result.unwrap();
+        assert_eq!(quads.len(), 2, "2 authorized graphs → 2 quads, got {}", quads.len());
+    }
+
     #[tokio::test]
     async fn sparql_bgp_authed_rejected_wrong_capability() {
         let (qs, graph) = setup_sparql_qs().await;
@@ -2307,6 +3534,54 @@ mod tests {
             &chain,
         ).await;
         assert!(matches!(result, Err(AccessError::Delegation(_))));
+    }
+
+    // ─── Sub-SELECT ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sparql_sub_select_in_join() {
+        // SELECT ?s ?n WHERE {
+        //   { SELECT ?s WHERE { ?s <role> "admin" } }
+        //   ?s <name> ?n .
+        // }
+        // Expected: Alice and Carol (admins) with their names
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            r#"SELECT ?s ?n WHERE {
+                { SELECT ?s WHERE { ?s <role> "admin" } }
+                ?s <name> ?n .
+            }"#,
+        ).await.unwrap();
+        // Inner sub-SELECT returns 2 admin quads; join with name predicate gives 2 name quads
+        assert_eq!(quads.len(), 2, "sub-SELECT join: 2 admins × 1 name each = 2, got {}", quads.len());
+        let names: Vec<String> = quads.iter().filter_map(|q| {
+            if q.predicate == "name" {
+                if let QuadObject::Text(t) = &q.object { Some(t.clone()) } else { None }
+            } else { None }
+        }).collect();
+        assert!(names.contains(&"Alice".to_string()), "Alice must be in sub-SELECT result");
+        assert!(names.contains(&"Carol".to_string()), "Carol must be in sub-SELECT result");
+    }
+
+    #[tokio::test]
+    async fn sparql_sub_select_with_aggregate() {
+        // Sub-SELECT with COUNT: join count result with outer query
+        // SELECT ?r ?n WHERE {
+        //   { SELECT ?r (COUNT(*) AS ?n) WHERE { ?s <role> ?r } GROUP BY ?r }
+        // }
+        // Expected: 2 rows — admin→2, user→1
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            "SELECT ?r ?n WHERE { { SELECT ?r (COUNT(*) AS ?n) WHERE { ?s <role> ?r } GROUP BY ?r } }",
+        ).await.unwrap();
+        assert_eq!(quads.len(), 2, "sub-SELECT aggregate: 2 role groups, got {}", quads.len());
+        let counts: Vec<String> = quads.iter()
+            .filter_map(|q| if let QuadObject::Text(t) = &q.object { Some(t.clone()) } else { None })
+            .collect();
+        assert!(counts.contains(&"2".to_string()), "admin group count=2");
+        assert!(counts.contains(&"1".to_string()), "user group count=1");
     }
 
     #[tokio::test]
@@ -2320,6 +3595,57 @@ mod tests {
             &chain,
         ).await;
         assert!(matches!(result, Err(AccessError::Delegation(_))));
+    }
+
+    // ─── CACAO-authed SPARQL UPDATE ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sparql_update_authed_allowed() {
+        let qs = QuadStore::new(
+            Arc::new(Journal::new()),
+            Arc::new(MemoryBlockStore::new()) as Arc<dyn BlockStore + Send + Sync>,
+        );
+        let graph = KotobaCid::from_bytes(b"authed-write-graph");
+        let chain = make_real_eddsa_cacao(&graph.to_multibase(), "quad:write");
+        let s_mb  = KotobaCid::from_bytes(b"authed-subject").to_multibase();
+
+        let sparql = format!(r#"INSERT DATA {{ <cid:{s_mb}> <label> "Authed" }}"#);
+        let result = qs.sparql_update_authed(&graph, &sparql, &chain).await;
+        assert!(result.is_ok(), "write-capable chain must succeed: {result:?}");
+        assert_eq!(result.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn sparql_update_authed_denied_wrong_graph() {
+        let qs = QuadStore::new(
+            Arc::new(Journal::new()),
+            Arc::new(MemoryBlockStore::new()) as Arc<dyn BlockStore + Send + Sync>,
+        );
+        let graph = KotobaCid::from_bytes(b"target-graph");
+        let wrong = KotobaCid::from_bytes(b"other-graph");
+        let chain = DelegationChain::new_for_test(&wrong.to_multibase(), "quad:write");
+        let s_mb  = KotobaCid::from_bytes(b"denied-subject").to_multibase();
+
+        let sparql = format!(r#"INSERT DATA {{ <cid:{s_mb}> <label> "Denied" }}"#);
+        let result = qs.sparql_update_authed(&graph, &sparql, &chain).await;
+        assert!(matches!(result, Err(AccessError::Delegation(_))),
+            "wrong-graph chain must be denied");
+    }
+
+    #[tokio::test]
+    async fn sparql_update_authed_denied_wrong_capability() {
+        let qs = QuadStore::new(
+            Arc::new(Journal::new()),
+            Arc::new(MemoryBlockStore::new()) as Arc<dyn BlockStore + Send + Sync>,
+        );
+        let graph = KotobaCid::from_bytes(b"read-only-graph");
+        let chain = DelegationChain::new_for_test(&graph.to_multibase(), "quad:read");
+        let s_mb  = KotobaCid::from_bytes(b"read-only-subject").to_multibase();
+
+        let sparql = format!(r#"INSERT DATA {{ <cid:{s_mb}> <label> "ReadOnly" }}"#);
+        let result = qs.sparql_update_authed(&graph, &sparql, &chain).await;
+        assert!(matches!(result, Err(AccessError::Delegation(_))),
+            "read-only chain must be denied for write");
     }
 
     // ─── CACAO EdDSA E2E: real signature, real cold-path authed query ─────────
@@ -2391,6 +3717,70 @@ mod tests {
         assert!(!quads.is_empty(), "Alice's quads must be returned");
     }
 
+    #[tokio::test]
+    async fn sparql_authed_real_sig_aggregate_count_by_role() {
+        // Real EdDSA CACAO + GROUP BY COUNT(*) via cold_query_sparql_bgp_authed
+        let (qs, graph) = setup_sparql_qs().await;
+        let graph_mb = graph.to_multibase();
+        let chain = make_real_eddsa_cacao(&graph_mb, "quad:read");
+
+        let result = qs.cold_query_sparql_bgp_authed(
+            &graph,
+            "SELECT ?r (COUNT(*) AS ?n) WHERE { ?s <role> ?r } GROUP BY ?r",
+            &chain,
+        ).await;
+        assert!(result.is_ok(), "real EdDSA CACAO GROUP BY aggregate: {:?}", result.err());
+        let quads = result.unwrap();
+        // admin=2, user=1 → 2 result quads
+        assert_eq!(quads.len(), 2, "GROUP BY role returns 2 groups (admin, user)");
+        // First result (desc by count) should be admin with count 2
+        assert_eq!(
+            quads[0].object,
+            QuadObject::Text("2".to_string()),
+            "admin group must have count=2"
+        );
+    }
+
+    #[tokio::test]
+    async fn sparql_authed_real_sig_orderby_limit() {
+        // Real EdDSA CACAO + ORDER BY + LIMIT via cold_query_sparql_bgp_authed
+        let (qs, graph) = setup_sparql_qs().await;
+        let graph_mb = graph.to_multibase();
+        let chain = make_real_eddsa_cacao(&graph_mb, "quad:read");
+
+        let result = qs.cold_query_sparql_bgp_authed(
+            &graph,
+            "SELECT ?s ?r WHERE { ?s <role> ?r } ORDER BY ?r LIMIT 2",
+            &chain,
+        ).await;
+        assert!(result.is_ok(), "real EdDSA CACAO ORDER BY LIMIT: {:?}", result.err());
+        let quads = result.unwrap();
+        assert_eq!(quads.len(), 2, "LIMIT 2 must return 2 quads");
+        // ASC sort: admin < user → first 2 must be admin
+        assert!(
+            quads.iter().all(|q| q.object == QuadObject::Text("admin".into())),
+            "first 2 ASC quads must be admin"
+        );
+    }
+
+    #[tokio::test]
+    async fn sparql_authed_real_sig_minus() {
+        // Real EdDSA CACAO + MINUS
+        let (qs, graph) = setup_sparql_qs().await;
+        let graph_mb = graph.to_multibase();
+        let chain = make_real_eddsa_cacao(&graph_mb, "quad:read");
+
+        let result = qs.cold_query_sparql_bgp_authed(
+            &graph,
+            r#"SELECT * WHERE { ?s <role> ?r MINUS { ?s <role> "admin" } }"#,
+            &chain,
+        ).await;
+        assert!(result.is_ok(), "real EdDSA CACAO MINUS: {:?}", result.err());
+        let quads = result.unwrap();
+        assert_eq!(quads.len(), 1, "MINUS admin leaves only Bob (user)");
+        assert_eq!(quads[0].object, QuadObject::Text("user".into()));
+    }
+
     // ─── SPARQL JOIN ──────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -2449,6 +3839,402 @@ mod tests {
         assert_eq!(count_val, "3", "3 role quads total");
     }
 
+    #[tokio::test]
+    async fn sparql_aggregate_min_name() {
+        // SELECT (MIN(?n) AS ?m) WHERE { ?s <name> ?n }
+        // Data: Alice, Bob, Carol → alphabetically MIN = "Alice"
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            "SELECT (MIN(?n) AS ?m) WHERE { ?s <name> ?n }",
+        ).await.unwrap();
+        assert_eq!(quads.len(), 1, "one aggregate row expected");
+        let val = if let QuadObject::Text(t) = &quads[0].object { t.clone() } else { "?".into() };
+        assert_eq!(val, "Alice", "MIN of Alice/Bob/Carol = Alice");
+    }
+
+    #[tokio::test]
+    async fn sparql_aggregate_max_name() {
+        // SELECT (MAX(?n) AS ?m) WHERE { ?s <name> ?n }
+        // Data: Alice, Bob, Carol → alphabetically MAX = "Carol"
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            "SELECT (MAX(?n) AS ?m) WHERE { ?s <name> ?n }",
+        ).await.unwrap();
+        assert_eq!(quads.len(), 1, "one aggregate row expected");
+        let val = if let QuadObject::Text(t) = &quads[0].object { t.clone() } else { "?".into() };
+        assert_eq!(val, "Carol", "MAX of Alice/Bob/Carol = Carol");
+    }
+
+    #[tokio::test]
+    async fn sparql_aggregate_sample_name() {
+        // SELECT (SAMPLE(?n) AS ?any) WHERE { ?s <name> ?n }
+        // Returns any one name — just verify it is one of the valid names
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            "SELECT (SAMPLE(?n) AS ?any) WHERE { ?s <name> ?n }",
+        ).await.unwrap();
+        assert_eq!(quads.len(), 1, "one aggregate row expected");
+        let val = if let QuadObject::Text(t) = &quads[0].object { t.clone() } else { "?".into() };
+        assert!(
+            ["Alice", "Bob", "Carol"].contains(&val.as_str()),
+            "SAMPLE must be one of the names, got {val:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sparql_aggregate_group_concat_names() {
+        // SELECT (GROUP_CONCAT(?n) AS ?all) WHERE { ?s <name> ?n }
+        // All names joined by space; order may vary, but all three must appear
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            "SELECT (GROUP_CONCAT(?n) AS ?all) WHERE { ?s <name> ?n }",
+        ).await.unwrap();
+        assert_eq!(quads.len(), 1, "one aggregate row expected");
+        let val = if let QuadObject::Text(t) = &quads[0].object { t.clone() } else { "?".into() };
+        assert!(val.contains("Alice"), "result must contain Alice");
+        assert!(val.contains("Bob"),   "result must contain Bob");
+        assert!(val.contains("Carol"), "result must contain Carol");
+    }
+
+    #[tokio::test]
+    async fn sparql_aggregate_sum_numeric() {
+        // Insert numeric score quads and verify SUM
+        let qs = QuadStore::new(
+            Arc::new(Journal::new()),
+            Arc::new(MemoryBlockStore::new()) as Arc<dyn BlockStore + Send + Sync>,
+        );
+        let graph = KotobaCid::from_bytes(b"agg-sum-graph");
+        let a = KotobaCid::from_bytes(b"player-a");
+        let b_node = KotobaCid::from_bytes(b"player-b");
+        let c = KotobaCid::from_bytes(b"player-c");
+        for (subj, score) in [(&a, "10"), (&b_node, "25"), (&c, "15")] {
+            qs.assert(Quad { graph: graph.clone(), subject: (*subj).clone(),
+                predicate: "score".into(), object: QuadObject::Text(score.to_string()) }).await;
+        }
+        qs.commit("did:test", graph.clone(), 1).await.unwrap();
+        qs.reset_arrangement(&graph).await;
+
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            "SELECT (SUM(?s) AS ?total) WHERE { ?p <score> ?s }",
+        ).await.unwrap();
+        assert_eq!(quads.len(), 1, "one aggregate row");
+        let val = if let QuadObject::Text(t) = &quads[0].object { t.clone() } else { "?".into() };
+        assert_eq!(val, "50", "SUM(10+25+15) = 50");
+    }
+
+    #[tokio::test]
+    async fn sparql_aggregate_avg_numeric() {
+        // Insert numeric score quads and verify AVG
+        let qs = QuadStore::new(
+            Arc::new(Journal::new()),
+            Arc::new(MemoryBlockStore::new()) as Arc<dyn BlockStore + Send + Sync>,
+        );
+        let graph = KotobaCid::from_bytes(b"agg-avg-graph");
+        let a = KotobaCid::from_bytes(b"player-a2");
+        let b_node = KotobaCid::from_bytes(b"player-b2");
+        let c = KotobaCid::from_bytes(b"player-c2");
+        for (subj, score) in [(&a, "10"), (&b_node, "20"), (&c, "30")] {
+            qs.assert(Quad { graph: graph.clone(), subject: (*subj).clone(),
+                predicate: "score".into(), object: QuadObject::Text(score.to_string()) }).await;
+        }
+        qs.commit("did:test", graph.clone(), 1).await.unwrap();
+        qs.reset_arrangement(&graph).await;
+
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            "SELECT (AVG(?s) AS ?avg) WHERE { ?p <score> ?s }",
+        ).await.unwrap();
+        assert_eq!(quads.len(), 1, "one aggregate row");
+        let val = if let QuadObject::Text(t) = &quads[0].object { t.clone() } else { "?".into() };
+        assert_eq!(val, "20.00", "AVG(10+20+30)/3 = 20.00");
+    }
+
+    #[tokio::test]
+    async fn sparql_aggregate_min_numeric() {
+        // Numeric MIN: ensure cmp_values numeric comparison is used (not lexicographic)
+        let qs = QuadStore::new(
+            Arc::new(Journal::new()),
+            Arc::new(MemoryBlockStore::new()) as Arc<dyn BlockStore + Send + Sync>,
+        );
+        let graph = KotobaCid::from_bytes(b"agg-min-num-graph");
+        for (i, score) in ["9", "10", "100"].iter().enumerate() {
+            let subj = KotobaCid::from_bytes(format!("player-num-{i}").as_bytes());
+            qs.assert(Quad { graph: graph.clone(), subject: subj,
+                predicate: "score".into(), object: QuadObject::Text(score.to_string()) }).await;
+        }
+        qs.commit("did:test", graph.clone(), 1).await.unwrap();
+        qs.reset_arrangement(&graph).await;
+
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            "SELECT (MIN(?s) AS ?m) WHERE { ?p <score> ?s }",
+        ).await.unwrap();
+        assert_eq!(quads.len(), 1);
+        let val = if let QuadObject::Text(t) = &quads[0].object { t.clone() } else { "?".into() };
+        // Lexicographic min would give "10" (since "1" < "9"), numeric gives "9"
+        assert_eq!(val, "9", "numeric MIN(9,10,100) = 9, not lexicographic '10'");
+    }
+
+    // ─── SPARQL UPDATE ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sparql_update_insert_data() {
+        let qs = QuadStore::new(
+            Arc::new(Journal::new()),
+            Arc::new(MemoryBlockStore::new()) as Arc<dyn BlockStore + Send + Sync>,
+        );
+        let graph = KotobaCid::from_bytes(b"update-test-graph");
+        let alice_mb = KotobaCid::from_bytes(b"alice-update").to_multibase();
+
+        // INSERT DATA using SPARQL UPDATE syntax
+        let insert_sparql = format!(
+            r#"INSERT DATA {{ <cid:{alice_mb}> <name> "Alice" . <cid:{alice_mb}> <role> "admin" }}"#
+        );
+        let count = qs.sparql_update(&graph, &insert_sparql).await.unwrap();
+        assert_eq!(count, 2, "INSERT DATA should insert 2 quads");
+
+        // Query back via BGP
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            &format!(r#"SELECT * WHERE {{ <cid:{alice_mb}> <role> ?r }}"#),
+        ).await.unwrap();
+        assert_eq!(quads.len(), 1, "inserted role quad must be queryable");
+        let role = if let QuadObject::Text(t) = &quads[0].object { t.clone() } else { "?".into() };
+        assert_eq!(role, "admin");
+    }
+
+    #[tokio::test]
+    async fn sparql_update_delete_data() {
+        let qs = QuadStore::new(
+            Arc::new(Journal::new()),
+            Arc::new(MemoryBlockStore::new()) as Arc<dyn BlockStore + Send + Sync>,
+        );
+        let graph = KotobaCid::from_bytes(b"update-delete-graph");
+        let alice = KotobaCid::from_bytes(b"alice-del");
+        let alice_mb = alice.to_multibase();
+
+        // Assert first
+        qs.assert(Quad { graph: graph.clone(), subject: alice.clone(),
+            predicate: "role".into(), object: QuadObject::Text("admin".into()) }).await;
+        qs.assert(Quad { graph: graph.clone(), subject: alice.clone(),
+            predicate: "name".into(), object: QuadObject::Text("Alice".into()) }).await;
+
+        // DELETE DATA via SPARQL UPDATE
+        let delete_sparql = format!(
+            r#"DELETE DATA {{ <cid:{alice_mb}> <role> "admin" }}"#
+        );
+        let count = qs.sparql_update(&graph, &delete_sparql).await.unwrap();
+        assert_eq!(count, 1, "DELETE DATA should retract 1 quad");
+
+        // Role quad should be gone; name should remain
+        let role_quads = qs.cold_query_sparql_bgp(
+            &graph,
+            &format!(r#"SELECT * WHERE {{ <cid:{alice_mb}> <role> ?r }}"#),
+        ).await.unwrap();
+        assert!(role_quads.is_empty(), "role quad must be deleted");
+
+        let name_quads = qs.cold_query_sparql_bgp(
+            &graph,
+            &format!(r#"SELECT * WHERE {{ <cid:{alice_mb}> <name> ?n }}"#),
+        ).await.unwrap();
+        assert_eq!(name_quads.len(), 1, "name quad must survive DELETE DATA");
+    }
+
+    #[tokio::test]
+    async fn sparql_update_insert_named_graph() {
+        let qs = QuadStore::new(
+            Arc::new(Journal::new()),
+            Arc::new(MemoryBlockStore::new()) as Arc<dyn BlockStore + Send + Sync>,
+        );
+        let default_graph = KotobaCid::from_bytes(b"ng-default");
+        let named_graph   = KotobaCid::from_bytes(b"ng-named");
+        let subject       = KotobaCid::from_bytes(b"ng-subject");
+        let graph_mb   = named_graph.to_multibase();
+        let subject_mb = subject.to_multibase();
+
+        // INSERT into named graph via GRAPH clause
+        let insert_sparql = format!(
+            r#"INSERT DATA {{ GRAPH <cid:{graph_mb}> {{ <cid:{subject_mb}> <label> "TestNode" }} }}"#
+        );
+        let count = qs.sparql_update(&default_graph, &insert_sparql).await.unwrap();
+        assert_eq!(count, 1, "INSERT into named graph: 1 quad");
+
+        // Query the named graph
+        let quads = qs.cold_query_sparql_bgp(
+            &named_graph,
+            &format!(r#"SELECT * WHERE {{ <cid:{subject_mb}> <label> ?l }}"#),
+        ).await.unwrap();
+        assert_eq!(quads.len(), 1, "quad must be in named graph");
+        let label = if let QuadObject::Text(t) = &quads[0].object { t.clone() } else { "?".into() };
+        assert_eq!(label, "TestNode");
+    }
+
+    #[tokio::test]
+    async fn sparql_update_insert_where_marks_admins() {
+        // INSERT { ?s <verified> "yes" } WHERE { ?s <role> "admin" }
+        // Expect: Alice + Carol each get a <verified> quad
+        let (qs, graph) = setup_sparql_qs().await;
+        let graph_mb = graph.to_multibase();
+        let alice    = KotobaCid::from_bytes(b"alice");
+        let alice_mb = alice.to_multibase();
+
+        let sparql = format!(
+            r#"INSERT {{ ?s <verified> "yes" }} WHERE {{ ?s <role> "admin" }}"#
+        );
+        let count = qs.sparql_update(&graph, &sparql).await.unwrap();
+        assert_eq!(count, 2, "2 admin subjects → 2 inserts");
+
+        // Query: Alice must now have <verified>=yes
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            &format!(r#"SELECT * WHERE {{ <cid:{alice_mb}> <verified> ?v }}"#),
+        ).await.unwrap();
+        assert_eq!(quads.len(), 1, "Alice must have verified quad");
+        assert_eq!(quads[0].object, QuadObject::Text("yes".into()));
+        let _ = graph_mb; // suppress unused warning
+    }
+
+    #[tokio::test]
+    async fn sparql_update_delete_where_removes_by_pattern() {
+        // DELETE { ?s <role> ?r } WHERE { ?s <role> ?r . FILTER(?r = "user") }
+        // Uses hot-only store (no commit/reset) so retract() removes from hot arrangement.
+        let qs = QuadStore::new(
+            Arc::new(Journal::new()),
+            Arc::new(MemoryBlockStore::new()) as Arc<dyn BlockStore + Send + Sync>,
+        );
+        let graph = KotobaCid::from_bytes(b"del-where-graph");
+        let alice = KotobaCid::from_bytes(b"dw-alice");
+        let bob   = KotobaCid::from_bytes(b"dw-bob");
+        let carol = KotobaCid::from_bytes(b"dw-carol");
+        let bob_mb   = bob.to_multibase();
+        let alice_mb = alice.to_multibase();
+
+        // Insert hot-only (no commit → arrangement is the source of truth)
+        for (subj, role) in [(&alice, "admin"), (&bob, "user"), (&carol, "admin")] {
+            qs.assert(Quad { graph: graph.clone(), subject: (*subj).clone(),
+                predicate: "role".into(), object: QuadObject::Text(role.to_string()) }).await;
+        }
+
+        let sparql = r#"DELETE { ?s <role> ?r } WHERE { ?s <role> ?r . FILTER(?r = "user") }"#;
+        let count = qs.sparql_update(&graph, sparql).await.unwrap();
+        assert!(count >= 1, "at least 1 retract for Bob's role");
+
+        // Bob must no longer have a <role> quad (hot arrangement should reflect retract)
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            &format!(r#"SELECT * WHERE {{ <cid:{bob_mb}> <role> ?r }}"#),
+        ).await.unwrap();
+        assert_eq!(quads.len(), 0, "Bob's role must be retracted, got {quads:?}");
+
+        // Alice still has her role (admin was not deleted)
+        let alice_role = qs.cold_query_sparql_bgp(
+            &graph,
+            &format!(r#"SELECT * WHERE {{ <cid:{alice_mb}> <role> ?r }}"#),
+        ).await.unwrap();
+        assert_eq!(alice_role.len(), 1, "Alice's role must survive");
+    }
+
+    // ─── SPARQL CONSTRUCT ─────────────────────────────────────────────────────
+    //
+    // CONSTRUCT substitutes variables from matched quads into template triples.
+    // Variable binding is position-based: ?s → matched.subject, ?o → matched.object.
+    // For unambiguous results, the WHERE clause should have a single triple binding
+    // the same variables as the CONSTRUCT template.
+
+    #[tokio::test]
+    async fn sparql_construct_single_triple_where() {
+        // CONSTRUCT { ?s <label> ?n } WHERE { ?s <role> "admin" }
+        // Each admin quad binds ?s=admin_subject, ?n=object("admin")
+        // Expect: 2 quads with predicate=label and object=Text("admin")
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.sparql_construct(
+            &graph,
+            r#"CONSTRUCT { ?s <label> ?n } WHERE { ?s <role> "admin" }"#,
+        ).await.unwrap();
+        assert_eq!(quads.len(), 2, "2 admin role quads → 2 CONSTRUCT results, got {}", quads.len());
+        assert!(quads.iter().all(|q| q.predicate == "label"), "all must have predicate=label");
+        // object = Text("admin") because role quads have object Text("admin")
+        assert!(quads.iter().all(|q| q.object == QuadObject::Text("admin".into())),
+            "object must be admin");
+    }
+
+    #[tokio::test]
+    async fn sparql_construct_cross_predicate_copy() {
+        // CONSTRUCT { ?s <fullname> ?n } WHERE { ?s <name> ?n }
+        // Expect: 3 quads (copy name → fullname for all subjects)
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.sparql_construct(
+            &graph,
+            r#"CONSTRUCT { ?s <fullname> ?n } WHERE { ?s <name> ?n }"#,
+        ).await.unwrap();
+        assert_eq!(quads.len(), 3, "CONSTRUCT copies name to fullname for all 3 subjects");
+        assert!(quads.iter().all(|q| q.predicate == "fullname"), "predicate must be fullname");
+        let names: Vec<String> = quads.iter()
+            .filter_map(|q| if let QuadObject::Text(t) = &q.object { Some(t.clone()) } else { None })
+            .collect();
+        assert!(names.contains(&"Alice".to_string()));
+        assert!(names.contains(&"Bob".to_string()));
+        assert!(names.contains(&"Carol".to_string()));
+    }
+
+    // ─── SPARQL ASK ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sparql_ask_existing_pattern_returns_true() {
+        let (qs, graph) = setup_sparql_qs().await;
+        let alice    = KotobaCid::from_bytes(b"alice");
+        let alice_mb = alice.to_multibase();
+        let result = qs.sparql_ask(
+            &graph,
+            &format!(r#"ASK {{ <cid:{alice_mb}> <role> "admin" }}"#),
+        ).await.unwrap();
+        assert!(result, "Alice is admin → ASK must return true");
+    }
+
+    #[tokio::test]
+    async fn sparql_ask_missing_pattern_returns_false() {
+        let (qs, graph) = setup_sparql_qs().await;
+        let bob    = KotobaCid::from_bytes(b"bob");
+        let bob_mb = bob.to_multibase();
+        let result = qs.sparql_ask(
+            &graph,
+            &format!(r#"ASK {{ <cid:{bob_mb}> <role> "admin" }}"#),
+        ).await.unwrap();
+        assert!(!result, "Bob is user not admin → ASK must return false");
+    }
+
+    #[tokio::test]
+    async fn sparql_ask_authed_allowed() {
+        let (qs, graph) = setup_sparql_qs().await;
+        let chain = make_real_eddsa_cacao(&graph.to_multibase(), "quad:read");
+        let alice_mb = KotobaCid::from_bytes(b"alice").to_multibase();
+        let result = qs.sparql_ask_authed(
+            &graph,
+            &format!(r#"ASK {{ <cid:{alice_mb}> <role> "admin" }}"#),
+            &chain,
+        ).await;
+        assert!(matches!(result, Ok(true)), "real EdDSA authed ASK must return Ok(true): {result:?}");
+    }
+
+    #[tokio::test]
+    async fn sparql_ask_authed_denied_wrong_graph() {
+        let (qs, graph) = setup_sparql_qs().await;
+        let wrong = KotobaCid::from_bytes(b"wrong-graph");
+        let chain = make_real_eddsa_cacao(&wrong.to_multibase(), "quad:read");
+        let alice_mb = KotobaCid::from_bytes(b"alice").to_multibase();
+        let result = qs.sparql_ask_authed(
+            &graph,
+            &format!(r#"ASK {{ <cid:{alice_mb}> <role> "admin" }}"#),
+            &chain,
+        ).await;
+        assert!(matches!(result, Err(AccessError::Delegation(_))), "wrong graph must be denied");
+    }
+
     // ─── SPARQL FILTER / UNION / OPTIONAL ────────────────────────────────────
 
     #[tokio::test]
@@ -2481,6 +4267,40 @@ mod tests {
             _ => panic!("expected text object"),
         };
         assert_eq!(obj, "Carol");
+    }
+
+    #[tokio::test]
+    async fn sparql_filter_exists_semi_join() {
+        // { ?s <role> ?r FILTER EXISTS { ?s <knows> ?x } }
+        // Only Alice has a <knows> edge (alice knows bob) → only Alice's role quad
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            "SELECT * WHERE { ?s <role> ?r FILTER EXISTS { ?s <knows> ?x } }",
+        ).await.unwrap();
+        assert_eq!(quads.len(), 1, "only Alice has <knows> edge, got {}", quads.len());
+        let obj = match &quads[0].object {
+            QuadObject::Text(t) => t.clone(),
+            _ => panic!("expected text object"),
+        };
+        assert_eq!(obj, "admin", "Alice is admin");
+    }
+
+    #[tokio::test]
+    async fn sparql_filter_not_exists_anti_join() {
+        // { ?s <role> ?r FILTER NOT EXISTS { ?s <knows> ?x } }
+        // Bob and Carol have no <knows> edges → 2 role quads (Bob user, Carol admin)
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            "SELECT * WHERE { ?s <role> ?r FILTER NOT EXISTS { ?s <knows> ?x } }",
+        ).await.unwrap();
+        assert_eq!(quads.len(), 2, "Bob and Carol have no <knows>, got {}", quads.len());
+        let roles: Vec<String> = quads.iter().filter_map(|q| {
+            if let QuadObject::Text(t) = &q.object { Some(t.clone()) } else { None }
+        }).collect();
+        assert!(roles.contains(&"user".to_string()), "Bob (user) must be in result");
+        assert!(roles.contains(&"admin".to_string()), "Carol (admin) must be in result");
     }
 
     #[tokio::test]
@@ -2557,6 +4377,50 @@ mod tests {
         assert!(quads.is_empty(), "bob has no outgoing knows edges");
     }
 
+    // ─── Property path: Alternative / Reverse / ZeroOrOne ────────────────────
+
+    #[tokio::test]
+    async fn sparql_property_path_alternative() {
+        // <cid:alice> (<name>|<role>) ?o → Alice's name and role quads (2 quads)
+        let (qs, graph) = setup_sparql_qs().await;
+        let alice_mb = KotobaCid::from_bytes(b"alice").to_multibase();
+        let sparql = format!("SELECT * WHERE {{ <cid:{alice_mb}> <name>|<role> ?o }}");
+        let quads = qs.cold_query_sparql_bgp(&graph, &sparql).await.unwrap();
+        assert_eq!(quads.len(), 2, "name + role = 2 quads, got {}", quads.len());
+        let vals: Vec<String> = quads.iter().filter_map(|q| {
+            if let QuadObject::Text(t) = &q.object { Some(t.clone()) } else { None }
+        }).collect();
+        assert!(vals.contains(&"Alice".to_string()), "name quad expected");
+        assert!(vals.contains(&"admin".to_string()), "role quad expected");
+    }
+
+    #[tokio::test]
+    async fn sparql_property_path_reverse() {
+        // <cid:bob> ^<knows> ?o → who knows bob? Alice knows bob → Alice's know quad
+        let (qs, graph) = setup_sparql_qs().await;
+        let bob_mb = KotobaCid::from_bytes(b"bob").to_multibase();
+        let sparql = format!("SELECT * WHERE {{ <cid:{bob_mb}> ^<knows> ?o }}");
+        let quads = qs.cold_query_sparql_bgp(&graph, &sparql).await.unwrap();
+        assert_eq!(quads.len(), 1, "only Alice knows bob, got {}", quads.len());
+        assert_eq!(quads[0].predicate, "knows", "predicate = knows");
+        let alice_cid = KotobaCid::from_bytes(b"alice");
+        assert_eq!(quads[0].subject, alice_cid, "subject = alice");
+    }
+
+    #[tokio::test]
+    async fn sparql_property_path_zero_or_one() {
+        // <cid:alice> <knows>? ?o → 0 or 1 hops via knows
+        // alice knows bob → includes alice's own quads + bob's quads (via knows edge)
+        let (qs, graph) = setup_sparql_qs().await;
+        let alice_mb = KotobaCid::from_bytes(b"alice").to_multibase();
+        let sparql = format!("SELECT * WHERE {{ <cid:{alice_mb}> <knows>? ?o }}");
+        let quads = qs.cold_query_sparql_bgp(&graph, &sparql).await.unwrap();
+        // Alice's own quads: name, role, knows (3) + Bob's quads: name, role (2) = up to 5
+        assert!(quads.len() >= 2, "at least alice's quads expected, got {}", quads.len());
+        let predicates: Vec<&str> = quads.iter().map(|q| q.predicate.as_str()).collect();
+        assert!(predicates.contains(&"name"), "name predicate expected");
+    }
+
     // ─── import_commit tests ──────────────────────────────────────────────────
 
     #[tokio::test]
@@ -2628,5 +4492,197 @@ mod tests {
         let imported = qs_b.import_commit(&commit_cid).await.unwrap();
         assert!(!imported, "commit not in store → import returns false");
         assert!(qs_b.head_commit(&graph).await.is_none());
+    }
+
+    // ── MINUS ──────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sparql_minus_excludes_admins() {
+        // SELECT ?s WHERE { ?s <role> ?r MINUS { ?s <role> "admin" } }
+        // → only Bob (role = "user") survives
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            r#"SELECT * WHERE { ?s <role> ?r MINUS { ?s <role> "admin" } }"#,
+        ).await.unwrap();
+        assert_eq!(quads.len(), 1, "only Bob survives MINUS, got {}", quads.len());
+        assert_eq!(
+            quads[0].object,
+            QuadObject::Text("user".to_string()),
+            "surviving quad must have role=user"
+        );
+    }
+
+    #[tokio::test]
+    async fn sparql_minus_full_overlap_returns_empty() {
+        // MINUS right-side is identical to left → all excluded → empty
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            r#"SELECT * WHERE { ?s <role> ?r MINUS { ?s <role> ?r } }"#,
+        ).await.unwrap();
+        assert!(quads.is_empty(), "full overlap MINUS must return empty");
+    }
+
+    // ── VALUES ─────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sparql_values_inline_filter() {
+        // VALUES ?r { "admin" } restricts ?s <role> ?r to admin subjects only
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            r#"SELECT * WHERE { VALUES ?r { "admin" } ?s <role> ?r }"#,
+        ).await.unwrap();
+        assert_eq!(quads.len(), 2, "VALUES filter: 2 admins expected, got {}", quads.len());
+        assert!(
+            quads.iter().all(|q| q.predicate == "role"),
+            "all quads should have predicate role"
+        );
+        assert!(
+            quads.iter().all(|q| q.object == QuadObject::Text("admin".into())),
+            "all quads must have object=admin"
+        );
+    }
+
+    #[tokio::test]
+    async fn sparql_values_multiple_bindings() {
+        // VALUES ?r { "admin" "user" } → all 3 role quads pass through
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            r#"SELECT * WHERE { VALUES ?r { "admin" "user" } ?s <role> ?r }"#,
+        ).await.unwrap();
+        assert_eq!(quads.len(), 3, "VALUES with both values: all 3 roles, got {}", quads.len());
+    }
+
+    #[tokio::test]
+    async fn sparql_values_no_match_returns_empty() {
+        // VALUES with a value not in the store → empty
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            r#"SELECT * WHERE { VALUES ?r { "viewer" } ?s <role> ?r }"#,
+        ).await.unwrap();
+        assert!(quads.is_empty(), "VALUES with unmatched value must return empty");
+    }
+
+    // ── ORDER BY + LIMIT (Slice) ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sparql_orderby_asc_limit() {
+        // SELECT ?s ?r WHERE { ?s <role> ?r } ORDER BY ASC(?r) LIMIT 2
+        // role values: admin (Alice), admin (Carol), user (Bob)
+        // Sorted ASC: admin, admin, user → LIMIT 2 → 2 admin quads
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            "SELECT ?s ?r WHERE { ?s <role> ?r } ORDER BY ASC(?r) LIMIT 2",
+        ).await.unwrap();
+        assert_eq!(quads.len(), 2, "LIMIT 2 must return exactly 2 quads, got {}", quads.len());
+        // Both must be admin
+        assert!(
+            quads.iter().all(|q| q.object == QuadObject::Text("admin".into())),
+            "first 2 (ASC) must be admin quads"
+        );
+    }
+
+    #[tokio::test]
+    async fn sparql_orderby_desc_limit_1() {
+        // DESC → user first; LIMIT 1 → Bob's role quad
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            "SELECT ?s ?r WHERE { ?s <role> ?r } ORDER BY DESC(?r) LIMIT 1",
+        ).await.unwrap();
+        assert_eq!(quads.len(), 1, "LIMIT 1 must return 1 quad");
+        assert_eq!(quads[0].object, QuadObject::Text("user".into()), "DESC first should be user");
+    }
+
+    #[tokio::test]
+    async fn sparql_orderby_offset() {
+        // OFFSET 2 on 3 quads → 1 quad
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            "SELECT ?s ?r WHERE { ?s <role> ?r } ORDER BY ?r OFFSET 2",
+        ).await.unwrap();
+        assert_eq!(quads.len(), 1, "OFFSET 2 of 3 = 1 remaining, got {}", quads.len());
+    }
+
+    // ─── SPARQL DESCRIBE ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sparql_describe_explicit_iri() {
+        // DESCRIBE <cid:alice> → all quads for Alice (name + role = 2 quads)
+        let (qs, graph) = setup_sparql_qs().await;
+        let alice_mb = KotobaCid::from_bytes(b"alice").to_multibase();
+        let quads = qs.sparql_describe(
+            &graph,
+            &format!("DESCRIBE <cid:{alice_mb}>"),
+        ).await.unwrap();
+        // Alice has: name="Alice", role="admin", knows->bob
+        assert_eq!(quads.len(), 3, "DESCRIBE alice: 3 quads expected, got {}", quads.len());
+        assert!(quads.iter().all(|q| q.subject == KotobaCid::from_bytes(b"alice")),
+            "all quads must be about Alice");
+    }
+
+    #[tokio::test]
+    async fn sparql_describe_where_clause() {
+        // DESCRIBE ?s WHERE { ?s <role> "admin" } → Alice + Carol, each with 2 quads
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.sparql_describe(
+            &graph,
+            r#"DESCRIBE ?s WHERE { ?s <role> "admin" }"#,
+        ).await.unwrap();
+        // Alice: name + role + knows = 3; Carol: name + role = 2 → 5 total
+        assert_eq!(quads.len(), 5, "DESCRIBE admins: 5 quads (Alice 3 + Carol 2), got {}", quads.len());
+        // All subjects must be Alice or Carol
+        let alice = KotobaCid::from_bytes(b"alice");
+        let carol = KotobaCid::from_bytes(b"carol");
+        assert!(quads.iter().all(|q| q.subject == alice || q.subject == carol),
+            "subjects must be admin entities");
+    }
+
+    #[tokio::test]
+    async fn sparql_describe_unknown_iri_returns_empty() {
+        // DESCRIBE <cid:nobody> — not in store → empty
+        let (qs, graph) = setup_sparql_qs().await;
+        let nobody_mb = KotobaCid::from_bytes(b"nobody").to_multibase();
+        let quads = qs.sparql_describe(
+            &graph,
+            &format!("DESCRIBE <cid:{nobody_mb}>"),
+        ).await.unwrap();
+        assert!(quads.is_empty(), "DESCRIBE unknown entity must return empty");
+    }
+
+    #[tokio::test]
+    async fn sparql_describe_authed_allowed() {
+        // Real Ed25519 chain → Ok(quads)
+        let (qs, graph) = setup_sparql_qs().await;
+        let chain = make_real_eddsa_cacao(&graph.to_multibase(), "quad:read");
+        let alice_mb = KotobaCid::from_bytes(b"alice").to_multibase();
+        let result = qs.sparql_describe_authed(
+            &graph,
+            &format!("DESCRIBE <cid:{alice_mb}>"),
+            &chain,
+        ).await;
+        assert!(result.is_ok(), "authed DESCRIBE must succeed: {result:?}");
+        assert_eq!(result.unwrap().len(), 3, "Alice: 3 quads (name+role+knows)");
+    }
+
+    #[tokio::test]
+    async fn sparql_describe_authed_denied_wrong_graph() {
+        // Chain for wrong graph → AccessError
+        let (qs, graph) = setup_sparql_qs().await;
+        let wrong = KotobaCid::from_bytes(b"wrong-graph");
+        let chain = make_real_eddsa_cacao(&wrong.to_multibase(), "quad:read");
+        let alice_mb = KotobaCid::from_bytes(b"alice").to_multibase();
+        let result = qs.sparql_describe_authed(
+            &graph,
+            &format!("DESCRIBE <cid:{alice_mb}>"),
+            &chain,
+        ).await;
+        assert!(matches!(result, Err(AccessError::Delegation(_))), "wrong graph must be denied");
     }
 }
