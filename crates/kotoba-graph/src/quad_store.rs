@@ -599,6 +599,176 @@ impl QuadStore {
         Ok(set2.into_iter().filter(|c| set1.contains(&c.0)).collect())
     }
 
+    // ── SPARQL BGP → cold-path router ────────────────────────────────────────
+
+    /// Route a SPARQL SELECT BGP to the optimal cold-path index.
+    ///
+    /// Supported single-triple patterns (WHERE clause):
+    /// - Bound subject IRI `cid:{multibase}` → EAVT (`get_entity_quads_cold`)
+    /// - Bound predicate + literal object → AVET (`lookup_subject_by_po_cold`)
+    /// - Bound predicate only → AEVT (`quads_by_predicate_prefix_cold`)
+    /// - Bound object IRI `cid:{multibase}` → VAET (`reverse_lookup_cold`)
+    ///
+    /// Two-triple patterns where both share `?s` + each has bound pred+literal:
+    /// → join (`join_by_two_predicates_cold`)
+    ///
+    /// Object IRIs that start with `cid:` are decoded via `KotobaCid::from_multibase`.
+    /// Returns synthetic `Quad` values for AVET/VAET results (pred and object known).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let quads = qs.cold_query_sparql_bgp(
+    ///     &graph,
+    ///     r#"SELECT * WHERE { ?s <role> "admin" }"#,
+    /// ).await?;
+    /// ```
+    pub async fn cold_query_sparql_bgp(
+        &self,
+        graph_cid: &KotobaCid,
+        sparql:    &str,
+    ) -> anyhow::Result<Vec<Quad>> {
+        use spargebra::term::{NamedNodePattern, TermPattern};
+
+        // Use a base IRI so relative IRIs like <role> resolve to "k:role".
+        // The routing helpers strip this base prefix when matching predicate strings.
+        let query = spargebra::SparqlParser::new()
+            .with_base_iri(SPARQL_BGP_BASE_IRI)
+            .map_err(|e| anyhow::anyhow!("base IRI error: {e}"))?
+            .parse_query(sparql)
+            .map_err(|e| anyhow::anyhow!("SPARQL parse error: {e}"))?;
+
+        let pattern = match query {
+            spargebra::Query::Select { pattern, .. } => pattern,
+            _ => anyhow::bail!("only SELECT queries are supported"),
+        };
+
+        // Unwrap Project / Distinct wrappers to reach the BGP.
+        let inner = unwrap_bgp_pattern(pattern);
+
+        // Collect triple patterns from the BGP.
+        let triples = collect_triple_patterns(&inner)
+            .ok_or_else(|| anyhow::anyhow!("unsupported SPARQL pattern; only plain BGP is supported"))?;
+
+        anyhow::ensure!(!triples.is_empty(), "SPARQL WHERE clause has no triple patterns");
+
+        // ── Single-triple routing ─────────────────────────────────────────────
+        if triples.len() == 1 {
+            let tp = &triples[0];
+            // Bound subject (named node)?
+            if let TermPattern::NamedNode(nn) = &tp.subject {
+                let iri = nn.as_str();
+                let subj = parse_cid_iri(iri)
+                    .ok_or_else(|| anyhow::anyhow!("subject IRI is not a valid cid: URI: {iri}"))?;
+                return self.get_entity_quads_cold(graph_cid, &subj).await;
+            }
+
+            // Bound predicate?
+            if let NamedNodePattern::NamedNode(pred_nn) = &tp.predicate {
+                let pred = strip_bgp_base(pred_nn.as_str()).to_string();
+
+                // Bound object (literal or named node)?
+                match &tp.object {
+                    TermPattern::Literal(lit) => {
+                        // AVET: pred + literal
+                        let obj_key = lit.value().to_string();
+                        let subjects = self.lookup_subject_by_po_cold(graph_cid, &pred, &obj_key).await?;
+                        return Ok(subjects.into_iter().map(|s| Quad {
+                            graph:    graph_cid.clone(),
+                            subject:  s,
+                            predicate: pred.clone(),
+                            object:   kotoba_kqe::quad::QuadObject::Text(obj_key.clone()),
+                        }).collect());
+                    }
+                    TermPattern::NamedNode(obj_nn) => {
+                        let obj_iri = strip_bgp_base(obj_nn.as_str());
+                        if let Some(obj_cid) = parse_cid_iri(obj_iri) {
+                            // AVET: pred + cid-object (lookup by object key = multibase)
+                            let obj_mb = obj_cid.to_multibase();
+                            let subjects = self.lookup_subject_by_po_cold(graph_cid, &pred, &obj_mb).await?;
+                            return Ok(subjects.into_iter().map(|s| Quad {
+                                graph:    graph_cid.clone(),
+                                subject:  s,
+                                predicate: pred.clone(),
+                                object:   kotoba_kqe::quad::QuadObject::Cid(obj_cid.clone()),
+                            }).collect());
+                        }
+                        // Unrecognised IRI: fall through to AEVT (pred-only scan)
+                    }
+                    TermPattern::Variable(_) => { /* fall through to AEVT */ }
+                    _ => { /* blank node objects: fall through */ }
+                }
+
+                // AEVT: only predicate bound
+                return self.quads_by_predicate_prefix_cold(graph_cid, &pred).await;
+            }
+
+            // Bound object CID only (no subject, no pred)?
+            if let TermPattern::NamedNode(obj_nn) = &tp.object {
+                if let Some(obj_cid) = parse_cid_iri(obj_nn.as_str()) {
+                    // VAET
+                    let pairs = self.reverse_lookup_cold(graph_cid, &obj_cid).await?;
+                    return Ok(pairs.into_iter().map(|(pred, subj)| Quad {
+                        graph:    graph_cid.clone(),
+                        subject:  subj,
+                        predicate: pred,
+                        object:   kotoba_kqe::quad::QuadObject::Cid(obj_cid.clone()),
+                    }).collect());
+                }
+            }
+
+            anyhow::bail!("SPARQL BGP pattern is too unconstrained; bind at least subject, predicate, or predicate+object");
+        }
+
+        // ── Two-triple join routing ───────────────────────────────────────────
+        if triples.len() == 2 {
+            // Both triples must share a common subject variable and have
+            // bound predicate + literal object.
+            if let (
+                Some((pred1, val1, svar1)),
+                Some((pred2, val2, svar2)),
+            ) = (
+                extract_pred_literal_triple(&triples[0]),
+                extract_pred_literal_triple(&triples[1]),
+            ) {
+                if svar1 == svar2 {
+                    let subjects = self
+                        .join_by_two_predicates_cold(graph_cid, &pred1, &val1, &pred2, &val2)
+                        .await?;
+                    // Synthesise two quads per subject (one per matched pred-val).
+                    let mut out = Vec::with_capacity(subjects.len() * 2);
+                    for s in subjects {
+                        out.push(Quad {
+                            graph: graph_cid.clone(), subject: s.clone(),
+                            predicate: pred1.clone(),
+                            object: kotoba_kqe::quad::QuadObject::Text(val1.clone()),
+                        });
+                        out.push(Quad {
+                            graph: graph_cid.clone(), subject: s,
+                            predicate: pred2.clone(),
+                            object: kotoba_kqe::quad::QuadObject::Text(val2.clone()),
+                        });
+                    }
+                    return Ok(out);
+                }
+            }
+        }
+
+        anyhow::bail!("unsupported SPARQL BGP: only 1-triple or 2-triple join patterns are supported")
+    }
+
+    /// CACAO-gated SPARQL BGP cold query.
+    pub async fn cold_query_sparql_bgp_authed(
+        &self,
+        graph_cid: &KotobaCid,
+        sparql:    &str,
+        chain:     &DelegationChain,
+    ) -> Result<Vec<Quad>, AccessError> {
+        chain.verify(&graph_cid.to_multibase(), "quad:read")?;
+        self.cold_query_sparql_bgp(graph_cid, sparql).await
+            .map_err(|e| AccessError::Internal(e.to_string()))
+    }
+
     // ── CACAO-authed cold-path reads ──────────────────────────────────────────
 
     /// CACAO-gated EAVT cold read.  Verifies `quad:read` capability on `graph_cid`
@@ -926,6 +1096,69 @@ impl QuadStore {
     pub async fn commit_dag_size(&self) -> usize {
         self.commit_dag.read().await.commit_count()
     }
+}
+
+// ── SPARQL BGP helper functions ───────────────────────────────────────────────
+
+/// Base IRI used to resolve relative IRIs in `cold_query_sparql_bgp`.
+/// Relative predicates like `<role>` resolve to `k:role`, which is then
+/// stripped back to `"role"` by `strip_bgp_base`.
+const SPARQL_BGP_BASE_IRI: &str = "k:";
+
+/// Strip the `SPARQL_BGP_BASE_IRI` prefix if present; return the local name.
+fn strip_bgp_base(iri: &str) -> &str {
+    iri.strip_prefix(SPARQL_BGP_BASE_IRI).unwrap_or(iri)
+}
+
+/// Unwrap Project / Distinct / Reduced wrappers to expose the inner BGP pattern.
+fn unwrap_bgp_pattern(pattern: spargebra::algebra::GraphPattern) -> spargebra::algebra::GraphPattern {
+    use spargebra::algebra::GraphPattern;
+    match pattern {
+        GraphPattern::Project { inner, .. }  => unwrap_bgp_pattern(*inner),
+        GraphPattern::Distinct { inner }     => unwrap_bgp_pattern(*inner),
+        GraphPattern::Reduced  { inner }     => unwrap_bgp_pattern(*inner),
+        other => other,
+    }
+}
+
+/// Collect triple patterns from a BGP node; returns `None` if non-BGP patterns are present.
+fn collect_triple_patterns(
+    pattern: &spargebra::algebra::GraphPattern,
+) -> Option<Vec<spargebra::term::TriplePattern>> {
+    use spargebra::algebra::GraphPattern;
+    match pattern {
+        GraphPattern::Bgp { patterns } => Some(patterns.clone()),
+        GraphPattern::Filter { inner, .. } => collect_triple_patterns(inner),
+        _ => None,
+    }
+}
+
+/// Parse a `cid:{multibase}` IRI into a `KotobaCid`.
+///
+/// Accepts bare multibase strings (no scheme) for convenience.
+fn parse_cid_iri(iri: &str) -> Option<KotobaCid> {
+    let mb = iri.strip_prefix("cid:").unwrap_or(iri);
+    KotobaCid::from_multibase(mb)
+}
+
+/// If `tp` is `?svar <pred> "literal"`, return `(pred, literal, svar_name)`.
+fn extract_pred_literal_triple(
+    tp: &spargebra::term::TriplePattern,
+) -> Option<(String, String, String)> {
+    use spargebra::term::{NamedNodePattern, TermPattern};
+    let svar = match &tp.subject {
+        TermPattern::Variable(v) => v.as_str().to_string(),
+        _ => return None,
+    };
+    let pred = match &tp.predicate {
+        NamedNodePattern::NamedNode(nn) => strip_bgp_base(nn.as_str()).to_string(),
+        _ => return None,
+    };
+    let val = match &tp.object {
+        TermPattern::Literal(lit) => lit.value().to_string(),
+        _ => return None,
+    };
+    Some((pred, val, svar))
 }
 
 #[cfg(test)]
@@ -1490,5 +1723,135 @@ mod tests {
         let result = qs.assert_batch_authed(quads, &chain).await;
         assert!(matches!(result, Err(AccessError::Delegation(_))),
             "cross-graph batch with single-graph chain must be rejected");
+    }
+
+    // ── SPARQL BGP cold-path routing tests ────────────────────────────────────
+
+    async fn setup_sparql_qs() -> (QuadStore, KotobaCid) {
+        let qs    = QuadStore::new(
+            Arc::new(Journal::new()),
+            Arc::new(MemoryBlockStore::new()) as Arc<dyn BlockStore + Send + Sync>,
+        );
+        let graph = KotobaCid::from_bytes(b"sparql-bgp-graph");
+        let alice = KotobaCid::from_bytes(b"alice");
+        let bob   = KotobaCid::from_bytes(b"bob");
+        let carol = KotobaCid::from_bytes(b"carol");
+
+        for (subj, name, role) in [
+            (&alice, "Alice", "admin"),
+            (&bob,   "Bob",   "user"),
+            (&carol, "Carol", "admin"),
+        ] {
+            qs.assert(Quad { graph: graph.clone(), subject: (*subj).clone(),
+                predicate: "name".into(), object: QuadObject::Text(name.to_string()) }).await;
+            qs.assert(Quad { graph: graph.clone(), subject: (*subj).clone(),
+                predicate: "role".into(), object: QuadObject::Text(role.to_string()) }).await;
+        }
+        // alice knows bob (CID reference for VAET)
+        qs.assert(Quad { graph: graph.clone(), subject: alice.clone(),
+            predicate: "knows".into(), object: QuadObject::Cid(bob.clone()) }).await;
+
+        qs.commit("did:test", graph.clone(), 1).await.unwrap();
+        qs.reset_arrangement(&graph).await;
+        (qs, graph)
+    }
+
+    #[tokio::test]
+    async fn sparql_bgp_avet_pred_literal() {
+        // ?s <role> "admin" → AVET → returns Alice and Carol
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            r#"SELECT * WHERE { ?s <role> "admin" }"#,
+        ).await.unwrap();
+        assert_eq!(quads.len(), 2, "two admins expected, got {}", quads.len());
+        let preds: Vec<_> = quads.iter().map(|q| q.predicate.as_str()).collect();
+        assert!(preds.iter().all(|&p| p == "role"), "predicate must be role");
+    }
+
+    #[tokio::test]
+    async fn sparql_bgp_aevt_pred_only() {
+        // ?s <name> ?o → AEVT → returns all 3 name quads
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            "SELECT * WHERE { ?s <name> ?o }",
+        ).await.unwrap();
+        assert_eq!(quads.len(), 3, "three name quads expected");
+        assert!(quads.iter().all(|q| q.predicate == "name"));
+    }
+
+    #[tokio::test]
+    async fn sparql_bgp_eavt_bound_subject() {
+        // <cid:alice> ?p ?o → EAVT → returns alice's quads
+        let (qs, graph) = setup_sparql_qs().await;
+        let alice_mb = KotobaCid::from_bytes(b"alice").to_multibase();
+        let sparql = format!("SELECT * WHERE {{ <cid:{alice_mb}> ?p ?o }}");
+        let quads = qs.cold_query_sparql_bgp(&graph, &sparql).await.unwrap();
+        // alice has: name, role, knows → 3 quads
+        assert_eq!(quads.len(), 3, "alice has 3 quads, got {}", quads.len());
+        assert!(quads.iter().all(|q| q.subject == KotobaCid::from_bytes(b"alice")));
+    }
+
+    #[tokio::test]
+    async fn sparql_bgp_vaet_bound_object_cid() {
+        // ?s ?p <cid:bob> → VAET → alice knows bob
+        let (qs, graph) = setup_sparql_qs().await;
+        let bob_mb = KotobaCid::from_bytes(b"bob").to_multibase();
+        let sparql = format!("SELECT * WHERE {{ ?s ?p <cid:{bob_mb}> }}");
+        let quads = qs.cold_query_sparql_bgp(&graph, &sparql).await.unwrap();
+        assert_eq!(quads.len(), 1, "one subject knows bob");
+        assert_eq!(quads[0].predicate, "knows");
+        assert_eq!(quads[0].subject, KotobaCid::from_bytes(b"alice"));
+    }
+
+    #[tokio::test]
+    async fn sparql_bgp_join_two_predicates() {
+        // ?s <name> "Alice" . ?s <role> "admin" → join → only alice
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            r#"SELECT * WHERE { ?s <name> "Alice" . ?s <role> "admin" }"#,
+        ).await.unwrap();
+        // 2 synthetic quads per matched subject (name + role)
+        assert_eq!(quads.len(), 2, "one subject × 2 quads expected");
+        let preds: std::collections::HashSet<_> = quads.iter().map(|q| q.predicate.as_str()).collect();
+        assert!(preds.contains("name") && preds.contains("role"));
+    }
+
+    #[tokio::test]
+    async fn sparql_bgp_join_no_overlap() {
+        // ?s <name> "Alice" . ?s <role> "user" → no match
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            r#"SELECT * WHERE { ?s <name> "Alice" . ?s <role> "user" }"#,
+        ).await.unwrap();
+        assert!(quads.is_empty(), "Alice is admin not user");
+    }
+
+    #[tokio::test]
+    async fn sparql_bgp_authed_rejected_wrong_capability() {
+        let (qs, graph) = setup_sparql_qs().await;
+        let chain = DelegationChain::new_for_test(&graph.to_multibase(), "quad:write");
+        let result = qs.cold_query_sparql_bgp_authed(
+            &graph,
+            r#"SELECT * WHERE { ?s <role> "admin" }"#,
+            &chain,
+        ).await;
+        assert!(matches!(result, Err(AccessError::Delegation(_))));
+    }
+
+    #[tokio::test]
+    async fn sparql_bgp_authed_rejected_wrong_graph() {
+        let (qs, graph) = setup_sparql_qs().await;
+        let wrong = KotobaCid::from_bytes(b"wrong-graph");
+        let chain = DelegationChain::new_for_test(&wrong.to_multibase(), "quad:read");
+        let result = qs.cold_query_sparql_bgp_authed(
+            &graph,
+            r#"SELECT * WHERE { ?s <role> "admin" }"#,
+            &chain,
+        ).await;
+        assert!(matches!(result, Err(AccessError::Delegation(_))));
     }
 }
