@@ -25,7 +25,7 @@ KOTOBA ≝ Datom[CID/T] × EAVT[KSE Topic] × Pregel[BSP] × Datalog[Δ]
 | kotoba-runtime | WASM Component Model host: WasmExecutor + UdfExecutor + WIT bindings |
 | kotoba-ingest | Gmail OAuth2 poll + RFC 2822 parse + E2E encrypt → QuadStore (ADR-2605252400); **EmailIngestor** now uses `Arc<dyn AgentCrypto>` + `Arc<Vault>` (raw vault_key removed 2026-05-26) |
 | kotoba-server | XRPC / MCP endpoints |
-| kotoba-store | BlockStore implementations: Memory (hot); IrohBlockStore (iroh-blobs 0.30, sole cold tier); BudgetedBlockStore<S> LRU eviction; TieredBlockStore<H,C> hot/cold tiering; **CapturingBlockStore** (pass-through + recorder for CAR bundling); **CarBundleWriter / CarBlockIndex** (CARv1 format: 72B header + blocks + 48B/entry index, 3.8 GiB/s serialize); **KotobasePinClient** (kotobase.gftd.ai XRPC pin client). S3BlockStore + LayeredBlockStore removed 2026-05-27. |
+| kotoba-store | BlockStore implementations: Memory (hot); IrohBlockStore (iroh-blobs 0.30, sole cold tier); BudgetedBlockStore<S> LRU eviction; TieredBlockStore<H,C> hot/cold tiering; **CapturingBlockStore** (pass-through + recorder for CAR bundling); **CarBundleWriter / CarBlockIndex** (CARv1 format: 72B header + blocks + 48B/entry index, 3.8 GiB/s serialize); **IpfsPinClient** (Kubo-compatible HTTP RPC: pin/add, pin/rm, pin/ls — kotoba 自体が IPFS node として自前 pin; 1GB 超の extended pin は kotobase.gftd.ai が担当). S3BlockStore + LayeredBlockStore + KotobasePinClient removed 2026-05-27. |
 | kotoba-store-web | Browser IndexedDB block store (wasm32), AsyncBlockStore trait |
 
 ## 実装順序

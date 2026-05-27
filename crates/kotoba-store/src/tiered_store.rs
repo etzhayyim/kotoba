@@ -9,7 +9,7 @@
 ///
 /// Each node keeps its working set in hot memory while the full dataset is
 /// stored persistently in the iroh cold tier.  Remote durability is handled by
-/// kotobase.gftd.ai via KotobasePinClient (fire-and-forget after put).
+/// IpfsPinClient (fire-and-forget pin to the local IPFS node after put).
 use std::sync::Arc;
 use bytes::Bytes;
 use anyhow::Result;

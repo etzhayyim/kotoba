@@ -3,7 +3,7 @@ name = "kotoba-store"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Kotoba content-addressed block store (memory + iroh/IPFS + tiered + kotobase pin)"
+description = "Kotoba content-addressed block store (memory + iroh/IPFS + tiered + IPFS pin)"
 
 [dependencies]
 kotoba-core.workspace = true
