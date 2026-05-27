@@ -329,6 +329,7 @@ MemoryBlockStore、10K entities × 4 quads (name/role/status/knows)。reset_arra
 
 - CACAO auth overhead <1µs; production EdDSA verify adds ~0.1ms → dominates only sub-ms hot queries
 - **EdDSA CACAO E2E verified (2026-05-27)**: real `SigningKey::from_bytes` + `Signer::sign(siwe_message)` + `DelegationChain::new(cacao).verify()` succeeds; `cold_query_sparql_bgp_authed` and `get_entity_quads_cold_authed` both return correct results with real-sig chains; 5 cacao.rs tests + 2 quad_store.rs tests pass
+- **SPARQL FILTER/UNION/OPTIONAL (2026-05-27)**: `cold_query_sparql_bgp` refactored to recursive `execute_sparql_graph_pattern`; supports `Filter { Not(Equal) }` (≠), `Filter { FunctionCall Contains }`, `Union` (merge-dedup), `LeftJoin` (OPTIONAL, left-outer-join by subject); `eval_filter_expr` handles Not/Or/And/Equal/Greater/Less/Contains/StrStarts; 4 new tests: `filter_not_equal` (Bob only), `filter_contains` (Carol), `union` (all 3), `optional` (name+role); **117 kotoba-graph tests pass**
 - `cold_query_sparql_bgp` bug fix: cold methods require **original graph CID** (not the commit CID returned by `commit()`)
 
 #### Distributed E2E — import_commit() (2026-05-27)

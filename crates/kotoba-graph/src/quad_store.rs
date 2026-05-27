@@ -628,10 +628,7 @@ impl QuadStore {
         graph_cid: &KotobaCid,
         sparql:    &str,
     ) -> anyhow::Result<Vec<Quad>> {
-        use spargebra::term::{NamedNodePattern, TermPattern};
-
         // Use a base IRI so relative IRIs like <role> resolve to "k:role".
-        // The routing helpers strip this base prefix when matching predicate strings.
         let query = spargebra::SparqlParser::new()
             .with_base_iri(SPARQL_BGP_BASE_IRI)
             .map_err(|e| anyhow::anyhow!("base IRI error: {e}"))?
@@ -643,12 +640,83 @@ impl QuadStore {
             _ => anyhow::bail!("only SELECT queries are supported"),
         };
 
-        // Unwrap Project / Distinct wrappers to reach the BGP.
+        // Unwrap Project / Distinct wrappers to expose the inner pattern.
         let inner = unwrap_bgp_pattern(pattern);
+        self.execute_sparql_graph_pattern(graph_cid, &inner).await
+    }
 
-        // Collect triple patterns from the BGP.
-        let triples = collect_triple_patterns(&inner)
-            .ok_or_else(|| anyhow::anyhow!("unsupported SPARQL pattern; only plain BGP is supported"))?;
+    /// Recursive SPARQL pattern executor.
+    ///
+    /// Handles: BGP, Filter, Union, LeftJoin (OPTIONAL).
+    /// Multi-triple BGPs are dispatched to the 4-index cold-path router.
+    async fn execute_sparql_graph_pattern(
+        &self,
+        graph_cid: &KotobaCid,
+        pattern:   &spargebra::algebra::GraphPattern,
+    ) -> anyhow::Result<Vec<Quad>> {
+        use spargebra::algebra::GraphPattern;
+
+        match pattern {
+            // ── Plain BGP ───────────────────────────────────────────────────────
+            GraphPattern::Bgp { patterns: triples } => {
+                self.route_bgp_triples(graph_cid, triples).await
+            }
+
+            // ── FILTER { inner WHERE expr } ─────────────────────────────────────
+            // Execute the inner pattern, then apply the filter expression.
+            GraphPattern::Filter { inner, expr } => {
+                let quads = Box::pin(self.execute_sparql_graph_pattern(graph_cid, inner)).await?;
+                Ok(quads.into_iter().filter(|q| eval_filter_expr(expr, q)).collect())
+            }
+
+            // ── UNION ────────────────────────────────────────────────────────────
+            // Execute both sides and merge, deduplicating by (subject, predicate, object).
+            GraphPattern::Union { left, right } => {
+                let mut results = Box::pin(self.execute_sparql_graph_pattern(graph_cid, left)).await?;
+                let right_quads = Box::pin(self.execute_sparql_graph_pattern(graph_cid, right)).await?;
+                for q in right_quads {
+                    if !results.iter().any(|r| quad_eq(r, &q)) {
+                        results.push(q);
+                    }
+                }
+                Ok(results)
+            }
+
+            // ── OPTIONAL (LeftJoin) ──────────────────────────────────────────────
+            // Return all left-side quads; augment with right-side quads whose subject
+            // already appears on the left.  Right quads subject to a FILTER expression
+            // (the `expression` field of LeftJoin) are additionally checked.
+            GraphPattern::LeftJoin { left, right, expression } => {
+                let left_quads  = Box::pin(self.execute_sparql_graph_pattern(graph_cid, left)).await?;
+                let right_quads = Box::pin(self.execute_sparql_graph_pattern(graph_cid, right)).await?;
+                let left_subjects: std::collections::HashSet<String> =
+                    left_quads.iter().map(|q| q.subject.to_multibase()).collect();
+                let mut results = left_quads;
+                for q in right_quads {
+                    if left_subjects.contains(&q.subject.to_multibase()) {
+                        let passes_expr = expression.as_ref().map_or(true, |e| eval_filter_expr(e, &q));
+                        if passes_expr && !results.iter().any(|r| quad_eq(r, &q)) {
+                            results.push(q);
+                        }
+                    }
+                }
+                Ok(results)
+            }
+
+            other => anyhow::bail!(
+                "unsupported SPARQL pattern type: {}",
+                sparql_pattern_name(other)
+            ),
+        }
+    }
+
+    /// Route a flat list of BGP triple patterns to the optimal cold-path index.
+    async fn route_bgp_triples(
+        &self,
+        graph_cid: &KotobaCid,
+        triples:   &[spargebra::term::TriplePattern],
+    ) -> anyhow::Result<Vec<Quad>> {
+        use spargebra::term::{NamedNodePattern, TermPattern};
 
         anyhow::ensure!(!triples.is_empty(), "SPARQL WHERE clause has no triple patterns");
 
@@ -683,7 +751,7 @@ impl QuadStore {
                     TermPattern::NamedNode(obj_nn) => {
                         let obj_iri = strip_bgp_base(obj_nn.as_str());
                         if let Some(obj_cid) = parse_cid_iri(obj_iri) {
-                            // AVET: pred + cid-object (lookup by object key = multibase)
+                            // AVET: pred + cid-object
                             let obj_mb = obj_cid.to_multibase();
                             let subjects = self.lookup_subject_by_po_cold(graph_cid, &pred, &obj_mb).await?;
                             return Ok(subjects.into_iter().map(|s| Quad {
@@ -693,7 +761,7 @@ impl QuadStore {
                                 object:   kotoba_kqe::quad::QuadObject::Cid(obj_cid.clone()),
                             }).collect());
                         }
-                        // Unrecognised IRI: fall through to AEVT (pred-only scan)
+                        // Unrecognised IRI: fall through to AEVT
                     }
                     TermPattern::Variable(_) => { /* fall through to AEVT */ }
                     _ => { /* blank node objects: fall through */ }
@@ -703,7 +771,7 @@ impl QuadStore {
                 return self.quads_by_predicate_prefix_cold(graph_cid, &pred).await;
             }
 
-            // Bound object CID only (no subject, no pred)?
+            // Bound object CID only?
             if let TermPattern::NamedNode(obj_nn) = &tp.object {
                 if let Some(obj_cid) = parse_cid_iri(obj_nn.as_str()) {
                     // VAET
@@ -722,8 +790,6 @@ impl QuadStore {
 
         // ── Two-triple join routing ───────────────────────────────────────────
         if triples.len() == 2 {
-            // Both triples must share a common subject variable and have
-            // bound predicate + literal object.
             if let (
                 Some((pred1, val1, svar1)),
                 Some((pred2, val2, svar2)),
@@ -735,7 +801,6 @@ impl QuadStore {
                     let subjects = self
                         .join_by_two_predicates_cold(graph_cid, &pred1, &val1, &pred2, &val2)
                         .await?;
-                    // Synthesise two quads per subject (one per matched pred-val).
                     let mut out = Vec::with_capacity(subjects.len() * 2);
                     for s in subjects {
                         out.push(Quad {
@@ -1158,6 +1223,121 @@ fn collect_triple_patterns(
 fn parse_cid_iri(iri: &str) -> Option<KotobaCid> {
     let mb = iri.strip_prefix("cid:").unwrap_or(iri);
     KotobaCid::from_multibase(mb)
+}
+
+/// Structural equality check on two quads (ignores graph field — same graph assumed).
+fn quad_eq(a: &Quad, b: &Quad) -> bool {
+    a.subject == b.subject
+        && a.predicate == b.predicate
+        && match (&a.object, &b.object) {
+            (kotoba_kqe::quad::QuadObject::Text(at), kotoba_kqe::quad::QuadObject::Text(bt)) => at == bt,
+            (kotoba_kqe::quad::QuadObject::Cid(ac),  kotoba_kqe::quad::QuadObject::Cid(bc))  => ac == bc,
+            _ => false,
+        }
+}
+
+/// Evaluate a SPARQL FILTER expression against a single Quad.
+///
+/// The expression operates on the quad's `object` field as the bound variable value.
+/// Supported expression types:
+///   - `Not(expr)`                        → `!eval(expr, quad)`
+///   - `Equal(Variable(_), Literal(v))`   → `quad.object.as_text() == v`
+///   - `NotEqual(...)`                    → `quad.object.as_text() != v`
+///   - `Or(a, b)`                         → `eval(a) || eval(b)`
+///   - `And(a, b)`                        → `eval(a) && eval(b)`
+///   - `FunctionCall(Contains, [_, lit])` → `quad.object.as_text().contains(v)`
+///   - `Exists` / other                   → `true` (pass through)
+fn eval_filter_expr(expr: &spargebra::algebra::Expression, quad: &Quad) -> bool {
+    use spargebra::algebra::Expression;
+    use spargebra::algebra::Function;
+
+    let obj_text = match &quad.object {
+        kotoba_kqe::quad::QuadObject::Text(t) => Some(t.as_str()),
+        _ => None,
+    };
+
+    match expr {
+        Expression::Not(inner) => !eval_filter_expr(inner, quad),
+        Expression::Or(a, b)   => eval_filter_expr(a, quad) || eval_filter_expr(b, quad),
+        Expression::And(a, b)  => eval_filter_expr(a, quad) && eval_filter_expr(b, quad),
+
+        Expression::Equal(left, right) => {
+            extract_literal_from_expr(left, right)
+                .or_else(|| extract_literal_from_expr(right, left))
+                .map_or(true, |v| obj_text.map_or(false, |t| t == v.as_str()))
+        }
+        Expression::Greater(left, right) => {
+            if let (Some(obj), Some(v)) = (
+                obj_text,
+                extract_literal_from_expr(left, right).or_else(|| extract_literal_from_expr(right, left)),
+            ) {
+                obj > v.as_str()
+            } else { true }
+        }
+        Expression::Less(left, right) => {
+            if let (Some(obj), Some(v)) = (
+                obj_text,
+                extract_literal_from_expr(left, right).or_else(|| extract_literal_from_expr(right, left)),
+            ) {
+                obj < v.as_str()
+            } else { true }
+        }
+
+        Expression::FunctionCall(Function::Contains, args) if args.len() == 2 => {
+            let substring = match &args[1] {
+                Expression::Literal(lit) => Some(lit.value().to_string()),
+                _ => None,
+            };
+            substring.map_or(true, |v| obj_text.map_or(false, |t| t.contains(v.as_str())))
+        }
+        Expression::FunctionCall(Function::StrStarts, args) if args.len() == 2 => {
+            let prefix = match &args[1] {
+                Expression::Literal(lit) => Some(lit.value().to_string()),
+                _ => None,
+            };
+            prefix.map_or(true, |v| obj_text.map_or(false, |t| t.starts_with(v.as_str())))
+        }
+
+        // Unknown / unsupported expressions: pass-through (don't discard results)
+        _ => true,
+    }
+}
+
+/// Extract a literal string from `Equal(Variable(_), Literal(v))` or `Equal(Literal(v), Variable(_))`.
+fn extract_literal_from_expr(
+    var_side: &spargebra::algebra::Expression,
+    lit_side: &spargebra::algebra::Expression,
+) -> Option<String> {
+    use spargebra::algebra::Expression;
+    if matches!(var_side, Expression::Variable(_)) {
+        if let Expression::Literal(lit) = lit_side {
+            return Some(lit.value().to_string());
+        }
+    }
+    None
+}
+
+/// Return a human-readable name for a GraphPattern variant (for error messages).
+fn sparql_pattern_name(pattern: &spargebra::algebra::GraphPattern) -> &'static str {
+    use spargebra::algebra::GraphPattern;
+    match pattern {
+        GraphPattern::Bgp { .. }       => "BGP",
+        GraphPattern::Join { .. }      => "Join",
+        GraphPattern::LeftJoin { .. }  => "LeftJoin",
+        GraphPattern::Filter { .. }    => "Filter",
+        GraphPattern::Union { .. }     => "Union",
+        GraphPattern::Graph { .. }     => "Graph",
+        GraphPattern::Extend { .. }    => "Extend",
+        GraphPattern::Minus { .. }     => "Minus",
+        GraphPattern::Values { .. }    => "Values",
+        GraphPattern::OrderBy { .. }   => "OrderBy",
+        GraphPattern::Project { .. }   => "Project",
+        GraphPattern::Distinct { .. }  => "Distinct",
+        GraphPattern::Reduced { .. }   => "Reduced",
+        GraphPattern::Slice { .. }     => "Slice",
+        GraphPattern::Group { .. }     => "Group",
+        _ => "Unknown",
+    }
 }
 
 /// If `tp` is `?svar <pred> "literal"`, return `(pred, literal, svar_name)`.
@@ -1941,6 +2121,69 @@ mod tests {
         let quads = result.unwrap();
         // Alice has name + role + knows = 3 quads
         assert!(!quads.is_empty(), "Alice's quads must be returned");
+    }
+
+    // ─── SPARQL FILTER / UNION / OPTIONAL ────────────────────────────────────
+
+    #[tokio::test]
+    async fn sparql_bgp_filter_not_equal() {
+        // { ?s <role> ?r FILTER(?r != "admin") } → only Bob (role=user)
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            r#"SELECT * WHERE { ?s <role> ?r FILTER(?r != "admin") }"#,
+        ).await.unwrap();
+        assert_eq!(quads.len(), 1, "only Bob expected, got {}", quads.len());
+        let obj = match &quads[0].object {
+            QuadObject::Text(t) => t.clone(),
+            _ => panic!("expected text object"),
+        };
+        assert_eq!(obj, "user");
+    }
+
+    #[tokio::test]
+    async fn sparql_bgp_filter_contains() {
+        // { ?s <name> ?n FILTER(contains(?n, "ol")) } → only Carol
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            r#"SELECT * WHERE { ?s <name> ?n FILTER(contains(?n, "ol")) }"#,
+        ).await.unwrap();
+        assert_eq!(quads.len(), 1, "only Carol expected, got {}", quads.len());
+        let obj = match &quads[0].object {
+            QuadObject::Text(t) => t.clone(),
+            _ => panic!("expected text object"),
+        };
+        assert_eq!(obj, "Carol");
+    }
+
+    #[tokio::test]
+    async fn sparql_bgp_union() {
+        // { { ?s <role> "admin" } UNION { ?s <role> "user" } } → Alice + Carol + Bob (3 quads)
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            r#"SELECT * WHERE { { ?s <role> "admin" } UNION { ?s <role> "user" } }"#,
+        ).await.unwrap();
+        assert_eq!(quads.len(), 3, "all three role quads expected, got {}", quads.len());
+        let values: std::collections::HashSet<String> = quads.iter().filter_map(|q| {
+            if let QuadObject::Text(t) = &q.object { Some(t.clone()) } else { None }
+        }).collect();
+        assert!(values.contains("admin") && values.contains("user"));
+    }
+
+    #[tokio::test]
+    async fn sparql_bgp_optional() {
+        // { ?s <name> ?n OPTIONAL { ?s <role> ?r } } → name quads for all 3 + role quads for all 3
+        let (qs, graph) = setup_sparql_qs().await;
+        let quads = qs.cold_query_sparql_bgp(
+            &graph,
+            r#"SELECT * WHERE { ?s <name> ?n OPTIONAL { ?s <role> ?r } }"#,
+        ).await.unwrap();
+        // 3 name quads (mandatory) + 3 role quads (optional, all subjects have roles)
+        assert_eq!(quads.len(), 6, "3 name + 3 role quads expected, got {}", quads.len());
+        let preds: std::collections::HashSet<&str> = quads.iter().map(|q| q.predicate.as_str()).collect();
+        assert!(preds.contains("name") && preds.contains("role"));
     }
 
     // ─── import_commit tests ──────────────────────────────────────────────────
