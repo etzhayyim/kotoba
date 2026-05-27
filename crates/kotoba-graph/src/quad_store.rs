@@ -350,6 +350,167 @@ impl QuadStore {
         Ok(quads)
     }
 
+    /// Cold-path AEVT scan: fetch quads by predicate prefix from the committed ProllyTree.
+    pub async fn quads_by_predicate_prefix_cold(
+        &self,
+        graph_cid:        &KotobaCid,
+        predicate_prefix: &str,
+    ) -> anyhow::Result<Vec<Quad>> {
+        // ── Hot path ──────────────────────────────────────────────────────────
+        {
+            if let Some(arr) = self.arrangements.get(&graph_cid.to_multibase()) {
+                if !arr.is_empty() {
+                    return Ok(arr.quads_with_predicate_prefix(graph_cid, predicate_prefix));
+                }
+            }
+        }
+
+        // ── Cold path: AEVT ProllyTree scan ───────────────────────────────────
+        let head = self.commit_dag.read().await.head(graph_cid).cloned();
+        let Some(commit) = head else { return Ok(vec![]); };
+
+        let root_aevt = match commit.index_roots.get("aevt") {
+            Some(r) => r.clone(),
+            None    => return Ok(vec![]), // pre-index-roots commit
+        };
+
+        let bs         = Arc::clone(&self.block_store);
+        let prefix_vec = predicate_prefix.as_bytes().to_vec();
+        let entries    = tokio::task::spawn_blocking(move || {
+            ProllyTree::scan_prefix(&root_aevt, &prefix_vec, &*bs)
+        }).await
+          .map_err(|e| anyhow::anyhow!("spawn_blocking panic: {e}"))??;
+
+        // AEVT key = predicate_bytes || subject_bytes[36]; val = object JSON
+        const CID_LEN: usize = 36;
+        let mut quads = Vec::new();
+        for (key, val) in entries {
+            if key.len() <= CID_LEN { continue; }
+            let predicate = match std::str::from_utf8(&key[..key.len() - CID_LEN]) {
+                Ok(p)  => p.to_string(),
+                Err(_) => continue,
+            };
+            let subj_arr: [u8; 36] = match key[key.len() - CID_LEN..].try_into() {
+                Ok(b)  => b,
+                Err(_) => continue,
+            };
+            let object: kotoba_kqe::quad::QuadObject =
+                serde_json::from_slice(&val).unwrap_or(kotoba_kqe::quad::QuadObject::Text(String::new()));
+            quads.push(Quad {
+                graph:    graph_cid.clone(),
+                subject:  KotobaCid(subj_arr),
+                predicate,
+                object,
+            });
+        }
+        Ok(quads)
+    }
+
+    /// Cold-path AVET scan: resolve subjects by predicate + object_key from the committed ProllyTree.
+    pub async fn lookup_subject_by_po_cold(
+        &self,
+        graph_cid:  &KotobaCid,
+        predicate:  &str,
+        object_key: &str,
+    ) -> anyhow::Result<Vec<KotobaCid>> {
+        // ── Hot path ──────────────────────────────────────────────────────────
+        {
+            if let Some(arr) = self.arrangements.get(&graph_cid.to_multibase()) {
+                if !arr.is_empty() {
+                    return Ok(arr.get_subjects_by_predicate_object(predicate, object_key));
+                }
+            }
+        }
+
+        // ── Cold path: AVET ProllyTree scan ───────────────────────────────────
+        let head = self.commit_dag.read().await.head(graph_cid).cloned();
+        let Some(commit) = head else { return Ok(vec![]); };
+
+        let root_avet = match commit.index_roots.get("avet") {
+            Some(r) => r.clone(),
+            None    => return Ok(vec![]),
+        };
+
+        let bs = Arc::clone(&self.block_store);
+        let mut prefix_vec = predicate.as_bytes().to_vec();
+        prefix_vec.extend_from_slice(object_key.as_bytes());
+
+        let entries = tokio::task::spawn_blocking(move || {
+            ProllyTree::scan_prefix(&root_avet, &prefix_vec, &*bs)
+        }).await
+          .map_err(|e| anyhow::anyhow!("spawn_blocking panic: {e}"))??;
+
+        // AVET val = subject_bytes[36]
+        const CID_LEN: usize = 36;
+        let mut subjects = Vec::new();
+        for (_key, val) in entries {
+            if val.len() < CID_LEN { continue; }
+            let subj_arr: [u8; 36] = match val[..CID_LEN].try_into() {
+                Ok(b)  => b,
+                Err(_) => continue,
+            };
+            subjects.push(KotobaCid(subj_arr));
+        }
+        Ok(subjects)
+    }
+
+    /// Cold-path VAET scan: resolve (predicate, subject) pairs for a given object CID.
+    pub async fn reverse_lookup_cold(
+        &self,
+        graph_cid:  &KotobaCid,
+        object_cid: &KotobaCid,
+    ) -> anyhow::Result<Vec<(String, KotobaCid)>> {
+        // ── Hot path ──────────────────────────────────────────────────────────
+        {
+            if let Some(arr) = self.arrangements.get(&graph_cid.to_multibase()) {
+                if !arr.is_empty() {
+                    let results = arr.vaet_entries()
+                        .into_iter()
+                        .filter(|(ocid, _, _)| ocid == object_cid)
+                        .flat_map(|(_, pred, subjects)| {
+                            subjects.into_iter().map(move |s| (pred.clone(), s))
+                        })
+                        .collect();
+                    return Ok(results);
+                }
+            }
+        }
+
+        // ── Cold path: VAET ProllyTree scan ───────────────────────────────────
+        let head = self.commit_dag.read().await.head(graph_cid).cloned();
+        let Some(commit) = head else { return Ok(vec![]); };
+
+        let root_vaet = match commit.index_roots.get("vaet") {
+            Some(r) => r.clone(),
+            None    => return Ok(vec![]),
+        };
+
+        let bs         = Arc::clone(&self.block_store);
+        let prefix_vec = object_cid.0.to_vec();
+
+        let entries = tokio::task::spawn_blocking(move || {
+            ProllyTree::scan_prefix(&root_vaet, &prefix_vec, &*bs)
+        }).await
+          .map_err(|e| anyhow::anyhow!("spawn_blocking panic: {e}"))??;
+
+        // VAET key = object_cid_bytes[36] || predicate_bytes; val = subject_bytes[36]
+        const CID_LEN: usize = 36;
+        let mut results = Vec::new();
+        for (key, val) in entries {
+            if key.len() <= CID_LEN || val.len() < CID_LEN { continue; }
+            let predicate = match std::str::from_utf8(&key[CID_LEN..]) {
+                Ok(p)  => p.to_string(),
+                Err(_) => continue,
+            };
+            let subj_arr: [u8; 36] = match val[..CID_LEN].try_into() {
+                Ok(b)  => b,
+                Err(_) => continue,
+            };
+            results.push((predicate, KotobaCid(subj_arr)));
+        }
+        Ok(results)
+    }
+
     /// Clear the in-memory Arrangement for `graph_cid`, reclaiming RAM.
     /// Call after `commit()` in a batch-ingest cycle when working-set > budget.
     pub async fn reset_arrangement(&self, graph_cid: &KotobaCid) {
