@@ -219,7 +219,9 @@ async fn handle_commit(
         return None;
     }
 
-    let seq     = cbor_i64(&body, "seq").unwrap_or(0) as u64;
+    let seq     = cbor_i64(&body, "seq")
+        .and_then(|v| u64::try_from(v).ok())
+        .unwrap_or(0);
     let too_big = cbor_bool(&body, "tooBig").unwrap_or(false);
 
     // Store CAR blocks in BlockStore (skip if tooBig — blocks absent)
@@ -425,7 +427,7 @@ fn cbor_str(v: &Value, key: &str) -> Option<String> {
 
 fn cbor_i64(v: &Value, key: &str) -> Option<i64> {
     match cbor_get(v, key)? {
-        Value::Integer(i) => Some(i128::from(*i) as i64),
+        Value::Integer(i) => i64::try_from(i128::from(*i)).ok(),
         _ => None,
     }
 }
@@ -531,6 +533,49 @@ mod tests {
     #[test]
     fn parse_car_empty_input_returns_empty() {
         assert!(parse_car(&[]).is_empty());
+    }
+
+    #[test]
+    fn cbor_i64_rejects_value_exceeding_i64_max() {
+        use ciborium::value::Value;
+        // u64::MAX as CBOR Integer exceeds i64::MAX — must return None, not silently truncate.
+        // ciborium::value::Integer implements From<u64>.
+        let big = ciborium::value::Integer::from(u64::MAX);
+        let map = Value::Map(vec![
+            (Value::Text("seq".into()), Value::Integer(big)),
+        ]);
+        let result = cbor_i64(&map, "seq");
+        assert!(result.is_none(),
+            "cbor_i64 must return None for values > i64::MAX, got: {result:?}");
+    }
+
+    #[test]
+    fn cbor_i64_accepts_in_range_value() {
+        use ciborium::value::Value;
+        let map = Value::Map(vec![
+            (Value::Text("seq".into()), Value::Integer(42i64.into())),
+        ]);
+        assert_eq!(cbor_i64(&map, "seq"), Some(42i64));
+    }
+
+    #[test]
+    fn negative_seq_from_firehose_is_rejected_not_wrapped_to_huge_u64() {
+        // AT Protocol seq numbers are always non-negative.  A rogue firehose relay
+        // could send seq = -1; the old `as u64` cast wraps -1i64 → u64::MAX,
+        // corrupting the persisted cursor and breaking subsequent restarts.
+        // The fixed path uses `u64::try_from(i64)` which rejects negatives.
+        use ciborium::value::Value;
+        let negative_seq = ciborium::value::Integer::from(-1i64);
+        let map = Value::Map(vec![
+            (Value::Text("seq".into()), Value::Integer(negative_seq)),
+        ]);
+        // cbor_i64 accepts -1 (in i64 range), but u64::try_from(-1i64) rejects it.
+        // The combined pipeline must return 0 (the safe fallback), never u64::MAX.
+        let raw = cbor_i64(&map, "seq");
+        assert_eq!(raw, Some(-1i64), "cbor_i64 should pass through in-range negatives");
+        let seq_u64 = raw.and_then(|v| u64::try_from(v).ok()).unwrap_or(0);
+        assert_eq!(seq_u64, 0,
+            "negative seq must map to 0, not wrap to {}", u64::MAX);
     }
 
     #[test]
