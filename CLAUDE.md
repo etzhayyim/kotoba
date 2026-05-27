@@ -309,6 +309,23 @@ entities × 2 quads = 要素数 (throughput = quad/s)
 - **peak RSS growth**: +856 MB (batch 1)。以降 OS がページ回収し負 (batch 2–10)
 - Phase-2 は 8 GB 上限未達で全 10 バッチ完走
 
+#### loadtest Phase 5 (SPARQL BGP + multi-hop + CACAO overhead, 2026-05-27)
+
+MemoryBlockStore、10K entities × 4 quads (name/role/status/knows)。reset_arrangement 後の cold-path (ProllyTree scan)。
+
+| query | p50_ms | result_n | routing |
+|---|---|---|---|
+| SPARQL pred-only (AEVT) role | 25ms | 10000 | AEVT scan |
+| SPARQL pred+literal (AVET) role=admin | 36ms | 3334 | AVET P+O→S |
+| SPARQL bound-subject (EAVT) | 44ms | 4 | EAVT entity |
+| SPARQL 2-triple join (AVET×AVET) role+status | 72ms | 6668 | AVET intersect |
+| multi_hop_cold 2-hop | 90ms | 12 | BFS ×2 |
+| multi_hop_cold 3-hop | 113ms | 16 | BFS ×3 |
+| CACAO verify_skip_sig overhead | **<1µs** | — | pure auth check |
+
+- CACAO auth overhead <1µs; production EdDSA verify adds ~0.1ms → dominates only sub-ms hot queries
+- `cold_query_sparql_bgp` bug fix: cold methods require **original graph CID** (not the commit CID returned by `commit()`)
+
 Run: `cargo bench -p kotoba-kqe --bench arrangement`  
 Run: `cargo bench -p kotoba-graph --bench quad_store`  
 Run: `cargo bench -p kotoba-store --bench tiered_store`  
