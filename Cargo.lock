@@ -334,6 +334,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ashiba-bmc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "kotoba-core",
+ "kotoba-kqe",
+ "kotoba-kse",
+ "kotoba-store",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "asn1-rs"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

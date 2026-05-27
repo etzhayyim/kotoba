@@ -17,6 +17,7 @@ members = [
     "crates/kotoba-crypto",
     "crates/kotoba-signal",
     "crates/kotoba-ingest",
+    "examples/ashiba-bmc",
 ]
 resolver = "2"
 
