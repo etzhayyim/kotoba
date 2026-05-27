@@ -166,19 +166,21 @@ impl CitationLedger {
 
         for entry in entries {
             let subject_cid = KotobaCid::from_bytes(&entry.datom_key.0);
+            let count_i64   = i64::try_from(entry.citation_count).unwrap_or(i64::MAX);
+            let royalty_i64 = i64::try_from(entry.royalty_mkoto).unwrap_or(i64::MAX);
 
             quads.push(Quad {
                 graph: graph_cid.clone(),
                 subject: subject_cid.clone(),
                 predicate: "citation/count".to_string(),
-                object: QuadObject::Integer(entry.citation_count as i64),
+                object: QuadObject::Integer(count_i64),
             });
 
             quads.push(Quad {
                 graph: graph_cid.clone(),
                 subject: subject_cid,
                 predicate: "citation/royalty_mkoto".to_string(),
-                object: QuadObject::Integer(entry.royalty_mkoto as i64),
+                object: QuadObject::Integer(royalty_i64),
             });
         }
 
@@ -414,6 +416,48 @@ mod tests {
         // All graph CIDs should be identical
         for (q1, q2) in quads1.iter().zip(quads2.iter()) {
             assert_eq!(q1.graph, q2.graph, "graph CID must be stable for the same epoch");
+        }
+    }
+
+    // ── u64→i64 saturation guards ─────────────────────────────────────────────
+
+    #[test]
+    fn royalty_quads_u64_to_i64_cast_is_safe_for_realistic_values() {
+        // Realistic max: 5000 KOTO × 1_000_000 mKOTO/KOTO = 5_000_000_000
+        let realistic_pool: Mkoto = 5_000 * MKOTO_PER_KOTO;
+        assert!(realistic_pool <= i64::MAX as u64,
+            "realistic royalty pool must fit in i64");
+        assert_eq!(i64::try_from(realistic_pool).unwrap(), realistic_pool as i64);
+    }
+
+    #[test]
+    fn royalty_quads_saturation_on_overflow() {
+        // Verify that i64::try_from(u64::MAX).unwrap_or(i64::MAX) == i64::MAX
+        // (the pattern used in royalty_quads).
+        assert_eq!(i64::try_from(u64::MAX).unwrap_or(i64::MAX), i64::MAX);
+        // Also verify that values at i64::MAX boundary are lossless.
+        assert_eq!(i64::try_from(i64::MAX as u64).unwrap(), i64::MAX);
+    }
+
+    #[test]
+    fn royalty_quads_produces_integer_objects_for_count_and_royalty() {
+        let mut ledger = CitationLedger::new();
+        let q = make_quad("subject-a");
+        ledger.cite_quad(&q);
+        ledger.cite_quad(&q);
+        let entries = ledger.flush_epoch(1_000_000);
+        let quads = CitationLedger::royalty_quads(&entries, 1);
+        // Expect 2 quads per entry: citation/count and citation/royalty_mkoto
+        assert_eq!(quads.len(), 2);
+        let count_quad   = quads.iter().find(|q| q.predicate == "citation/count").unwrap();
+        let royalty_quad = quads.iter().find(|q| q.predicate == "citation/royalty_mkoto").unwrap();
+        match count_quad.object {
+            QuadObject::Integer(n) => assert!(n > 0, "citation count must be positive"),
+            ref other => panic!("expected Integer for count, got {other:?}"),
+        }
+        match royalty_quad.object {
+            QuadObject::Integer(n) => assert!(n >= 0, "royalty must be non-negative"),
+            ref other => panic!("expected Integer for royalty, got {other:?}"),
         }
     }
 }
