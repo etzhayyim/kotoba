@@ -366,8 +366,7 @@ mod tests {
         // MAX_THREAD_ID_LEN in this file must equal the limit enforced inside
         // EmailIngestor::ingest_raw so that the XRPC handler catches oversized
         // thread_id with 400 before the ingestor would return an anyhow error.
-        use kotoba_ingest::EmailIngestor;
-        // ingest_raw rejects thread_id.len() > 256
+        // ingest_raw rejects thread_id.len() > 256 (matches EmailIngestor internal limit)
         assert_eq!(MAX_THREAD_ID_LEN, 256,
             "XRPC handler limit must match ingestor limit");
         // Also ensure the constant is used (not dead code)
@@ -405,7 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_field_safe_empty_returns_empty() {
-        use kotoba_crypto::{AgentCrypto, VaultKeyedCrypto};
+        use kotoba_crypto::VaultKeyedCrypto;
         use zeroize::Zeroizing;
         let crypto = VaultKeyedCrypto::new(Zeroizing::new([0xAAu8; 32]));
         let result = open_field_safe(&crypto, b"scope", "").await;
@@ -414,7 +413,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_field_safe_plaintext_returns_unchanged() {
-        use kotoba_crypto::{AgentCrypto, VaultKeyedCrypto};
+        use kotoba_crypto::VaultKeyedCrypto;
         use zeroize::Zeroizing;
         let crypto = VaultKeyedCrypto::new(Zeroizing::new([0xAAu8; 32]));
         let result = open_field_safe(&crypto, b"scope", "alice@example.com").await;
@@ -423,7 +422,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_field_safe_signal_roundtrip_with_real_crypto() {
-        use kotoba_crypto::{AgentCrypto, VaultKeyedCrypto};
+        use kotoba_crypto::{AgentCrypto as _, VaultKeyedCrypto};
         use zeroize::Zeroizing;
         let crypto = VaultKeyedCrypto::new(Zeroizing::new([0x11u8; 32]));
         let scope = b"email/from";
@@ -438,7 +437,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_field_safe_bad_ciphertext_returns_original() {
-        use kotoba_crypto::{AgentCrypto, VaultKeyedCrypto};
+        use kotoba_crypto::VaultKeyedCrypto;
         use zeroize::Zeroizing;
         let crypto = VaultKeyedCrypto::new(Zeroizing::new([0x11u8; 32]));
         // "signal:v1:" prefix but not valid ciphertext → decrypt will fail → fallback
@@ -449,7 +448,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_field_safe_non_signal_prefix_with_colon_passthrough() {
-        use kotoba_crypto::{AgentCrypto, VaultKeyedCrypto};
+        use kotoba_crypto::VaultKeyedCrypto;
         use zeroize::Zeroizing;
         let crypto = VaultKeyedCrypto::new(Zeroizing::new([0xAAu8; 32]));
         // A string that has a colon but not the signal:v1: prefix
