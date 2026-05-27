@@ -833,6 +833,71 @@ impl QuadStore {
             .map_err(|e| AccessError::Internal(e.to_string()))
     }
 
+    /// N-hop DESCRIBE — traverse `QuadObject::Cid` references for up to `max_hops`
+    /// and return all quads in the subgraph reachable from the seed entities.
+    ///
+    /// Semantics:
+    ///   Hop 0 = entities matched by the DESCRIBE query (seeds).
+    ///   Hop k+1 = every CID appearing as an object in hop-k quads, not yet visited.
+    ///
+    /// Returns the deduplicated union of all quads about visited entities.
+    /// `max_hops = 0` is equivalent to a plain `sparql_describe`.
+    ///
+    /// Useful for distributed entity-profile fetching across content-addressed
+    /// graphs — each hop loads only the blocks needed for the next layer.
+    pub async fn sparql_describe_n_hop(
+        &self,
+        graph_cid: &KotobaCid,
+        sparql:    &str,
+        max_hops:  usize,
+    ) -> anyhow::Result<Vec<Quad>> {
+        use std::collections::HashSet;
+
+        let seed_quads = self.sparql_describe(graph_cid, sparql).await?;
+        let mut visited: HashSet<KotobaCid> = HashSet::new();
+        let mut frontier: Vec<KotobaCid>   = Vec::new();
+        let mut result:   Vec<Quad>        = Vec::new();
+
+        for q in &seed_quads {
+            if visited.insert(q.subject.clone()) {
+                frontier.push(q.subject.clone());
+            }
+        }
+        result.extend(seed_quads);
+
+        for _hop in 0..max_hops {
+            let mut next: Vec<KotobaCid> = Vec::new();
+            for q in &result {
+                if let kotoba_kqe::quad::QuadObject::Cid(ref c) = q.object {
+                    if visited.insert(c.clone()) {
+                        next.push(c.clone());
+                    }
+                }
+            }
+            if next.is_empty() { break; }
+            for subj in &next {
+                let quads = self.get_entity_quads_cold(graph_cid, subj).await?;
+                result.extend(quads);
+            }
+            frontier = next;
+            let _ = &frontier;
+        }
+        Ok(result)
+    }
+
+    /// CACAO-authed N-hop DESCRIBE — requires `quad:read` capability on the graph.
+    pub async fn sparql_describe_n_hop_authed(
+        &self,
+        graph_cid: &KotobaCid,
+        sparql:    &str,
+        max_hops:  usize,
+        chain:     &DelegationChain,
+    ) -> Result<Vec<Quad>, AccessError> {
+        chain.verify(&graph_cid.to_multibase(), "quad:read")?;
+        self.sparql_describe_n_hop(graph_cid, sparql, max_hops).await
+            .map_err(|e| AccessError::Internal(e.to_string()))
+    }
+
     /// Recursive SPARQL pattern executor.
     ///
     /// Handles: BGP, Filter, Union, LeftJoin (OPTIONAL).
@@ -4820,5 +4885,129 @@ mod tests {
             _ => panic!("expected text"),
         };
         assert_eq!(obj, "user");
+    }
+
+    // ─── SPARQL N-hop DESCRIBE (multi-pop traversal) ───────────────────────────
+
+    /// Setup: alice --knows--> bob --knows--> carol --knows--> dave
+    /// + each entity has a name quad.
+    async fn setup_chain_qs() -> (QuadStore, KotobaCid, [KotobaCid; 4]) {
+        let qs = QuadStore::new(
+            Arc::new(Journal::new()),
+            Arc::new(MemoryBlockStore::new()) as Arc<dyn BlockStore + Send + Sync>,
+        );
+        let g = KotobaCid::from_bytes(b"nhop-graph");
+        let people = [
+            KotobaCid::from_bytes(b"nhop-alice"),
+            KotobaCid::from_bytes(b"nhop-bob"),
+            KotobaCid::from_bytes(b"nhop-carol"),
+            KotobaCid::from_bytes(b"nhop-dave"),
+        ];
+        let names = ["Alice", "Bob", "Carol", "Dave"];
+        for (p, n) in people.iter().zip(names.iter()) {
+            qs.assert(Quad { graph: g.clone(), subject: p.clone(),
+                predicate: "name".into(), object: QuadObject::Text((*n).into()) }).await;
+        }
+        for i in 0..3 {
+            qs.assert(Quad { graph: g.clone(), subject: people[i].clone(),
+                predicate: "knows".into(), object: QuadObject::Cid(people[i+1].clone()) }).await;
+        }
+        qs.commit("did:nhop", g.clone(), 1).await.unwrap();
+        qs.reset_arrangement(&g).await;
+        (qs, g, people)
+    }
+
+    #[tokio::test]
+    async fn nhop_describe_zero_hops_equals_describe() {
+        let (qs, g, people) = setup_chain_qs().await;
+        let alice_mb = people[0].to_multibase();
+        let plain = qs.sparql_describe(&g, &format!("DESCRIBE <cid:{alice_mb}>"))
+            .await.unwrap();
+        let zero  = qs.sparql_describe_n_hop(&g, &format!("DESCRIBE <cid:{alice_mb}>"), 0)
+            .await.unwrap();
+        assert_eq!(zero.len(), plain.len(), "0-hop == plain DESCRIBE");
+    }
+
+    #[tokio::test]
+    async fn nhop_describe_one_hop_includes_neighbor() {
+        // Alice has: name + knows->bob = 2 quads
+        // 1-hop adds Bob: name + knows->carol = 2 quads → 4 total
+        let (qs, g, people) = setup_chain_qs().await;
+        let alice_mb = people[0].to_multibase();
+        let quads = qs.sparql_describe_n_hop(
+            &g,
+            &format!("DESCRIBE <cid:{alice_mb}>"),
+            1,
+        ).await.unwrap();
+        assert_eq!(quads.len(), 4, "1-hop should include Alice + Bob = 4 quads, got {}", quads.len());
+        let subjects: std::collections::HashSet<_> =
+            quads.iter().map(|q| q.subject.clone()).collect();
+        assert!(subjects.contains(&people[0]), "must contain Alice");
+        assert!(subjects.contains(&people[1]), "must contain Bob (1-hop neighbor)");
+        assert!(!subjects.contains(&people[2]), "must NOT contain Carol (2-hop)");
+    }
+
+    #[tokio::test]
+    async fn nhop_describe_three_hops_traverses_whole_chain() {
+        // 3 hops: Alice → Bob → Carol → Dave
+        // Each has name + (knows for 0..2) = 4 + 2 + 2 + 2 - 1 (dave no knows) = 7
+        // alice=2, bob=2, carol=2, dave=1 → 7 quads
+        let (qs, g, people) = setup_chain_qs().await;
+        let alice_mb = people[0].to_multibase();
+        let quads = qs.sparql_describe_n_hop(
+            &g,
+            &format!("DESCRIBE <cid:{alice_mb}>"),
+            3,
+        ).await.unwrap();
+        let subjects: std::collections::HashSet<_> =
+            quads.iter().map(|q| q.subject.clone()).collect();
+        assert_eq!(subjects.len(), 4, "3-hop must reach all 4 entities, got {}", subjects.len());
+        for p in &people {
+            assert!(subjects.contains(p), "must contain {}", p.to_multibase());
+        }
+    }
+
+    #[tokio::test]
+    async fn nhop_describe_stops_when_no_more_cid_objects() {
+        // Dave has no outgoing CID refs → traversal stops naturally
+        let (qs, g, people) = setup_chain_qs().await;
+        let dave_mb = people[3].to_multibase();
+        let quads = qs.sparql_describe_n_hop(
+            &g,
+            &format!("DESCRIBE <cid:{dave_mb}>"),
+            10,
+        ).await.unwrap();
+        assert_eq!(quads.len(), 1, "Dave alone (just name), got {}", quads.len());
+    }
+
+    #[tokio::test]
+    async fn nhop_describe_authed_real_eddsa() {
+        let (qs, g, people) = setup_chain_qs().await;
+        let chain = make_real_eddsa_cacao(&g.to_multibase(), "quad:read");
+        let alice_mb = people[0].to_multibase();
+        let result = qs.sparql_describe_n_hop_authed(
+            &g,
+            &format!("DESCRIBE <cid:{alice_mb}>"),
+            2,
+            &chain,
+        ).await;
+        assert!(result.is_ok(), "authed n-hop DESCRIBE must succeed: {result:?}");
+        // 2-hop: Alice (name+knows) + Bob (name+knows) + Carol (name+knows) = 6
+        assert_eq!(result.unwrap().len(), 6, "2-hop quads count");
+    }
+
+    #[tokio::test]
+    async fn nhop_describe_authed_denied_wrong_graph() {
+        let (qs, g, people) = setup_chain_qs().await;
+        let wrong = KotobaCid::from_bytes(b"nhop-wrong-graph");
+        let chain = make_real_eddsa_cacao(&wrong.to_multibase(), "quad:read");
+        let alice_mb = people[0].to_multibase();
+        let result = qs.sparql_describe_n_hop_authed(
+            &g,
+            &format!("DESCRIBE <cid:{alice_mb}>"),
+            2,
+            &chain,
+        ).await;
+        assert!(matches!(result, Err(AccessError::Delegation(_))), "wrong graph denied");
     }
 }
