@@ -20,6 +20,8 @@
 ///   KOTOBA_IPFS_TOKEN     — optional Bearer JWT
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use bytes::Bytes;
 use anyhow::{anyhow, Result};
 use sha2::{Sha256, Digest};
@@ -57,23 +59,30 @@ struct BlockPutResponse {
 // ── KuboBlockStore ───────────────────────────────────────────────────────────
 
 pub struct KuboBlockStore {
-    client:   reqwest::Client,
-    endpoint: String,
-    token:    Option<String>,
+    client:    reqwest::Client,
+    endpoint:  String,
+    token:     Option<String>,
     /// blake3 CID bytes ([u8;36]) → SHA2-256 CIDv1 multibase string.
-    index:    Arc<RwLock<HashMap<[u8; 36], String>>>,
-    pinned:   Arc<RwLock<HashSet<[u8; 36]>>>,
+    index:     Arc<RwLock<HashMap<[u8; 36], String>>>,
+    pinned:    Arc<RwLock<HashSet<[u8; 36]>>>,
+    available: Arc<AtomicBool>,
 }
 
 impl KuboBlockStore {
     /// Create a store pointing at `endpoint` (e.g. `"http://127.0.0.1:5001"`).
     pub fn new(endpoint: impl Into<String>) -> Self {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(500))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_default();
         Self {
-            client:   reqwest::Client::new(),
-            endpoint: endpoint.into(),
-            token:    None,
-            index:    Arc::new(RwLock::new(HashMap::new())),
-            pinned:   Arc::new(RwLock::new(HashSet::new())),
+            client,
+            endpoint:  endpoint.into(),
+            token:     None,
+            index:     Arc::new(RwLock::new(HashMap::new())),
+            pinned:    Arc::new(RwLock::new(HashSet::new())),
+            available: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -84,12 +93,18 @@ impl KuboBlockStore {
         let endpoint = std::env::var("KOTOBA_IPFS_ENDPOINT")
             .unwrap_or_else(|_| "http://localhost:5001".into());
         let token = std::env::var("KOTOBA_IPFS_TOKEN").ok();
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(500))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_default();
         Self {
-            client:   reqwest::Client::new(),
+            client,
             endpoint,
             token,
-            index:    Arc::new(RwLock::new(HashMap::new())),
-            pinned:   Arc::new(RwLock::new(HashSet::new())),
+            index:     Arc::new(RwLock::new(HashMap::new())),
+            pinned:    Arc::new(RwLock::new(HashSet::new())),
+            available: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -116,17 +131,22 @@ impl KuboBlockStore {
 impl Clone for KuboBlockStore {
     fn clone(&self) -> Self {
         Self {
-            client:   self.client.clone(),
-            endpoint: self.endpoint.clone(),
-            token:    self.token.clone(),
-            index:    Arc::clone(&self.index),
-            pinned:   Arc::clone(&self.pinned),
+            client:    self.client.clone(),
+            endpoint:  self.endpoint.clone(),
+            token:     self.token.clone(),
+            index:     Arc::clone(&self.index),
+            pinned:    Arc::clone(&self.pinned),
+            available: Arc::clone(&self.available),
         }
     }
 }
 
 impl BlockStore for KuboBlockStore {
     fn put(&self, cid: &KotobaCid, data: &[u8]) -> Result<()> {
+        if !self.available.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
         // Compute SHA2-256 CIDv1 at the storage boundary.
         let sha256 = sha256_cid(data);
 
@@ -151,7 +171,13 @@ impl BlockStore for KuboBlockStore {
                     None    => rb,
                 };
                 let resp = rb.send().await
-                    .map_err(|e| anyhow!("kubo block/put request: {e}"))?;
+                    .map_err(|e| {
+                        if e.is_connect() {
+                            anyhow!("kubo block/put connect: {e}")
+                        } else {
+                            anyhow!("kubo block/put request: {e}")
+                        }
+                    })?;
                 if !resp.status().is_success() {
                     let status = resp.status();
                     let text   = resp.text().await.unwrap_or_default();
@@ -161,8 +187,14 @@ impl BlockStore for KuboBlockStore {
                     .map_err(|e| anyhow!("kubo block/put parse: {e}"))?;
                 Ok::<String, anyhow::Error>(parsed.key)
             })
+        }).map_err(|e| {
+            if e.to_string().contains("connect") {
+                self.available.store(false, Ordering::Relaxed);
+            }
+            e
         })?;
 
+        self.available.store(true, Ordering::Relaxed);
         tracing::debug!(blake3 = %cid, sha256 = %resp_key, "kubo block stored");
         // Canonicalise: use the CID that Kubo returned (may differ in encoding).
         self.index_insert(cid, resp_key.is_empty().then(|| sha256_c).unwrap_or(resp_key));
@@ -174,6 +206,10 @@ impl BlockStore for KuboBlockStore {
             Some(s) => s,
             None    => return Ok(None), // unknown CID — not in this store
         };
+
+        if !self.available.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
 
         let url    = format!("{}?arg={sha256}", self.api_url("block/get"));
         let client = self.client.clone();
@@ -187,7 +223,13 @@ impl BlockStore for KuboBlockStore {
                     None    => rb,
                 };
                 let resp = rb.send().await
-                    .map_err(|e| anyhow!("kubo block/get request: {e}"))?;
+                    .map_err(|e| {
+                        if e.is_connect() {
+                            anyhow!("kubo block/get connect: {e}")
+                        } else {
+                            anyhow!("kubo block/get request: {e}")
+                        }
+                    })?;
                 if resp.status() == reqwest::StatusCode::NOT_FOUND
                     || resp.status().as_u16() == 500
                 {
@@ -207,8 +249,14 @@ impl BlockStore for KuboBlockStore {
                     .map_err(|e| anyhow!("kubo block/get read body: {e}"))?;
                 Ok(Some(bytes))
             })
+        }).map_err(|e| {
+            if e.to_string().contains("connect") {
+                self.available.store(false, Ordering::Relaxed);
+            }
+            e
         })?;
 
+        self.available.store(true, Ordering::Relaxed);
         Ok(bytes)
     }
 

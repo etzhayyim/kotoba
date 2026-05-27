@@ -716,7 +716,12 @@ pub async fn block_put(
 
     let bytes = B64.decode(&req.data_b64)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let cid = KotobaCid::from_bytes(&bytes);
+    let (cid, bytes) = tokio::task::spawn_blocking(move || {
+        let cid = KotobaCid::from_bytes(&bytes);
+        (cid, bytes)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("spawn_blocking: {e}")))?;
     state.block_store.put(&cid, &bytes)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

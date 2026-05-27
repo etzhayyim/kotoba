@@ -13,9 +13,9 @@ use kotoba_kqe::arrangement::Arrangement;
 use kotoba_kse::journal::Journal;
 use kotoba_kse::topic::Topic;
 use kotoba_auth::delegation::{DelegationChain, DelegationError};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use dashmap::DashMap;
 
 use crate::commit::{Commit, CommitDag};
 
@@ -30,7 +30,7 @@ pub enum AccessError {
 pub struct QuadStore {
     journal:       Arc<Journal>,
     block_store:   Arc<dyn BlockStore + Send + Sync>,
-    arrangements:  Arc<RwLock<HashMap<String, Arrangement>>>, // graph_cid → Arrangement
+    arrangements:  Arc<DashMap<String, Arrangement>>, // graph_cid → Arrangement
     commit_dag:    Arc<RwLock<CommitDag>>,
     /// seq of the last successful commit — persisted as a checkpoint in the Journal store.
     /// On startup this is loaded from the checkpoint before Journal replay so that
@@ -44,7 +44,7 @@ impl QuadStore {
         Self {
             journal,
             block_store,
-            arrangements:  Arc::new(RwLock::new(HashMap::new())),
+            arrangements:  Arc::new(DashMap::new()),
             commit_dag:    Arc::new(RwLock::new(CommitDag::new())),
             committed_seq: Arc::new(RwLock::new(0)),
         }
@@ -67,8 +67,7 @@ impl QuadStore {
         self.journal.publish(Topic::quad_osp(&g, &o, &s, &p), payload).await;
 
         let delta = Delta::assert(quad.clone());
-        let mut arrs = self.arrangements.write().await;
-        arrs.entry(g).or_insert_with(Arrangement::new).insert(&quad);
+        self.arrangements.entry(g).or_insert_with(Arrangement::new).insert(&quad);
         delta
     }
 
@@ -89,34 +88,30 @@ impl QuadStore {
 
     pub async fn retract(&self, quad: Quad) -> Delta {
         let g = quad.graph.to_multibase();
-        let mut arrs = self.arrangements.write().await;
-        arrs.entry(g).or_insert_with(Arrangement::new).remove(&quad);
+        self.arrangements.entry(g).or_insert_with(Arrangement::new).remove(&quad);
         Delta::retract(quad)
     }
 
     /// Assert without publishing to Journal — used during WAL replay on startup.
     pub async fn assert_silent(&self, quad: Quad) {
         let g = quad.graph.to_multibase();
-        let mut arrs = self.arrangements.write().await;
-        arrs.entry(g).or_insert_with(Arrangement::new).insert(&quad);
+        self.arrangements.entry(g).or_insert_with(Arrangement::new).insert(&quad);
     }
 
-    /// Insert a batch of quads with a single lock acquisition — fast path for bulk ingest.
+    /// Insert a batch of quads — fast path for bulk ingest.
     /// Does not publish to Journal.
     pub async fn assert_batch_silent(&self, quads: Vec<Quad>) {
         if quads.is_empty() { return; }
-        let mut arrs = self.arrangements.write().await;
         for quad in &quads {
             let g = quad.graph.to_multibase();
-            arrs.entry(g).or_insert_with(Arrangement::new).insert(quad);
+            self.arrangements.entry(g).or_insert_with(Arrangement::new).insert(quad);
         }
     }
 
     /// Retract without publishing to Journal — used during WAL replay on startup.
     pub async fn retract_silent(&self, quad: Quad) {
         let g = quad.graph.to_multibase();
-        let mut arrs = self.arrangements.write().await;
-        arrs.entry(g).or_insert_with(Arrangement::new).remove(&quad);
+        self.arrangements.entry(g).or_insert_with(Arrangement::new).remove(&quad);
     }
 
     /// Restore state from Journal on startup.
@@ -213,7 +208,7 @@ impl QuadStore {
     }
 
     pub async fn arrangement(&self, graph_cid: &KotobaCid) -> Option<Arrangement> {
-        self.arrangements.read().await.get(&graph_cid.to_multibase()).cloned()
+        self.arrangements.get(&graph_cid.to_multibase()).map(|r| r.clone())
     }
 
     /// Return all Quads whose subject matches `subject`, optionally restricted to `graph_cid`.
@@ -223,14 +218,15 @@ impl QuadStore {
         graph_cid: Option<&KotobaCid>,
         subject: &KotobaCid,
     ) -> Vec<Quad> {
-        let arrs = self.arrangements.read().await;
         if let Some(gcid) = graph_cid {
-            return arrs.get(&gcid.to_multibase())
+            return self.arrangements.get(&gcid.to_multibase())
                 .map(|arr| arr.get_subject_quads(gcid, subject))
                 .unwrap_or_default();
         }
         let mut out = vec![];
-        for (g_mb, arr) in arrs.iter() {
+        for entry in self.arrangements.iter() {
+            let g_mb = entry.key();
+            let arr = entry.value();
             let gcid = KotobaCid::from_multibase(g_mb)
                 .unwrap_or_else(|| KotobaCid::from_bytes(g_mb.as_bytes()));
             out.extend(arr.get_subject_quads(&gcid, subject));
@@ -244,14 +240,15 @@ impl QuadStore {
         graph_cid: Option<&KotobaCid>,
         prefix: &str,
     ) -> Vec<Quad> {
-        let arrs = self.arrangements.read().await;
         if let Some(gcid) = graph_cid {
-            return arrs.get(&gcid.to_multibase())
+            return self.arrangements.get(&gcid.to_multibase())
                 .map(|arr| arr.quads_with_predicate_prefix(gcid, prefix))
                 .unwrap_or_default();
         }
         let mut out = vec![];
-        for (g_mb, arr) in arrs.iter() {
+        for entry in self.arrangements.iter() {
+            let g_mb = entry.key();
+            let arr = entry.value();
             let gcid = KotobaCid::from_multibase(g_mb)
                 .unwrap_or_else(|| KotobaCid::from_bytes(g_mb.as_bytes()));
             out.extend(arr.quads_with_predicate_prefix(&gcid, prefix));
@@ -261,16 +258,14 @@ impl QuadStore {
 
     /// Snapshot all quads in the named graph as Assert Deltas (Datalog seed).
     pub async fn snapshot_deltas(&self, graph_cid: &KotobaCid) -> Vec<Delta> {
-        self.arrangements.read().await
-            .get(&graph_cid.to_multibase())
+        self.arrangements.get(&graph_cid.to_multibase())
             .map(|arr| arr.to_deltas(graph_cid))
             .unwrap_or_default()
     }
 
     /// Count quads whose predicate starts with `prefix` within the named graph.
     pub async fn count_by_predicate_prefix(&self, graph_cid: &KotobaCid, prefix: &str) -> usize {
-        self.arrangements.read().await
-            .get(&graph_cid.to_multibase())
+        self.arrangements.get(&graph_cid.to_multibase())
             .map(|arr| arr.count_by_predicate_prefix(prefix))
             .unwrap_or(0)
     }
@@ -283,15 +278,14 @@ impl QuadStore {
         predicate: &str,
         object_key: &str,
     ) -> Vec<KotobaCid> {
-        let arrs = self.arrangements.read().await;
         if let Some(gcid) = graph_cid {
-            return arrs.get(&gcid.to_multibase())
+            return self.arrangements.get(&gcid.to_multibase())
                 .map(|arr| arr.get_subjects_by_predicate_object(predicate, object_key))
                 .unwrap_or_default();
         }
         let mut out = vec![];
-        for arr in arrs.values() {
-            out.extend(arr.get_subjects_by_predicate_object(predicate, object_key));
+        for entry in self.arrangements.iter() {
+            out.extend(entry.value().get_subjects_by_predicate_object(predicate, object_key));
         }
         out
     }
@@ -311,8 +305,7 @@ impl QuadStore {
     ) -> anyhow::Result<Vec<Quad>> {
         // ── Hot path ──────────────────────────────────────────────────────────
         {
-            let arrs = self.arrangements.read().await;
-            if let Some(arr) = arrs.get(&graph_cid.to_multibase()) {
+            if let Some(arr) = self.arrangements.get(&graph_cid.to_multibase()) {
                 if !arr.is_empty() {
                     return Ok(arr.get_subject_quads(graph_cid, subject));
                 }
@@ -360,7 +353,7 @@ impl QuadStore {
     /// Clear the in-memory Arrangement for `graph_cid`, reclaiming RAM.
     /// Call after `commit()` in a batch-ingest cycle when working-set > budget.
     pub async fn reset_arrangement(&self, graph_cid: &KotobaCid) {
-        if let Some(arr) = self.arrangements.write().await.get_mut(&graph_cid.to_multibase()) {
+        if let Some(mut arr) = self.arrangements.get_mut(&graph_cid.to_multibase()) {
             arr.clear();
         }
     }
@@ -423,8 +416,7 @@ impl QuadStore {
         seq:       u64,
     ) -> anyhow::Result<KotobaCid> {
         let (eavt_entries, aevt_entries, avet_entries, vaet_entries) = {
-            let arrs = self.arrangements.read().await;
-            match arrs.get(&graph_cid.to_multibase()) {
+            match self.arrangements.get(&graph_cid.to_multibase()) {
                 None => (vec![], vec![], vec![], vec![]),
                 Some(arr) => {
                     // EAVT (SPO): key = subject || predicate, value = object bytes

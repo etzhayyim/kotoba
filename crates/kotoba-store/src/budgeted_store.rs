@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use anyhow::Result;
@@ -25,16 +25,18 @@ pub struct BudgetedBlockStore<S: BlockStore> {
 }
 
 struct Budget {
-    used_bytes: usize,
-    sizes:      HashMap<[u8; 36], usize>,  // cid → byte size
-    lru:        VecDeque<[u8; 36]>,         // front = coldest (LRU order)
-    pinned:     HashSet<[u8; 36]>,
+    used_bytes:  usize,
+    sizes:       HashMap<[u8; 36], usize>,
+    lru_gen:     HashMap<[u8; 36], u64>, // cid → access generation (lower = colder)
+    pinned:      HashSet<[u8; 36]>,
+    gen_counter: u64,
 }
 
 impl Budget {
+    /// O(1) touch: assign the current generation to this key.
     fn touch(&mut self, key: [u8; 36]) {
-        self.lru.retain(|k| k != &key);
-        self.lru.push_back(key);
+        self.gen_counter += 1;
+        self.lru_gen.insert(key, self.gen_counter);
     }
 }
 
@@ -44,10 +46,11 @@ impl<S: BlockStore + 'static> BudgetedBlockStore<S> {
             inner: Arc::new(inner),
             max_bytes,
             state: Mutex::new(Budget {
-                used_bytes: 0,
-                sizes: HashMap::new(),
-                lru: VecDeque::new(),
-                pinned: HashSet::new(),
+                used_bytes:  0,
+                sizes:       HashMap::new(),
+                lru_gen:     HashMap::new(),
+                pinned:      HashSet::new(),
+                gen_counter: 0,
             }),
         }
     }
@@ -64,31 +67,36 @@ impl<S: BlockStore + 'static> BudgetedBlockStore<S> {
     /// Returns the number of bytes freed.
     pub fn evict_cold(&self) -> usize {
         let target = (self.max_bytes as f64 * 0.80) as usize;
-        let mut freed = 0usize;
         let to_delete: Vec<[u8; 36]> = {
             let st = self.state.lock().unwrap();
             if st.used_bytes <= self.max_bytes {
                 return 0;
             }
+            // Sort unpinned entries by generation (lowest = coldest).
+            let mut candidates: Vec<([u8; 36], u64)> = st.lru_gen.iter()
+                .filter(|(k, _)| !st.pinned.contains(*k))
+                .map(|(k, &g)| (*k, g))
+                .collect();
+            candidates.sort_unstable_by_key(|&(_, g)| g);
+
             let mut evict = Vec::new();
             let mut projected = st.used_bytes;
-            for &key in &st.lru {
+            for (key, _) in candidates {
                 if projected <= target { break; }
-                if !st.pinned.contains(&key) {
-                    if let Some(&sz) = st.sizes.get(&key) {
-                        evict.push(key);
-                        projected = projected.saturating_sub(sz);
-                    }
+                if let Some(&sz) = st.sizes.get(&key) {
+                    evict.push(key);
+                    projected = projected.saturating_sub(sz);
                 }
             }
             evict
         };
 
+        let mut freed = 0usize;
         for key in &to_delete {
             let cid = KotobaCid(*key);
             let _ = self.inner.delete(&cid);
             let mut st = self.state.lock().unwrap();
-            st.lru.retain(|k| k != key);
+            st.lru_gen.remove(key);
             if let Some(sz) = st.sizes.remove(key) {
                 st.used_bytes = st.used_bytes.saturating_sub(sz);
                 freed += sz;
@@ -140,7 +148,7 @@ impl<S: BlockStore + 'static> BlockStore for BudgetedBlockStore<S> {
     fn delete(&self, cid: &KotobaCid) -> Result<()> {
         self.inner.delete(cid)?;
         let mut st = self.state.lock().unwrap();
-        st.lru.retain(|k| k != &cid.0);
+        st.lru_gen.remove(&cid.0);
         if let Some(sz) = st.sizes.remove(&cid.0) {
             st.used_bytes = st.used_bytes.saturating_sub(sz);
         }
@@ -192,18 +200,15 @@ mod tests {
 
     #[test]
     fn evict_cold_removes_unpinned_when_over_budget() {
-        // Budget = 30 bytes; fill with 3 × 10-byte blocks
         let store = budgeted(30);
         let d1 = b"0123456789"; // 10 bytes
         let d2 = b"abcdefghij"; // 10 bytes
-        let d3 = b"ABCDEFGHIJ"; // 10 bytes — triggers eviction (used = 30, budget = 30, ok)
+        let d3 = b"ABCDEFGHIJ"; // 10 bytes
         store.put(&cid(d1), d1).unwrap();
         store.put(&cid(d2), d2).unwrap();
         store.put(&cid(d3), d3).unwrap();
-        // Now add a 4th to push over budget
         let d4 = b"xxxxxxxxxxxx"; // 12 bytes → total 42 > 30
         store.put(&cid(d4), d4).unwrap();
-        // After eviction, used ≤ 30*0.8 = 24 bytes, oldest blocks removed
         assert!(store.used_bytes() <= 30);
     }
 
@@ -216,12 +221,9 @@ mod tests {
         store.put(&c1, d1).unwrap();
         store.pin(&c1);
         store.put(&cid(d2), d2).unwrap();
-        // Over budget by 20 bytes (budget=20, used=20 — just at limit)
-        // Add 1 more byte to push over
         let d3 = b"!";
         store.put(&cid(d3), d3).unwrap();
         store.evict_cold();
-        // Pinned block must survive
         assert!(store.has(&c1), "pinned block must not be evicted");
     }
 
@@ -245,7 +247,6 @@ mod tests {
         let c1 = cid(d1);
         store.put(&c1, d1).unwrap();
         store.put(&cid(d2), d2).unwrap();
-        // d1 is now evicted
         assert!(!store.has(&c1));
         assert!(store.get(&c1).unwrap().is_none());
     }

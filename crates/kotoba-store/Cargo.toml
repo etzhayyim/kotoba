@@ -8,6 +8,7 @@ description = "Kotoba content-addressed block store (memory + Kubo IPFS + tiered
 [dependencies]
 kotoba-core.workspace = true
 bytes.workspace  = true
+dashmap.workspace = true
 serde.workspace  = true
 thiserror.workspace = true
 anyhow.workspace = true

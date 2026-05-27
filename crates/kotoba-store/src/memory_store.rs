@@ -1,56 +1,56 @@
 use bytes::Bytes;
+use dashmap::DashMap;
 use kotoba_core::cid::KotobaCid;
 use kotoba_core::store::BlockStore;
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 #[derive(Default, Clone)]
 pub struct MemoryBlockStore {
-    blocks: Arc<RwLock<HashMap<[u8; 36], Bytes>>>,
-    pinned: Arc<RwLock<HashSet<[u8; 36]>>>,
+    blocks: Arc<DashMap<[u8; 36], Bytes>>,
+    pinned: Arc<DashMap<[u8; 36], ()>>,
 }
 
 impl MemoryBlockStore {
     pub fn new() -> Self { Self::default() }
 
     pub fn block_count(&self) -> usize {
-        self.blocks.read().unwrap().len()
+        self.blocks.len()
     }
 }
 
 impl BlockStore for MemoryBlockStore {
     fn put(&self, cid: &KotobaCid, data: &[u8]) -> anyhow::Result<()> {
-        self.blocks.write().unwrap().insert(cid.0, Bytes::copy_from_slice(data));
+        self.blocks.insert(cid.0, Bytes::copy_from_slice(data));
         Ok(())
     }
 
     fn get(&self, cid: &KotobaCid) -> anyhow::Result<Option<Bytes>> {
-        Ok(self.blocks.read().unwrap().get(&cid.0).cloned())
+        Ok(self.blocks.get(&cid.0).map(|r| r.clone()))
     }
 
     fn has(&self, cid: &KotobaCid) -> bool {
-        self.blocks.read().unwrap().contains_key(&cid.0)
+        self.blocks.contains_key(&cid.0)
     }
 
     fn delete(&self, cid: &KotobaCid) -> anyhow::Result<()> {
-        self.blocks.write().unwrap().remove(&cid.0);
+        self.blocks.remove(&cid.0);
         Ok(())
     }
 
     fn pin(&self, cid: &KotobaCid) {
-        self.pinned.write().unwrap().insert(cid.0);
+        self.pinned.insert(cid.0, ());
     }
 
     fn unpin(&self, cid: &KotobaCid) {
-        self.pinned.write().unwrap().remove(&cid.0);
+        self.pinned.remove(&cid.0);
     }
 
     fn is_pinned(&self, cid: &KotobaCid) -> bool {
-        self.pinned.read().unwrap().contains(&cid.0)
+        self.pinned.contains_key(&cid.0)
     }
 
     fn all_cids(&self) -> Vec<KotobaCid> {
-        self.blocks.read().unwrap().keys().map(|k| KotobaCid(*k)).collect()
+        self.blocks.iter().map(|r| KotobaCid(*r.key())).collect()
     }
 }
 
@@ -123,8 +123,7 @@ mod tests {
         let c2 = cid(b"all-cids-2");
         store.put(&c1, b"").unwrap();
         store.put(&c2, b"").unwrap();
-        let mut cids = store.all_cids();
-        cids.sort_by_key(|c| c.to_multibase());
+        let cids = store.all_cids();
         assert!(cids.contains(&c1));
         assert!(cids.contains(&c2));
         assert_eq!(cids.len(), 2);
@@ -140,16 +139,12 @@ mod tests {
         assert_eq!(store.block_count(), 1);
     }
 
-    // ── New tests ─────────────────────────────────────────────────────────────
-
     #[test]
     fn clone_shares_underlying_data() {
-        // MemoryBlockStore wraps Arc<RwLock<...>>; clone should share the same map.
         let store1 = MemoryBlockStore::new();
         let store2 = store1.clone();
         let c = cid(b"shared");
         store1.put(&c, b"value").unwrap();
-        // store2 should see the block because they share the same Arc.
         assert!(store2.has(&c), "clone shares inner Arc");
         assert_eq!(store2.get(&c).unwrap().as_deref(), Some(b"value".as_slice()));
     }
@@ -168,23 +163,19 @@ mod tests {
     fn unpin_nonexistent_cid_is_noop() {
         let store = MemoryBlockStore::new();
         let c = cid(b"never-pinned");
-        // Should not panic.
         store.unpin(&c);
         assert!(!store.is_pinned(&c));
     }
 
     #[test]
     fn pin_then_delete_does_not_keep_pin() {
-        // Deleting a block should not affect the pin set (they are separate).
         let store = MemoryBlockStore::new();
         let c = cid(b"pin-del");
         store.put(&c, b"data").unwrap();
         store.pin(&c);
         assert!(store.is_pinned(&c));
         store.delete(&c).unwrap();
-        // Block gone but pin persists in pin set (memory_store does not auto-unpin on delete).
         assert!(!store.has(&c));
-        // Pin tracking is independent — still pinned in set even after block deleted.
         assert!(store.is_pinned(&c));
     }
 
