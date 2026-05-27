@@ -18,6 +18,7 @@ members = [
     "crates/kotoba-signal",
     "crates/kotoba-ingest",
     "examples/ashiba-bmc",
+    "examples/gftdcojp-chargespot-bma",
 ]
 resolver = "2"
 

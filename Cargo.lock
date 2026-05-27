@@ -2763,6 +2763,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gftdcojp-chargespot-bma"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "kotoba-core",
+ "kotoba-kqe",
+ "kotoba-store",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ghash"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
