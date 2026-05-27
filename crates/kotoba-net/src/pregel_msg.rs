@@ -104,4 +104,66 @@ mod tests {
         assert_eq!(cloned.dst, msg.dst);
         assert_eq!(cloned.payload_b64, msg.payload_b64);
     }
+
+    // ── New tests ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn pregel_gossip_topic_is_non_empty() {
+        assert!(!PREGEL_GOSSIP_TOPIC.is_empty());
+    }
+
+    #[test]
+    fn pregel_gossip_topic_contains_slash() {
+        // "pregel/messages" — must contain a slash as sub-topic separator.
+        assert!(PREGEL_GOSSIP_TOPIC.contains('/'));
+    }
+
+    #[test]
+    fn pregel_net_message_debug_contains_field_values() {
+        let msg = PregelNetMessage {
+            src:         "bsrcdbg".to_string(),
+            dst:         "bdstdbg".to_string(),
+            payload_b64: "payload".to_string(),
+        };
+        let dbg = format!("{msg:?}");
+        assert!(dbg.contains("bsrcdbg"));
+        assert!(dbg.contains("bdstdbg"));
+        assert!(dbg.contains("payload"));
+    }
+
+    #[test]
+    fn pregel_net_message_src_dst_can_be_multibase_cids() {
+        // Verify realistic CID-like strings round-trip correctly.
+        let msg = PregelNetMessage {
+            src:         "bafy2bzacexxxxxxxxxx".to_string(),
+            dst:         "bafy2bzaceyyyyyyyyyy".to_string(),
+            payload_b64: "dGVzdA==".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: PregelNetMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.src, "bafy2bzacexxxxxxxxxx");
+        assert_eq!(back.dst, "bafy2bzaceyyyyyyyyyy");
+    }
+
+    #[test]
+    fn pregel_net_message_missing_field_deserialize_fails() {
+        // Missing "payload_b64" field should fail deserialization.
+        let json = r#"{"src":"bsrc1","dst":"bdst1"}"#;
+        let result: Result<PregelNetMessage, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "missing payload_b64 should fail");
+    }
+
+    #[test]
+    fn pregel_net_message_with_unicode_src_dst() {
+        // Unicode characters in src/dst survive round-trip (JSON escaping).
+        let msg = PregelNetMessage {
+            src:         "src_日本語".to_string(),
+            dst:         "dst_漢字".to_string(),
+            payload_b64: "dGVzdA==".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: PregelNetMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.src, "src_日本語");
+        assert_eq!(back.dst, "dst_漢字");
+    }
 }

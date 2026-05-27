@@ -91,4 +91,46 @@ mod tests {
         let e = SignalError::from(json_err);
         assert!(e.to_string().starts_with("serialization: "));
     }
+
+    // ---- New tests --------------------------------------------------------
+
+    #[test]
+    fn too_many_skipped_keys_display() {
+        let e = SignalError::TooManySkippedKeys;
+        assert_eq!(e.to_string(), "too many skipped message keys (gap exceeds limit)");
+    }
+
+    #[test]
+    fn no_prekey_zero_display() {
+        let e = SignalError::NoPreKey(0);
+        assert_eq!(e.to_string(), "no pre-key 0");
+    }
+
+    #[test]
+    fn no_signed_prekey_zero_display() {
+        let e = SignalError::NoSignedPreKey(0);
+        assert_eq!(e.to_string(), "no signed pre-key 0");
+    }
+
+    #[test]
+    fn store_error_empty_string() {
+        let e = SignalError::Store(String::new());
+        // message should be "store error: " followed by empty string
+        assert!(e.to_string().starts_with("store error:"));
+    }
+
+    #[test]
+    fn crypto_error_from_wraps_display() {
+        use kotoba_crypto::aead::CryptoError;
+        let inner = CryptoError::OpenFailed;
+        let e = SignalError::from(inner);
+        assert!(e.to_string().starts_with("crypto:"), "SignalError::Crypto must prefix with 'crypto:'");
+    }
+
+    #[test]
+    fn no_session_with_long_did() {
+        let long_did = "did:key:".to_string() + &"z".repeat(100);
+        let e = SignalError::NoSession(long_did.clone());
+        assert!(e.to_string().contains(&long_did));
+    }
 }

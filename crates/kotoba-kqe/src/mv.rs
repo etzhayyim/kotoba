@@ -201,4 +201,78 @@ mod tests {
         let mv = MaterializedView::new("my-view", DatalogProgram::new());
         assert_eq!(mv.name, "my-view");
     }
+
+    // ── New tests ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn new_mv_state_is_empty_initially() {
+        let mv = MaterializedView::new("empty", DatalogProgram::new());
+        assert!(mv.state.is_empty());
+        assert_eq!(mv.state.len(), 0);
+    }
+
+    #[test]
+    fn apply_with_retract_on_empty_state_does_not_panic() {
+        // Retracting a quad that was never asserted should be a no-op.
+        let prog = DatalogProgram::new();
+        let mut mv = MaterializedView::new("noop-retract", prog);
+        let q = edge_quad("x", "y");
+        // Should not panic or error.
+        let out = mv.apply(&[Delta::retract(q)]);
+        assert!(out.is_empty(), "no rules → no derived deltas");
+        assert_eq!(mv.state.len(), 0, "retract of phantom quad keeps state at 0");
+    }
+
+    #[test]
+    fn apply_multiple_asserts_accumulate_in_state() {
+        let prog = DatalogProgram::new();
+        let mut mv = MaterializedView::new("accumulate", prog);
+        let quads: Vec<_> = (0u8..5).map(|i| {
+            let s = format!("s{i}");
+            let t = format!("t{i}");
+            Delta::assert(edge_quad(&s, &t))
+        }).collect();
+        mv.apply(&quads);
+        assert_eq!(mv.state.len(), 5, "five asserts → five quads in state");
+    }
+
+    #[test]
+    fn assert_then_retract_same_quad_leaves_empty_state() {
+        let prog = DatalogProgram::new();
+        let mut mv = MaterializedView::new("assert-retract", prog);
+        let q = edge_quad("alice", "bob");
+        mv.apply(&[Delta::assert(q.clone())]);
+        assert_eq!(mv.state.len(), 1);
+        mv.apply(&[Delta::retract(q)]);
+        assert_eq!(mv.state.len(), 0);
+    }
+
+    #[test]
+    fn apply_returns_empty_for_program_with_no_rules_any_input() {
+        let prog = DatalogProgram::new(); // zero rules
+        let mut mv = MaterializedView::new("zero-rules", prog);
+        let deltas: Vec<_> = (0u8..3).map(|i| {
+            Delta::assert(edge_quad(&format!("a{i}"), &format!("b{i}")))
+        }).collect();
+        let out = mv.apply(&deltas);
+        assert!(out.is_empty(), "no rules → output always empty");
+    }
+
+    #[test]
+    fn mv_name_is_accessible_from_field() {
+        let name = "my-materialized-view";
+        let mv = MaterializedView::new(name, DatalogProgram::new());
+        assert_eq!(mv.name.as_str(), name);
+    }
+
+    #[test]
+    fn state_len_increments_with_each_assert() {
+        let prog = DatalogProgram::new();
+        let mut mv = MaterializedView::new("inc", prog);
+        for i in 0u8..10 {
+            let q = edge_quad(&format!("from{i}"), &format!("to{i}"));
+            mv.apply(&[Delta::assert(q)]);
+            assert_eq!(mv.state.len(), (i as usize) + 1);
+        }
+    }
 }

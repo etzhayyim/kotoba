@@ -213,4 +213,88 @@ mod tests {
         let payload = vec![0xABu8; 200];
         round_trip(FrameType::Load, FrameFlags::default(), &payload);
     }
+
+    // ── New tests ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn from_nibble_out_of_range_returns_none() {
+        // All nibbles 0x00..=0x0F are valid; 0x10 and beyond are out of range.
+        assert!(FrameType::from_nibble(16).is_none());
+        assert!(FrameType::from_nibble(255).is_none());
+    }
+
+    #[test]
+    fn varint_boundary_127_is_single_byte() {
+        // Payload of exactly 127 bytes encodes length in 1 byte (0x7F), no continuation.
+        let payload = vec![0u8; 127];
+        round_trip(FrameType::Nop, FrameFlags::default(), &payload);
+        // Verify encoded length: 1 header + 1 varint byte (0x7F) + 127 payload = 129.
+        let frame = Frame {
+            frame_type: FrameType::Nop,
+            flags: FrameFlags::default(),
+            payload: Bytes::copy_from_slice(&payload),
+        };
+        assert_eq!(frame.encode().len(), 1 + 1 + 127);
+    }
+
+    #[test]
+    fn varint_boundary_128_is_two_bytes() {
+        // Payload of exactly 128 bytes requires 2-byte varint (0x80 0x01).
+        let payload = vec![0u8; 128];
+        round_trip(FrameType::NopR, FrameFlags::default(), &payload);
+        let frame = Frame {
+            frame_type: FrameType::NopR,
+            flags: FrameFlags::default(),
+            payload: Bytes::copy_from_slice(&payload),
+        };
+        // 1 header + 2 varint bytes + 128 payload = 131
+        assert_eq!(frame.encode().len(), 1 + 2 + 128);
+    }
+
+    #[test]
+    fn all_flags_set_roundtrip() {
+        let flags = FrameFlags { compressed: true, fragment: true, ack_req: true, priority: true };
+        assert_eq!(flags.to_nibble(), 0x0F);
+        let back = FrameFlags::from_nibble(0x0F);
+        assert!(back.compressed);
+        assert!(back.fragment);
+        assert!(back.ack_req);
+        assert!(back.priority);
+    }
+
+    #[test]
+    fn no_flags_set_nibble_is_zero() {
+        let flags = FrameFlags::default();
+        assert_eq!(flags.to_nibble(), 0x00);
+    }
+
+    #[test]
+    fn frame_clone_preserves_all_fields() {
+        let original = Frame {
+            frame_type: FrameType::Verify,
+            flags: FrameFlags { compressed: true, fragment: false, ack_req: false, priority: true },
+            payload: Bytes::from_static(b"clone-me"),
+        };
+        let cloned = original.clone();
+        assert_eq!(cloned.frame_type, original.frame_type);
+        assert_eq!(cloned.payload, original.payload);
+        assert_eq!(cloned.flags.compressed, original.flags.compressed);
+        assert_eq!(cloned.flags.priority, original.flags.priority);
+    }
+
+    #[test]
+    fn decode_only_header_byte_no_payload_no_varint_returns_none() {
+        // A single byte with valid header nibble but no varint for length: must return None.
+        // 0x10 = Call (0x1) type in high nibble, but the raw encode of a 0-len frame
+        // has 3 bytes: header + 0x00 (varint 0) + empty payload.
+        // Providing only the header byte (not the varint) should return None.
+        // Use FrameType::Read = 0x1; header = 0x10, just one byte supplied.
+        assert!(Frame::decode(&[0x10u8]).is_none());
+    }
+
+    #[test]
+    fn encode_decode_retract_with_binary_payload() {
+        let payload: Vec<u8> = (0u8..=255u8).collect();
+        round_trip(FrameType::Retract, FrameFlags::default(), &payload);
+    }
 }

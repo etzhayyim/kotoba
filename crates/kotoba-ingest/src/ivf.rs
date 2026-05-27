@@ -461,4 +461,85 @@ mod tests {
         assert_eq!(cosine(&a, &z), 0.0);
         assert_eq!(cosine(&z, &z), 0.0);
     }
+
+    // ---- New tests --------------------------------------------------------
+
+    #[test]
+    fn l2_sq_known_value() {
+        // (3,4) vs (0,0) → 9 + 16 = 25
+        let a = vec![3.0f32, 4.0];
+        let b = vec![0.0f32, 0.0];
+        assert!((l2_sq(&a, &b) - 25.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_opposite_vectors() {
+        let a = vec![1.0f32, 0.0];
+        let b = vec![-1.0f32, 0.0];
+        assert!((cosine(&a, &b) + 1.0).abs() < 1e-6, "opposite vectors: cosine = -1");
+    }
+
+    #[test]
+    fn build_k_clamped_to_n() {
+        // Requesting more clusters than points: k must be clamped to n.
+        let pts: Vec<(KotobaCid, Vec<f32>)> = (0..3u8)
+            .map(|i| (KotobaCid::from_bytes(&[i]), vec![i as f32, 0.0]))
+            .collect();
+        let idx = IvfIndex::build(&pts, 100, "clamp-model", 5);
+        assert_eq!(idx.k(), 3, "k must be clamped to number of embeddings");
+    }
+
+    #[test]
+    fn build_k_equals_one() {
+        let pts = vec![(KotobaCid::from_bytes(b"single"), vec![1.0f32, 2.0, 3.0])];
+        let idx = IvfIndex::build(&pts, 1, "singleton", 5);
+        assert_eq!(idx.k(), 1);
+        assert_eq!(idx.dim(), 3);
+        let (ci, dist) = idx.assign(&[1.0, 2.0, 3.0]);
+        assert_eq!(ci, 0);
+        assert!(dist < 1e-6, "assign to self should have zero l2_sq distance");
+    }
+
+    #[test]
+    fn nearest_centroids_nprobe_clamped_to_k() {
+        let pts = two_cluster_points(10);
+        let idx = IvfIndex::build(&pts, 2, "m", 5);
+        // Requesting more probes than clusters: result length ≤ k.
+        let near = idx.nearest_centroids(&[10.0f32, 0.0], 100);
+        assert!(near.len() <= idx.k(), "nprobe must be clamped to k");
+    }
+
+    #[test]
+    fn from_quads_empty_returns_none() {
+        assert!(IvfIndex::from_quads(&[]).is_none(), "empty quads must return None");
+    }
+
+    #[test]
+    fn search_top_k_clamped_by_candidate_count() {
+        let pts = two_cluster_points(6);
+        let idx = IvfIndex::build(&pts, 2, "m", 10);
+        let assigned: Vec<(usize, Vec<f32>)> = pts.iter()
+            .map(|(_, v)| { let (ci, _) = idx.assign(v); (ci, v.clone()) })
+            .collect();
+        let cand_refs: Vec<(usize, &[f32])> =
+            assigned.iter().map(|(ci, v)| (*ci, v.as_slice())).collect();
+        // Ask for more results than candidates.
+        let result = idx.search(&[10.0f32, 0.0], &cand_refs, 2, 1000);
+        assert!(result.len() <= cand_refs.len(),
+            "search cannot return more results than candidates");
+    }
+
+    #[test]
+    fn to_quads_produces_correct_predicates() {
+        let pts = two_cluster_points(10);
+        let idx   = IvfIndex::build(&pts, 2, "pred-model", 10);
+        let graph = KotobaCid::from_bytes(b"g");
+        let quads = idx.to_quads(&graph, &[5, 5]);
+        // Each centroid produces 5 quads: centroid_id, vector, model, k, n.
+        let predicates: std::collections::HashSet<_> =
+            quads.iter().map(|q| q.predicate.as_str()).collect();
+        for p in &["cc/ivf/centroid_id", "cc/ivf/vector", "cc/ivf/model", "cc/ivf/k", "cc/ivf/n"] {
+            assert!(predicates.contains(p), "missing predicate: {p}");
+        }
+    }
 }

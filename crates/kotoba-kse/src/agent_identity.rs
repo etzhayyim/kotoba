@@ -169,4 +169,60 @@ mod tests {
         let id = AgentIdentity::generate_ephemeral();
         assert!(id.did.starts_with("did:key:z"), "ephemeral DID should start with did:key:z");
     }
+
+    // ── New tests ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn did_slug_length_is_always_8() {
+        // Even for DIDs of different lengths, the slug must always be 8 hex chars.
+        for _ in 0..5 {
+            let id = AgentIdentity::generate_ephemeral();
+            assert_eq!(id.did_slug().len(), 8);
+        }
+    }
+
+    #[test]
+    fn different_dids_produce_different_slugs() {
+        let a = AgentIdentity::generate_ephemeral();
+        let b = AgentIdentity::generate_ephemeral();
+        // With overwhelming probability two random DIDs hash to different slugs.
+        assert_ne!(a.did_slug(), b.did_slug());
+    }
+
+    #[test]
+    fn ephemeral_flag_is_true_for_generate_ephemeral() {
+        let id = AgentIdentity::generate_ephemeral();
+        assert!(id.ephemeral);
+    }
+
+    #[test]
+    fn x25519_public_key_is_deterministic_from_secret() {
+        let id = AgentIdentity::generate_ephemeral();
+        let pk1 = id.x25519_public_key();
+        let pk2 = id.x25519_public_key();
+        assert_eq!(pk1.as_bytes(), pk2.as_bytes());
+    }
+
+    #[test]
+    fn verifying_key_bytes_are_32_bytes() {
+        let id = AgentIdentity::generate_ephemeral();
+        let vk = id.verifying_key();
+        assert_eq!(vk.as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn x25519_public_key_bytes_are_32_bytes() {
+        let id = AgentIdentity::generate_ephemeral();
+        let pk = id.x25519_public_key();
+        assert_eq!(pk.as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn ephemeral_did_contains_hex_encoded_verifying_key() {
+        let id = AgentIdentity::generate_ephemeral();
+        // DID format: "did:key:z{hex(vk_bytes)}"
+        let vk_hex = hex::encode(id.verifying_key().as_bytes());
+        let expected_suffix = format!("did:key:z{vk_hex}");
+        assert_eq!(id.did, expected_suffix);
+    }
 }

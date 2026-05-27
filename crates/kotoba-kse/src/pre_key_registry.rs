@@ -497,4 +497,65 @@ mod tests {
             "expected RootMismatch, got {err:?}"
         );
     }
+
+    // ---- New tests --------------------------------------------------------
+
+    #[test]
+    fn rule_rekey_revoked_constant_is_seven() {
+        assert_eq!(RULE_REKEY_REVOKED, 7);
+    }
+
+    #[test]
+    fn pre_key_error_not_found_display() {
+        let e = PreKeyError::NotFound("did:owner".to_string(), "did:acc".to_string());
+        let s = e.to_string();
+        assert!(s.contains("did:owner") && s.contains("did:acc"),
+            "NotFound display must include both DIDs, got: {s}");
+    }
+
+    #[test]
+    fn pre_key_error_store_display() {
+        let e = PreKeyError::Store("disk full".to_string());
+        assert!(e.to_string().contains("disk full"));
+    }
+
+    #[test]
+    fn pre_key_error_serde_display() {
+        let e = PreKeyError::Serde("bad json".to_string());
+        let s = e.to_string();
+        assert!(s.contains("bad json") || s.contains("serialization"), "got: {s}");
+    }
+
+    #[test]
+    fn rekey_revocation_record_serde_roundtrip() {
+        let rec = RekeyRevocationRecord {
+            owner_did:    "did:key:zOwner".to_string(),
+            accessor_did: "did:key:zAcc".to_string(),
+            revoked_at:   1_700_000_000_000,
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        let back: RekeyRevocationRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.owner_did,    rec.owner_did);
+        assert_eq!(back.accessor_did, rec.accessor_did);
+        assert_eq!(back.revoked_at,   rec.revoked_at);
+    }
+
+    #[tokio::test]
+    async fn list_accessors_empty_for_unknown_owner() {
+        let reg = PreKeyRegistry::new(store());
+        let list = reg.list_accessors("did:unknown").await;
+        assert!(list.is_empty(), "unknown owner must return empty accessor list");
+    }
+
+    #[tokio::test]
+    async fn double_revoke_is_safe() {
+        // Revoking an already-revoked pair must not panic.
+        let reg = PreKeyRegistry::new(store());
+        let enc_key = rand_key();
+        reg.grant("did:alice", "did:bob", &rand_key(), &enc_key).await.unwrap();
+        reg.revoke("did:alice", "did:bob").await;
+        reg.revoke("did:alice", "did:bob").await; // second revoke — must not panic
+        assert!(reg.revoked.read().await
+            .contains(&("did:alice".to_string(), "did:bob".to_string())));
+    }
 }

@@ -251,4 +251,94 @@ mod tests {
             panic!("expected LlmInfer");
         }
     }
+
+    // ── New tests ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn foreign_error_gateway_contains_message() {
+        let msg = "connection refused";
+        let e = ForeignError::Gateway(msg.to_string());
+        assert!(e.to_string().contains(msg));
+    }
+
+    #[test]
+    fn foreign_error_not_implemented_display() {
+        let e = ForeignError::NotImplemented;
+        let s = e.to_string();
+        assert_eq!(s, "not implemented");
+    }
+
+    #[test]
+    fn foreign_error_unauthorized_display() {
+        let e = ForeignError::Unauthorized;
+        let s = e.to_string();
+        assert_eq!(s, "unauthorized");
+    }
+
+    #[test]
+    fn foreign_bridge_new_stores_exact_url() {
+        let url = "https://mcp.example.com";
+        let bridge = ForeignBridge::new(url);
+        assert_eq!(bridge.gateway_url, url);
+    }
+
+    #[test]
+    fn foreign_call_embed_empty_text() {
+        let call = ForeignCall {
+            call_id: 99,
+            call_type: ForeignCallType::Embed {
+                model_cid: dummy_cid(b"m"),
+                text:      "".to_string(),
+            },
+            ucan_cid: dummy_cid(b"u"),
+        };
+        if let ForeignCallType::Embed { text, .. } = &call.call_type {
+            assert!(text.is_empty());
+        } else {
+            panic!("expected Embed");
+        }
+    }
+
+    #[test]
+    fn foreign_call_weight_load_empty_shape() {
+        let call = ForeignCall {
+            call_id: 7,
+            call_type: ForeignCallType::WeightLoad {
+                blob_cid: dummy_cid(b"weight_empty"),
+                shape:    vec![],
+            },
+            ucan_cid: dummy_cid(b"u2"),
+        };
+        if let ForeignCallType::WeightLoad { shape, .. } = &call.call_type {
+            assert!(shape.is_empty());
+        } else {
+            panic!("expected WeightLoad");
+        }
+    }
+
+    #[test]
+    fn foreign_call_id_zero_is_valid() {
+        let call = ForeignCall {
+            call_id: 0,
+            call_type: ForeignCallType::LlmInfer {
+                model_cid:   dummy_cid(b"m"),
+                adapter_cid: None,
+                session_cid: None,
+                max_tokens:  1,
+            },
+            ucan_cid: dummy_cid(b"u"),
+        };
+        assert_eq!(call.call_id, 0);
+    }
+
+    #[test]
+    fn foreign_error_debug_contains_variant_name() {
+        let e = ForeignError::NotImplemented;
+        let s = format!("{e:?}");
+        assert!(s.contains("NotImplemented"));
+        let e2 = ForeignError::Unauthorized;
+        assert!(format!("{e2:?}").contains("Unauthorized"));
+        let e3 = ForeignError::Gateway("oops".into());
+        assert!(format!("{e3:?}").contains("Gateway"));
+    }
 }

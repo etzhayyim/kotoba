@@ -151,4 +151,64 @@ mod tests {
         ct.pop();
         assert!(open(&key, &ct).is_err(), "truncated tag must be rejected");
     }
+
+    // ---- New tests --------------------------------------------------------
+
+    #[test]
+    fn key_nonce_tag_len_constants() {
+        assert_eq!(KEY_LEN,   32, "AES-256 requires 32-byte key");
+        assert_eq!(NONCE_LEN, 12, "GCM 96-bit nonce = 12 bytes");
+        assert_eq!(TAG_LEN,   16, "GCM auth tag = 16 bytes");
+    }
+
+    #[test]
+    fn seal_with_nonce_is_deterministic() {
+        let key   = random_key();
+        let nonce = [0xABu8; NONCE_LEN];
+        let ct1 = seal_with_nonce(&key, &nonce, b"deterministic").unwrap();
+        let ct2 = seal_with_nonce(&key, &nonce, b"deterministic").unwrap();
+        assert_eq!(ct1, ct2, "same key+nonce+pt must produce identical ciphertext");
+    }
+
+    #[test]
+    fn seal_with_nonce_open_roundtrip() {
+        let key   = random_key();
+        let nonce = [0x01u8; NONCE_LEN];
+        let ct = seal_with_nonce(&key, &nonce, b"nonce-roundtrip").unwrap();
+        let pt = open(&key, &ct).unwrap();
+        assert_eq!(pt.as_slice(), b"nonce-roundtrip");
+    }
+
+    #[test]
+    fn too_short_error_display_contains_threshold() {
+        let threshold = NONCE_LEN + TAG_LEN;
+        let err = CryptoError::TooShort(threshold);
+        let s = err.to_string();
+        assert!(s.contains(&threshold.to_string()), "TooShort display must include the threshold, got: {s}");
+    }
+
+    #[test]
+    fn invalid_envelope_error_display() {
+        let err = CryptoError::InvalidEnvelope("bad header".to_string());
+        let s = err.to_string();
+        assert!(s.contains("bad header"), "InvalidEnvelope display must include reason, got: {s}");
+    }
+
+    #[test]
+    fn seal_open_large_plaintext() {
+        let key = random_key();
+        let pt: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+        let ct = seal(&key, &pt).unwrap();
+        assert_eq!(ct.len(), NONCE_LEN + pt.len() + TAG_LEN);
+        let recovered = open(&key, &ct).unwrap();
+        assert_eq!(recovered.as_slice(), pt.as_slice());
+    }
+
+    #[test]
+    fn open_only_nonce_no_ciphertext_fails() {
+        // Exactly NONCE_LEN bytes — below minimum NONCE_LEN + TAG_LEN.
+        let key  = random_key();
+        let data = vec![0u8; NONCE_LEN];
+        assert!(open(&key, &data).is_err(), "bare nonce without tag must be rejected");
+    }
 }

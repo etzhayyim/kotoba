@@ -289,4 +289,78 @@ mod tests {
         let cid2 = graph.checkpoint_chained(&store, Some(&cid1)).unwrap();
         assert_ne!(cid1, cid2, "chained checkpoint with prev must differ from step-0 CID");
     }
+
+    // ---- New tests --------------------------------------------------------
+
+    #[test]
+    fn exec_status_ok_ne_halt() {
+        assert_ne!(ExecStatus::Ok, ExecStatus::Halt);
+        assert_ne!(ExecStatus::Ok, ExecStatus::StepsExceeded);
+        assert_ne!(ExecStatus::Ok, ExecStatus::Error);
+    }
+
+    #[test]
+    fn exec_status_copy_clone() {
+        let s = ExecStatus::StepsExceeded;
+        let c = s;   // Copy
+        assert_eq!(s, c);
+        let c2 = s.clone();
+        assert_eq!(s, c2);
+    }
+
+    #[test]
+    fn exec_result_call_id_zero() {
+        let result = KotobaVm::execute(
+            &dummy_cid(), &DatalogProgram::default(), &Arrangement::new(),
+            &[], 5, 0, None,
+        );
+        assert_eq!(result.call_id, 0);
+    }
+
+    #[test]
+    fn max_steps_zero_returns_ok() {
+        // When max_steps=0 and there are deltas + rules, the loop body
+        // never executes → steps_used=0, status=Ok (0 >= 0 && !last.all_halted
+        // is false since last is None → condition is false).
+        let result = KotobaVm::execute(
+            &dummy_cid(), &one_rule_program(), &Arrangement::new(),
+            &[make_delta("x", "base")], 0, 77, None,
+        );
+        // steps_used must be 0 (no loop body ran)
+        assert_eq!(result.steps_used, 0);
+        assert_eq!(result.call_id, 77);
+    }
+
+    #[test]
+    fn multiple_deltas_same_program() {
+        let deltas: Vec<Delta> = (0..5)
+            .map(|i| make_delta(&format!("node-{i}"), "base"))
+            .collect();
+        let result = KotobaVm::execute(
+            &dummy_cid(), &one_rule_program(), &Arrangement::new(),
+            &deltas, 10, 55, None,
+        );
+        assert_eq!(result.call_id, 55);
+        assert_eq!(result.status, ExecStatus::Ok);
+        assert!(result.checkpoint_cids.is_empty());
+    }
+
+    #[test]
+    fn exec_status_debug_format() {
+        let s = format!("{:?}", ExecStatus::StepsExceeded);
+        assert_eq!(s, "StepsExceeded");
+        let s2 = format!("{:?}", ExecStatus::Error);
+        assert_eq!(s2, "Error");
+    }
+
+    #[test]
+    fn call_id_preserved_with_store() {
+        use kotoba_store::MemoryBlockStore;
+        let store  = MemoryBlockStore::new();
+        let result = KotobaVm::execute(
+            &dummy_cid(), &one_rule_program(), &Arrangement::new(),
+            &[make_delta("a", "base")], 5, 12345, Some(&store),
+        );
+        assert_eq!(result.call_id, 12345);
+    }
 }

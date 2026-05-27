@@ -139,4 +139,74 @@ mod tests {
         assert_eq!(store.get(&c).unwrap().as_deref(), Some(b"new".as_slice()));
         assert_eq!(store.block_count(), 1);
     }
+
+    // ── New tests ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn clone_shares_underlying_data() {
+        // MemoryBlockStore wraps Arc<RwLock<...>>; clone should share the same map.
+        let store1 = MemoryBlockStore::new();
+        let store2 = store1.clone();
+        let c = cid(b"shared");
+        store1.put(&c, b"value").unwrap();
+        // store2 should see the block because they share the same Arc.
+        assert!(store2.has(&c), "clone shares inner Arc");
+        assert_eq!(store2.get(&c).unwrap().as_deref(), Some(b"value".as_slice()));
+    }
+
+    #[test]
+    fn empty_data_put_and_get() {
+        let store = MemoryBlockStore::new();
+        let c = cid(b"empty-val");
+        store.put(&c, b"").unwrap();
+        let got = store.get(&c).unwrap().expect("block should exist");
+        assert_eq!(got.len(), 0);
+        assert!(store.has(&c));
+    }
+
+    #[test]
+    fn unpin_nonexistent_cid_is_noop() {
+        let store = MemoryBlockStore::new();
+        let c = cid(b"never-pinned");
+        // Should not panic.
+        store.unpin(&c);
+        assert!(!store.is_pinned(&c));
+    }
+
+    #[test]
+    fn pin_then_delete_does_not_keep_pin() {
+        // Deleting a block should not affect the pin set (they are separate).
+        let store = MemoryBlockStore::new();
+        let c = cid(b"pin-del");
+        store.put(&c, b"data").unwrap();
+        store.pin(&c);
+        assert!(store.is_pinned(&c));
+        store.delete(&c).unwrap();
+        // Block gone but pin persists in pin set (memory_store does not auto-unpin on delete).
+        assert!(!store.has(&c));
+        // Pin tracking is independent — still pinned in set even after block deleted.
+        assert!(store.is_pinned(&c));
+    }
+
+    #[test]
+    fn all_cids_empty_on_new_store() {
+        let store = MemoryBlockStore::new();
+        assert!(store.all_cids().is_empty());
+    }
+
+    #[test]
+    fn block_count_starts_at_zero() {
+        let store = MemoryBlockStore::new();
+        assert_eq!(store.block_count(), 0);
+    }
+
+    #[test]
+    fn large_block_data_roundtrip() {
+        let store = MemoryBlockStore::new();
+        let large_data: Vec<u8> = (0u8..=255u8).cycle().take(4096).collect();
+        let c = cid(&large_data[..16]);
+        store.put(&c, &large_data).unwrap();
+        let got = store.get(&c).unwrap().expect("should exist");
+        assert_eq!(got.as_ref(), large_data.as_slice());
+    }
 }

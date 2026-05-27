@@ -191,4 +191,64 @@ mod tests {
         assert!(e2.to_string().contains("X25519"));
         assert!(e2.to_string().contains("did:key:zBar"));
     }
+
+    // ── New tests ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn x25519_key_for_unknown_did_returns_not_found() {
+        // x25519_key calls resolve first; if resolve fails with NotFound, the
+        // error should propagate as NotFound, NOT as NoX25519Key.
+        let resolver = InMemoryDidResolver::new();
+        let err = resolver.x25519_key("did:key:zNobodyX").unwrap_err();
+        assert!(
+            matches!(err, DidResolverError::NotFound(_)),
+            "expected NotFound, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn error_debug_contains_variant_name() {
+        let e1 = DidResolverError::NotFound("did:key:zDebug".into());
+        assert!(format!("{e1:?}").contains("NotFound"));
+
+        let e2 = DidResolverError::NoX25519Key("did:key:zDebug2".into());
+        assert!(format!("{e2:?}").contains("NoX25519Key"));
+    }
+
+    #[test]
+    fn error_is_send_and_sync() {
+        // Compile-time assertion that DidResolverError: Send + Sync.
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<DidResolverError>();
+    }
+
+    #[test]
+    fn resolver_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<InMemoryDidResolver>();
+    }
+
+    #[test]
+    fn empty_resolver_has_no_documents() {
+        let resolver = InMemoryDidResolver::new();
+        // Resolving any DID on an empty resolver returns NotFound.
+        assert!(matches!(
+            resolver.resolve("did:key:zAny"),
+            Err(DidResolverError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_after_multiple_inserts_returns_correct_doc() {
+        let resolver = InMemoryDidResolver::new();
+        let dids = ["did:key:zA", "did:key:zB", "did:key:zC"];
+        for (i, did) in dids.iter().enumerate() {
+            let key = [(i as u8 + 1) * 10u8; 32];
+            resolver.insert(*did, make_doc_with_x25519(did, key));
+        }
+        for did in &dids {
+            let doc = resolver.resolve(did).unwrap();
+            assert_eq!(&doc.id, did);
+        }
+    }
 }
