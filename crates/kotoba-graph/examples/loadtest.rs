@@ -239,6 +239,9 @@ async fn async_main() {
 
     // Phase 10: DISTINCT, HAVING, SUM/MIN/MAX/AVG, multi-graph aggregate
     phase10_aggregate_distinct().await;
+
+    // Phase 11: SPARQL DESCRIBE + CACAO-authed DESCRIBE + multi-graph CACAO DESCRIBE
+    phase11_describe_cacao().await;
 }
 
 // ─── Phase 4: distributed block fetch (simulated 2-node cluster) ─────────────
@@ -1206,6 +1209,158 @@ async fn phase10_aggregate_distinct() {
 
     println!("  → {N} entities × 3 predicates = {} quads (single graph).", N * 3);
     println!("  → {} quads across {N_GRAPHS} graphs (fan-out queries).", N * N_GRAPHS as u64 / N_GRAPHS as u64);
+}
+
+// ─── Phase 11: SPARQL DESCRIBE + CACAO-authed DESCRIBE + multi-graph CACAO ───
+
+async fn phase11_describe_cacao() {
+    use ed25519_dalek::{SigningKey, Signer};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use kotoba_auth::{Cacao, CacaoHeader, CacaoPayload, CacaoSig};
+    use kotoba_auth::did_key::ed25519_pubkey_to_did_key;
+
+    const N:        u64   = 5_000;
+    const ITERS:    usize = 40;
+    const N_GRAPHS: usize = 3;
+    const ROLES:    &[&str] = &["admin", "viewer", "editor"];
+
+    println!("\n=== Phase 11: SPARQL DESCRIBE + CACAO-authed + multi-graph CACAO ({N} entities) ===");
+    println!("{:<60}  {:>9}  {:>9}  {:>9}  {:>9}",
+        "query", "p50_µs", "p95_µs", "p99_µs", "result_n");
+
+    let qs = QuadStore::new(
+        Arc::new(Journal::new()),
+        Arc::new(MemoryBlockStore::new()) as Arc<dyn kotoba_core::store::BlockStore + Send + Sync>,
+    );
+
+    // Single graph with 3 quads per entity (role, score, name)
+    let graph = KotobaCid::from_bytes(b"phase11-main");
+    let mut sample_cids: Vec<KotobaCid> = Vec::new();
+    for i in 0..N {
+        let s = cid_for(400_000_000 + i);
+        if i < 50 { sample_cids.push(s.clone()); }
+        let role  = ROLES[(i % ROLES.len() as u64) as usize];
+        let score = (i % 100) as i64;
+        qs.assert(Quad { graph: graph.clone(), subject: s.clone(),
+            predicate: "role".into(),
+            object: QuadObject::Text(role.to_string()) }).await;
+        qs.assert(Quad { graph: graph.clone(), subject: s.clone(),
+            predicate: "score".into(),
+            object: QuadObject::Text(score.to_string()) }).await;
+        qs.assert(Quad { graph: graph.clone(), subject: s,
+            predicate: "name".into(),
+            object: QuadObject::Text(format!("E{i}")) }).await;
+    }
+    qs.commit("did:bench11", graph.clone(), 1).await.unwrap();
+    qs.reset_arrangement(&graph).await;
+
+    // Multi-graph setup for multi-graph CACAO DESCRIBE
+    let graphs: Vec<KotobaCid> = (0..N_GRAPHS)
+        .map(|i| KotobaCid::from_bytes(&[(i + 240) as u8; 36]))
+        .collect();
+    let mut multi_cids: Vec<KotobaCid> = Vec::new();
+    for (gi, g) in graphs.iter().enumerate() {
+        for i in 0..(N / N_GRAPHS as u64) {
+            let s = cid_for(500_000_000 + gi as u64 * 100_000 + i);
+            if gi == 0 && i < 10 { multi_cids.push(s.clone()); }
+            qs.assert(Quad { graph: g.clone(), subject: s.clone(),
+                predicate: "role".into(),
+                object: QuadObject::Text(ROLES[(i % ROLES.len() as u64) as usize].to_string()) }).await;
+            qs.assert(Quad { graph: g.clone(), subject: s,
+                predicate: "name".into(),
+                object: QuadObject::Text(format!("g{gi}-e{i}")) }).await;
+        }
+        qs.commit(&format!("did:bench11-{gi}"), g.clone(), gi as u64 + 2).await.unwrap();
+        qs.reset_arrangement(g).await;
+    }
+
+    // Real EdDSA CACAO chain authorizing this graph
+    let graph_mb = graph.to_multibase();
+    let sk  = SigningKey::from_bytes(&[55u8; 32]);
+    let pk  = sk.verifying_key();
+    let did = ed25519_pubkey_to_did_key(pk.as_bytes());
+    let template = Cacao {
+        h: CacaoHeader { t: "eip4361".to_string() },
+        p: CacaoPayload {
+            iss:       did.clone(),
+            aud:       "https://kotoba.bench".to_string(),
+            issued_at: "2026-01-01T00:00:00Z".to_string(),
+            expiry:    Some("2099-01-01T00:00:00Z".to_string()),
+            nonce:     "bench11-describe".to_string(),
+            domain:    "kotoba.bench".to_string(),
+            statement: None,
+            version:   "1".to_string(),
+            resources: vec![
+                "kotoba://can/quad:read".to_string(),
+                format!("kotoba://graph/{graph_mb}"),
+            ],
+        },
+        s: CacaoSig { t: "EdDSA".to_string(), s: String::new() },
+    };
+    let msg     = template.siwe_message();
+    let sig     = sk.sign(msg.as_bytes());
+    let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+    let cacao   = Cacao { s: CacaoSig { t: "EdDSA".to_string(), s: sig_b64 }, ..template };
+    let chain   = DelegationChain::new(cacao);
+
+    macro_rules! bench_describe {
+        ($label:expr, $body:expr) => {{
+            let mut times = Vec::with_capacity(ITERS);
+            let mut last_n = 0usize;
+            for _ in 0..ITERS {
+                let t = Instant::now();
+                let r: Vec<Quad> = $body;
+                times.push(t.elapsed());
+                last_n = r.len();
+            }
+            times.sort();
+            let p50 = times[times.len() / 2].as_micros();
+            let p95 = times[(times.len() * 95 / 100).min(times.len() - 1)].as_micros();
+            let p99 = times[(times.len() * 99 / 100).min(times.len() - 1)].as_micros();
+            println!("{:<60}  {:>9}  {:>9}  {:>9}  {:>9}",
+                $label, p50, p95, p99, last_n);
+        }};
+    }
+
+    // DESCRIBE single entity (1 IRI)
+    let target_mb = sample_cids[0].to_multibase();
+    bench_describe!("DESCRIBE <cid:single> (3 quads expected)",
+        qs.sparql_describe(&graph, &format!("DESCRIBE <cid:{target_mb}>"))
+            .await.unwrap());
+
+    // DESCRIBE 10 entities (multi-IRI)
+    let multi_iri_list: String = sample_cids.iter().take(10)
+        .map(|c| format!("<cid:{}>", c.to_multibase()))
+        .collect::<Vec<_>>().join(" ");
+    bench_describe!("DESCRIBE 10 entities by IRI (multi-pop, 30 quads)",
+        qs.sparql_describe(&graph, &format!("DESCRIBE {multi_iri_list}"))
+            .await.unwrap());
+
+    // DESCRIBE ?s WHERE { ?s <role> "admin" } — ~1666 admin entities × 3 quads
+    bench_describe!(r#"DESCRIBE ?s WHERE { ?s <role> "admin" } (~5K quads)"#,
+        qs.sparql_describe(&graph,
+            r#"DESCRIBE ?s WHERE { ?s <role> "admin" }"#).await.unwrap());
+
+    // CACAO-authed DESCRIBE (real EdDSA sig verified)
+    bench_describe!("real EdDSA CACAO + DESCRIBE 10 entities",
+        qs.sparql_describe_authed(&graph,
+            &format!("DESCRIBE {multi_iri_list}"), &chain).await.unwrap());
+
+    // CACAO-authed DESCRIBE ?s WHERE (complex query + sig verify)
+    bench_describe!(r#"real EdDSA CACAO + DESCRIBE ?s WHERE role=admin"#,
+        qs.sparql_describe_authed(&graph,
+            r#"DESCRIBE ?s WHERE { ?s <role> "admin" }"#, &chain).await.unwrap());
+
+    // Multi-pop: DESCRIBE bound by complex 2-triple BGP (role=admin AND has name)
+    bench_describe!(r#"DESCRIBE ?s WHERE role=admin AND <name> (complex BGP)"#,
+        qs.sparql_describe(&graph,
+            r#"DESCRIBE ?s WHERE { ?s <role> "admin" . ?s <name> ?n }"#)
+            .await.unwrap());
+
+    println!("  → DESCRIBE fetches all triples about each matched entity (multi-pop semantics).");
+    println!("  → ~{} admin entities × 3 predicates = ~{} quads per DESCRIBE.",
+        N / 3, N);
+    println!("  → Real EdDSA sig + multi-IRI DESCRIBE measures CACAO overhead on distributed queries.");
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
