@@ -242,6 +242,9 @@ async fn async_main() {
 
     // Phase 11: SPARQL DESCRIBE + CACAO-authed DESCRIBE + multi-graph CACAO DESCRIBE
     phase11_describe_cacao().await;
+
+    // Phase 12: SPARQL SERVICE clause federation + CACAO multi-graph SERVICE
+    phase12_service_federation().await;
 }
 
 // ─── Phase 4: distributed block fetch (simulated 2-node cluster) ─────────────
@@ -1361,6 +1364,141 @@ async fn phase11_describe_cacao() {
     println!("  → ~{} admin entities × 3 predicates = ~{} quads per DESCRIBE.",
         N / 3, N);
     println!("  → Real EdDSA sig + multi-IRI DESCRIBE measures CACAO overhead on distributed queries.");
+}
+
+// ─── Phase 12: SPARQL SERVICE federation + CACAO multi-graph SERVICE ──────────
+
+async fn phase12_service_federation() {
+    use ed25519_dalek::{SigningKey, Signer};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use kotoba_auth::{Cacao, CacaoHeader, CacaoPayload, CacaoSig};
+    use kotoba_auth::did_key::ed25519_pubkey_to_did_key;
+
+    const N_PER_GRAPH: u64   = 2_000;
+    const N_GRAPHS:    usize = 3;
+    const ITERS:       usize = 40;
+    const ROLES:       &[&str] = &["admin", "viewer", "editor"];
+
+    println!("\n=== Phase 12: SPARQL SERVICE federation + CACAO ({N_PER_GRAPH} entities × {N_GRAPHS} graphs) ===");
+    println!("{:<60}  {:>9}  {:>9}  {:>9}  {:>9}",
+        "query", "p50_µs", "p95_µs", "p99_µs", "result_n");
+
+    let qs = QuadStore::new(
+        Arc::new(Journal::new()),
+        Arc::new(MemoryBlockStore::new()) as Arc<dyn kotoba_core::store::BlockStore + Send + Sync>,
+    );
+
+    // Build N_GRAPHS independent graphs (simulates federation across IPFS peers)
+    let graphs: Vec<KotobaCid> = (0..N_GRAPHS)
+        .map(|i| KotobaCid::from_bytes(&[(i + 250) as u8; 36]))
+        .collect();
+
+    for (gi, g) in graphs.iter().enumerate() {
+        for i in 0..N_PER_GRAPH {
+            let s = cid_for(700_000_000 + gi as u64 * 1_000_000 + i);
+            qs.assert(Quad { graph: g.clone(), subject: s.clone(),
+                predicate: "role".into(),
+                object: QuadObject::Text(ROLES[(i % ROLES.len() as u64) as usize].to_string()) }).await;
+            qs.assert(Quad { graph: g.clone(), subject: s,
+                predicate: "name".into(),
+                object: QuadObject::Text(format!("g{gi}-e{i}")) }).await;
+        }
+        qs.commit(&format!("did:bench12-{gi}"), g.clone(), gi as u64 + 1).await.unwrap();
+        qs.reset_arrangement(g).await;
+    }
+
+    let g0_mb = graphs[0].to_multibase();
+    let g1_mb = graphs[1].to_multibase();
+    let g2_mb = graphs[2].to_multibase();
+
+    // Real EdDSA CACAO authorizing g0 + g1 (NOT g2)
+    let sk  = SigningKey::from_bytes(&[88u8; 32]);
+    let pk  = sk.verifying_key();
+    let did = ed25519_pubkey_to_did_key(pk.as_bytes());
+    let template = Cacao {
+        h: CacaoHeader { t: "eip4361".to_string() },
+        p: CacaoPayload {
+            iss:       did,
+            aud:       "https://kotoba.bench".to_string(),
+            issued_at: "2026-01-01T00:00:00Z".to_string(),
+            expiry:    Some("2099-01-01T00:00:00Z".to_string()),
+            nonce:     "bench12-service-fed".to_string(),
+            domain:    "kotoba.bench".to_string(),
+            statement: None,
+            version:   "1".to_string(),
+            resources: vec![
+                "kotoba://can/quad:read".to_string(),
+                format!("kotoba://graph/{g0_mb}"),
+                format!("kotoba://graph/{g1_mb}"),
+            ],
+        },
+        s: CacaoSig { t: "EdDSA".to_string(), s: String::new() },
+    };
+    let msg     = template.siwe_message();
+    let sig     = sk.sign(msg.as_bytes());
+    let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+    let cacao   = Cacao { s: CacaoSig { t: "EdDSA".to_string(), s: sig_b64 }, ..template };
+    let chain   = DelegationChain::new(cacao);
+
+    macro_rules! bench_q {
+        ($label:expr, $body:expr) => {{
+            let mut times = Vec::with_capacity(ITERS);
+            let mut last_n = 0usize;
+            for _ in 0..ITERS {
+                let t = Instant::now();
+                let r: Vec<Quad> = $body;
+                times.push(t.elapsed());
+                last_n = r.len();
+            }
+            times.sort();
+            let p50 = times[times.len() / 2].as_micros();
+            let p95 = times[(times.len() * 95 / 100).min(times.len() - 1)].as_micros();
+            let p99 = times[(times.len() * 99 / 100).min(times.len() - 1)].as_micros();
+            println!("{:<60}  {:>9}  {:>9}  {:>9}  {:>9}",
+                $label, p50, p95, p99, last_n);
+        }};
+    }
+
+    // Single SERVICE federation: g0 → g1 (cross-graph)
+    bench_q!("SERVICE <cid:g1> from g0 (single federation)",
+        qs.cold_query_sparql_bgp(&graphs[0],
+            &format!("SELECT * WHERE {{ SERVICE <cid:{g1_mb}> {{ ?s <role> ?r }} }}"))
+            .await.unwrap());
+
+    // SERVICE with FILTER inner — only admins from g1
+    bench_q!(r#"SERVICE <cid:g1> { FILTER admin } (federated + filter)"#,
+        qs.cold_query_sparql_bgp(&graphs[0],
+            &format!(r#"SELECT * WHERE {{ SERVICE <cid:{g1_mb}> {{ ?s <role> ?r FILTER(?r = "admin") }} }}"#))
+            .await.unwrap());
+
+    // SERVICE chained: outer pattern in g0 + SERVICE pulling g2
+    bench_q!("g0 ?s <role> + SERVICE <cid:g2> (complex multi-pop)",
+        qs.cold_query_sparql_bgp(&graphs[0],
+            &format!("SELECT * WHERE {{ {{ ?s <role> ?r }} UNION {{ SERVICE <cid:{g2_mb}> {{ ?s <name> ?n }} }} }}"))
+            .await.unwrap());
+
+    // CACAO-authed SERVICE — authorized graph (g1 in chain)
+    bench_q!("CACAO + SERVICE <cid:g1> (authorized)",
+        qs.cold_query_sparql_bgp_multi_graph_authed(&graphs[0],
+            &format!("SELECT * WHERE {{ SERVICE <cid:{g1_mb}> {{ ?s <role> ?r }} }}"),
+            &chain).await.unwrap());
+
+    // CACAO-authed SERVICE — UNAUTHORIZED target (g2 not in chain) → post-filter to 0
+    bench_q!("CACAO + SERVICE <cid:g2> (NOT authorized, post-filtered)",
+        qs.cold_query_sparql_bgp_multi_graph_authed(&graphs[0],
+            &format!("SELECT * WHERE {{ SERVICE <cid:{g2_mb}> {{ ?s <role> ?r }} }}"),
+            &chain).await.unwrap());
+
+    // SERVICE SILENT — unknown remote node, should return empty fast
+    bench_q!("SERVICE SILENT <kotoba://node/did:unknown> { ... }",
+        qs.cold_query_sparql_bgp(&graphs[0],
+            "SELECT * WHERE { SERVICE SILENT <kotoba://node/did:unknown> { ?s <role> ?r } }")
+            .await.unwrap());
+
+    println!("  → {N_PER_GRAPH} entities/graph × {N_GRAPHS} graphs = {} quads/graph (role+name).",
+        N_PER_GRAPH * 2);
+    println!("  → SERVICE federates query to target graph CID; blocks loaded via BlockStore.");
+    println!("  → CACAO chain authorizes g0+g1 only; queries against g2 post-filtered to 0 results.");
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
