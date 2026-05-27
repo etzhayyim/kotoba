@@ -206,6 +206,7 @@ bytemuck = { version = "1",  features = ["derive"], optional = true }
 | `kotoba-graph/benches/quad_store.rs` | `quad_store/insert_per_quad` | assert_silent × N (1ロック/quad) |
 | | `quad_store/insert_batch` | assert_batch_silent (1ロック/全quads) |
 | | `quad_store/insert_batch_chunked` | 50K chunk バッチ (loadtest 同等) |
+| | `quad_store/insert_batch_authed` | CACAO verify_skip_sig + batch insert (auth overhead 分離) |
 | | `quad_store/query_hot` | Arrangement hot-path クエリ |
 | | `quad_store/query_cold_prolly_1k` | ProllyTree 点引き + 模擬RTT |
 | `kotoba-store/benches/tiered_store.rs` | `tiered_store/*` | hot put/get, cold-promote, 予算 eviction |
@@ -264,8 +265,11 @@ entities × 2 quads = 要素数 (throughput = quad/s)
 | `insert_per_quad` (1ロック/quad) | 13.7ms **146K/s** | 138ms **145K/s** | 1.54s **130K/s** | — |
 | `insert_batch` (1ロック/全quads) | 5.1ms **390K/s** (2.7×) | 79ms **252K/s** (1.7×) | 1.11s **180K/s** (1.4×) | — |
 | `insert_batch_chunked` (50K chunk) | — | — | 1.33s **150K/s** | 38.6s **52K/s** ¹ |
+| `insert_batch_authed` (verify_skip_sig + insert) | 3.7ms **540K/s** | 43ms **465K/s** | 596ms **335K/s** | — |
 
 ¹ 1M entities (2M quads) の bench は HashMap/BTreeMap 成長コストを含む。実運用 (batch commit cycle で reset_arrangement) は loadtest 測定値を参照。
+
+`insert_batch_authed` と `insert_batch` の差 ≈ **<1 µs/batch** (CACAO 非暗号チェック: capability + graph scope + temporal)。本番 Ed25519 verify ≈ +0.1 ms/batch (per-call, quad 数に非依存)。
 
 #### QuadStore cold-path (ProllyTree + 模擬 IPFS/S3 RTT, 2026-05-25, 1K entries)
 

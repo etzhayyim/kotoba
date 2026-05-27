@@ -20,6 +20,7 @@
 /// | insert_per_quad            | no  (hot Arrangement) |
 /// | insert_batch               | no  (hot Arrangement) |
 /// | insert_batch_chunked       | no  (hot Arrangement) |
+/// | insert_batch_authed        | no  (hot + CACAO gate)|
 /// | query_hot_arrangement      | no  (in-memory only)  |
 /// | query_cold_prolly_commit   | YES (simulated RTT)   |
 ///
@@ -29,6 +30,7 @@ use std::{sync::Arc, time::Duration};
 use anyhow::Result;
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use kotoba_auth::delegation::DelegationChain;
 use kotoba_core::{cid::KotobaCid, prolly::ProllyTree, store::BlockStore};
 use kotoba_graph::quad_store::QuadStore;
 use kotoba_kqe::quad::{Quad, QuadObject};
@@ -126,6 +128,52 @@ fn bench_insert_batch_chunked(c: &mut Criterion) {
                 for chunk in quads.chunks(CHUNK) {
                     qs.assert_batch_silent(chunk.to_vec()).await;
                 }
+                qs
+            });
+        });
+    }
+    group.finish();
+}
+
+/// CACAO-gated batch insert benchmark.
+///
+/// Measures the combined overhead of CACAO authorization + batch insert relative
+/// to bare `assert_batch_silent`.  Uses `verify_skip_sig` (all logic: capability
+/// scope, graph-CID scope, temporal expiry — crypto skipped) because criterion
+/// benches run under `test-utils` and a real EdDSA key is not available.
+///
+/// ## How to read
+///
+///   auth_overhead ≈ authed_time − silent_time
+///
+/// In production, add ≈ 0.1 ms per-batch for real Ed25519/EIP-191 verification
+/// (one-shot per batch call, not per quad).
+///
+/// | batch size | expected auth overhead |
+/// |------------|------------------------|
+/// | 1 000 q    | < 1 µs   (1 graph CID) |
+/// | 10 000 q   | < 1 µs   (1 graph CID) |
+/// | 100 000 q  | < 1 µs   (1 graph CID) |
+fn bench_insert_batch_authed(c: &mut Criterion) {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let graph_mb = make_cid(1).to_multibase();
+    let chain = DelegationChain::new_for_test(&graph_mb, "quad:write");
+
+    let mut group = c.benchmark_group("quad_store/insert_batch_authed");
+    for n in [1_000u64, 10_000, 100_000] {
+        let quads = make_quads(n);
+        group.throughput(Throughput::Elements(n * 2));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &quads, |b, quads| {
+            b.to_async(&rt).iter(|| async {
+                let qs = make_store();
+                // Auth gate: verify capability + graph scope + expiry (no crypto).
+                // Real Ed25519 ≈ +0.1 ms per batch call.
+                chain.verify_skip_sig(&graph_mb, "quad:write").unwrap();
+                qs.assert_batch_silent(quads.clone()).await;
                 qs
             });
         });
@@ -405,6 +453,7 @@ criterion_group!(
     bench_insert_per_quad,
     bench_insert_batch,
     bench_insert_batch_chunked,
+    bench_insert_batch_authed,
     bench_query_hot,
     bench_query_cold_prolly,
     bench_cold_eavt,
