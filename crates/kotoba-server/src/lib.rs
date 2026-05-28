@@ -304,6 +304,10 @@ pub fn build_router(state: Arc<KotobaState>) -> Router {
             post(kg::kg_query),
         )
         .route(
+            &format!("/xrpc/{}", kg::NSID_KG_SPARQL),
+            post(kg::kg_sparql),
+        )
+        .route(
             &format!("/xrpc/{}", kg::NSID_KG_INGEST),
             post(kg::kg_ingest),
         )

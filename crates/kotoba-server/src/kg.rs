@@ -61,6 +61,7 @@ pub const NSID_KG_CATALOG: &str = "ai.gftd.apps.yata.kg.catalog";
 pub const NSID_KG_EMBED:   &str = "ai.gftd.apps.yata.kg.embed";
 pub const NSID_KG_SEARCH:  &str = "ai.gftd.apps.yata.kg.search";
 pub const NSID_KG_QUERY:   &str = "ai.gftd.apps.yata.kg.query";
+pub const NSID_KG_SPARQL:  &str = "ai.gftd.apps.kotoba.graph.sparql";
 pub const NSID_KG_INGEST:  &str = "ai.gftd.apps.yata.kg.ingest";
 pub const NSID_KG_DELETE:  &str = "ai.gftd.apps.yata.kg.delete";
 
@@ -809,6 +810,135 @@ pub async fn kg_query(
         "results":   results,
         "elapsedMs": t0.elapsed().as_millis(),
     })))
+}
+
+// ── Direct SPARQL form endpoint (SELECT / DESCRIBE / CONSTRUCT / ASK) ─────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SparqlReq {
+    /// SPARQL query string (max 64 KiB).  Auto-detects SELECT / DESCRIBE /
+    /// CONSTRUCT / ASK from the leading keyword.
+    pub query:     String,
+    /// Optional named graph CID (multibase).  Defaults to the kg-graph CID.
+    pub graph:     Option<String>,
+    /// CACAO delegation chain (DAG-CBOR + base64) for private graphs.
+    pub cacao_b64: Option<String>,
+    /// Maximum results to materialise (defaults to 10000).
+    pub limit:     Option<usize>,
+}
+
+/// POST /xrpc/ai.gftd.apps.kotoba.graph.sparql
+///
+/// Execute a SPARQL query directly against the QuadStore cold path.
+/// Supports all four query forms; result shape varies:
+///
+///   - SELECT    →  `{ "form": "select",    "quads": [{...}] }`
+///   - DESCRIBE  →  `{ "form": "describe",  "quads": [{...}] }`
+///   - CONSTRUCT →  `{ "form": "construct", "quads": [{...}] }`
+///   - ASK       →  `{ "form": "ask",       "result": true }`
+///
+/// Goes through the IPFS-backed cold path (DistributedBlockStore / Kubo HTTP);
+/// honours CACAO gating per the graph's visibility policy.
+pub async fn kg_sparql(
+    State(state): State<Arc<KotobaState>>,
+    headers:      HeaderMap,
+    Json(req):    Json<SparqlReq>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    use std::time::Instant;
+
+    const MAX_SPARQL_RESULT_LIMIT: usize = 100_000;
+    if req.query.is_empty() || req.query.len() > MAX_KG_QUERY_PROG_LEN {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("query must be 1–{MAX_KG_QUERY_PROG_LEN} bytes")));
+    }
+    let limit = req.limit.unwrap_or(10_000).min(MAX_SPARQL_RESULT_LIMIT);
+
+    // Resolve target graph CID.
+    let graph_cid = match req.graph.as_deref() {
+        None    => kg_graph_cid(),
+        Some(s) => kotoba_core::cid::KotobaCid::from_multibase(s)
+            .ok_or((StatusCode::BAD_REQUEST, format!("invalid graph CID: {s}")))?,
+    };
+
+    // CACAO / visibility gate.
+    let visibility = state.graph_visibility(&graph_cid).await;
+    check_read_access(&visibility, &headers, req.cacao_b64.as_deref(),
+        Some(&state.operator_did), Some(&state.nonce_store))
+        .map_err(AccessDenied::into_response)?;
+
+    // Detect the SPARQL query form from the leading keyword.
+    let t0   = Instant::now();
+    let head = req.query.trim_start();
+    let upper: String = head.chars().take(10).collect::<String>().to_ascii_uppercase();
+    let qs = &state.quad_store;
+
+    let response = if upper.starts_with("ASK") {
+        let result = qs.sparql_ask(&graph_cid, &req.query).await
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("ASK eval: {e}")))?;
+        serde_json::json!({
+            "ok":        true,
+            "form":      "ask",
+            "result":    result,
+            "elapsedMs": t0.elapsed().as_millis(),
+        })
+    } else if upper.starts_with("DESCRIBE") {
+        let quads = qs.sparql_describe(&graph_cid, &req.query).await
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("DESCRIBE eval: {e}")))?;
+        let materialised: Vec<_> = quads.into_iter().take(limit)
+            .map(quad_to_json).collect();
+        serde_json::json!({
+            "ok":        true,
+            "form":      "describe",
+            "count":     materialised.len(),
+            "quads":     materialised,
+            "elapsedMs": t0.elapsed().as_millis(),
+        })
+    } else if upper.starts_with("CONSTRUCT") {
+        let quads = qs.sparql_construct(&graph_cid, &req.query).await
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("CONSTRUCT eval: {e}")))?;
+        let materialised: Vec<_> = quads.into_iter().take(limit)
+            .map(quad_to_json).collect();
+        serde_json::json!({
+            "ok":        true,
+            "form":      "construct",
+            "count":     materialised.len(),
+            "quads":     materialised,
+            "elapsedMs": t0.elapsed().as_millis(),
+        })
+    } else if upper.starts_with("SELECT") {
+        let quads = qs.cold_query_sparql_bgp(&graph_cid, &req.query).await
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("SELECT eval: {e}")))?;
+        let materialised: Vec<_> = quads.into_iter().take(limit)
+            .map(quad_to_json).collect();
+        serde_json::json!({
+            "ok":        true,
+            "form":      "select",
+            "count":     materialised.len(),
+            "quads":     materialised,
+            "elapsedMs": t0.elapsed().as_millis(),
+        })
+    } else {
+        return Err((StatusCode::BAD_REQUEST,
+            "query must start with SELECT, DESCRIBE, CONSTRUCT, or ASK".to_string()));
+    };
+    Ok(Json(response))
+}
+
+fn quad_to_json(q: kotoba_kqe::quad::Quad) -> serde_json::Value {
+    serde_json::json!({
+        "graph":     q.graph.to_multibase(),
+        "subject":   q.subject.to_multibase(),
+        "predicate": q.predicate,
+        "object":    match q.object {
+            QuadObject::Cid(c)      => serde_json::json!({"cid": c.to_multibase()}),
+            QuadObject::Text(t)     => serde_json::json!({"text": t}),
+            QuadObject::Integer(i)  => serde_json::json!({"int": i}),
+            QuadObject::Float(f)    => serde_json::json!({"float": f}),
+            QuadObject::Bool(b)     => serde_json::json!({"bool": b}),
+            other                   => serde_json::json!({"raw": format!("{other:?}")}),
+        },
+    })
 }
 
 #[cfg(test)]

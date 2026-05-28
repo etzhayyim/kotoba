@@ -49,18 +49,22 @@ enum Cmd {
     #[command(subcommand)]
     Quad(QuadCmd),
 
-    /// SPARQL or Cypher query over the running server's KG endpoint.
-    /// Goes to POST /xrpc/ai.gftd.apps.yata.kg.query — which evaluates over
-    /// IPFS-backed cold storage (DistributedBlockStore / Kubo HTTP).
+    /// SPARQL query (SELECT / DESCRIBE / CONSTRUCT / ASK) over the running
+    /// server's direct-SPARQL endpoint.  Auto-detects the form from the
+    /// query.  Goes to POST /xrpc/ai.gftd.apps.kotoba.graph.sparql which
+    /// runs over IPFS-backed cold storage (DistributedBlockStore / Kubo HTTP).
     Sparql {
         /// SPARQL query string (max 64 KiB).
         query: String,
-        /// Maximum results (1–10000, default 1000)
-        #[arg(long, default_value = "1000")]
+        /// Maximum quads returned (default 10000)
+        #[arg(long, default_value = "10000")]
         limit: usize,
         /// CACAO chain (base64 DAG-CBOR) for private graphs
         #[arg(long, env = "KOTOBA_CACAO_B64")]
         cacao: Option<String>,
+        /// Target named graph CID (multibase). Defaults to the kg-graph.
+        #[arg(long)]
+        graph: Option<String>,
     },
 
     /// Cypher MATCH/RETURN over the running server (same endpoint, lang=cypher).
@@ -164,8 +168,8 @@ async fn main() -> Result<()> {
             kotoba_server::run().await?;
         }
 
-        Cmd::Sparql { query, limit, cacao } => {
-            run_kg_query(&cli.url, &cli.token, "sparql", &query, limit, cacao).await?;
+        Cmd::Sparql { query, limit, cacao, graph } => {
+            run_sparql(&cli.url, &cli.token, &query, limit, cacao, graph).await?;
         }
 
         Cmd::Cypher { query, limit, cacao } => {
@@ -390,6 +394,33 @@ fn check_status(resp: &reqwest::Response) -> Result<()> {
     if !status.is_success() {
         anyhow::bail!("server returned {status}");
     }
+    Ok(())
+}
+
+/// POST a SPARQL query (any form) to the direct-SPARQL endpoint.
+async fn run_sparql(
+    base_url: &str,
+    token:    &Option<String>,
+    query:    &str,
+    limit:    usize,
+    cacao:    Option<String>,
+    graph:    Option<String>,
+) -> Result<()> {
+    let url = format!("{}/xrpc/ai.gftd.apps.kotoba.graph.sparql",
+        base_url.trim_end_matches('/'));
+    let client = build_client(token)?;
+    let body = serde_json::json!({
+        "query":    query,
+        "limit":    limit,
+        "cacaoB64": cacao,
+        "graph":    graph,
+    });
+    let resp = client.post(&url).json(&body).send().await
+        .context("POST kotoba.graph.sparql failed")?;
+    check_status(&resp)?;
+    let v: serde_json::Value = resp.json().await
+        .context("decode kotoba.graph.sparql JSON")?;
+    println!("{}", serde_json::to_string_pretty(&v)?);
     Ok(())
 }
 
