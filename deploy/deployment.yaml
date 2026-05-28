@@ -110,6 +110,7 @@ spec:
           volumeMounts:
             - name: sled-data
               mountPath: /data/sled
+              subPath: sled
 
         # ── Sidecar: Kubo (IPFS) daemon ─────────────────────────────────────
         # Provides the cold-tier BlockStore that kotoba's TieredBlockStore
@@ -154,13 +155,11 @@ spec:
             limits:
               memory: "1Gi"
           volumeMounts:
-            - name: ipfs-data
+            - name: sled-data
               mountPath: /data/ipfs
+              subPath: ipfs
 
       volumes:
         - name: sled-data
           persistentVolumeClaim:
             claimName: kotoba-sled
-        - name: ipfs-data
-          persistentVolumeClaim:
-            claimName: kotoba-ipfs
