@@ -19,10 +19,13 @@ storage, native CACAO authentication, and WASM Component Model execution.
 ```bash
 # Tap the kotoba formula
 brew tap etzhayyim/kotoba          # one-time
-brew install kotoba                # installs the `kotoba` binary
+brew install --HEAD kotoba         # installs the `kotoba` binary (HEAD-only)
 ```
 
-Or, until the tap is published, install the formula directly from this repo:
+`--HEAD` is required while the formula tracks `main` (no tagged release
+yet); once a stable tag exists, plain `brew install kotoba` will work.
+
+Or, install the formula directly from this repo without tapping:
 
 ```bash
 brew install --HEAD --build-from-source ./Formula/kotoba.rb
