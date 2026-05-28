@@ -682,6 +682,12 @@ async fn run_bench(
 
     let wall_start = Instant::now();
 
+    // Per-run nonce salt — ensures CACAO nonces from this bench run do not
+    // collide with nonces from prior bench runs (the server's NonceStore
+    // persists across requests but inside one server process).
+    let run_salt = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+
     // Spawn `concurrency` workers; each consumes from a shared atomic counter
     // until `iters` requests have been dispatched.
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -705,7 +711,8 @@ async fn run_bench(
                 // Per-request CACAO when --cacao-seed is set.  Nonce must be
                 // unique across requests so the server's NonceStore admits it.
                 let cacao_field: Option<String> = match (&*signer, cacao_static.as_ref()) {
-                    (Some(s), _)    => Some(s.sign_with_nonce(&format!("kb-{worker_id}-{i}"))),
+                    (Some(s), _)    => Some(s.sign_with_nonce(
+                        &format!("kb-{run_salt}-{worker_id}-{i}"))),
                     (None, Some(c)) => Some(c.clone()),
                     (None, None)    => None,
                 };
