@@ -12,6 +12,9 @@ path = "src/main.rs"
 [dependencies]
 kotoba-server = { path = "../kotoba-server" }
 kotoba-kse    = { path = "../kotoba-kse" }
+kotoba-auth   = { path = "../kotoba-auth" }
+ciborium      = "0.2"
+ed25519-dalek = { version = "2", features = ["std"] }
 clap          = { version = "4", features = ["derive", "env"] }
 tokio.workspace = true
 anyhow.workspace = true

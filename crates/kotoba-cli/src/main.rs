@@ -107,6 +107,40 @@ enum Cmd {
         token: Option<String>,
     },
 
+    /// Derive a `did:key:z…` from a 32-byte hex Ed25519 seed.  Useful for
+    /// pre-computing the DID a `kotoba serve` will boot with when
+    /// KOTOBA_AGENT_ED25519_HEX is set to the same seed.
+    DidDerive {
+        /// 64 hex chars (32-byte seed).
+        seed: String,
+    },
+
+    /// Build a real-signed CACAO authorising `quad:read` (or another cap) on a
+    /// graph CID, signed by the supplied Ed25519 seed.  Output is DAG-CBOR
+    /// base64-standard — paste into `cacaoB64` field of the SPARQL request.
+    CacaoSign {
+        /// 32-byte hex Ed25519 seed of the signer.
+        seed: String,
+        /// Graph CID multibase to scope the CACAO to.
+        #[arg(long)]
+        graph: String,
+        /// Capability granted (e.g. `quad:read`, `quad:write`).
+        #[arg(long, default_value = "quad:read")]
+        capability: String,
+        /// Audience.  Defaults to the issuer DID (the server enforces
+        /// aud == operator_did on Private graphs).
+        #[arg(long)]
+        aud: Option<String>,
+        /// CACAO nonce (anti-replay).  Default `kotoba-cli-nonce`.
+        #[arg(long, default_value = "kotoba-cli-nonce")]
+        nonce: String,
+        /// If true, prefix the graph as `private/<did>` (matches the server's
+        /// Private-visibility check).  When the server runs with
+        /// KOTOBA_DEFAULT_VISIBILITY=private this is required.
+        #[arg(long)]
+        private: bool,
+    },
+
     /// HTTP-level loadtest for the direct-SPARQL endpoint.  Issues `iters`
     /// POSTs of the same query (sequential or concurrent) and reports
     /// p50/p95/p99/mean in milliseconds plus aggregate QPS.
@@ -123,6 +157,10 @@ enum Cmd {
         /// Bearer token (defaults to a fresh JWT-shaped demo token).
         #[arg(long, env = "KOTOBA_DEMO_TOKEN")]
         token: Option<String>,
+        /// CACAO chain (DAG-CBOR base64).  When set, every request includes
+        /// `cacaoB64` — required for Private-visibility graphs.
+        #[arg(long, env = "KOTOBA_CACAO_B64")]
+        cacao: Option<String>,
     },
 }
 
@@ -234,11 +272,77 @@ async fn main() -> Result<()> {
             run_demo(&cli.url, &tok).await?;
         }
 
-        Cmd::Bench { query, iters, concurrency, token } => {
+        Cmd::DidDerive { seed } => {
+            use ed25519_dalek::SigningKey;
+            let bytes = hex::decode(seed.trim())
+                .context("seed must be hex")?;
+            if bytes.len() != 32 {
+                anyhow::bail!("seed must decode to exactly 32 bytes, got {}", bytes.len());
+            }
+            let mut arr = [0u8; 32]; arr.copy_from_slice(&bytes);
+            let sk  = SigningKey::from_bytes(&arr);
+            let did = kotoba_auth::did_key::ed25519_pubkey_to_did_key(
+                sk.verifying_key().as_bytes()
+            );
+            println!("{did}");
+        }
+
+        Cmd::CacaoSign { seed, graph, capability, aud, nonce, private } => {
+            use base64::{Engine, engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD}};
+            use ed25519_dalek::{Signer, SigningKey};
+            use kotoba_auth::did_key::ed25519_pubkey_to_did_key;
+            use kotoba_auth::{Cacao, CacaoHeader, CacaoPayload, CacaoSig};
+
+            let bytes = hex::decode(seed.trim()).context("seed must be hex")?;
+            if bytes.len() != 32 {
+                anyhow::bail!("seed must decode to exactly 32 bytes");
+            }
+            let mut arr = [0u8; 32]; arr.copy_from_slice(&bytes);
+            let sk  = SigningKey::from_bytes(&arr);
+            let did = ed25519_pubkey_to_did_key(sk.verifying_key().as_bytes());
+
+            // The Private-visibility check uses the synthetic graph scope
+            // "private/<owner_did>" rather than the raw CID multibase, so the
+            // CACAO must carry that scope to be accepted by the server.
+            let graph_scope = if private {
+                format!("private/{did}")
+            } else {
+                graph
+            };
+
+            let aud_resolved = aud.unwrap_or_else(|| did.clone());
+            let mut cacao = Cacao {
+                h: CacaoHeader { t: "caip122".into() },
+                p: CacaoPayload {
+                    iss:       did.clone(),
+                    aud:       aud_resolved,
+                    issued_at: "2026-05-26T00:00:00Z".into(),
+                    expiry:    Some("2099-01-01T00:00:00Z".into()),
+                    nonce,
+                    domain:    "kotoba.cli".into(),
+                    statement: None,
+                    version:   "1".into(),
+                    resources: vec![
+                        format!("kotoba://graph/{graph_scope}"),
+                        format!("kotoba://can/{capability}"),
+                    ],
+                },
+                s: CacaoSig { t: "EdDSA".into(), s: String::new() },
+            };
+            let msg = cacao.siwe_message();
+            let sig: ed25519_dalek::Signature = sk.sign(msg.as_bytes());
+            cacao.s.s = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+
+            let mut cbor = Vec::new();
+            ciborium::into_writer(&cacao, &mut cbor).context("cbor encode")?;
+            println!("{}", B64.encode(&cbor));
+        }
+
+        Cmd::Bench { query, iters, concurrency, token, cacao } => {
             let tok = token
                 .or_else(|| cli.token.clone())
                 .unwrap_or_else(|| "demo-token".into());
-            run_bench(&cli.url, &tok, &query, iters, concurrency).await?;
+            run_bench(&cli.url, &tok, &query, iters, concurrency, cacao).await?;
         }
 
         Cmd::Whoami => {
@@ -461,6 +565,7 @@ async fn run_bench(
     query:       &str,
     iters:       usize,
     concurrency: usize,
+    cacao:       Option<String>,
 ) -> Result<()> {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -478,7 +583,11 @@ async fn run_bench(
     println!("    {query}");
 
     let url   = Arc::new(format!("{base}/xrpc/ai.gftd.apps.kotoba.graph.sparql"));
-    let body  = Arc::new(serde_json::json!({ "query": query, "limit": 10_000 }));
+    let body  = Arc::new(serde_json::json!({
+        "query":    query,
+        "limit":    10_000,
+        "cacaoB64": cacao,
+    }));
     let token = Arc::new(token);
 
     let wall_start = Instant::now();
