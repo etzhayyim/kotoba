@@ -73,14 +73,13 @@ impl DelegationChain {
             }
         }
 
-        // 3. Graph-CID scope check
-        if let Some(granted_graph) = cacao.p.graph_cid() {
-            if granted_graph != graph_cid {
-                return Err(DelegationError::GraphMismatch {
-                    expected: granted_graph.to_string(),
-                    got:      graph_cid.to_string(),
-                });
-            }
+        // 3. Graph-CID scope check (multi-graph: any granted graph matches)
+        let granted = cacao.p.all_graph_cids();
+        if !granted.is_empty() && !granted.iter().any(|g| *g == graph_cid) {
+            return Err(DelegationError::GraphMismatch {
+                expected: granted.join(","),
+                got:      graph_cid.to_string(),
+            });
         }
 
         // 4. Signature SKIPPED in test mode
@@ -153,14 +152,15 @@ impl DelegationChain {
             }
         }
 
-        // 3. Graph-CID scope check — kotoba://graph/{cid} must match (if present)
-        if let Some(granted_graph) = cacao.p.graph_cid() {
-            if granted_graph != graph_cid {
-                return Err(DelegationError::GraphMismatch {
-                    expected: granted_graph.to_string(),
-                    got:      graph_cid.to_string(),
-                });
-            }
+        // 3. Graph-CID scope check — requested graph must be one of the granted graphs.
+        //    A CACAO may grant access to multiple graphs via repeated
+        //    `kotoba://graph/{cid}` resources; the caller's graph_cid must match any.
+        let granted = cacao.p.all_graph_cids();
+        if !granted.is_empty() && !granted.iter().any(|g| *g == graph_cid) {
+            return Err(DelegationError::GraphMismatch {
+                expected: granted.join(","),
+                got:      graph_cid.to_string(),
+            });
         }
 
         // 4. Verify cryptographic signature
@@ -221,26 +221,34 @@ impl DelegationChain {
             )));
         }
 
-        // 3/4. Capability + graph attenuation: leaf must claim same cap+graph as root
-        let root_cap   = root.p.capability().unwrap_or("");
-        let leaf_cap   = leaf.p.capability().unwrap_or("");
-        let root_graph = root.p.graph_cid().unwrap_or("");
-        let leaf_graph = leaf.p.graph_cid().unwrap_or("");
+        // 3/4. Capability + graph attenuation:
+        //   leaf must claim same cap as root, and leaf's granted graphs ⊆ root's.
+        let root_cap    = root.p.capability().unwrap_or("");
+        let leaf_cap    = leaf.p.capability().unwrap_or("");
+        let root_graphs = root.p.all_graph_cids();
+        let leaf_graphs = leaf.p.all_graph_cids();
         if root_cap != leaf_cap {
             return Err(DelegationError::AttenuationViolation(format!(
                 "root grants '{root_cap}', leaf claims '{leaf_cap}'"
             )));
         }
-        if root_graph != leaf_graph {
-            return Err(DelegationError::AttenuationViolation(format!(
-                "root graph '{root_graph}' != leaf graph '{leaf_graph}'"
-            )));
+        // Leaf's graph set must be a subset of root's (no scope widening)
+        if !root_graphs.is_empty() {
+            for lg in &leaf_graphs {
+                if !root_graphs.iter().any(|rg| rg == lg) {
+                    return Err(DelegationError::AttenuationViolation(format!(
+                        "leaf graph '{lg}' not in root grant"
+                    )));
+                }
+            }
         }
 
-        // 5. Caller's graph request matches the chain's grant
-        if !root_graph.is_empty() && root_graph != graph_cid {
+        // 5. Caller's graph request matches one of the granted graphs.
+        //    If leaf restricts the set, use leaf's grants; otherwise fall back to root's.
+        let effective = if !leaf_graphs.is_empty() { &leaf_graphs } else { &root_graphs };
+        if !effective.is_empty() && !effective.iter().any(|g| *g == graph_cid) {
             return Err(DelegationError::GraphMismatch {
-                expected: root_graph.to_string(),
+                expected: effective.join(","),
                 got:      graph_cid.to_string(),
             });
         }
@@ -714,6 +722,45 @@ mod tests {
         let err = chain.verify("graph-B", "quad:read").unwrap_err();
         assert!(matches!(err, DelegationError::GraphMismatch { .. }),
             "caller-graph mismatch must be rejected: {err:?}");
+    }
+
+    #[test]
+    fn single_cacao_multi_graph_grants_both() {
+        // CACAO with two graph resources should authorize calls against either.
+        let (sk, did) = signing_key_seed(20);
+        let template = Cacao {
+            h: CacaoHeader { t: "eip4361".into() },
+            p: CacaoPayload {
+                iss:       did.clone(),
+                aud:       "did:final:caller".into(),
+                issued_at: "2026-01-01T00:00:00Z".into(),
+                expiry:    Some("2099-01-01T00:00:00Z".into()),
+                nonce:     "multi-graph".into(),
+                domain:    "kotoba.test".into(),
+                statement: None,
+                version:   "1".into(),
+                resources: vec![
+                    "kotoba://can/quad:read".into(),
+                    "kotoba://graph/g-aaa".into(),
+                    "kotoba://graph/g-bbb".into(),
+                ],
+            },
+            s: CacaoSig { t: "EdDSA".into(), s: String::new() },
+        };
+        let msg     = template.siwe_message();
+        let sig     = sk.sign(msg.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+        let cacao   = Cacao { s: CacaoSig { t: "EdDSA".into(), s: sig_b64 }, ..template };
+        let chain   = DelegationChain::new(cacao);
+
+        // Both should pass
+        assert!(chain.verify("g-aaa", "quad:read").is_ok(), "g-aaa must be authorized");
+        assert!(chain.verify("g-bbb", "quad:read").is_ok(), "g-bbb must be authorized");
+        // Out-of-set must fail
+        assert!(matches!(
+            chain.verify("g-ccc", "quad:read").unwrap_err(),
+            DelegationError::GraphMismatch { .. }
+        ), "out-of-set graph must be denied");
     }
 
     #[test]
