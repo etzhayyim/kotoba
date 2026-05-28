@@ -100,6 +100,15 @@ enum Cmd {
     /// source, IPFS endpoint, peer list, default visibility, hot-cache size.
     Whoami,
 
+    /// Check whether `etzhayyim/kotoba` main branch is newer than this
+    /// binary's build commit.  Hits GitHub's REST API once and caches the
+    /// result for 24 h in `~/.gftd/kotoba-update.json`.
+    UpdateCheck {
+        /// Re-fetch even if the cache is fresh.
+        #[arg(long)]
+        force: bool,
+    },
+
     /// End-to-end smoke: ingest a sample entity via kg.ingest, then run
     /// SELECT / ASK / DESCRIBE / CONSTRUCT through the direct-SPARQL endpoint.
     /// Useful for verifying that `kotoba serve` is wired up against the
@@ -253,7 +262,12 @@ async fn main() -> Result<()> {
 
     match cli.cmd {
         Cmd::Serve => {
-            // Re-init logging at INFO for serve mode unless RUST_LOG is set
+            // Fire-and-forget update-check before booting the server.  Cached
+            // 24 h to avoid hitting GitHub on every restart.  Result is printed
+            // to stderr so it doesn't interfere with structured logging.
+            if let Some(msg) = check_for_update(false).await {
+                eprintln!("{msg}");
+            }
             kotoba_server::run().await?;
         }
 
@@ -366,6 +380,15 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|| "demo-token".into());
             run_bench(&cli.url, &tok, &query, iters, concurrency,
                 cacao, cacao_seed, cacao_graph, cacao_private, max_hops).await?;
+        }
+
+        Cmd::UpdateCheck { force } => {
+            let local_sha = BUILD_COMMIT;
+            println!("local build commit : {local_sha}");
+            match check_for_update(force).await {
+                Some(msg) => println!("{msg}"),
+                None      => println!("you are up to date."),
+            }
         }
 
         Cmd::Whoami => {
@@ -919,4 +942,95 @@ async fn run_kg_query(
     let v: serde_json::Value = resp.json().await.context("decode kg.query JSON")?;
     println!("{}", serde_json::to_string_pretty(&v)?);
     Ok(())
+}
+
+// ── Update check (etzhayyim/kotoba) ───────────────────────────────────────────
+
+/// Short SHA baked at build time by `build.rs`.  "unknown" outside a git tree
+/// or when the build script did not run (e.g. cargo install from a tarball).
+const BUILD_COMMIT: &str = match option_env!("KOTOBA_BUILD_COMMIT") {
+    Some(s) => s,
+    None    => "unknown",
+};
+
+const UPDATE_CACHE_TTL_SECS: u64 = 24 * 3600;
+const UPDATE_CHECK_URL: &str =
+    "https://api.github.com/repos/etzhayyim/kotoba/commits/main";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct UpdateCache {
+    checked_at: u64,    // unix seconds
+    upstream_sha: String,
+}
+
+fn update_cache_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(std::path::PathBuf::from(home).join(".gftd").join("kotoba-update.json"))
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn read_update_cache() -> Option<UpdateCache> {
+    let path = update_cache_path()?;
+    let raw  = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn write_update_cache(c: &UpdateCache) -> Result<()> {
+    let path = update_cache_path().ok_or_else(|| anyhow::anyhow!("no HOME"))?;
+    if let Some(p) = path.parent() { std::fs::create_dir_all(p)?; }
+    std::fs::write(&path, serde_json::to_vec(c)?)?;
+    Ok(())
+}
+
+/// Return a short notice string when an upstream update is available.
+/// `None` means up-to-date, no network failure, or fresh-enough cache that
+/// matches the local commit.  Stays silent on any failure so the user is
+/// never blocked by a flaky network.
+async fn check_for_update(force: bool) -> Option<String> {
+    if BUILD_COMMIT == "unknown" { return None; }
+
+    if !force {
+        if let Some(c) = read_update_cache() {
+            if now_secs().saturating_sub(c.checked_at) < UPDATE_CACHE_TTL_SECS {
+                return notify(&c.upstream_sha);
+            }
+        }
+    }
+
+    // One-shot GitHub fetch.  Short timeout so this never blocks startup.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build().ok()?;
+    let resp = client.get(UPDATE_CHECK_URL)
+        .header("User-Agent", format!("kotoba-cli/{BUILD_COMMIT}"))
+        .header("Accept",     "application/vnd.github+json")
+        .send().await.ok()?;
+    if !resp.status().is_success() { return None; }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    let upstream_full = body.get("sha")?.as_str()?.to_string();
+    let upstream_sha  = upstream_full.chars().take(12).collect::<String>();
+
+    let _ = write_update_cache(&UpdateCache {
+        checked_at: now_secs(),
+        upstream_sha: upstream_sha.clone(),
+    });
+
+    notify(&upstream_sha)
+}
+
+fn notify(upstream_sha: &str) -> Option<String> {
+    if upstream_sha == BUILD_COMMIT { return None; }
+    Some(format!(
+        "→ kotoba update available: upstream {upstream} ≠ local {local}\n  \
+         brew upgrade etzhayyim/kotoba/kotoba   # or `brew reinstall --HEAD`\n  \
+         see  https://github.com/etzhayyim/kotoba/commits/main",
+        upstream = upstream_sha,
+        local    = BUILD_COMMIT,
+    ))
 }
