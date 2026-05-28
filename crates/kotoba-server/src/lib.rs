@@ -319,6 +319,10 @@ pub fn build_router(state: Arc<KotobaState>) -> Router {
             &format!("/xrpc/{}", kg::NSID_KG_DELETE),
             post(kg::kg_delete),
         )
+        .route(
+            &format!("/xrpc/{}", kg::NSID_KG_COMMIT),
+            post(kg::kg_commit),
+        )
         // MCP body limit: 50 MB to allow kotoba_wasm_run with large WASM payloads
         .route("/mcp", post(mcp::mcp_handler).layer(DefaultBodyLimit::max(50 * 1024 * 1024)))
         // ── kotobase multi-tenant pinning service (ADR-2605260001) ──────────

@@ -50,14 +50,22 @@ impl AgentIdentity {
     ///      `KOTOBA_AGENT_DID` env vars
     ///   3. ephemeral keypair (DID changes on restart)
     pub fn from_env() -> Self {
-        // 1. Device-local Keychain / dotfile
-        if let Some(stored) = crate::keychain::read_identity() {
-            if let Some(id) = Self::from_hex_triple(
-                &stored.ed25519_hex, &stored.x25519_hex, &stored.did,
-            ) {
-                tracing::info!(did = %id.did, source = "keychain",
-                    "AgentIdentity loaded from device-local store");
-                return id;
+        // 1. Device-local Keychain / dotfile.  `KOTOBA_NO_KEYCHAIN=1` skips
+        //    this lookup — needed by unit tests that exercise ephemeral
+        //    behaviour on developer machines where `kotoba init` has already
+        //    populated the Keychain.
+        let allow_keychain = std::env::var("KOTOBA_NO_KEYCHAIN")
+            .map(|v| v != "1" && !v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true);
+        if allow_keychain {
+            if let Some(stored) = crate::keychain::read_identity() {
+                if let Some(id) = Self::from_hex_triple(
+                    &stored.ed25519_hex, &stored.x25519_hex, &stored.did,
+                ) {
+                    tracing::info!(did = %id.did, source = "keychain",
+                        "AgentIdentity loaded from device-local store");
+                    return id;
+                }
             }
         }
 

@@ -620,6 +620,7 @@ mod tests {
 
     #[test]
     fn is_ephemeral_returns_true_without_env_vars() {
+        std::env::set_var("KOTOBA_NO_KEYCHAIN", "1");
         std::env::remove_var("KOTOBA_AGENT_ED25519_HEX");
         std::env::remove_var("KOTOBA_AGENT_X25519_HEX");
         std::env::remove_var("KOTOBA_AGENT_DID");
@@ -631,6 +632,7 @@ mod tests {
     fn node_id_matches_operator_did_signing_key() {
         // NodeId is blake3(verifying_key) — derived from the same identity used for
         // operator_did (prevents the double-generation bug; never exposes private key).
+        std::env::set_var("KOTOBA_NO_KEYCHAIN", "1");
         std::env::remove_var("KOTOBA_AGENT_ED25519_HEX");
         std::env::remove_var("KOTOBA_AGENT_X25519_HEX");
         std::env::remove_var("KOTOBA_AGENT_DID");
@@ -653,6 +655,7 @@ mod tests {
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
         use axum::http::HeaderMap;
 
+        std::env::set_var("KOTOBA_NO_KEYCHAIN", "1");
         std::env::remove_var("KOTOBA_AGENT_ED25519_HEX");
         std::env::remove_var("KOTOBA_AGENT_X25519_HEX");
         std::env::remove_var("KOTOBA_AGENT_DID");

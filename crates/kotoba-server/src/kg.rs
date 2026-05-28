@@ -65,6 +65,7 @@ pub const NSID_KG_SPARQL:  &str = "ai.gftd.apps.kotoba.graph.sparql";
 pub const NSID_KG_INGEST:  &str = "ai.gftd.apps.kotobase.kg.ingest";
 pub const NSID_KG_INGEST_BATCH: &str = "ai.gftd.apps.kotobase.kg.ingest_batch";
 pub const NSID_KG_DELETE:  &str = "ai.gftd.apps.kotobase.kg.delete";
+pub const NSID_KG_COMMIT:  &str = "ai.gftd.apps.kotobase.kg.commit";
 
 /// All yatabase KG quads are written into this named graph.
 pub fn kg_graph_cid() -> KotobaCid {
@@ -834,6 +835,65 @@ fn validate_ingest_req(e: &KgIngestReq) -> Result<(), String> {
 pub struct KgDeleteReq {
     /// Entity nanoid — same as the `id` field used in kg.ingest.
     pub id: String,
+}
+
+// ── kg.commit ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KgCommitReq {
+    /// Optional author DID for the commit metadata.  Defaults to the
+    /// operator DID.
+    pub author: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KgCommitResp {
+    pub ok:         bool,
+    pub commit_cid: String,
+    pub elapsed_ms: u128,
+}
+
+/// POST /xrpc/ai.gftd.apps.kotobase.kg.commit
+///
+/// Seal the current hot Arrangement for the kg graph into 4 covering
+/// ProllyTrees (EAVT / AEVT / AVET / VAET), persist them to the BlockStore
+/// (Kubo when KOTOBA_IPFS=on), and update the CommitDag head.  This is the
+/// canonical way to make pending ingest_batch writes durable across crash.
+///
+/// Side effects:
+///   - writes ~5-50 dag-cbor blocks per commit (4 ProllyTree roots + tree
+///     pages + 1 Commit block + 1 CAR bundle block)
+///   - updates Journal checkpoint to the current seq → next replay
+///     short-circuits past all pre-commit WAL entries
+///
+/// Restricted to operator DID — only the node operator may seal a commit.
+pub async fn kg_commit(
+    State(state): State<Arc<KotobaState>>,
+    headers:      HeaderMap,
+    Json(req):    Json<KgCommitReq>,
+) -> impl IntoResponse {
+    use std::time::Instant;
+    if let Err((code, msg)) = crate::graph_auth::require_operator_auth(&headers, &state.operator_did) {
+        return (code, Json(serde_json::json!({"ok": false, "error": msg}))).into_response();
+    }
+    let t0     = Instant::now();
+    let graph  = kg_graph_cid();
+    let author = req.author.clone().unwrap_or_else(|| state.operator_did.clone());
+    let seq    = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+
+    match state.quad_store.commit(&author, graph, seq).await {
+        Ok(cid) => Json(KgCommitResp {
+            ok:         true,
+            commit_cid: cid.to_multibase(),
+            elapsed_ms: t0.elapsed().as_millis(),
+        }).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "ok": false, "error": format!("commit failed: {e}"),
+        }))).into_response(),
+    }
 }
 
 /// POST /xrpc/ai.gftd.apps.kotobase.kg.delete
