@@ -10,3 +10,22 @@ spec:
   resources:
     requests:
       storage: 40Gi
+---
+# IPFS (Kubo) blockstore for the in-pod sidecar (P-1, 2026-05-28).
+#
+# The kotoba `BlockStore` is `TieredBlockStore<hot BudgetedMemory, cold
+# KuboBlockStore>`; the cold tier writes through `http://localhost:5001` to
+# the kubo container, whose datastore lives on this PVC.  Without this volume
+# the cold-put fails silently and content blocks are lost on pod restart.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kotoba-ipfs
+  namespace: kotoba
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: vultr-block-storage-hdd-retain
+  resources:
+    requests:
+      storage: 50Gi

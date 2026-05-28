@@ -3458,6 +3458,7 @@ dependencies = [
  "kotoba-kse",
  "kotoba-server",
  "reqwest 0.12.28",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

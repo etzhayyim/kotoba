@@ -295,12 +295,21 @@ impl KotobaState {
         }
 
         // Named graph registry — pre-populate well-known graphs.
+        //
+        // `kotobase-kg-v1` is the multi-tenant kotobase data plane (named graph
+        // backing ai.gftd.apps.kotobase.kg.*).  It is explicitly registered as
+        // `Authenticated` (any valid Bearer JWT may read) so that tenant apps
+        // can read back data they themselves wrote without provisioning a
+        // depth-2 CACAO delegation chain.  Writes still require Bearer auth
+        // (require_kg_write_auth in kg.rs) — the visibility only governs reads.
         let graph_registry = {
             let mut map: HashMap<KotobaCid, (String, GraphVisibility)> = HashMap::new();
             let pub_g  = NamedGraph::public();
             let auth_g = NamedGraph::authenticated();
+            let kg_g   = NamedGraph::new("kotobase-kg-v1", GraphVisibility::Authenticated);
             map.insert(pub_g.cid.clone(),  (pub_g.name.clone(),  pub_g.visibility));
             map.insert(auth_g.cid.clone(), (auth_g.name.clone(), auth_g.visibility));
+            map.insert(kg_g.cid.clone(),   (kg_g.name.clone(),   kg_g.visibility));
             Arc::new(tokio::sync::RwLock::new(map))
         };
 

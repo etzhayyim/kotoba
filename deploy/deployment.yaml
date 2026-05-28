@@ -111,7 +111,56 @@ spec:
             - name: sled-data
               mountPath: /data/sled
 
+        # ── Sidecar: Kubo (IPFS) daemon ─────────────────────────────────────
+        # Provides the cold-tier BlockStore that kotoba's TieredBlockStore
+        # writes through (KOTOBA_IPFS_ENDPOINT defaults to localhost:5001).
+        # Without this sidecar the cold-put fails silently and content blocks
+        # are lost on every pod restart.
+        - name: kubo
+          image: ipfs/kubo:v0.34.1
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              set -e
+              if [ ! -f /data/ipfs/config ]; then
+                ipfs init --profile=server,lowpower
+              fi
+              # Pod-local only (kotoba container reaches us via localhost).
+              ipfs config Addresses.API     /ip4/127.0.0.1/tcp/5001
+              ipfs config Addresses.Gateway /ip4/127.0.0.1/tcp/8081
+              ipfs config Datastore.StorageMax 40GB
+              # Reduce libp2p chatter so we don't compete with kotoba's own swarm.
+              ipfs config --json Swarm.ConnMgr.LowWater  64
+              ipfs config --json Swarm.ConnMgr.HighWater 128
+              exec ipfs daemon --migrate=true
+          env:
+            - name: IPFS_PATH
+              value: /data/ipfs
+          ports:
+            - name: ipfs-api
+              containerPort: 5001
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: 5001
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 5001
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            limits:
+              memory: "1Gi"
+          volumeMounts:
+            - name: ipfs-data
+              mountPath: /data/ipfs
+
       volumes:
         - name: sled-data
           persistentVolumeClaim:
             claimName: kotoba-sled
+        - name: ipfs-data
+          persistentVolumeClaim:
+            claimName: kotoba-ipfs
