@@ -106,6 +106,22 @@ enum Cmd {
         #[arg(long, env = "KOTOBA_DEMO_TOKEN")]
         token: Option<String>,
     },
+
+    /// HTTP-level loadtest for the direct-SPARQL endpoint.  Issues `iters`
+    /// sequential POSTs of the same query and reports p50 / p95 / p99 / mean
+    /// in milliseconds.  Use after `kotoba demo` has seeded a quad so the
+    /// query has non-empty results.
+    Bench {
+        /// SPARQL query to repeat.
+        #[arg(default_value = r#"SELECT * WHERE { ?s <kg/claim/role> ?o }"#)]
+        query: String,
+        /// Number of sequential iterations (default 100).
+        #[arg(long, default_value = "100")]
+        iters: usize,
+        /// Bearer token (defaults to a fresh JWT-shaped demo token).
+        #[arg(long, env = "KOTOBA_DEMO_TOKEN")]
+        token: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -214,6 +230,13 @@ async fn main() -> Result<()> {
                 .or_else(|| cli.token.clone())
                 .unwrap_or_else(|| "demo-token".into());
             run_demo(&cli.url, &tok).await?;
+        }
+
+        Cmd::Bench { query, iters, token } => {
+            let tok = token
+                .or_else(|| cli.token.clone())
+                .unwrap_or_else(|| "demo-token".into());
+            run_bench(&cli.url, &tok, &query, iters).await?;
         }
 
         Cmd::Whoami => {
@@ -426,6 +449,57 @@ fn demo_token() -> String {
         br#"{"sub":"did:key:zKotobaDemo","exp":9999999999}"#
     );
     format!("{header}.{payload}.demosig")
+}
+
+/// Sequential SPARQL loadtest.  Issues `iters` POSTs of the same query and
+/// prints p50/p95/p99/mean in milliseconds plus the response count.
+async fn run_bench(base_url: &str, token_in: &str, query: &str, iters: usize) -> Result<()> {
+    use std::time::{Duration, Instant};
+
+    let base   = base_url.trim_end_matches('/');
+    let client = reqwest::Client::new();
+    let token: String = if token_in.contains('.') {
+        token_in.to_string()
+    } else {
+        demo_token()
+    };
+
+    println!("→ benchmarking {iters} iterations of:");
+    println!("    {query}");
+
+    let url = format!("{base}/xrpc/ai.gftd.apps.kotoba.graph.sparql");
+    let body = serde_json::json!({ "query": query, "limit": 10_000 });
+
+    let mut samples: Vec<Duration> = Vec::with_capacity(iters);
+    let mut last_count: u64 = 0;
+    for _ in 0..iters {
+        let t0 = Instant::now();
+        let resp = client.post(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .json(&body)
+            .send().await.context("bench POST")?;
+        check_status(&resp)?;
+        let v: serde_json::Value = resp.json().await.context("bench JSON")?;
+        samples.push(t0.elapsed());
+        last_count = v["count"].as_u64().unwrap_or(0);
+    }
+    samples.sort_unstable();
+
+    let pct = |q: f64| -> u128 {
+        let idx = ((samples.len() as f64 * q) as usize).min(samples.len() - 1);
+        samples[idx].as_micros()
+    };
+    let mean: u128 =
+        (samples.iter().map(|d| d.as_micros()).sum::<u128>()) / (samples.len() as u128);
+
+    println!("\nresults (sequential, single client):");
+    println!("  count per query : {last_count}");
+    println!("  p50             : {:.2} ms", pct(0.50) as f64 / 1000.0);
+    println!("  p95             : {:.2} ms", pct(0.95) as f64 / 1000.0);
+    println!("  p99             : {:.2} ms", pct(0.99) as f64 / 1000.0);
+    println!("  mean            : {:.2} ms", mean   as f64 / 1000.0);
+    println!("  total           : {:.2} s",  samples.iter().sum::<Duration>().as_secs_f64());
+    Ok(())
 }
 
 /// End-to-end smoke: ingest a sample entity then run all four SPARQL forms.
