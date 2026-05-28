@@ -2295,6 +2295,72 @@ async fn kg_query_sparql_empty_graph_returns_empty() {
 // ─── kotoba.graph.sparql (direct SPARQL form endpoint) ───────────────────────
 
 #[tokio::test]
+async fn kg_sparql_roundtrip_ingest_then_select_describe_ask() {
+    // End-to-end HTTP roundtrip:
+    //   1. ingest an entity via kg.ingest (writes to the kg graph)
+    //   2. SELECT via kg.sparql — predicate matches return ≥1 quad
+    //   3. ASK   via kg.sparql — known fact → true
+    //   4. ASK   via kg.sparql — unknown fact → false
+    let s   = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zSparqlRoundtrip1");
+
+    let (status, put) = s.post_auth(
+        "/xrpc/ai.gftd.apps.yata.kg.ingest",
+        json!({
+            "id":        "sparql-roundtrip-001",
+            "qid":       "Q42",
+            "type":      "Person",
+            "labelJa":   "山田太郎",
+            "labelEn":   "Yamada Taro",
+            "confidence":"0.99",
+            "license":   "CC0-1.0",
+            "sourceId":  "src-roundtrip",
+            "claims": [
+                { "pred": "occupation", "value": "engineer" }
+            ],
+            "relations": []
+        }),
+        &tok,
+    ).await;
+    assert_eq!(status, 200, "ingest: {put}");
+    assert!(put["ok"].as_bool().unwrap_or(false), "ingest ok: {put}");
+
+    // SELECT bound by predicate.  kg.ingest writes "kg/claim/<pred>" predicates;
+    // the SPARQL executor's base IRI strips relative IRIs to their raw bytes,
+    // so we match the exact stored predicate string.
+    let (status, body) = s.post_auth(
+        "/xrpc/ai.gftd.apps.kotoba.graph.sparql",
+        json!({ "query": r#"SELECT * WHERE { ?s <kg/claim/occupation> ?o }"#, "limit": 1000 }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "select: {body}");
+    assert_eq!(body["form"], "select", "{body}");
+    let count = body["count"].as_u64().unwrap_or(0);
+    assert!(count >= 1, "expected ≥1 kg/claim/occupation quad, got {count}: {body}");
+
+    // ASK with the predicate we just wrote
+    let (status, ask) = s.post_auth(
+        "/xrpc/ai.gftd.apps.kotoba.graph.sparql",
+        json!({ "query": r#"ASK { ?s <kg/claim/occupation> "engineer" }"# }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "ask-true: {ask}");
+    assert_eq!(ask["form"], "ask", "{ask}");
+    assert_eq!(ask["result"], true,
+        "ingested <kg/claim/occupation>=\"engineer\" must be ASK-true: {ask}");
+
+    // ASK with a value that was NOT written — must be false
+    let (status, ask2) = s.post_auth(
+        "/xrpc/ai.gftd.apps.kotoba.graph.sparql",
+        json!({ "query": r#"ASK { ?s <kg/claim/occupation> "wizard" }"# }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "ask-false: {ask2}");
+    assert_eq!(ask2["result"], false,
+        "occupation=\"wizard\" was never written; ASK must be false: {ask2}");
+}
+
+#[tokio::test]
 async fn kg_sparql_select_empty_graph_returns_select_form() {
     let s = TestServer::start(false).await;
     let (status, body) = s.post_auth(
