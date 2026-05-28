@@ -875,9 +875,17 @@ impl QuadStore {
                 }
             }
             if next.is_empty() { break; }
-            for subj in &next {
-                let quads = self.get_entity_quads_cold(graph_cid, subj).await?;
-                result.extend(quads);
+            // Parallel per-subject fetch — each get_entity_quads_cold reads from
+            // BlockStore (potentially network-bound via DistributedBlockStore).
+            // Concurrent fetches drastically reduce wall time for wide hops.
+            let fetches = next.iter().map(|subj| {
+                let s = subj.clone();
+                let g = graph_cid.clone();
+                async move { self.get_entity_quads_cold(&g, &s).await }
+            });
+            let batches = futures::future::try_join_all(fetches).await?;
+            for batch in batches {
+                result.extend(batch);
             }
             frontier = next;
             let _ = &frontier;
