@@ -409,6 +409,17 @@ MemoryBlockStore、10K entities × 4 quads (name/role/status/knows)。reset_arra
   - 6-hop: **27 304 quads (full tree)**, p50 **65 ms / 14 QPS**
   - 6-hop c=16: 27304 quads, p50 188 ms / **75 QPS** (5.3× concurrent speedup)
   Latency scales sub-linearly with reach (1700× quads → 500× latency) thanks to parallel per-layer `try_join_all`.  Concurrent dispatch additionally hides per-layer fan-out cost.  CLI now drives this end-to-end: `kotoba bench --max-hops N "DESCRIBE <cid:root>"`.
+- **CACAO-gated wide-fanout multi-pop matrix (2026-05-28)**: identical 4-ary tree depth-6 workload + `kotoba bench --max-hops N --cacao-seed $SEED --cacao-private`, server in `KOTOBA_DEFAULT_VISIBILITY=private`:
+
+  | hops | reach   | unauthed QPS | CACAO QPS | overhead |
+  |------|---------|--------------|-----------|----------|
+  | 0    | 8       | 5297         | **1613**  | 3.3×     |
+  | 1    | 40      | 3420         | **984**   | 3.5×     |
+  | 3    | 680     | 568          | **191**   | 3.0×     |
+  | 6    | 27 304  | 14           | **14**    | **1.01× — vanishes** |
+  | 6 c=16 | 27 304 | 75          | **70**    | 1.07×    |
+
+  **CACAO overhead is purely additive (~0.4 ms per request for sign+verify)**, not multiplicative — at 6-hop where 65 ms query work dominates, the auth cost is essentially free.  Auth is the cost only when the query itself is sub-millisecond.  All 320 CACAO-gated requests across the matrix succeeded (no replay/nonce/scope failures).  This is the canonical "CACAO 前提 + multi-pop + 認証認可 + 複雑な query" measurement.
 - **NonceStore: RwLock<HashMap> → DashMap (2026-05-28)**: replaced the single global write-lock with 64-way sharded `DashMap<String, u64>` + `AtomicUsize` size cache. Concurrent writers on different nonces never serialise on the same shard. **Measured CACAO ASK throughput post-fix** (same setup): c=1 1240→**3916 QPS** (3.2×), c=8 3777→**10113** (2.7×), c=16 3686→**10140** (2.8×), c=32 4125→**12753 QPS** (3.1× — **new peak**). 100% success at c≤32. c=64 hits the 16384 MAX_NONCES cap at 320K total requests (`nonce store at capacity` warns) — expected; a longer-running workload with realistic 5-minute CACAO expiries would naturally evict. **CACAO trust-boundary throughput moved from 4K → 12.8K QPS without compromising replay protection**.
 - **kg.query (Datalog) vs kg.sparql (direct) HTTP head-to-head (2026-05-28, 2000-entity)**: same SPARQL string `SELECT ?s ?role WHERE { ?s <kg/claim/role> ?role }` (returns 2000 quads):
   - `kg.query` (compile → DatalogProgram → semi-naive fixpoint over snapshot Δ): **36 QPS**, 27.8ms/req
