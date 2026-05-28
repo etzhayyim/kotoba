@@ -35,6 +35,13 @@ struct TestServer {
 
 impl TestServer {
     async fn start(with_inference: bool) -> Self {
+        // Tests pre-date the 2026-05-28 default-Private flip; keep the historic
+        // Bearer-token-only auth behaviour unless an individual test overrides.
+        std::env::set_var("KOTOBA_DEFAULT_VISIBILITY", "authenticated");
+        // KuboBlockStore::put uses block_in_place which requires the multi-
+        // thread tokio runtime; #[tokio::test] defaults to current_thread.
+        // Disable IPFS cold tier in tests so puts stay in the hot memory cache.
+        std::env::set_var("KOTOBA_IPFS", "off");
         let engine = if with_inference { Some(stub_engine()) } else { None };
         let state  = KotobaState::new(engine).expect("KotobaState::new");
         let operator_did = state.operator_did.clone();
@@ -2283,6 +2290,98 @@ async fn kg_query_sparql_empty_graph_returns_empty() {
     assert_eq!(status, 200, "{body}");
     assert!(body["results"].is_array(), "expected results array: {body}");
     assert_eq!(body["results"].as_array().unwrap().len(), 0, "fresh graph should have no quads: {body}");
+}
+
+// ─── kotoba.graph.sparql (direct SPARQL form endpoint) ───────────────────────
+
+#[tokio::test]
+async fn kg_sparql_select_empty_graph_returns_select_form() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post_auth(
+        "/xrpc/ai.gftd.apps.kotoba.graph.sparql",
+        json!({ "query": r#"SELECT * WHERE { ?s <role> "admin" }"# }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["form"], "select", "{body}");
+    assert_eq!(body["count"], 0, "{body}");
+    assert!(body["quads"].is_array(), "{body}");
+}
+
+#[tokio::test]
+async fn kg_sparql_ask_empty_graph_returns_false() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post_auth(
+        "/xrpc/ai.gftd.apps.kotoba.graph.sparql",
+        json!({ "query": r#"ASK { ?s <role> "admin" }"# }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["form"], "ask", "{body}");
+    assert_eq!(body["result"], false, "{body}");
+}
+
+#[tokio::test]
+async fn kg_sparql_describe_empty_returns_zero_quads() {
+    let s = TestServer::start(false).await;
+    let cid = kotoba_core::cid::KotobaCid::from_bytes(b"sparql-e2e-nobody");
+    let (status, body) = s.post_auth(
+        "/xrpc/ai.gftd.apps.kotoba.graph.sparql",
+        json!({ "query": format!("DESCRIBE <cid:{}>", cid.to_multibase()) }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["form"], "describe", "{body}");
+    assert_eq!(body["count"], 0, "{body}");
+}
+
+#[tokio::test]
+async fn kg_sparql_construct_returns_construct_form() {
+    let s = TestServer::start(false).await;
+    let (status, body) = s.post_auth(
+        "/xrpc/ai.gftd.apps.kotoba.graph.sparql",
+        json!({ "query": r#"CONSTRUCT { ?s <label> "ADMIN" } WHERE { ?s <role> "admin" }"# }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["form"], "construct", "{body}");
+    assert_eq!(body["count"], 0, "empty graph yields zero constructed quads: {body}");
+}
+
+#[tokio::test]
+async fn kg_sparql_unknown_form_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, _body) = s.post_auth(
+        "/xrpc/ai.gftd.apps.kotoba.graph.sparql",
+        json!({ "query": "INSERT DATA { <a> <b> <c> }" }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 400, "non-SELECT/DESCRIBE/CONSTRUCT/ASK must be 400");
+}
+
+#[tokio::test]
+async fn kg_sparql_empty_query_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, _) = s.post_auth(
+        "/xrpc/ai.gftd.apps.kotoba.graph.sparql",
+        json!({ "query": "" }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 400);
+}
+
+#[tokio::test]
+async fn kg_sparql_invalid_graph_cid_returns_400() {
+    let s = TestServer::start(false).await;
+    let (status, _) = s.post_auth(
+        "/xrpc/ai.gftd.apps.kotoba.graph.sparql",
+        json!({
+            "query": r#"SELECT * WHERE { ?s ?p ?o }"#,
+            "graph": "not-a-real-multibase-cid",
+        }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 400);
 }
 
 #[tokio::test]
