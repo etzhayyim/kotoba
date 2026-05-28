@@ -10,6 +10,7 @@ use kotoba_store::{CapturingBlockStore, CarBundleWriter};
 use kotoba_kqe::quad::Quad;
 use kotoba_kqe::delta::Delta;
 use kotoba_kqe::arrangement::Arrangement;
+use kotoba_kqe::datalog::DatalogProgram;
 use kotoba_kse::journal::Journal;
 use kotoba_kse::topic::Topic;
 use kotoba_auth::delegation::{DelegationChain, DelegationError};
@@ -728,6 +729,69 @@ impl QuadStore {
             .map_err(|e| anyhow::anyhow!("MV serialise: {e}"))?;
         self.block_store.put(&mv_cid, &bytes)?;
         Ok((quads, mv_cid, false))
+    }
+
+    /// Evaluate a Datalog program against the IPFS-backed cold graph state.
+    ///
+    /// Pipeline:
+    ///   1. Load all committed quads for `graph_cid` via the cold AEVT scan
+    ///      (`quads_by_predicate_prefix_cold("")`).  Each quad fetch ultimately
+    ///      hits the configured BlockStore, which may be a DistributedBlockStore
+    ///      fronting Kubo HTTP peers — so this is a fully network-capable read.
+    ///   2. Union with the hot arrangement (for uncommitted assertions).
+    ///   3. Convert each quad into a `Delta::assert` and hand to the semi-naive
+    ///      Datalog engine.
+    ///   4. Return all derived `Delta` outputs.
+    ///
+    /// This bridges the in-memory KQE Datalog engine to IPFS substrate: every
+    /// query is served by the same content-addressed BlockStore as SPARQL.
+    pub async fn evaluate_datalog_cold(
+        &self,
+        graph_cid: &KotobaCid,
+        program:   &DatalogProgram,
+    ) -> anyhow::Result<Vec<Delta>> {
+        // 1. Load committed facts via cold AEVT (empty prefix scans everything).
+        let mut quads = self.quads_by_predicate_prefix_cold(graph_cid, "").await?;
+
+        // 2. Union with hot arrangement for uncommitted state.
+        if let Some(arr) = self.arrangements.get(&graph_cid.to_multibase()) {
+            if !arr.is_empty() {
+                let key = graph_cid.to_multibase();
+                let hot_covers = self.hot_covers_all.get(&key).map(|v| *v).unwrap_or(true);
+                // Same dedupe strategy as get_entity_quads_cold: (s, p, o-bytes)
+                let mut seen: std::collections::HashSet<(KotobaCid, String, Vec<u8>)> = quads.iter()
+                    .map(|q| (q.subject.clone(), q.predicate.clone(),
+                        serde_json::to_vec(&q.object).unwrap_or_default()))
+                    .collect();
+                for hq in arr.quads(graph_cid) {
+                    let k = (hq.subject.clone(), hq.predicate.clone(),
+                        serde_json::to_vec(&hq.object).unwrap_or_default());
+                    if seen.insert(k) { quads.push(hq); }
+                }
+                // If hot covers all and cold was empty, the cold scan returned
+                // hot quads via the predicate-prefix scan's hot-path branch —
+                // dedupe handles that case as well.
+                let _ = hot_covers;
+            }
+        }
+
+        // 3. Quads → Deltas
+        let deltas: Vec<Delta> = quads.into_iter().map(Delta::assert).collect();
+
+        // 4. Evaluate
+        Ok(program.evaluate_delta(&deltas))
+    }
+
+    /// CACAO-authed Datalog query over IPFS — requires `quad:read` on the graph.
+    pub async fn evaluate_datalog_cold_authed(
+        &self,
+        graph_cid: &KotobaCid,
+        program:   &DatalogProgram,
+        chain:     &DelegationChain,
+    ) -> Result<Vec<Delta>, AccessError> {
+        chain.verify(&graph_cid.to_multibase(), "quad:read")?;
+        self.evaluate_datalog_cold(graph_cid, program).await
+            .map_err(|e| AccessError::Internal(e.to_string()))
     }
 
     pub async fn cold_query_sparql_bgp(
@@ -5345,6 +5409,127 @@ mod tests {
         let cold = qs_b.cold_query_sparql_bgp(&graph,
             r#"SELECT * WHERE { ?s <role> "admin" }"#).await.unwrap();
         assert_eq!(cold.len(), 1, "committed quad must be cold-readable after hot clear");
+    }
+
+    // ─── Datalog over IPFS-backed cold storage ────────────────────────────────
+
+    #[tokio::test]
+    async fn datalog_cold_evaluates_against_prolly_tree_facts() {
+        // Datalog rule: transitive_closure(?x, ?z) :- knows(?x, ?y), knows(?y, ?z).
+        // Set up a 2-hop knows chain, commit to ProllyTree (cold), then evaluate
+        // the program — every join must be served by BlockStore-backed scans.
+        use kotoba_kqe::datalog::{DatalogProgram, DatalogRule, Atom, BodyLiteral, Term};
+
+        let qs = QuadStore::new(
+            Arc::new(Journal::new()),
+            Arc::new(MemoryBlockStore::new()) as Arc<dyn BlockStore + Send + Sync>,
+        );
+        let g = KotobaCid::from_bytes(b"datalog-cold-graph");
+        let a = KotobaCid::from_bytes(b"dl-alice");
+        let b = KotobaCid::from_bytes(b"dl-bob");
+        let c = KotobaCid::from_bytes(b"dl-carol");
+
+        qs.assert(Quad { graph: g.clone(), subject: a.clone(),
+            predicate: "knows".into(), object: QuadObject::Cid(b.clone()) }).await;
+        qs.assert(Quad { graph: g.clone(), subject: b.clone(),
+            predicate: "knows".into(), object: QuadObject::Cid(c.clone()) }).await;
+        qs.commit("did:dl", g.clone(), 1).await.unwrap();
+        qs.reset_arrangement(&g).await;  // force cold path
+
+        let mut program = DatalogProgram::new();
+        program.add_rule(DatalogRule {
+            head: Atom { relation: "closure".into(),
+                args: vec![Term::Variable("x".into()), Term::Variable("z".into())] },
+            body: vec![
+                BodyLiteral::Positive(Atom { relation: "knows".into(),
+                    args: vec![Term::Variable("x".into()), Term::Variable("y".into())] }),
+                BodyLiteral::Positive(Atom { relation: "knows".into(),
+                    args: vec![Term::Variable("y".into()), Term::Variable("z".into())] }),
+            ],
+        });
+
+        let derived = qs.evaluate_datalog_cold(&g, &program).await.unwrap();
+        assert_eq!(derived.len(), 1, "1 closure fact expected, got {}", derived.len());
+        assert_eq!(derived[0].quad.subject, a, "closure subject must be alice");
+        match derived[0].quad.object {
+            QuadObject::Cid(ref oc) => assert_eq!(*oc, c, "closure object must be carol"),
+            _ => panic!("closure object must be a CID"),
+        }
+    }
+
+    #[tokio::test]
+    async fn datalog_cold_unions_hot_uncommitted_facts() {
+        use kotoba_kqe::datalog::{DatalogProgram, DatalogRule, Atom, BodyLiteral, Term};
+
+        let qs = QuadStore::new(
+            Arc::new(Journal::new()),
+            Arc::new(MemoryBlockStore::new()) as Arc<dyn BlockStore + Send + Sync>,
+        );
+        let g = KotobaCid::from_bytes(b"datalog-mix-graph");
+        let a = KotobaCid::from_bytes(b"mix-alice");
+        let b = KotobaCid::from_bytes(b"mix-bob");
+        let c = KotobaCid::from_bytes(b"mix-carol");
+
+        qs.assert(Quad { graph: g.clone(), subject: a.clone(),
+            predicate: "knows".into(), object: QuadObject::Cid(b.clone()) }).await;
+        qs.commit("did:dl-mix", g.clone(), 1).await.unwrap();
+        // Uncommitted edge — hot only
+        qs.assert(Quad { graph: g.clone(), subject: b.clone(),
+            predicate: "knows".into(), object: QuadObject::Cid(c.clone()) }).await;
+
+        let mut program = DatalogProgram::new();
+        program.add_rule(DatalogRule {
+            head: Atom { relation: "closure".into(),
+                args: vec![Term::Variable("x".into()), Term::Variable("z".into())] },
+            body: vec![
+                BodyLiteral::Positive(Atom { relation: "knows".into(),
+                    args: vec![Term::Variable("x".into()), Term::Variable("y".into())] }),
+                BodyLiteral::Positive(Atom { relation: "knows".into(),
+                    args: vec![Term::Variable("y".into()), Term::Variable("z".into())] }),
+            ],
+        });
+
+        let derived = qs.evaluate_datalog_cold(&g, &program).await.unwrap();
+        assert_eq!(derived.len(), 1,
+            "must derive closure(a,c) from hot+cold facts, got {}", derived.len());
+    }
+
+    #[tokio::test]
+    async fn datalog_cold_authed_real_eddsa() {
+        use kotoba_kqe::datalog::{DatalogProgram, DatalogRule, Atom, BodyLiteral, Term};
+
+        let (qs, g, _people) = setup_chain_qs().await;
+        let chain = make_real_eddsa_cacao(&g.to_multibase(), "quad:read");
+
+        let mut program = DatalogProgram::new();
+        program.add_rule(DatalogRule {
+            head: Atom { relation: "two_hop".into(),
+                args: vec![Term::Variable("x".into()), Term::Variable("z".into())] },
+            body: vec![
+                BodyLiteral::Positive(Atom { relation: "knows".into(),
+                    args: vec![Term::Variable("x".into()), Term::Variable("y".into())] }),
+                BodyLiteral::Positive(Atom { relation: "knows".into(),
+                    args: vec![Term::Variable("y".into()), Term::Variable("z".into())] }),
+            ],
+        });
+
+        let result = qs.evaluate_datalog_cold_authed(&g, &program, &chain).await;
+        assert!(result.is_ok(), "authed datalog must succeed: {result:?}");
+        // setup_chain_qs: alice→bob→carol→dave; 2-hop = (alice,carol), (bob,dave) = 2
+        let derived = result.unwrap();
+        assert_eq!(derived.len(), 2, "2 two-hop closures expected, got {}", derived.len());
+    }
+
+    #[tokio::test]
+    async fn datalog_cold_authed_denied_wrong_graph() {
+        use kotoba_kqe::datalog::DatalogProgram;
+        let (qs, g, _people) = setup_chain_qs().await;
+        let wrong = KotobaCid::from_bytes(b"datalog-wrong-graph");
+        let chain = make_real_eddsa_cacao(&wrong.to_multibase(), "quad:read");
+        let program = DatalogProgram::new();
+        let result = qs.evaluate_datalog_cold_authed(&g, &program, &chain).await;
+        assert!(matches!(result, Err(AccessError::Delegation(_))),
+            "wrong-graph CACAO must be denied");
     }
 
     #[tokio::test]
