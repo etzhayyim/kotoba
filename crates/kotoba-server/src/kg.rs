@@ -1,7 +1,7 @@
 //! yatabase KG entity lookup endpoint backed by kotoba QuadStore.
 //!
-//! NSID: ai.gftd.apps.yata.kg.entity
-//! All KG quads live in the named graph `yatabase-kg-v1`.
+//! NSID: ai.gftd.apps.kotobase.kg.entity
+//! All KG quads live in the named graph `kotobase-kg-v1`.
 //!
 //! Predicate conventions (written by seed_kotoba.py):
 //!   kg/id           — nanoid primary key
@@ -56,19 +56,19 @@ fn require_kg_write_auth(headers: &HeaderMap) -> Result<(), (StatusCode, String)
     Ok(())
 }
 
-pub const NSID_KG_ENTITY:  &str = "ai.gftd.apps.yata.kg.entity";
-pub const NSID_KG_CATALOG: &str = "ai.gftd.apps.yata.kg.catalog";
-pub const NSID_KG_EMBED:   &str = "ai.gftd.apps.yata.kg.embed";
-pub const NSID_KG_SEARCH:  &str = "ai.gftd.apps.yata.kg.search";
-pub const NSID_KG_QUERY:   &str = "ai.gftd.apps.yata.kg.query";
+pub const NSID_KG_ENTITY:  &str = "ai.gftd.apps.kotobase.kg.entity";
+pub const NSID_KG_CATALOG: &str = "ai.gftd.apps.kotobase.kg.catalog";
+pub const NSID_KG_EMBED:   &str = "ai.gftd.apps.kotobase.kg.embed";
+pub const NSID_KG_SEARCH:  &str = "ai.gftd.apps.kotobase.kg.search";
+pub const NSID_KG_QUERY:   &str = "ai.gftd.apps.kotobase.kg.query";
 pub const NSID_KG_SPARQL:  &str = "ai.gftd.apps.kotoba.graph.sparql";
-pub const NSID_KG_INGEST:  &str = "ai.gftd.apps.yata.kg.ingest";
-pub const NSID_KG_INGEST_BATCH: &str = "ai.gftd.apps.yata.kg.ingest_batch";
-pub const NSID_KG_DELETE:  &str = "ai.gftd.apps.yata.kg.delete";
+pub const NSID_KG_INGEST:  &str = "ai.gftd.apps.kotobase.kg.ingest";
+pub const NSID_KG_INGEST_BATCH: &str = "ai.gftd.apps.kotobase.kg.ingest_batch";
+pub const NSID_KG_DELETE:  &str = "ai.gftd.apps.kotobase.kg.delete";
 
 /// All yatabase KG quads are written into this named graph.
 pub fn kg_graph_cid() -> KotobaCid {
-    KotobaCid::from_bytes(b"yatabase-kg-v1")
+    KotobaCid::from_bytes(b"kotobase-kg-v1")
 }
 
 const MAX_KG_ID_LEN:    usize = 256;
@@ -105,8 +105,8 @@ pub struct KgEntityResp {
     pub elapsed_ms: u128,
 }
 
-/// GET /xrpc/ai.gftd.apps.yata.kg.entity?id=<nanoid>
-/// GET /xrpc/ai.gftd.apps.yata.kg.entity?qid=Q42
+/// GET /xrpc/ai.gftd.apps.kotobase.kg.entity?id=<nanoid>
+/// GET /xrpc/ai.gftd.apps.kotobase.kg.entity?qid=Q42
 pub async fn kg_entity(
     State(state): State<Arc<KotobaState>>,
     headers:      HeaderMap,
@@ -232,7 +232,7 @@ pub struct KgCatalogQuery {
     pub cacao_b64: Option<String>,
 }
 
-/// GET /xrpc/ai.gftd.apps.yata.kg.catalog
+/// GET /xrpc/ai.gftd.apps.kotobase.kg.catalog
 /// Returns aggregate stats and source breakdown from the QuadStore.
 pub async fn kg_catalog(
     State(state): State<Arc<KotobaState>>,
@@ -298,7 +298,7 @@ pub struct KgEmbedResp {
     pub dims: usize,
 }
 
-/// POST /xrpc/ai.gftd.apps.yata.kg.embed
+/// POST /xrpc/ai.gftd.apps.kotobase.kg.embed
 /// Compute a blake3 pseudo-vector for `text` and store it as a `kg/label_vec`
 /// VectorF32 quad for the entity.  Uses the inference engine when available.
 pub async fn kg_embed(
@@ -374,7 +374,7 @@ pub struct KgSearchQuery {
 }
 fn default_limit() -> usize { 10 }
 
-/// GET /xrpc/ai.gftd.apps.yata.kg.search?q=<text>&limit=10
+/// GET /xrpc/ai.gftd.apps.kotobase.kg.search?q=<text>&limit=10
 /// Cosine similarity search over `kg/label_vec` VectorF32 quads.
 pub async fn kg_search(
     State(state): State<Arc<KotobaState>>,
@@ -510,9 +510,9 @@ pub struct KgIngestResp {
     pub quad_count:  usize,
 }
 
-/// POST /xrpc/ai.gftd.apps.yata.kg.ingest
+/// POST /xrpc/ai.gftd.apps.kotobase.kg.ingest
 ///
-/// Write a KG entity into the `yatabase-kg-v1` named graph. Each field becomes
+/// Write a KG entity into the `kotobase-kg-v1` named graph. Each field becomes
 /// a quad with predicate conventions matching `kg_entity` lookups.
 const MAX_KG_CLAIMS:      usize = 1_024;
 const MAX_KG_RELATIONS:   usize = 1_024;
@@ -678,7 +678,7 @@ pub struct KgIngestBatchResp {
 /// Bounds per-request memory + amortises HTTP overhead.
 const MAX_KG_BATCH_SIZE: usize = 1_000;
 
-/// POST /xrpc/ai.gftd.apps.yata.kg.ingest_batch
+/// POST /xrpc/ai.gftd.apps.kotobase.kg.ingest_batch
 ///
 /// Ingest up to `MAX_KG_BATCH_SIZE` entities in a single HTTP request.
 /// Validation is run once before any writes; if any entity fails the entire
@@ -836,9 +836,9 @@ pub struct KgDeleteReq {
     pub id: String,
 }
 
-/// POST /xrpc/ai.gftd.apps.yata.kg.delete
+/// POST /xrpc/ai.gftd.apps.kotobase.kg.delete
 ///
-/// Retract all quads for the given entity from the `yatabase-kg-v1` graph.
+/// Retract all quads for the given entity from the `kotobase-kg-v1` graph.
 /// Publishes a retract event to the Journal for each quad (WAL + GossipSub).
 pub async fn kg_delete(
     State(state): State<Arc<KotobaState>>,
@@ -900,7 +900,7 @@ pub struct KgQueryReq {
     pub limit: Option<usize>,
 }
 
-/// POST /xrpc/ai.gftd.apps.yata.kg.query
+/// POST /xrpc/ai.gftd.apps.kotobase.kg.query
 /// Execute a SPARQL SELECT or Cypher MATCH/RETURN against the QuadStore.
 ///
 /// Both compilers enforce binary-relation arity (exactly 2 RETURN variables).

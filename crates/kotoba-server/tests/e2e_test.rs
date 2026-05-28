@@ -1217,8 +1217,8 @@ async fn vault_get_missing_cid_param_returns_400() {
 async fn kg_entity_lookup_by_id_after_quad_create() {
     let s = TestServer::start(false).await;
 
-    // Seed quads directly via quad.create into yatabase-kg-v1 graph
-    let g = "yatabase-kg-v1";
+    // Seed quads directly via quad.create into kotobase-kg-v1 graph
+    let g = "kotobase-kg-v1";
     let subj = "e2e-person-001";
 
     for (pred, obj) in &[
@@ -1238,7 +1238,7 @@ async fn kg_entity_lookup_by_id_after_quad_create() {
 
     // Query by id — kg graph defaults to Authenticated tier.
     let (status, body) = s.get_authed(
-        &format!("/xrpc/ai.gftd.apps.yata.kg.entity?id={subj}")
+        &format!("/xrpc/ai.gftd.apps.kotobase.kg.entity?id={subj}")
     ).await;
     assert_eq!(status, 200, "{body}");
     assert!(body["ok"].as_bool().unwrap_or(false), "ok false: {body}");
@@ -1260,7 +1260,7 @@ async fn kg_entity_lookup_by_id_after_quad_create() {
 #[tokio::test]
 async fn kg_entity_lookup_by_qid() {
     let s = TestServer::start(false).await;
-    let g    = "yatabase-kg-v1";
+    let g    = "kotobase-kg-v1";
     let subj = "e2e-person-qid";
 
     for (pred, obj) in &[
@@ -1271,7 +1271,7 @@ async fn kg_entity_lookup_by_qid() {
         s.post_quad(g, subj, pred, obj).await;
     }
 
-    let (status, body) = s.get_authed("/xrpc/ai.gftd.apps.yata.kg.entity?qid=Q42").await;
+    let (status, body) = s.get_authed("/xrpc/ai.gftd.apps.kotobase.kg.entity?qid=Q42").await;
     assert_eq!(status, 200, "{body}");
     assert!(body["ok"].as_bool().unwrap_or(false));
     assert_eq!(body["entity"]["qid"], "Q42");
@@ -1281,7 +1281,7 @@ async fn kg_entity_lookup_by_qid() {
 #[tokio::test]
 async fn kg_entity_not_found_returns_ok_false() {
     let s = TestServer::start(false).await;
-    let (status, body) = s.get_authed("/xrpc/ai.gftd.apps.yata.kg.entity?id=no-such-entity").await;
+    let (status, body) = s.get_authed("/xrpc/ai.gftd.apps.kotobase.kg.entity?id=no-such-entity").await;
     assert_eq!(status, 200, "{body}");
     assert!(!body["ok"].as_bool().unwrap_or(true), "expected ok:false: {body}");
     assert!(body["error"].as_str().is_some(), "error missing: {body}");
@@ -1291,7 +1291,7 @@ async fn kg_entity_not_found_returns_ok_false() {
 async fn kg_entity_missing_param_returns_400() {
     let s = TestServer::start(false).await;
     // Must pass auth first (authenticated tier), then the missing-param check fires.
-    let (status, _) = s.get_authed("/xrpc/ai.gftd.apps.yata.kg.entity").await;
+    let (status, _) = s.get_authed("/xrpc/ai.gftd.apps.kotobase.kg.entity").await;
     assert_eq!(status, 400);
 }
 
@@ -1301,7 +1301,7 @@ async fn kg_ingest_and_entity_roundtrip() {
     let tok = tenant_jwt("did:key:zKgRoundtrip1");
 
     let (status, put) = s.post_auth(
-        "/xrpc/ai.gftd.apps.yata.kg.ingest",
+        "/xrpc/ai.gftd.apps.kotobase.kg.ingest",
         json!({
             "id":        "ingest-e2e-001",
             "qid":       "Q100",
@@ -1326,7 +1326,7 @@ async fn kg_ingest_and_entity_roundtrip() {
     assert!(put["quadCount"].as_u64().unwrap_or(0) >= 3, "quadCount low: {put}");
 
     // Lookup via kg.entity — kg graph defaults to Authenticated tier.
-    let (status, body) = s.get_authed("/xrpc/ai.gftd.apps.yata.kg.entity?id=ingest-e2e-001").await;
+    let (status, body) = s.get_authed("/xrpc/ai.gftd.apps.kotobase.kg.entity?id=ingest-e2e-001").await;
     assert_eq!(status, 200, "{body}");
     assert!(body["ok"].as_bool().unwrap_or(false), "entity not found: {body}");
 
@@ -1352,14 +1352,14 @@ async fn kg_ingest_with_relations() {
 
     // Ingest target entity first (needed for relation dst)
     s.post_auth(
-        "/xrpc/ai.gftd.apps.yata.kg.ingest",
+        "/xrpc/ai.gftd.apps.kotobase.kg.ingest",
         json!({ "id": "rel-dst-001", "type": "City", "labelEn": "Tokyo" }),
         &tok,
     ).await;
 
     // Ingest source entity with relation to target
     let (status, put) = s.post_auth(
-        "/xrpc/ai.gftd.apps.yata.kg.ingest",
+        "/xrpc/ai.gftd.apps.kotobase.kg.ingest",
         json!({
             "id":      "rel-src-001",
             "type":    "Person",
@@ -1374,7 +1374,7 @@ async fn kg_ingest_with_relations() {
     assert!(put["ok"].as_bool().unwrap_or(false));
 
     // Query source entity — kg graph defaults to Authenticated tier.
-    let (st, body) = s.get_authed("/xrpc/ai.gftd.apps.yata.kg.entity?id=rel-src-001").await;
+    let (st, body) = s.get_authed("/xrpc/ai.gftd.apps.kotobase.kg.entity?id=rel-src-001").await;
     assert_eq!(st, 200, "{body}");
 
     let rels = body["entity"]["relations"].as_array().expect("relations");
@@ -1391,7 +1391,7 @@ async fn kg_catalog_reflects_ingested_entities() {
     // Ingest two entities
     for (id, label) in &[("cat-e1", "EntityOne"), ("cat-e2", "EntityTwo")] {
         let (st, _) = s.post_auth(
-            "/xrpc/ai.gftd.apps.yata.kg.ingest",
+            "/xrpc/ai.gftd.apps.kotobase.kg.ingest",
             json!({ "id": id, "type": "Thing", "labelEn": label, "sourceId": "cat-test-src" }),
             &tok,
         ).await;
@@ -1399,7 +1399,7 @@ async fn kg_catalog_reflects_ingested_entities() {
     }
 
     // kg graph defaults to Authenticated tier — send a Bearer token.
-    let (status, body) = s.get_authed("/xrpc/ai.gftd.apps.yata.kg.catalog").await;
+    let (status, body) = s.get_authed("/xrpc/ai.gftd.apps.kotobase.kg.catalog").await;
     assert_eq!(status, 200, "{body}");
     assert!(body["ok"].as_bool().unwrap_or(false));
     assert!(body["stats"]["totalEntities"].as_u64().unwrap_or(0) >= 2, "{body}");
@@ -1914,7 +1914,7 @@ async fn kg_catalog_empty_returns_zero_stats() {
     let s = TestServer::start(false).await;
     // KG graph defaults to Authenticated visibility — opaque Bearer token suffices
     let (status, body) = s
-        .get_authed("/xrpc/ai.gftd.apps.yata.kg.catalog")
+        .get_authed("/xrpc/ai.gftd.apps.kotobase.kg.catalog")
         .await;
     assert_eq!(status, 200, "{body}");
     assert!(body["ok"].as_bool().unwrap_or(false), "{body}");
@@ -2240,7 +2240,7 @@ async fn kg_search_empty_returns_empty_results() {
     let s = TestServer::start(false).await;
     // KG graph defaults to Authenticated — send Bearer token
     let (status, body) = s.get_authed(
-        "/xrpc/ai.gftd.apps.yata.kg.search?q=nonexistent+entity"
+        "/xrpc/ai.gftd.apps.kotobase.kg.search?q=nonexistent+entity"
     ).await;
     assert_eq!(status, 200, "{body}");
     assert!(body["results"].is_array(), "expected results array: {body}");
@@ -2255,7 +2255,7 @@ async fn kg_search_after_ingest_returns_entity() {
 
     // Ingest an entity with a label so the search index has data
     let (status, _) = s.post_auth(
-        "/xrpc/ai.gftd.apps.yata.kg.ingest",
+        "/xrpc/ai.gftd.apps.kotobase.kg.ingest",
         json!({
             "id":      "ent-search-1",
             "labelJa": "東京都",
@@ -2268,7 +2268,7 @@ async fn kg_search_after_ingest_returns_entity() {
 
     // Search for the entity (blake3 pseudo-vector fallback, no LLM needed)
     let (status, body) = s.get_authed(
-        "/xrpc/ai.gftd.apps.yata.kg.search?q=Tokyo"
+        "/xrpc/ai.gftd.apps.kotobase.kg.search?q=Tokyo"
     ).await;
     assert_eq!(status, 200, "{body}");
     assert!(body["results"].is_array(), "{body}");
@@ -2280,7 +2280,7 @@ async fn kg_search_after_ingest_returns_entity() {
 async fn kg_query_sparql_empty_graph_returns_empty() {
     let s = TestServer::start(false).await;
     let (status, body) = s.post_auth(
-        "/xrpc/ai.gftd.apps.yata.kg.query",
+        "/xrpc/ai.gftd.apps.kotobase.kg.query",
         json!({
             "lang":  "sparql",
             "query": "PREFIX k: <urn:kg:> SELECT ?s ?o WHERE { ?s k:id ?o }",
@@ -2305,7 +2305,7 @@ async fn kg_sparql_roundtrip_ingest_then_select_describe_ask() {
     let tok = tenant_jwt("did:key:zSparqlRoundtrip1");
 
     let (status, put) = s.post_auth(
-        "/xrpc/ai.gftd.apps.yata.kg.ingest",
+        "/xrpc/ai.gftd.apps.kotobase.kg.ingest",
         json!({
             "id":        "sparql-roundtrip-001",
             "qid":       "Q42",
@@ -2367,7 +2367,7 @@ async fn kg_sparql_roundtrip_ingest_then_describe_subject() {
     let tok = tenant_jwt("did:key:zSparqlDescribe1");
 
     let (status, put) = s.post_auth(
-        "/xrpc/ai.gftd.apps.yata.kg.ingest",
+        "/xrpc/ai.gftd.apps.kotobase.kg.ingest",
         json!({
             "id":        "sparql-describe-001",
             "type":      "Person",
@@ -2410,7 +2410,7 @@ async fn kg_sparql_roundtrip_ingest_then_construct() {
     let tok = tenant_jwt("did:key:zSparqlConstruct1");
 
     let (status, put) = s.post_auth(
-        "/xrpc/ai.gftd.apps.yata.kg.ingest",
+        "/xrpc/ai.gftd.apps.kotobase.kg.ingest",
         json!({
             "id":        "sparql-construct-001",
             "type":      "Person",
@@ -2539,7 +2539,7 @@ async fn kg_sparql_invalid_graph_cid_returns_400() {
 async fn kg_query_unknown_lang_returns_400() {
     let s = TestServer::start(false).await;
     let (status, _body) = s.post_auth(
-        "/xrpc/ai.gftd.apps.yata.kg.query",
+        "/xrpc/ai.gftd.apps.kotobase.kg.query",
         json!({ "lang": "sql", "query": "SELECT 1" }),
         "test-token",
     ).await;
@@ -2551,7 +2551,7 @@ async fn kg_delete_nonexistent_entity_returns_ok_zero_retracted() {
     let s   = TestServer::start(false).await;
     let tok = tenant_jwt(&s.operator_did);
     let (status, body) = s.post_auth(
-        "/xrpc/ai.gftd.apps.yata.kg.delete",
+        "/xrpc/ai.gftd.apps.kotobase.kg.delete",
         json!({ "id": "ent-does-not-exist" }),
         &tok,
     ).await;
@@ -2568,7 +2568,7 @@ async fn kg_ingest_then_delete_removes_entity() {
 
     // Ingest an entity (any bearer allowed)
     let (status, _) = s.post_auth(
-        "/xrpc/ai.gftd.apps.yata.kg.ingest",
+        "/xrpc/ai.gftd.apps.kotobase.kg.ingest",
         json!({ "id": "ent-delete-me", "type": "Thing", "labelEn": "Delete Target" }),
         &write_tok,
     ).await;
@@ -2576,14 +2576,14 @@ async fn kg_ingest_then_delete_removes_entity() {
 
     // Verify it's present
     let (status, body) = s.get_authed(
-        "/xrpc/ai.gftd.apps.yata.kg.entity?id=ent-delete-me"
+        "/xrpc/ai.gftd.apps.kotobase.kg.entity?id=ent-delete-me"
     ).await;
     assert_eq!(status, 200, "{body}");
     assert!(body["ok"].as_bool().unwrap_or(false), "entity not found before delete: {body}");
 
     // Delete requires operator auth
     let (status, body) = s.post_auth(
-        "/xrpc/ai.gftd.apps.yata.kg.delete",
+        "/xrpc/ai.gftd.apps.kotobase.kg.delete",
         json!({ "id": "ent-delete-me" }),
         &op_tok,
     ).await;
@@ -2593,7 +2593,7 @@ async fn kg_ingest_then_delete_removes_entity() {
 
     // Entity should no longer be found
     let (status, body) = s.get_authed(
-        "/xrpc/ai.gftd.apps.yata.kg.entity?id=ent-delete-me"
+        "/xrpc/ai.gftd.apps.kotobase.kg.entity?id=ent-delete-me"
     ).await;
     assert_eq!(status, 200, "{body}");
     assert!(!body["ok"].as_bool().unwrap_or(true), "entity still found after delete: {body}");
@@ -2821,7 +2821,7 @@ async fn agent_sync_open_oversized_session_id_returns_400() {
 async fn kg_ingest_empty_id_returns_400() {
     let s   = TestServer::start(false).await;
     let tok = tenant_jwt("did:key:zKgVal1");
-    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.ingest", json!({
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotobase.kg.ingest", json!({
         "id": "",
     }), &tok).await;
     assert_eq!(status, 400, "{body}");
@@ -2831,7 +2831,7 @@ async fn kg_ingest_empty_id_returns_400() {
 async fn kg_embed_empty_text_returns_400() {
     let s   = TestServer::start(false).await;
     let tok = tenant_jwt("did:key:zKgVal2");
-    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.embed", json!({
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotobase.kg.embed", json!({
         "entityId": "ent-1",
         "text": "",
     }), &tok).await;
@@ -2841,7 +2841,7 @@ async fn kg_embed_empty_text_returns_400() {
 #[tokio::test]
 async fn kg_search_empty_query_returns_400() {
     let s = TestServer::start(false).await;
-    let (status, body) = s.get("/xrpc/ai.gftd.apps.yata.kg.search?q=").await;
+    let (status, body) = s.get("/xrpc/ai.gftd.apps.kotobase.kg.search?q=").await;
     assert_eq!(status, 400, "{body}");
 }
 
@@ -2849,7 +2849,7 @@ async fn kg_search_empty_query_returns_400() {
 async fn kg_delete_empty_id_returns_400() {
     let s   = TestServer::start(false).await;
     let tok = tenant_jwt(&s.operator_did);
-    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.delete", json!({
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotobase.kg.delete", json!({
         "id": "",
     }), &tok).await;
     assert_eq!(status, 400, "{body}");
@@ -2858,7 +2858,7 @@ async fn kg_delete_empty_id_returns_400() {
 #[tokio::test]
 async fn kg_query_empty_query_returns_400() {
     let s = TestServer::start(false).await;
-    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.query", json!({
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotobase.kg.query", json!({
         "lang": "sparql", "query": "",
     }), "test-token").await;
     assert_eq!(status, 400, "{body}");
@@ -2869,7 +2869,7 @@ async fn kg_ingest_too_many_claims_returns_400() {
     let s   = TestServer::start(false).await;
     let tok = tenant_jwt("did:key:zKgVal4");
     let claims: Vec<_> = (0..1025).map(|i| json!({"pred": format!("p{i}"), "value": "v"})).collect();
-    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.ingest", json!({
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotobase.kg.ingest", json!({
         "id": "ent-overflow",
         "claims": claims,
     }), &tok).await;
@@ -3035,7 +3035,7 @@ async fn attest_challenge_empty_reason_returns_400() {
 #[tokio::test]
 async fn kg_ingest_without_auth_returns_401() {
     let s = TestServer::start(false).await;
-    let (status, body) = s.post("/xrpc/ai.gftd.apps.yata.kg.ingest", json!({
+    let (status, body) = s.post("/xrpc/ai.gftd.apps.kotobase.kg.ingest", json!({
         "id": "ent-noauth",
         "labelEn": "Test Entity",
     })).await;
@@ -3046,7 +3046,7 @@ async fn kg_ingest_without_auth_returns_401() {
 #[tokio::test]
 async fn kg_delete_without_auth_returns_401() {
     let s = TestServer::start(false).await;
-    let (status, body) = s.post("/xrpc/ai.gftd.apps.yata.kg.delete", json!({
+    let (status, body) = s.post("/xrpc/ai.gftd.apps.kotobase.kg.delete", json!({
         "id": "ent-noauth-del",
     })).await;
     assert_eq!(status, 401, "{body}");
@@ -3056,7 +3056,7 @@ async fn kg_delete_without_auth_returns_401() {
 #[tokio::test]
 async fn kg_embed_without_auth_returns_401() {
     let s = TestServer::start(false).await;
-    let (status, body) = s.post("/xrpc/ai.gftd.apps.yata.kg.embed", json!({
+    let (status, body) = s.post("/xrpc/ai.gftd.apps.kotobase.kg.embed", json!({
         "entityId": "ent-embed-noauth",
         "text": "some text",
     })).await;
@@ -3067,7 +3067,7 @@ async fn kg_embed_without_auth_returns_401() {
 async fn kg_ingest_with_auth_succeeds() {
     let s   = TestServer::start(false).await;
     let tok = tenant_jwt("did:key:zKgWriter1");
-    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.ingest", json!({
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotobase.kg.ingest", json!({
         "id":      "ent-auth-ok",
         "labelEn": "Authenticated Entity",
         "labelJa": "認証済みエンティティ",
@@ -3082,7 +3082,7 @@ async fn kg_ingest_with_auth_succeeds() {
 async fn kg_delete_with_auth_on_missing_entity_returns_ok_zero() {
     let s   = TestServer::start(false).await;
     let tok = tenant_jwt(&s.operator_did);
-    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.delete", json!({
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotobase.kg.delete", json!({
         "id": "ent-does-not-exist-auth",
     }), &tok).await;
     assert_eq!(status, 200, "{body}");
@@ -3094,7 +3094,7 @@ async fn kg_delete_with_auth_on_missing_entity_returns_ok_zero() {
 async fn kg_delete_non_operator_returns_401() {
     let s   = TestServer::start(false).await;
     let tok = tenant_jwt("did:key:zNonOperatorDeleter");
-    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.delete", json!({
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotobase.kg.delete", json!({
         "id": "ent-non-op-del",
     }), &tok).await;
     assert_eq!(status, 401, "{body}");
@@ -3106,7 +3106,7 @@ async fn kg_ingest_claim_pred_too_long_returns_400() {
     let s   = TestServer::start(false).await;
     let tok = tenant_jwt("did:key:zKgClaimLen");
     let long_pred = "x".repeat(300); // exceeds MAX_KG_ID_LEN=256
-    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.ingest", json!({
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotobase.kg.ingest", json!({
         "id":     "ent-claim-pred-len",
         "claims": [{ "pred": long_pred, "value": "v" }],
     }), &tok).await;
@@ -3119,7 +3119,7 @@ async fn kg_ingest_relation_pred_too_long_returns_400() {
     let s   = TestServer::start(false).await;
     let tok = tenant_jwt("did:key:zKgRelLen");
     let long_pred = "r".repeat(300);
-    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.ingest", json!({
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotobase.kg.ingest", json!({
         "id":        "ent-rel-pred-len",
         "relations": [{ "pred": long_pred, "dstId": "dst-ok" }],
     }), &tok).await;
@@ -3133,7 +3133,7 @@ async fn kg_ingest_label_vec_inf_returns_400() {
     // as Vec<f32>.  The is_finite() guard should reject it with 400.
     let s   = TestServer::start(false).await;
     let tok = tenant_jwt("did:key:zKgVecInf");
-    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.yata.kg.ingest", json!({
+    let (status, body) = s.post_auth("/xrpc/ai.gftd.apps.kotobase.kg.ingest", json!({
         "id":       "ent-vec-inf",
         "labelVec": [1.0_f64, 1e40_f64],
     }), &tok).await;
@@ -3746,7 +3746,7 @@ async fn kg_query_oversized_lang_returns_400() {
     let oversized_lang = "x".repeat(17); // exceeds MAX_KG_LANG_LEN=16
     let (status, body) = s
         .post_auth(
-            "/xrpc/ai.gftd.apps.yata.kg.query",
+            "/xrpc/ai.gftd.apps.kotobase.kg.query",
             json!({ "lang": oversized_lang, "query": "SELECT ?s ?o WHERE {}" }),
             "test-token",
         )

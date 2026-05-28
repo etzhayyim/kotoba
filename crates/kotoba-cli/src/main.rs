@@ -815,7 +815,7 @@ async fn run_demo(base_url: &str, token_in: &str) -> Result<()> {
         ],
         "relations": []
     });
-    let resp = bearer(client.post(format!("{base}/xrpc/ai.gftd.apps.yata.kg.ingest"))
+    let resp = bearer(client.post(format!("{base}/xrpc/ai.gftd.apps.kotobase.kg.ingest"))
         .json(&ingest_body))
         .send().await.context("kg.ingest POST")?;
     check_status(&resp)?;
@@ -894,7 +894,7 @@ async fn run_sparql(
 }
 
 /// POST a SPARQL/Cypher query to the running server's
-/// `/xrpc/ai.gftd.apps.yata.kg.query` endpoint.  The server evaluates over
+/// `/xrpc/ai.gftd.apps.kotobase.kg.query` endpoint.  The server evaluates over
 /// IPFS-backed cold storage (Kubo HTTP via KOTOBA_IPFS_ENDPOINT or a
 /// DistributedBlockStore multi-peer setup).
 async fn run_kg_query(
@@ -905,7 +905,7 @@ async fn run_kg_query(
     limit:    usize,
     cacao:    Option<String>,
 ) -> Result<()> {
-    let url = format!("{}/xrpc/ai.gftd.apps.yata.kg.query", base_url.trim_end_matches('/'));
+    let url = format!("{}/xrpc/ai.gftd.apps.kotobase.kg.query", base_url.trim_end_matches('/'));
     let client = build_client(token)?;
     let body = serde_json::json!({
         "lang":     lang,
