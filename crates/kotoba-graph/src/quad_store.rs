@@ -2202,22 +2202,26 @@ impl QuadStore {
         self.commit_dag.write().await.add(commit);
 
         // ── Checkpoint ────────────────────────────────────────────────────────────
-        // Record committed_seq + CommitDag heads as a tiny JSON blob in the Journal
-        // store.  On the next startup replay_from_journal() will skip all Journal
-        // entries ≤ this seq — reducing startup cost from O(all history) to O(delta).
-        *self.committed_seq.write().await = seq;
+        // Record committed_seq (the JOURNAL's current seq, not the user-provided
+        // commit-seq) + CommitDag heads as a tiny JSON blob in the Journal store.
+        // On the next startup replay_from_journal() will skip all Journal entries
+        // ≤ this seq — reducing startup cost from O(all history) to O(delta) and
+        // preventing already-committed quads from being re-loaded into the hot
+        // arrangement (which would shadow the ProllyTree cold path).
+        let journal_seq = self.journal.current_seq().await;
+        *self.committed_seq.write().await = journal_seq;
         {
             let heads = self.commit_dag.read().await.heads_as_map();
-            let cp    = serde_json::json!({ "committed_seq": seq, "heads": heads });
+            let cp    = serde_json::json!({ "committed_seq": journal_seq, "heads": heads });
             let bytes = bytes::Bytes::from(cp.to_string().into_bytes());
             self.journal.write_checkpoint(bytes).await;
         }
         // Trim ring buffer (in-process memory free).
-        self.journal.trim_before(seq).await;
+        self.journal.trim_before(journal_seq).await;
         // Trim persistent seq-index in B2 (fire-and-forget; old seq keys deleted).
         {
             let j = Arc::clone(&self.journal);
-            tokio::spawn(async move { j.trim_persistent_before(seq).await; });
+            tokio::spawn(async move { j.trim_persistent_before(journal_seq).await; });
         }
         // ─────────────────────────────────────────────────────────────────────────
 
@@ -5153,6 +5157,151 @@ mod tests {
         ).await.unwrap();
         assert!(federated.is_empty(),
             "g2 quads must be filtered out (not in authorized_graphs), got {}", federated.len());
+    }
+
+    // ─── Crash recovery via WAL replay ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn crash_recovery_committed_data_survives_journal_replay() {
+        // Scenario: store A asserts + commits → write checkpoint.  A is dropped.
+        // Store B is brought up against the SAME BlockStore + Journal head_path.
+        // After replay_from_journal it must serve the committed data via cold query.
+        let dir       = tempfile::tempdir().unwrap();
+        let head_path = dir.path().join("journal_head.json");
+        let block_store: Arc<dyn BlockStore + Send + Sync> =
+            Arc::new(MemoryBlockStore::new());
+
+        let graph = KotobaCid::from_bytes(b"crash-recovery-graph");
+        let alice = KotobaCid::from_bytes(b"crash-alice");
+        let bob   = KotobaCid::from_bytes(b"crash-bob");
+
+        // --- Instance A: insert + commit ---
+        {
+            let journal_a = Arc::new(Journal::with_block_store(
+                Arc::clone(&block_store), head_path.clone(),
+            ));
+            let qs_a = QuadStore::new(Arc::clone(&journal_a), Arc::clone(&block_store));
+            qs_a.assert(Quad { graph: graph.clone(), subject: alice.clone(),
+                predicate: "name".into(), object: QuadObject::Text("Alice".into()) }).await;
+            qs_a.assert(Quad { graph: graph.clone(), subject: alice.clone(),
+                predicate: "role".into(), object: QuadObject::Text("admin".into()) }).await;
+            qs_a.assert(Quad { graph: graph.clone(), subject: bob.clone(),
+                predicate: "role".into(), object: QuadObject::Text("user".into()) }).await;
+            qs_a.commit("did:test", graph.clone(), 1).await.unwrap();
+            // A goes out of scope — simulates process crash AFTER commit
+        }
+
+        // --- Instance B: reopen against same store + journal head_path ---
+        let journal_b = Arc::new(Journal::with_block_store(
+            Arc::clone(&block_store), head_path.clone(),
+        ));
+        let qs_b = QuadStore::new(Arc::clone(&journal_b), Arc::clone(&block_store));
+        qs_b.replay_from_journal().await;
+
+        // Verify committed quads are queryable via cold path
+        let quads = qs_b.cold_query_sparql_bgp(
+            &graph,
+            r#"SELECT * WHERE { ?s <role> ?r }"#,
+        ).await.unwrap();
+        assert_eq!(quads.len(), 2, "2 role quads must survive crash, got {}", quads.len());
+
+        let entity_quads = qs_b.get_entity_quads_cold(&graph, &alice).await.unwrap();
+        assert_eq!(entity_quads.len(), 2, "Alice's name + role survive, got {}", entity_quads.len());
+    }
+
+    #[tokio::test]
+    async fn crash_recovery_uncommitted_writes_recovered_from_wal() {
+        // Scenario: assert quads WITHOUT commit, drop instance, reopen.
+        // Replay should restore hot-path arrangement from journal entries.
+        let dir       = tempfile::tempdir().unwrap();
+        let head_path = dir.path().join("journal_head.json");
+        let block_store: Arc<dyn BlockStore + Send + Sync> =
+            Arc::new(MemoryBlockStore::new());
+
+        let graph = KotobaCid::from_bytes(b"wal-only-graph");
+
+        {
+            let journal_a = Arc::new(Journal::with_block_store(
+                Arc::clone(&block_store), head_path.clone(),
+            ));
+            let qs_a = QuadStore::new(Arc::clone(&journal_a), Arc::clone(&block_store));
+            qs_a.assert(Quad { graph: graph.clone(),
+                subject: KotobaCid::from_bytes(b"wal-s1"),
+                predicate: "label".into(),
+                object: QuadObject::Text("pre-commit-1".into()) }).await;
+            qs_a.assert(Quad { graph: graph.clone(),
+                subject: KotobaCid::from_bytes(b"wal-s2"),
+                predicate: "label".into(),
+                object: QuadObject::Text("pre-commit-2".into()) }).await;
+            // NO commit — simulates crash before commit; checkpoint never written
+        }
+
+        let journal_b = Arc::new(Journal::with_block_store(
+            Arc::clone(&block_store), head_path.clone(),
+        ));
+        let qs_b = QuadStore::new(Arc::clone(&journal_b), Arc::clone(&block_store));
+        qs_b.replay_from_journal().await;
+
+        // The two quads should be present in the hot arrangement after replay.
+        // Hot query via predicate scan.
+        let arr_ref = qs_b.arrangements.get(&graph.to_multibase())
+            .expect("graph must have arrangement after replay");
+        let subjects: Vec<_> = arr_ref.get_subjects_by_predicate("label");
+        assert_eq!(subjects.len(), 2, "2 WAL-restored quads expected, got {}", subjects.len());
+    }
+
+    #[tokio::test]
+    async fn crash_recovery_committed_plus_uncommitted_recovered() {
+        // Mixed: commit some quads, assert MORE without commit, crash, reopen.
+        // Both batches must be queryable post-replay.
+        let dir       = tempfile::tempdir().unwrap();
+        let head_path = dir.path().join("journal_head.json");
+        let block_store: Arc<dyn BlockStore + Send + Sync> =
+            Arc::new(MemoryBlockStore::new());
+
+        let graph = KotobaCid::from_bytes(b"mixed-recovery-graph");
+
+        {
+            let journal_a = Arc::new(Journal::with_block_store(
+                Arc::clone(&block_store), head_path.clone(),
+            ));
+            let qs_a = QuadStore::new(Arc::clone(&journal_a), Arc::clone(&block_store));
+            // Batch 1: assert + commit
+            qs_a.assert(Quad { graph: graph.clone(),
+                subject: KotobaCid::from_bytes(b"mix-1"),
+                predicate: "role".into(),
+                object: QuadObject::Text("admin".into()) }).await;
+            qs_a.commit("did:test", graph.clone(), 1).await.unwrap();
+            // Batch 2: assert WITHOUT commit
+            qs_a.assert(Quad { graph: graph.clone(),
+                subject: KotobaCid::from_bytes(b"mix-2"),
+                predicate: "role".into(),
+                object: QuadObject::Text("editor".into()) }).await;
+        }
+
+        let journal_b = Arc::new(Journal::with_block_store(
+            Arc::clone(&block_store), head_path.clone(),
+        ));
+        let qs_b = QuadStore::new(Arc::clone(&journal_b), Arc::clone(&block_store));
+        qs_b.replay_from_journal().await;
+
+        // Uncommitted quad: visible via hot arrangement (WAL-restored)
+        let arr_ref = qs_b.arrangements.get(&graph.to_multibase())
+            .expect("hot arrangement present");
+        let editors: Vec<_> = arr_ref.get_subjects_by_predicate_object("role", "editor");
+        assert_eq!(editors.len(), 1, "uncommitted WAL editor quad must be hot");
+        drop(arr_ref);
+
+        // Committed quad: hot path currently shadows cold when arrangement is
+        // non-empty (route_bgp_triples returns early on hot hit). After
+        // reset_arrangement clears hot, cold ProllyTree serves the committed
+        // admin quad. This documents the current hot-vs-cold semantics —
+        // a true union semantics would query both layers, but that is a
+        // separate design change.
+        qs_b.reset_arrangement(&graph).await;
+        let cold = qs_b.cold_query_sparql_bgp(&graph,
+            r#"SELECT * WHERE { ?s <role> "admin" }"#).await.unwrap();
+        assert_eq!(cold.len(), 1, "committed quad must be cold-readable after hot clear");
     }
 
     // ─── CID-addressed materialised view cache ─────────────────────────────────

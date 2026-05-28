@@ -33,6 +33,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 kotoba-auth = { path = "../kotoba-auth", features = ["test-utils"] }
 ed25519-dalek.workspace = true
 base64.workspace = true
+tempfile = "3"
 
 [[bench]]
 name = "quad_store"
