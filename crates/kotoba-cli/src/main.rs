@@ -109,6 +109,17 @@ enum Cmd {
         force: bool,
     },
 
+    /// Seal the running server's hot Arrangement into 4 ProllyTrees +
+    /// checkpoint via POST /xrpc/ai.gftd.apps.kotobase.kg.commit.
+    /// Required by the operator to make ingested writes survive crash +
+    /// restart.  Sends an operator JWT — by default constructs one from
+    /// the local Keychain identity so the operator-auth check passes.
+    Commit {
+        /// Optional author DID for the commit metadata.
+        #[arg(long)]
+        author: Option<String>,
+    },
+
     /// End-to-end smoke: ingest a sample entity via kg.ingest, then run
     /// SELECT / ASK / DESCRIBE / CONSTRUCT through the direct-SPARQL endpoint.
     /// Useful for verifying that `kotoba serve` is wired up against the
@@ -380,6 +391,10 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|| "demo-token".into());
             run_bench(&cli.url, &tok, &query, iters, concurrency,
                 cacao, cacao_seed, cacao_graph, cacao_private, max_hops).await?;
+        }
+
+        Cmd::Commit { author } => {
+            run_commit(&cli.url, author).await?;
         }
 
         Cmd::UpdateCheck { force } => {
@@ -941,6 +956,50 @@ async fn run_kg_query(
     check_status(&resp)?;
     let v: serde_json::Value = resp.json().await.context("decode kg.query JSON")?;
     println!("{}", serde_json::to_string_pretty(&v)?);
+    Ok(())
+}
+
+/// POST kg.commit to seal pending writes into a ProllyTree commit + checkpoint.
+///
+/// Operator auth: server's `require_operator_auth` accepts a Bearer JWT whose
+/// `sub` claim equals the operator DID.  We construct one from the local
+/// Keychain identity, so this works as long as `kotoba init` ran on this
+/// machine and `kotoba serve` is using the same identity.
+async fn run_commit(base_url: &str, author: Option<String>) -> Result<()> {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    let id = kotoba_kse::AgentIdentity::from_env();
+    if id.ephemeral {
+        anyhow::bail!(
+            "no persisted identity — `kotoba commit` needs a stable operator DID. \
+             Run `kotoba init` first, then restart `kotoba serve`."
+        );
+    }
+    let header  = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+    let payload = URL_SAFE_NO_PAD.encode(
+        format!(r#"{{"sub":"{}","exp":9999999999}}"#, id.did).as_bytes()
+    );
+    let token = format!("{header}.{payload}.kotoba-cli-commit");
+
+    let body = serde_json::json!({ "author": author });
+    let url = format!("{}/xrpc/ai.gftd.apps.kotobase.kg.commit",
+        base_url.trim_end_matches('/'));
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&body)
+        .send().await.context("POST kg.commit failed")?;
+    let status = resp.status();
+    let body_text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("server returned {status}: {body_text}");
+    }
+    let v: serde_json::Value = serde_json::from_str(&body_text)
+        .context("decode kg.commit JSON")?;
+    println!("commit CID  : {}",
+        v["commitCid"].as_str().unwrap_or("<missing>"));
+    println!("elapsed     : {} ms",
+        v["elapsedMs"].as_u64().unwrap_or(0));
     Ok(())
 }
 
