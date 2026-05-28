@@ -158,9 +158,24 @@ enum Cmd {
         #[arg(long, env = "KOTOBA_DEMO_TOKEN")]
         token: Option<String>,
         /// CACAO chain (DAG-CBOR base64).  When set, every request includes
-        /// `cacaoB64` — required for Private-visibility graphs.
+        /// `cacaoB64` — required for Private-visibility graphs.  Note: CAIP-74
+        /// anti-replay nonce is single-use, so this works for one request only.
+        /// Use `--cacao-seed` instead for sustained CACAO loadtests.
         #[arg(long, env = "KOTOBA_CACAO_B64")]
         cacao: Option<String>,
+        /// 32-byte hex Ed25519 seed — when set, a fresh CACAO is signed for
+        /// each request with a unique nonce.  Required for any sustained
+        /// (`--iters > 1`) CACAO-gated bench.
+        #[arg(long)]
+        cacao_seed: Option<String>,
+        /// Graph scope baked into the per-request CACAO.  With
+        /// `--cacao-private` the scope is rewritten to `private/<did>` to
+        /// match the server's Private-visibility check.
+        #[arg(long, default_value = "foo")]
+        cacao_graph: String,
+        /// Treat the graph as Private (rewrite scope to `private/<did>`).
+        #[arg(long)]
+        cacao_private: bool,
     },
 }
 
@@ -338,11 +353,12 @@ async fn main() -> Result<()> {
             println!("{}", B64.encode(&cbor));
         }
 
-        Cmd::Bench { query, iters, concurrency, token, cacao } => {
+        Cmd::Bench { query, iters, concurrency, token, cacao, cacao_seed, cacao_graph, cacao_private } => {
             let tok = token
                 .or_else(|| cli.token.clone())
                 .unwrap_or_else(|| "demo-token".into());
-            run_bench(&cli.url, &tok, &query, iters, concurrency, cacao).await?;
+            run_bench(&cli.url, &tok, &query, iters, concurrency,
+                cacao, cacao_seed, cacao_graph, cacao_private).await?;
         }
 
         Cmd::Whoami => {
@@ -544,6 +560,66 @@ fn check_status(resp: &reqwest::Response) -> Result<()> {
     Ok(())
 }
 
+/// A signer that produces a fresh DAG-CBOR base64 CACAO with a caller-chosen
+/// nonce on every call.  Used by `kotoba bench --cacao-seed` to sustain a
+/// CACAO-gated loadtest beyond iter 1 (CAIP-74 nonce is single-use).
+struct CacaoSigner {
+    sk:          ed25519_dalek::SigningKey,
+    did:         String,
+    graph_scope: String,
+}
+
+impl CacaoSigner {
+    fn from_seed_hex(seed: &str, graph: &str, private: bool) -> Result<Self> {
+        use ed25519_dalek::SigningKey;
+        let bytes = hex::decode(seed.trim()).context("cacao seed must be hex")?;
+        if bytes.len() != 32 {
+            anyhow::bail!("cacao seed must decode to 32 bytes");
+        }
+        let mut arr = [0u8; 32]; arr.copy_from_slice(&bytes);
+        let sk  = SigningKey::from_bytes(&arr);
+        let did = kotoba_auth::did_key::ed25519_pubkey_to_did_key(
+            sk.verifying_key().as_bytes()
+        );
+        let graph_scope = if private {
+            format!("private/{did}")
+        } else {
+            graph.to_string()
+        };
+        Ok(Self { sk, did, graph_scope })
+    }
+
+    fn sign_with_nonce(&self, nonce: &str) -> String {
+        use base64::{Engine, engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD}};
+        use ed25519_dalek::Signer;
+        use kotoba_auth::{Cacao, CacaoHeader, CacaoPayload, CacaoSig};
+        let mut cacao = Cacao {
+            h: CacaoHeader { t: "caip122".into() },
+            p: CacaoPayload {
+                iss:       self.did.clone(),
+                aud:       self.did.clone(),
+                issued_at: "2026-05-26T00:00:00Z".into(),
+                expiry:    Some("2099-01-01T00:00:00Z".into()),
+                nonce:     nonce.to_string(),
+                domain:    "kotoba.bench".into(),
+                statement: None,
+                version:   "1".into(),
+                resources: vec![
+                    format!("kotoba://graph/{}", self.graph_scope),
+                    "kotoba://can/quad:read".into(),
+                ],
+            },
+            s: CacaoSig { t: "EdDSA".into(), s: String::new() },
+        };
+        let msg = cacao.siwe_message();
+        let sig: ed25519_dalek::Signature = self.sk.sign(msg.as_bytes());
+        cacao.s.s = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&cacao, &mut cbor).expect("cbor encode");
+        B64.encode(&cbor)
+    }
+}
+
 /// Build a non-expiring JWT-shaped token. The kotoba server's Authenticated
 /// tier accepts any Bearer token whose `exp` claim is in the future — it does
 /// NOT verify the signature (the upstream PDS / edge BFF is the trust
@@ -559,13 +635,17 @@ fn demo_token() -> String {
 
 /// HTTP SPARQL loadtest.  Issues `iters` POSTs of the same query with up to
 /// `concurrency` in-flight clients; prints latency percentiles + aggregate QPS.
+#[allow(clippy::too_many_arguments)]
 async fn run_bench(
-    base_url:    &str,
-    token_in:    &str,
-    query:       &str,
-    iters:       usize,
-    concurrency: usize,
-    cacao:       Option<String>,
+    base_url:      &str,
+    token_in:      &str,
+    query:         &str,
+    iters:         usize,
+    concurrency:   usize,
+    cacao:         Option<String>,
+    cacao_seed:    Option<String>,
+    cacao_graph:   String,
+    cacao_private: bool,
 ) -> Result<()> {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -578,17 +658,27 @@ async fn run_bench(
         demo_token()
     };
 
+    // Resolve the CACAO signer (when --cacao-seed given) so each worker can
+    // forge a fresh CACAO with unique nonce per request — the only way to
+    // sustain a CACAO-gated bench past iter 1.
+    let signer: Option<CacaoSigner> = if let Some(seed) = &cacao_seed {
+        Some(CacaoSigner::from_seed_hex(seed, &cacao_graph, cacao_private)?)
+    } else { None };
+
     let concurrency = concurrency.max(1);
-    println!("→ benchmarking {iters} iters × concurrency {concurrency} of:");
+    let mode = match (&cacao, &signer) {
+        (_,        Some(_)) => "CACAO-gated (fresh CACAO per request)",
+        (Some(_), _       ) => "CACAO-gated (single CACAO — likely 1 request only)",
+        (None,    None    ) => "unauthed",
+    };
+    println!("→ benchmarking {iters} iters × concurrency {concurrency} ({mode}):");
     println!("    {query}");
 
-    let url   = Arc::new(format!("{base}/xrpc/ai.gftd.apps.kotoba.graph.sparql"));
-    let body  = Arc::new(serde_json::json!({
-        "query":    query,
-        "limit":    10_000,
-        "cacaoB64": cacao,
-    }));
+    let url = Arc::new(format!("{base}/xrpc/ai.gftd.apps.kotoba.graph.sparql"));
     let token = Arc::new(token);
+    let cacao_static = Arc::new(cacao);
+    let signer = Arc::new(signer);
+    let query  = Arc::new(query.to_string());
 
     let wall_start = Instant::now();
 
@@ -598,22 +688,36 @@ async fn run_bench(
     let next = Arc::new(AtomicUsize::new(0));
     let mut handles = Vec::with_capacity(concurrency);
 
-    for _ in 0..concurrency {
+    for worker_id in 0..concurrency {
         let client = client.clone();
         let url    = Arc::clone(&url);
-        let body   = Arc::clone(&body);
         let token  = Arc::clone(&token);
         let next   = Arc::clone(&next);
+        let cacao_static = Arc::clone(&cacao_static);
+        let signer = Arc::clone(&signer);
+        let query  = Arc::clone(&query);
         handles.push(tokio::spawn(async move {
             let mut local: Vec<Duration> = Vec::new();
             let mut last_count: u64 = 0;
             loop {
                 let i = next.fetch_add(1, Ordering::Relaxed);
                 if i >= iters { break; }
+                // Per-request CACAO when --cacao-seed is set.  Nonce must be
+                // unique across requests so the server's NonceStore admits it.
+                let cacao_field: Option<String> = match (&*signer, cacao_static.as_ref()) {
+                    (Some(s), _)    => Some(s.sign_with_nonce(&format!("kb-{worker_id}-{i}"))),
+                    (None, Some(c)) => Some(c.clone()),
+                    (None, None)    => None,
+                };
+                let body = serde_json::json!({
+                    "query":    &*query,
+                    "limit":    10_000,
+                    "cacaoB64": cacao_field,
+                });
                 let t0 = Instant::now();
                 let resp = match client.post(url.as_str())
                     .header("Authorization", format!("Bearer {token}"))
-                    .json(&*body)
+                    .json(&body)
                     .send().await {
                     Ok(r)  => r,
                     Err(_) => continue,
