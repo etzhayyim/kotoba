@@ -73,37 +73,48 @@ impl SovereignCrypto {
         let cur_key = format!("agent/crypto/{slug}/current.json");
 
         if kse_store.exists(&cur_key).await {
-            // Bootstrap: load existing key
-            let data  = kse_store.get(&cur_key).await
-                .context("read key-ref pointer")?;
-            let key_ref: KeyRef = serde_json::from_slice(&data)
-                .context("parse key-ref JSON")?;
+            // Bootstrap: try to load existing key.  If the referenced block is
+            // gone (e.g. backing IPFS daemon was wiped between runs but the
+            // KseStore pointer file survived), fall through to genesis instead
+            // of bricking the startup.
+            let result: Result<Self> = (async {
+                let data  = kse_store.get(&cur_key).await
+                    .context("read key-ref pointer")?;
+                let key_ref: KeyRef = serde_json::from_slice(&data)
+                    .context("parse key-ref JSON")?;
+                let cid = KotobaCid::from_multibase(&key_ref.cid)
+                    .ok_or_else(|| anyhow!("parse key ref CID: {}", key_ref.cid))?;
+                let wrapped = block_store.get(&cid)
+                    .context("load wrapped key block")?
+                    .ok_or_else(|| anyhow!("wrapped key block not found: {}", key_ref.cid))?;
+                let vault_key_bytes = hpke_open(&identity.dh_secret, &wrapped)
+                    .context("HPKE unwrap vault key")?;
+                if vault_key_bytes.len() != 32 {
+                    return Err(anyhow!("vault key has wrong length: {}", vault_key_bytes.len()));
+                }
+                let mut arr = Zeroizing::new([0u8; 32]);
+                arr.copy_from_slice(&vault_key_bytes);
+                tracing::info!(
+                    did = %identity.did,
+                    version = key_ref.version,
+                    cid = %key_ref.cid,
+                    "SovereignCrypto: vault key loaded from store"
+                );
+                Ok(Self { inner: VaultKeyedCrypto::new(arr) })
+            }).await;
 
-            let cid = KotobaCid::from_multibase(&key_ref.cid)
-                .ok_or_else(|| anyhow!("parse key ref CID: {}", key_ref.cid))?;
-
-            let wrapped = block_store.get(&cid)
-                .context("load wrapped key block")?
-                .ok_or_else(|| anyhow!("wrapped key block not found: {}", key_ref.cid))?;
-
-            let vault_key_bytes = hpke_open(&identity.dh_secret, &wrapped)
-                .context("HPKE unwrap vault key")?;
-
-            if vault_key_bytes.len() != 32 {
-                return Err(anyhow!("vault key has wrong length: {}", vault_key_bytes.len()));
+            match result {
+                Ok(c) => Ok(c),
+                Err(e) => {
+                    tracing::warn!(
+                        did = %identity.did,
+                        error = %e,
+                        "SovereignCrypto: pointer found but wrapped key block missing — \
+                         re-genesising (backing block-store may have been wiped)"
+                    );
+                    Self::genesis(identity, kse_store, block_store).await
+                }
             }
-
-            let mut arr = Zeroizing::new([0u8; 32]);
-            arr.copy_from_slice(&vault_key_bytes);
-
-            tracing::info!(
-                did = %identity.did,
-                version = key_ref.version,
-                cid = %key_ref.cid,
-                "SovereignCrypto: vault key loaded from store"
-            );
-
-            Ok(Self { inner: VaultKeyedCrypto::new(arr) })
         } else {
             // Genesis: generate and persist
             Self::genesis(identity, kse_store, block_store).await
