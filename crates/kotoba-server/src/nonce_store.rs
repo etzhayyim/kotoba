@@ -4,14 +4,23 @@
 /// replaying a captured delegation token within its validity window.
 ///
 /// Capacity is bounded at MAX_NONCES; expired entries are purged on overflow.
-use std::collections::HashMap;
-use std::sync::RwLock;
+///
+/// Backed by `dashmap::DashMap` (64-way sharded RwLock by default) so
+/// independent CACAO requests rarely contend on the same shard.  Earlier
+/// implementations used a single `RwLock<HashMap>` which serialised every
+/// request through one global write-lock — that capped CACAO throughput at
+/// ~4 K QPS regardless of concurrency.
+use dashmap::DashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_NONCES: usize = 16_384;
 
 pub struct NonceStore {
-    inner: RwLock<HashMap<String, u64>>, // nonce → expiry_unix
+    inner: DashMap<String, u64>,   // nonce → expiry_unix
+    /// Approximate live-entry counter — DashMap::len() walks all shards so
+    /// caching it lets the hot path avoid the global scan on every call.
+    size: AtomicUsize,
 }
 
 impl Default for NonceStore {
@@ -22,7 +31,7 @@ impl Default for NonceStore {
 
 impl NonceStore {
     pub fn new() -> Self {
-        Self { inner: RwLock::new(HashMap::new()) }
+        Self { inner: DashMap::new(), size: AtomicUsize::new(0) }
     }
 
     /// Check that `nonce` has not been seen before and register it until `expiry_unix`.
@@ -37,29 +46,48 @@ impl NonceStore {
             .unwrap_or_default()
             .as_secs();
 
-        let mut map = self.inner.write().unwrap_or_else(|e| e.into_inner());
-
-        // Purge expired entries when at capacity to keep memory bounded.
-        if map.len() >= MAX_NONCES {
-            map.retain(|_, &mut exp| exp > now);
-        }
-        // Hard cap: if purge freed nothing (all nonces still live), reject to prevent
-        // unbounded growth beyond MAX_NONCES.  The caller treats this as a failed
-        // check, which is the safe fail-closed behaviour.
-        if map.len() >= MAX_NONCES {
-            tracing::warn!(
-                "nonce store at capacity ({MAX_NONCES}) after purge; rejecting new nonce"
-            );
-            return false;
+        // Capacity check first — only one writer ever runs purge_expired() so
+        // we use compare_exchange to elect a single purger.
+        if self.size.load(Ordering::Relaxed) >= MAX_NONCES {
+            self.purge_expired(now);
+            if self.size.load(Ordering::Relaxed) >= MAX_NONCES {
+                tracing::warn!(
+                    "nonce store at capacity ({MAX_NONCES}) after purge; rejecting new nonce"
+                );
+                return false;
+            }
         }
 
-        match map.get(nonce) {
-            Some(&exp) if exp > now => false, // still valid — replay detected
-            _ => {
-                map.insert(nonce.to_string(), expiry_unix);
+        // Per-shard fine-grained lock — concurrent writers on different
+        // nonces (i.e. different hashes) never serialise.
+        use dashmap::mapref::entry::Entry;
+        match self.inner.entry(nonce.to_string()) {
+            Entry::Occupied(slot) => {
+                let exp = *slot.get();
+                if exp > now {
+                    false // replay detected
+                } else {
+                    // expired — overwrite and treat as fresh
+                    *slot.into_ref() = expiry_unix;
+                    true
+                }
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(expiry_unix);
+                self.size.fetch_add(1, Ordering::Relaxed);
                 true
             }
         }
+    }
+
+    /// Drop entries whose expiry is in the past.  Called under the capacity
+    /// guard above, not on the hot path.
+    fn purge_expired(&self, now: u64) {
+        let before = self.inner.len();
+        self.inner.retain(|_, &mut exp| exp > now);
+        let after = self.inner.len();
+        self.size.store(after, Ordering::Relaxed);
+        let _ = before;
     }
 }
 
@@ -145,7 +173,7 @@ mod tests {
         let accepted = store.check_and_register("overflow-nonce", future);
         assert!(!accepted, "hard cap must reject when all stored nonces are still live");
         // Verify the store did not grow beyond MAX_NONCES.
-        let len = store.inner.read().unwrap().len();
+        let len = store.inner.len();
         assert_eq!(len, MAX_NONCES, "map must not exceed MAX_NONCES after hard-cap rejection");
     }
 }

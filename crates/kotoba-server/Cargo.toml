@@ -28,6 +28,7 @@ kotoba-vm                = { path = "../kotoba-vm" }
 kotoba-llm               = { path = "../kotoba-llm" }
 kotoba-runtime           = { path = "../kotoba-runtime" }
 kotoba-net               = { path = "../kotoba-net" }
+dashmap.workspace        = true
 tokio.workspace          = true
 serde.workspace          = true
 serde_json.workspace     = true

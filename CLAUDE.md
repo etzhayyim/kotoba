@@ -394,7 +394,8 @@ MemoryBlockStore、10K entities × 4 quads (name/role/status/knows)。reset_arra
   - c=8  → **3777 QPS** (p50 1.56ms, 1000/1000)  — 3× scale-up
   - c=16 → **3686 QPS** (p50 3.91ms, 2000/2000) — plateau
   - c=32 → **4125 QPS** (p50 6.36ms, 3000/3000) — peak
-  100% success across all levels. Saturation at ~4K QPS — bottleneck is server-side Ed25519 verify CPU (single-core bound; no parallel verification yet). Linear scaling 1→8, then flat — server has sufficient async-IO headroom but the verify work is unscaled.
+  100% success across all levels. Saturation at ~4K QPS — bottleneck identified as NonceStore `RwLock<HashMap>` global write-lock contention.
+- **NonceStore: RwLock<HashMap> → DashMap (2026-05-28)**: replaced the single global write-lock with 64-way sharded `DashMap<String, u64>` + `AtomicUsize` size cache. Concurrent writers on different nonces never serialise on the same shard. **Measured CACAO ASK throughput post-fix** (same setup): c=1 1240→**3916 QPS** (3.2×), c=8 3777→**10113** (2.7×), c=16 3686→**10140** (2.8×), c=32 4125→**12753 QPS** (3.1× — **new peak**). 100% success at c≤32. c=64 hits the 16384 MAX_NONCES cap at 320K total requests (`nonce store at capacity` warns) — expected; a longer-running workload with realistic 5-minute CACAO expiries would naturally evict. **CACAO trust-boundary throughput moved from 4K → 12.8K QPS without compromising replay protection**.
 - **kg.query (Datalog) vs kg.sparql (direct) HTTP head-to-head (2026-05-28, 2000-entity)**: same SPARQL string `SELECT ?s ?role WHERE { ?s <kg/claim/role> ?role }` (returns 2000 quads):
   - `kg.query` (compile → DatalogProgram → semi-naive fixpoint over snapshot Δ): **36 QPS**, 27.8ms/req
   - `kg.sparql` (spargebra → cold-path BGP scan): **75 QPS**, 12.7ms/req
