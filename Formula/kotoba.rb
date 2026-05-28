@@ -1,10 +1,9 @@
 class Kotoba < Formula
   desc "Content-addressed distributed Datalog database with native CACAO auth"
   homepage "https://github.com/etzhayyim/kotoba"
+  url "https://github.com/etzhayyim/kotoba/archive/refs/tags/v0.1.0.tar.gz"
+  sha256 "cdf1099d970aa6e5be0e88099fc58bcefea58cadec63392863c3b7538a883655"
   license "Apache-2.0"
-
-  # Track the upstream main branch.  Once tagged releases exist, swap the
-  # head-only block for `url "…vN.tar.gz"` + sha256.
   head "https://github.com/etzhayyim/kotoba.git", branch: "main"
 
   depends_on "rust" => :build
