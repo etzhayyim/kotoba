@@ -780,11 +780,14 @@ pub async fn kg_query(
         other => return Err((StatusCode::BAD_REQUEST, format!("unknown lang: {other}; use sparql or cypher"))),
     };
 
-    // Snapshot all quads as Assert deltas (Datalog fact base)
-    let deltas = state.quad_store.snapshot_deltas(&graph_cid).await;
-
-    // Evaluate Datalog rules against the fact base
-    let derived = program.evaluate_delta(&deltas);
+    // Evaluate Datalog program against IPFS-backed cold storage (hot+cold union).
+    // This path loads facts via ProllyTree scans on the configured BlockStore —
+    // which can be Kubo HTTP (KOTOBA_IPFS_ENDPOINT) or a multi-peer
+    // DistributedBlockStore. Falls back to hot arrangement if not yet committed.
+    let derived = state.quad_store
+        .evaluate_datalog_cold(&graph_cid, &program)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("datalog eval: {e}")))?;
 
     // Collect derived facts for the output_relation, bounded by result_limit.
     let results: Vec<serde_json::Value> = derived.iter()

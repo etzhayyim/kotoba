@@ -49,6 +49,29 @@ enum Cmd {
     #[command(subcommand)]
     Quad(QuadCmd),
 
+    /// SPARQL or Cypher query over the running server's KG endpoint.
+    /// Goes to POST /xrpc/ai.gftd.apps.yata.kg.query — which evaluates over
+    /// IPFS-backed cold storage (DistributedBlockStore / Kubo HTTP).
+    Sparql {
+        /// SPARQL query string (max 64 KiB).
+        query: String,
+        /// Maximum results (1–10000, default 1000)
+        #[arg(long, default_value = "1000")]
+        limit: usize,
+        /// CACAO chain (base64 DAG-CBOR) for private graphs
+        #[arg(long, env = "KOTOBA_CACAO_B64")]
+        cacao: Option<String>,
+    },
+
+    /// Cypher MATCH/RETURN over the running server (same endpoint, lang=cypher).
+    Cypher {
+        query: String,
+        #[arg(long, default_value = "1000")]
+        limit: usize,
+        #[arg(long, env = "KOTOBA_CACAO_B64")]
+        cacao: Option<String>,
+    },
+
     /// Ping the server's /health endpoint
     Health,
 }
@@ -122,6 +145,14 @@ async fn main() -> Result<()> {
         Cmd::Serve => {
             // Re-init logging at INFO for serve mode unless RUST_LOG is set
             kotoba_server::run().await?;
+        }
+
+        Cmd::Sparql { query, limit, cacao } => {
+            run_kg_query(&cli.url, &cli.token, "sparql", &query, limit, cacao).await?;
+        }
+
+        Cmd::Cypher { query, limit, cacao } => {
+            run_kg_query(&cli.url, &cli.token, "cypher", &query, limit, cacao).await?;
         }
 
         Cmd::Health => {
@@ -288,5 +319,33 @@ fn check_status(resp: &reqwest::Response) -> Result<()> {
     if !status.is_success() {
         anyhow::bail!("server returned {status}");
     }
+    Ok(())
+}
+
+/// POST a SPARQL/Cypher query to the running server's
+/// `/xrpc/ai.gftd.apps.yata.kg.query` endpoint.  The server evaluates over
+/// IPFS-backed cold storage (Kubo HTTP via KOTOBA_IPFS_ENDPOINT or a
+/// DistributedBlockStore multi-peer setup).
+async fn run_kg_query(
+    base_url: &str,
+    token:    &Option<String>,
+    lang:     &str,
+    query:    &str,
+    limit:    usize,
+    cacao:    Option<String>,
+) -> Result<()> {
+    let url = format!("{}/xrpc/ai.gftd.apps.yata.kg.query", base_url.trim_end_matches('/'));
+    let client = build_client(token)?;
+    let body = serde_json::json!({
+        "lang":     lang,
+        "query":    query,
+        "limit":    limit,
+        "cacaoB64": cacao,
+    });
+    let resp = client.post(&url).json(&body).send().await
+        .context("POST kg.query failed")?;
+    check_status(&resp)?;
+    let v: serde_json::Value = resp.json().await.context("decode kg.query JSON")?;
+    println!("{}", serde_json::to_string_pretty(&v)?);
     Ok(())
 }
