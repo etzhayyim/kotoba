@@ -52,7 +52,7 @@ pub enum Term {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum CmpOp { Eq, Ne, Lt, Le, Gt, Ge }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct DatalogProgram {
     pub rules: Vec<DatalogRule>,
 }

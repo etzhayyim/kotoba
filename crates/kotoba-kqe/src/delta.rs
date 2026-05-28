@@ -1,11 +1,12 @@
 use crate::quad::Quad;
+use serde::{Deserialize, Serialize};
 
 /// Multiplicity: +1 = assert, -1 = retract (Datom retraction as Delta)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Multiplicity { Assert = 1, Retract = -1 }
 
 /// Delta — atomic Pregel message: (Quad, ±1)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Delta {
     pub quad:     Quad,
     pub mult:     Multiplicity,

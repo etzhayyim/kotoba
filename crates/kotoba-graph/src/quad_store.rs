@@ -813,6 +813,51 @@ impl QuadStore {
         Ok(program.evaluate_delta(&deltas))
     }
 
+    /// CID-addressed materialised view cache for Datalog evaluation.
+    ///
+    /// Parallel to `cold_query_sparql_bgp_cached` but for derived Datalog
+    /// facts.  Cache key:
+    ///   `blake3("kotoba-datalog-mv:v1\n{head_commit_cid}\n{graph_cid}\n{ciborium(program)}")`
+    /// Value: ciborium-encoded `Vec<Delta>`.
+    ///
+    /// Behaviour mirrors SPARQL MV: deterministic mv_cid; new commit auto-
+    /// invalidates (different head → different key); same program against
+    /// same commit returns byte-stable result.
+    pub async fn evaluate_datalog_cold_cached(
+        &self,
+        graph_cid: &KotobaCid,
+        program:   &DatalogProgram,
+    ) -> anyhow::Result<(Vec<Delta>, KotobaCid, bool /* cache_hit */)> {
+        let commit_cid = {
+            let dag = self.commit_dag.read().await;
+            dag.head(graph_cid).map(|c| c.cid.clone()).unwrap_or_else(|| graph_cid.clone())
+        };
+        let mut prog_cbor = Vec::new();
+        ciborium::into_writer(program, &mut prog_cbor)
+            .map_err(|e| anyhow::anyhow!("datalog MV program serialise: {e}"))?;
+        let mut keymat = Vec::new();
+        keymat.extend_from_slice(b"kotoba-datalog-mv:v1\n");
+        keymat.extend_from_slice(commit_cid.to_multibase().as_bytes());
+        keymat.push(b'\n');
+        keymat.extend_from_slice(graph_cid.to_multibase().as_bytes());
+        keymat.push(b'\n');
+        keymat.extend_from_slice(&prog_cbor);
+        let mv_cid = KotobaCid::from_bytes(&keymat);
+
+        if let Some(blob) = self.block_store.get(&mv_cid)? {
+            if let Ok(deltas) = ciborium::from_reader::<Vec<Delta>, _>(&blob[..]) {
+                return Ok((deltas, mv_cid, true));
+            }
+        }
+
+        let deltas = self.evaluate_datalog_cold(graph_cid, program).await?;
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&deltas, &mut bytes)
+            .map_err(|e| anyhow::anyhow!("datalog MV serialise: {e}"))?;
+        self.block_store.put(&mv_cid, &bytes)?;
+        Ok((deltas, mv_cid, false))
+    }
+
     /// CACAO-authed Datalog query over IPFS — requires `quad:read` on the graph.
     pub async fn evaluate_datalog_cold_authed(
         &self,
@@ -5566,6 +5611,82 @@ mod tests {
         let derived = qs.evaluate_datalog_cold(&g, &program).await.unwrap();
         assert_eq!(derived.len(), 1,
             "must derive closure(a,c) from hot+cold facts, got {}", derived.len());
+    }
+
+    #[tokio::test]
+    async fn datalog_cold_cached_first_miss_second_hit() {
+        // CID-MV cache for Datalog: same program against same commit → byte-stable
+        // cache lookup on repeat.
+        use kotoba_kqe::datalog::{DatalogProgram, DatalogRule, Atom, BodyLiteral, Term};
+
+        let qs = QuadStore::new(
+            Arc::new(Journal::new()),
+            Arc::new(MemoryBlockStore::new()) as Arc<dyn BlockStore + Send + Sync>,
+        );
+        let g = KotobaCid::from_bytes(b"datalog-mv-graph");
+        let a = KotobaCid::from_bytes(b"mv-alice");
+        let b = KotobaCid::from_bytes(b"mv-bob");
+        let c = KotobaCid::from_bytes(b"mv-carol");
+
+        qs.assert(Quad { graph: g.clone(), subject: a.clone(),
+            predicate: "knows".into(), object: QuadObject::Cid(b.clone()) }).await;
+        qs.assert(Quad { graph: g.clone(), subject: b.clone(),
+            predicate: "knows".into(), object: QuadObject::Cid(c.clone()) }).await;
+        qs.commit("did:mv", g.clone(), 1).await.unwrap();
+        qs.reset_arrangement(&g).await;
+
+        let mut program = DatalogProgram::new();
+        program.add_rule(DatalogRule {
+            head: Atom { relation: "closure".into(),
+                args: vec![Term::Variable("x".into()), Term::Variable("z".into())] },
+            body: vec![
+                BodyLiteral::Positive(Atom { relation: "knows".into(),
+                    args: vec![Term::Variable("x".into()), Term::Variable("y".into())] }),
+                BodyLiteral::Positive(Atom { relation: "knows".into(),
+                    args: vec![Term::Variable("y".into()), Term::Variable("z".into())] }),
+            ],
+        });
+
+        let (d1, cid1, hit1) = qs.evaluate_datalog_cold_cached(&g, &program).await.unwrap();
+        let (d2, cid2, hit2) = qs.evaluate_datalog_cold_cached(&g, &program).await.unwrap();
+
+        assert!(!hit1, "first call must be a miss");
+        assert!(hit2,  "second call must be a hit");
+        assert_eq!(cid1, cid2, "MV CID stable across calls");
+        assert_eq!(d1.len(), d2.len(), "cached deltas match live");
+        assert_eq!(d1.len(), 1, "1 closure fact expected");
+        assert_eq!(d1[0].quad.subject, d2[0].quad.subject, "byte-stable");
+    }
+
+    #[tokio::test]
+    async fn datalog_cold_cached_distinct_programs_distinct_cids() {
+        use kotoba_kqe::datalog::{DatalogProgram, DatalogRule, Atom, BodyLiteral, Term};
+
+        let (qs, g, _people) = setup_chain_qs().await;
+
+        let mut prog_a = DatalogProgram::new();
+        prog_a.add_rule(DatalogRule {
+            head: Atom { relation: "rel_a".into(),
+                args: vec![Term::Variable("x".into()), Term::Variable("z".into())] },
+            body: vec![
+                BodyLiteral::Positive(Atom { relation: "knows".into(),
+                    args: vec![Term::Variable("x".into()), Term::Variable("y".into())] }),
+                BodyLiteral::Positive(Atom { relation: "knows".into(),
+                    args: vec![Term::Variable("y".into()), Term::Variable("z".into())] }),
+            ],
+        });
+        let mut prog_b = DatalogProgram::new();
+        prog_b.add_rule(DatalogRule {
+            head: Atom { relation: "rel_b".into(),
+                args: vec![Term::Variable("x".into()), Term::Variable("y".into())] },
+            body: vec![
+                BodyLiteral::Positive(Atom { relation: "knows".into(),
+                    args: vec![Term::Variable("x".into()), Term::Variable("y".into())] }),
+            ],
+        });
+        let (_, cid_a, _) = qs.evaluate_datalog_cold_cached(&g, &prog_a).await.unwrap();
+        let (_, cid_b, _) = qs.evaluate_datalog_cold_cached(&g, &prog_b).await.unwrap();
+        assert_ne!(cid_a, cid_b, "different programs must yield different MV CIDs");
     }
 
     #[tokio::test]
