@@ -443,10 +443,12 @@ impl QuadStore {
         graph_cid:        &KotobaCid,
         predicate_prefix: &str,
     ) -> anyhow::Result<Vec<Quad>> {
-        // ── Hot path ──────────────────────────────────────────────────────────
+        // ── Hot path (only when hot is known to cover all committed state) ────
         {
-            if let Some(arr) = self.arrangements.get(&graph_cid.to_multibase()) {
-                if !arr.is_empty() {
+            let key = graph_cid.to_multibase();
+            if let Some(arr) = self.arrangements.get(&key) {
+                let covers_all = self.hot_covers_all.get(&key).map(|v| *v).unwrap_or(true);
+                if !arr.is_empty() && covers_all {
                     return Ok(arr.quads_with_predicate_prefix(graph_cid, predicate_prefix));
                 }
             }
@@ -490,6 +492,22 @@ impl QuadStore {
                 object,
             });
         }
+
+        // Union with hot (when hot is a partial post-replay view)
+        if let Some(arr) = self.arrangements.get(&graph_cid.to_multibase()) {
+            if !arr.is_empty() {
+                let hot = arr.quads_with_predicate_prefix(graph_cid, predicate_prefix);
+                let mut seen: std::collections::HashSet<(KotobaCid, String, Vec<u8>)> = quads.iter()
+                    .map(|q| (q.subject.clone(), q.predicate.clone(),
+                        serde_json::to_vec(&q.object).unwrap_or_default()))
+                    .collect();
+                for hq in hot {
+                    let k = (hq.subject.clone(), hq.predicate.clone(),
+                        serde_json::to_vec(&hq.object).unwrap_or_default());
+                    if seen.insert(k) { quads.push(hq); }
+                }
+            }
+        }
         Ok(quads)
     }
 
@@ -500,10 +518,12 @@ impl QuadStore {
         predicate:  &str,
         object_key: &str,
     ) -> anyhow::Result<Vec<KotobaCid>> {
-        // ── Hot path ──────────────────────────────────────────────────────────
+        // ── Hot path (only when hot covers all committed state) ───────────────
         {
-            if let Some(arr) = self.arrangements.get(&graph_cid.to_multibase()) {
-                if !arr.is_empty() {
+            let key = graph_cid.to_multibase();
+            if let Some(arr) = self.arrangements.get(&key) {
+                let covers_all = self.hot_covers_all.get(&key).map(|v| *v).unwrap_or(true);
+                if !arr.is_empty() && covers_all {
                     return Ok(arr.get_subjects_by_predicate_object(predicate, object_key));
                 }
             }
@@ -537,6 +557,17 @@ impl QuadStore {
                 Err(_) => continue,
             };
             subjects.push(KotobaCid(subj_arr));
+        }
+
+        // Union with hot (post-replay partial view)
+        if let Some(arr) = self.arrangements.get(&graph_cid.to_multibase()) {
+            if !arr.is_empty() {
+                let hot = arr.get_subjects_by_predicate_object(predicate, object_key);
+                let mut seen: std::collections::HashSet<KotobaCid> = subjects.iter().cloned().collect();
+                for s in hot {
+                    if seen.insert(s.clone()) { subjects.push(s); }
+                }
+            }
         }
         Ok(subjects)
     }
@@ -5409,6 +5440,49 @@ mod tests {
         let cold = qs_b.cold_query_sparql_bgp(&graph,
             r#"SELECT * WHERE { ?s <role> "admin" }"#).await.unwrap();
         assert_eq!(cold.len(), 1, "committed quad must be cold-readable after hot clear");
+    }
+
+    #[tokio::test]
+    async fn sparql_bgp_hot_cold_union_after_replay() {
+        // SPARQL BGP query after replay must see BOTH committed (cold) and
+        // WAL-restored (hot) quads — uses the union path via
+        // quads_by_predicate_prefix_cold + lookup_subject_by_po_cold.
+        let dir       = tempfile::tempdir().unwrap();
+        let head_path = dir.path().join("journal_head.json");
+        let block_store: Arc<dyn BlockStore + Send + Sync> =
+            Arc::new(MemoryBlockStore::new());
+        let graph = KotobaCid::from_bytes(b"sparql-union-graph");
+
+        {
+            let journal_a = Arc::new(Journal::with_block_store(
+                Arc::clone(&block_store), head_path.clone(),
+            ));
+            let qs_a = QuadStore::new(Arc::clone(&journal_a), Arc::clone(&block_store));
+            qs_a.assert(Quad { graph: graph.clone(),
+                subject: KotobaCid::from_bytes(b"un-alice"),
+                predicate: "role".into(),
+                object: QuadObject::Text("admin".into()) }).await;
+            qs_a.commit("did:union", graph.clone(), 1).await.unwrap();
+            // Uncommitted: another admin role only in WAL
+            qs_a.assert(Quad { graph: graph.clone(),
+                subject: KotobaCid::from_bytes(b"un-bob"),
+                predicate: "role".into(),
+                object: QuadObject::Text("admin".into()) }).await;
+        }
+
+        let journal_b = Arc::new(Journal::with_block_store(
+            Arc::clone(&block_store), head_path.clone(),
+        ));
+        let qs_b = QuadStore::new(Arc::clone(&journal_b), Arc::clone(&block_store));
+        qs_b.replay_from_journal().await;
+
+        let admins = qs_b.cold_query_sparql_bgp(
+            &graph,
+            r#"SELECT * WHERE { ?s <role> "admin" }"#,
+        ).await.unwrap();
+        assert_eq!(admins.len(), 2,
+            "BGP must return committed un-alice + WAL un-bob = 2 admins, got {}",
+            admins.len());
     }
 
     // ─── Datalog over IPFS-backed cold storage ────────────────────────────────
