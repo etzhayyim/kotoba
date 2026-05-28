@@ -87,6 +87,10 @@ enum Cmd {
         #[arg(long)]
         show: bool,
     },
+
+    /// Print the local deployment-config summary (env-driven): identity
+    /// source, IPFS endpoint, peer list, default visibility, hot-cache size.
+    Whoami,
 }
 
 #[derive(Subcommand)]
@@ -188,6 +192,38 @@ async fn main() -> Result<()> {
                 println!("KOTOBA_AGENT_X25519_HEX={}",  hex::encode(id.dh_secret.to_bytes()));
                 println!("KOTOBA_AGENT_DID={}",         id.did);
             }
+        }
+
+        Cmd::Whoami => {
+            // Resolve identity (keychain → env → ephemeral)
+            let id = kotoba_kse::AgentIdentity::from_env();
+            let source = if id.ephemeral { "ephemeral (no keychain, no env)" }
+                else if kotoba_kse::AgentIdentity::from_keychain().is_some() { "keychain" }
+                else { "env" };
+            let ipfs_off = std::env::var("KOTOBA_IPFS")
+                .map(|v| v.eq_ignore_ascii_case("off") || v == "0" || v.eq_ignore_ascii_case("false"))
+                .unwrap_or(false);
+            let ipfs_endpoint = std::env::var("KOTOBA_IPFS_ENDPOINT")
+                .unwrap_or_else(|_| "http://localhost:5001 (default)".into());
+            let peers = std::env::var("KOTOBA_PEERS").unwrap_or_default();
+            let default_vis = std::env::var("KOTOBA_DEFAULT_VISIBILITY")
+                .unwrap_or_else(|_| "private (default)".into());
+            let hot_mib = std::env::var("KOTOBA_HOT_CACHE_BYTES")
+                .or_else(|_| std::env::var("KOTOBA_STORAGE_BUDGET_BYTES"))
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .map(|b| b / (1024 * 1024))
+                .unwrap_or(256);
+            println!("identity source       : {source}");
+            println!("DID                   : {}", id.did);
+            println!("ephemeral             : {}", id.ephemeral);
+            println!("IPFS cold tier        : {}", if ipfs_off { "OFF (KOTOBA_IPFS=off)" } else { "ON" });
+            println!("KOTOBA_IPFS_ENDPOINT  : {ipfs_endpoint}");
+            println!("KOTOBA_PEERS          : {}",
+                if peers.trim().is_empty() { "(none — single-node)".into() }
+                else { peers.split_whitespace().collect::<Vec<_>>().join(", ") });
+            println!("default visibility    : {default_vis}");
+            println!("hot cache             : {hot_mib} MiB");
         }
 
         Cmd::Health => {

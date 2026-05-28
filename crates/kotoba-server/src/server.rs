@@ -164,12 +164,34 @@ impl KotobaState {
                 let cold = kotoba_store::KuboBlockStore::from_env();
                 let endpoint = std::env::var("KOTOBA_IPFS_ENDPOINT")
                     .unwrap_or_else(|_| "http://localhost:5001".into());
-                tracing::info!(
-                    hot_cache_mib = hot_cache_bytes / (1024 * 1024),
-                    ipfs_endpoint = %endpoint,
-                    "BlockStore: TieredBlockStore<BudgetedMemory, KuboIpfs> — IPFS cold tier ENABLED by default"
-                );
-                Arc::new(kotoba_store::TieredBlockStore::new(hot, cold))
+                let tiered = kotoba_store::TieredBlockStore::new(hot, cold);
+
+                // KOTOBA_PEERS — space-separated Kubo HTTP URLs for federated
+                // read.  When set, wrap the tiered store in a
+                // DistributedBlockStore so cache misses fan out to peer Kubo
+                // nodes before failing.  Each peer is a `KOTOBA_IPFS_ENDPOINT`-
+                // shaped URL.
+                let peers_str = std::env::var("KOTOBA_PEERS").unwrap_or_default();
+                if !peers_str.trim().is_empty() {
+                    let local: Arc<dyn BlockStore + Send + Sync> = Arc::new(tiered);
+                    let dist = kotoba_store::DistributedBlockStore::from_peers_str(
+                        &peers_str, Arc::clone(&local),
+                    );
+                    tracing::info!(
+                        hot_cache_mib = hot_cache_bytes / (1024 * 1024),
+                        ipfs_endpoint = %endpoint,
+                        peer_count = dist.peer_count(),
+                        "BlockStore: DistributedBlockStore<TieredBlockStore<…>> — multi-peer federation enabled"
+                    );
+                    Arc::new(dist)
+                } else {
+                    tracing::info!(
+                        hot_cache_mib = hot_cache_bytes / (1024 * 1024),
+                        ipfs_endpoint = %endpoint,
+                        "BlockStore: TieredBlockStore<BudgetedMemory, KuboIpfs> — IPFS cold tier ENABLED by default"
+                    );
+                    Arc::new(tiered)
+                }
             } else {
                 tracing::warn!(
                     hot_cache_mib = hot_cache_bytes / (1024 * 1024),
