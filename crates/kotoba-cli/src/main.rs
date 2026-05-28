@@ -65,6 +65,10 @@ enum Cmd {
         /// Target named graph CID (multibase). Defaults to the kg-graph.
         #[arg(long)]
         graph: Option<String>,
+        /// DESCRIBE only: traverse N hops along QuadObject::Cid edges from
+        /// matched seeds (multi-pop subgraph expansion).  Capped at 16 server-side.
+        #[arg(long, default_value = "0")]
+        max_hops: usize,
     },
 
     /// Cypher MATCH/RETURN over the running server (same endpoint, lang=cypher).
@@ -250,8 +254,8 @@ async fn main() -> Result<()> {
             kotoba_server::run().await?;
         }
 
-        Cmd::Sparql { query, limit, cacao, graph } => {
-            run_sparql(&cli.url, &cli.token, &query, limit, cacao, graph).await?;
+        Cmd::Sparql { query, limit, cacao, graph, max_hops } => {
+            run_sparql(&cli.url, &cli.token, &query, limit, cacao, graph, max_hops).await?;
         }
 
         Cmd::Cypher { query, limit, cacao } => {
@@ -863,6 +867,7 @@ async fn run_sparql(
     limit:    usize,
     cacao:    Option<String>,
     graph:    Option<String>,
+    max_hops: usize,
 ) -> Result<()> {
     let url = format!("{}/xrpc/ai.gftd.apps.kotoba.graph.sparql",
         base_url.trim_end_matches('/'));
@@ -872,6 +877,7 @@ async fn run_sparql(
         "limit":    limit,
         "cacaoB64": cacao,
         "graph":    graph,
+        "maxHops":  max_hops,
     });
     let resp = client.post(&url).json(&body).send().await
         .context("POST kotoba.graph.sparql failed")?;

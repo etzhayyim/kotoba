@@ -1001,6 +1001,13 @@ pub struct SparqlReq {
     pub cacao_b64: Option<String>,
     /// Maximum results to materialise (defaults to 10000).
     pub limit:     Option<usize>,
+    /// For DESCRIBE only: number of hops to traverse along `QuadObject::Cid`
+    /// edges starting from the matched seed subjects.  When > 0 dispatches to
+    /// `sparql_describe_n_hop` instead of the single-level `sparql_describe`,
+    /// returning the entire reachable subgraph deduplicated by entity.
+    /// Useful for "multi-pop" social-graph / citation-chain expansion.
+    #[serde(default)]
+    pub max_hops:  usize,
 }
 
 /// POST /xrpc/ai.gftd.apps.kotoba.graph.sparql
@@ -1058,13 +1065,21 @@ pub async fn kg_sparql(
             "elapsedMs": t0.elapsed().as_millis(),
         })
     } else if upper.starts_with("DESCRIBE") {
-        let quads = qs.sparql_describe(&graph_cid, &req.query).await
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("DESCRIBE eval: {e}")))?;
+        // Bound max_hops to a sane ceiling — N-hop is fully parallel per layer
+        // but each hop fans out, so the per-request memory cost is O(reach).
+        const MAX_HOPS_HARD_CAP: usize = 16;
+        let max_hops = req.max_hops.min(MAX_HOPS_HARD_CAP);
+        let quads = if max_hops == 0 {
+            qs.sparql_describe(&graph_cid, &req.query).await
+        } else {
+            qs.sparql_describe_n_hop(&graph_cid, &req.query, max_hops).await
+        }.map_err(|e| (StatusCode::BAD_REQUEST, format!("DESCRIBE eval: {e}")))?;
         let materialised: Vec<_> = quads.into_iter().take(limit)
             .map(quad_to_json).collect();
         serde_json::json!({
             "ok":        true,
             "form":      "describe",
+            "maxHops":   max_hops,
             "count":     materialised.len(),
             "quads":     materialised,
             "elapsedMs": t0.elapsed().as_millis(),
