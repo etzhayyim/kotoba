@@ -39,6 +39,12 @@ pub struct QuadStore {
     /// `replay_from_journal` only processes entries written *after* the last commit,
     /// not the full WAL history.
     committed_seq: Arc<RwLock<u64>>,
+    /// Per-graph flag: `true` iff the hot arrangement is a SUPERSET of the committed
+    /// cold ProllyTree (or there is no committed state).  In that case, query paths
+    /// may short-circuit and return from hot alone.  Set to `false` after WAL replay
+    /// of post-checkpoint entries — replay only restores uncommitted quads into hot,
+    /// so the committed cold state is no longer fully reflected in hot.
+    hot_covers_all: Arc<DashMap<String, bool>>,
 }
 
 impl QuadStore {
@@ -49,6 +55,7 @@ impl QuadStore {
             arrangements:  Arc::new(DashMap::new()),
             commit_dag:    Arc::new(RwLock::new(CommitDag::new())),
             committed_seq: Arc::new(RwLock::new(0)),
+            hot_covers_all: Arc::new(DashMap::new()),
         }
     }
 
@@ -69,7 +76,9 @@ impl QuadStore {
         self.journal.publish(Topic::quad_osp(&g, &o, &s, &p), payload).await;
 
         let delta = Delta::assert(quad.clone());
-        self.arrangements.entry(g).or_insert_with(Arrangement::new).insert(&quad);
+        self.arrangements.entry(g.clone()).or_insert_with(Arrangement::new).insert(&quad);
+        // Normal write: hot remains a superset of (committed ∪ pending uncommitted).
+        self.hot_covers_all.entry(g).or_insert(true);
         delta
     }
 
@@ -122,9 +131,15 @@ impl QuadStore {
     }
 
     /// Assert without publishing to Journal — used during WAL replay on startup.
+    ///
+    /// Marks the graph's `hot_covers_all` flag as `false` because replay only
+    /// loads post-checkpoint (uncommitted) quads into the arrangement; the
+    /// committed cold ProllyTree state is NOT reflected in hot any more.
     pub async fn assert_silent(&self, quad: Quad) {
         let g = quad.graph.to_multibase();
-        self.arrangements.entry(g).or_insert_with(Arrangement::new).insert(&quad);
+        self.arrangements.entry(g.clone()).or_insert_with(Arrangement::new).insert(&quad);
+        // Hot is now a strict subset of (committed ∪ uncommitted) — cold must also be consulted.
+        self.hot_covers_all.insert(g, false);
     }
 
     /// Insert a batch of quads — fast path for bulk ingest.
@@ -352,10 +367,13 @@ impl QuadStore {
         graph_cid: &KotobaCid,
         subject:   &KotobaCid,
     ) -> anyhow::Result<Vec<Quad>> {
-        // ── Hot path ──────────────────────────────────────────────────────────
+        // ── Hot path (only when hot is known to cover all committed state) ────
         {
-            if let Some(arr) = self.arrangements.get(&graph_cid.to_multibase()) {
-                if !arr.is_empty() {
+            let key = graph_cid.to_multibase();
+            if let Some(arr) = self.arrangements.get(&key) {
+                let covers_all = self.hot_covers_all.get(&key)
+                    .map(|v| *v).unwrap_or(true);
+                if !arr.is_empty() && covers_all {
                     return Ok(arr.get_subject_quads(graph_cid, subject));
                 }
             }
@@ -395,6 +413,25 @@ impl QuadStore {
                 predicate,
                 object,
             });
+        }
+
+        // ── Union with hot (when hot is a partial view, e.g. post-replay) ────
+        // If hot has uncommitted writes for this subject, merge them in.  Use
+        // (predicate, object) as the dedupe key — committed and hot can
+        // describe the same fact through different write paths.
+        if let Some(arr) = self.arrangements.get(&graph_cid.to_multibase()) {
+            if !arr.is_empty() {
+                let hot_quads = arr.get_subject_quads(graph_cid, subject);
+                let mut seen: std::collections::HashSet<(String, Vec<u8>)> = quads.iter()
+                    .map(|q| (q.predicate.clone(), serde_json::to_vec(&q.object).unwrap_or_default()))
+                    .collect();
+                for hq in hot_quads {
+                    let key = (hq.predicate.clone(), serde_json::to_vec(&hq.object).unwrap_or_default());
+                    if seen.insert(key) {
+                        quads.push(hq);
+                    }
+                }
+            }
         }
         Ok(quads)
     }
@@ -1988,9 +2025,15 @@ impl QuadStore {
     /// Clear the in-memory Arrangement for `graph_cid`, reclaiming RAM.
     /// Call after `commit()` in a batch-ingest cycle when working-set > budget.
     pub async fn reset_arrangement(&self, graph_cid: &KotobaCid) {
-        if let Some(mut arr) = self.arrangements.get_mut(&graph_cid.to_multibase()) {
+        let key = graph_cid.to_multibase();
+        if let Some(mut arr) = self.arrangements.get_mut(&key) {
             arr.clear();
         }
+        // Hot is now empty; subsequent queries go straight to cold.  Mark as
+        // "covers nothing" — but the short-circuit only triggers when hot is
+        // non-empty, so this is mostly bookkeeping.  Set true so a future
+        // write into the now-empty arrangement restores the normal invariant.
+        self.hot_covers_all.insert(key, true);
     }
 
     /// Import a commit from the local BlockStore into the CommitDag.
@@ -5302,6 +5345,52 @@ mod tests {
         let cold = qs_b.cold_query_sparql_bgp(&graph,
             r#"SELECT * WHERE { ?s <role> "admin" }"#).await.unwrap();
         assert_eq!(cold.len(), 1, "committed quad must be cold-readable after hot clear");
+    }
+
+    #[tokio::test]
+    async fn hot_cold_union_after_replay_returns_both_layers() {
+        // Verifies hot_covers_all flag: after replay puts uncommitted in hot,
+        // get_entity_quads_cold must union hot+cold instead of short-circuiting.
+        let dir       = tempfile::tempdir().unwrap();
+        let head_path = dir.path().join("journal_head.json");
+        let block_store: Arc<dyn BlockStore + Send + Sync> =
+            Arc::new(MemoryBlockStore::new());
+
+        let graph = KotobaCid::from_bytes(b"hot-cold-union-graph");
+        let alice = KotobaCid::from_bytes(b"hcu-alice");
+
+        {
+            let journal_a = Arc::new(Journal::with_block_store(
+                Arc::clone(&block_store), head_path.clone(),
+            ));
+            let qs_a = QuadStore::new(Arc::clone(&journal_a), Arc::clone(&block_store));
+            // committed: name + role
+            qs_a.assert(Quad { graph: graph.clone(), subject: alice.clone(),
+                predicate: "name".into(), object: QuadObject::Text("Alice".into()) }).await;
+            qs_a.assert(Quad { graph: graph.clone(), subject: alice.clone(),
+                predicate: "role".into(), object: QuadObject::Text("admin".into()) }).await;
+            qs_a.commit("did:test", graph.clone(), 1).await.unwrap();
+            // uncommitted: an extra label quad — only in hot/journal
+            qs_a.assert(Quad { graph: graph.clone(), subject: alice.clone(),
+                predicate: "label".into(), object: QuadObject::Text("VIP".into()) }).await;
+        }
+
+        let journal_b = Arc::new(Journal::with_block_store(
+            Arc::clone(&block_store), head_path.clone(),
+        ));
+        let qs_b = QuadStore::new(Arc::clone(&journal_b), Arc::clone(&block_store));
+        qs_b.replay_from_journal().await;
+
+        // Without union: would have returned only the WAL-restored "label" (1 quad).
+        // With union: cold name+role + hot label = 3 quads.
+        let quads = qs_b.get_entity_quads_cold(&graph, &alice).await.unwrap();
+        assert_eq!(quads.len(), 3,
+            "hot∪cold must return committed name+role + uncommitted label, got {}", quads.len());
+        let preds: std::collections::HashSet<_> = quads.iter()
+            .map(|q| q.predicate.as_str()).collect();
+        assert!(preds.contains("name"),  "cold name must be visible");
+        assert!(preds.contains("role"),  "cold role must be visible");
+        assert!(preds.contains("label"), "hot label must be visible");
     }
 
     // ─── CID-addressed materialised view cache ─────────────────────────────────
