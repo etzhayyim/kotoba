@@ -5010,4 +5010,105 @@ mod tests {
         ).await;
         assert!(matches!(result, Err(AccessError::Delegation(_))), "wrong graph denied");
     }
+
+    // ─── CACAO + SERVICE + multi-graph integration ──────────────────────────────
+
+    /// Build a real-signed CACAO authorizing multiple graphs (uses the new
+    /// multi-graph CACAO support added to kotoba-auth).
+    fn make_multigraph_cacao(graph_mbs: &[&str], capability: &str) -> DelegationChain {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        use ed25519_dalek::{SigningKey, Signer};
+        use kotoba_auth::cacao::{Cacao, CacaoHeader, CacaoPayload, CacaoSig};
+        use kotoba_auth::did_key::ed25519_pubkey_to_did_key;
+
+        let sk  = SigningKey::from_bytes(&[17u8; 32]);
+        let pk  = sk.verifying_key();
+        let did = ed25519_pubkey_to_did_key(pk.as_bytes());
+
+        let mut resources = vec![format!("kotoba://can/{capability}")];
+        for g in graph_mbs {
+            resources.push(format!("kotoba://graph/{g}"));
+        }
+        let template = Cacao {
+            h: CacaoHeader { t: "eip4361".to_string() },
+            p: CacaoPayload {
+                iss:       did,
+                aud:       "https://kotoba.test".to_string(),
+                issued_at: "2026-01-01T00:00:00Z".to_string(),
+                expiry:    Some("2099-01-01T00:00:00Z".to_string()),
+                nonce:     "multi-graph-cacao".to_string(),
+                domain:    "kotoba.test".to_string(),
+                statement: None,
+                version:   "1".to_string(),
+                resources,
+            },
+            s: CacaoSig { t: "EdDSA".to_string(), s: String::new() },
+        };
+        let msg     = template.siwe_message();
+        let sig     = sk.sign(msg.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+        let cacao   = Cacao { s: CacaoSig { t: "EdDSA".to_string(), s: sig_b64 }, ..template };
+        DelegationChain::new(cacao)
+    }
+
+    #[tokio::test]
+    async fn cacao_service_multigraph_authed_both_graphs() {
+        // CACAO authorizes g1 + g2; SERVICE federates from g1 to g2; verify() succeeds.
+        let (qs, g1, g2) = setup_two_graph_qs().await;
+        let g1_mb = g1.to_multibase();
+        let g2_mb = g2.to_multibase();
+        let chain = make_multigraph_cacao(&[&g1_mb, &g2_mb], "quad:read");
+
+        // 1) Local g1 query
+        let local = qs.cold_query_sparql_bgp_authed(
+            &g1,
+            "SELECT * WHERE { ?s <role> ?r }",
+            &chain,
+        ).await.unwrap();
+        assert_eq!(local.len(), 1, "g1 has 1 quad (alice=admin)");
+
+        // 2) Federated query via SERVICE — caller is in g1, fetches g2 quads.
+        //    Use the multi_graph_authed wrapper which post-filters by authorized graphs.
+        let federated = qs.cold_query_sparql_bgp_multi_graph_authed(
+            &g1,
+            &format!("SELECT * WHERE {{ SERVICE <cid:{g2_mb}> {{ ?s <role> ?r }} }}"),
+            &chain,
+        ).await.unwrap();
+        assert_eq!(federated.len(), 2, "g2 has 2 role quads (bob=user, alice=viewer)");
+        assert!(federated.iter().all(|q| q.graph == g2),
+            "all federated results must be from g2");
+    }
+
+    #[tokio::test]
+    async fn cacao_service_multigraph_denies_unauthorized_target() {
+        // CACAO authorizes only g1; SERVICE targets g2 → multi_graph_authed
+        // post-filters and returns empty (results not in authorized_graphs).
+        let (qs, g1, g2) = setup_two_graph_qs().await;
+        let g1_mb = g1.to_multibase();
+        let g2_mb = g2.to_multibase();
+        let chain = make_multigraph_cacao(&[&g1_mb], "quad:read");
+
+        let federated = qs.cold_query_sparql_bgp_multi_graph_authed(
+            &g1,
+            &format!("SELECT * WHERE {{ SERVICE <cid:{g2_mb}> {{ ?s <role> ?r }} }}"),
+            &chain,
+        ).await.unwrap();
+        assert!(federated.is_empty(),
+            "g2 quads must be filtered out (not in authorized_graphs), got {}", federated.len());
+    }
+
+    #[tokio::test]
+    async fn cacao_service_silent_unknown_endpoint_returns_empty_under_auth() {
+        // SERVICE SILENT to unknown endpoint under CACAO gating still returns empty
+        let (qs, g1, _g2) = setup_two_graph_qs().await;
+        let g1_mb = g1.to_multibase();
+        let chain = make_multigraph_cacao(&[&g1_mb], "quad:read");
+
+        let result = qs.cold_query_sparql_bgp_multi_graph_authed(
+            &g1,
+            "SELECT * WHERE { SERVICE SILENT <kotoba://node/did:not-routed> { ?s <role> ?r } }",
+            &chain,
+        ).await.unwrap();
+        assert!(result.is_empty(), "SILENT unknown service must return empty under CACAO");
+    }
 }
