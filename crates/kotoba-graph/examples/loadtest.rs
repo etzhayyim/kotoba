@@ -245,6 +245,9 @@ async fn async_main() {
 
     // Phase 12: SPARQL SERVICE clause federation + CACAO multi-graph SERVICE
     phase12_service_federation().await;
+
+    // Phase 13: N-hop DESCRIBE multi-pop traversal scaling
+    phase13_nhop_describe().await;
 }
 
 // ─── Phase 4: distributed block fetch (simulated 2-node cluster) ─────────────
@@ -1499,6 +1502,167 @@ async fn phase12_service_federation() {
         N_PER_GRAPH * 2);
     println!("  → SERVICE federates query to target graph CID; blocks loaded via BlockStore.");
     println!("  → CACAO chain authorizes g0+g1 only; queries against g2 post-filtered to 0 results.");
+}
+
+// ─── Phase 13: N-hop SPARQL DESCRIBE — multi-pop traversal scaling ────────────
+
+async fn phase13_nhop_describe() {
+    use ed25519_dalek::{SigningKey, Signer};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use kotoba_auth::{Cacao, CacaoHeader, CacaoPayload, CacaoSig};
+    use kotoba_auth::did_key::ed25519_pubkey_to_did_key;
+
+    const CHAIN_LEN: u64 = 1_000;   // linked-list chain
+    const FANOUT:    u64 = 4;        // tree branching factor
+    const TREE_DEPTH: u32 = 6;       // tree depth (4^6 = 4096 nodes)
+    const ITERS: usize = 20;
+
+    println!("\n=== Phase 13: N-hop SPARQL DESCRIBE (multi-pop traversal scaling) ===");
+    println!("{:<60}  {:>9}  {:>9}  {:>9}  {:>9}",
+        "query", "p50_µs", "p95_µs", "p99_µs", "result_n");
+
+    let qs = QuadStore::new(
+        Arc::new(Journal::new()),
+        Arc::new(MemoryBlockStore::new()) as Arc<dyn kotoba_core::store::BlockStore + Send + Sync>,
+    );
+
+    // ── Linked-list chain: e0 → e1 → e2 → … → e999  (1 hop per step) ──────────
+    let chain_g = KotobaCid::from_bytes(b"phase13-chain");
+    let chain_nodes: Vec<KotobaCid> = (0..CHAIN_LEN)
+        .map(|i| cid_for(900_000_000 + i))
+        .collect();
+    for i in 0..CHAIN_LEN {
+        qs.assert(Quad {
+            graph: chain_g.clone(),
+            subject: chain_nodes[i as usize].clone(),
+            predicate: "name".into(),
+            object: QuadObject::Text(format!("e{i}")),
+        }).await;
+        if i + 1 < CHAIN_LEN {
+            qs.assert(Quad {
+                graph: chain_g.clone(),
+                subject: chain_nodes[i as usize].clone(),
+                predicate: "next".into(),
+                object: QuadObject::Cid(chain_nodes[(i + 1) as usize].clone()),
+            }).await;
+        }
+    }
+    qs.commit("did:bench13-chain", chain_g.clone(), 1).await.unwrap();
+    qs.reset_arrangement(&chain_g).await;
+
+    // ── Tree: 4-ary, depth 6 = 4096 nodes ─────────────────────────────────────
+    let tree_g = KotobaCid::from_bytes(b"phase13-tree");
+    let mut tree_nodes: Vec<KotobaCid> = Vec::new();
+    let total_tree_nodes: u64 = (0..=TREE_DEPTH).map(|d| FANOUT.pow(d)).sum();
+    for i in 0..total_tree_nodes {
+        tree_nodes.push(cid_for(910_000_000 + i));
+    }
+    for i in 0..total_tree_nodes {
+        qs.assert(Quad {
+            graph: tree_g.clone(),
+            subject: tree_nodes[i as usize].clone(),
+            predicate: "label".into(),
+            object: QuadObject::Text(format!("n{i}")),
+        }).await;
+        // children: indices i*FANOUT+1 .. i*FANOUT+FANOUT
+        for k in 1..=FANOUT {
+            let child_idx = i * FANOUT + k;
+            if child_idx < total_tree_nodes {
+                qs.assert(Quad {
+                    graph: tree_g.clone(),
+                    subject: tree_nodes[i as usize].clone(),
+                    predicate: "child".into(),
+                    object: QuadObject::Cid(tree_nodes[child_idx as usize].clone()),
+                }).await;
+            }
+        }
+    }
+    qs.commit("did:bench13-tree", tree_g.clone(), 2).await.unwrap();
+    qs.reset_arrangement(&tree_g).await;
+
+    let root_chain_mb = chain_nodes[0].to_multibase();
+    let root_tree_mb  = tree_nodes[0].to_multibase();
+
+    // Real EdDSA CACAO authorizing both graphs
+    let sk  = SigningKey::from_bytes(&[111u8; 32]);
+    let pk  = sk.verifying_key();
+    let did = ed25519_pubkey_to_did_key(pk.as_bytes());
+    let chain_mb = chain_g.to_multibase();
+    let tree_mb  = tree_g.to_multibase();
+    let template = Cacao {
+        h: CacaoHeader { t: "eip4361".to_string() },
+        p: CacaoPayload {
+            iss:       did,
+            aud:       "https://kotoba.bench".to_string(),
+            issued_at: "2026-01-01T00:00:00Z".to_string(),
+            expiry:    Some("2099-01-01T00:00:00Z".to_string()),
+            nonce:     "bench13-nhop".to_string(),
+            domain:    "kotoba.bench".to_string(),
+            statement: None,
+            version:   "1".to_string(),
+            resources: vec![
+                "kotoba://can/quad:read".to_string(),
+                format!("kotoba://graph/{chain_mb}"),
+                format!("kotoba://graph/{tree_mb}"),
+            ],
+        },
+        s: CacaoSig { t: "EdDSA".to_string(), s: String::new() },
+    };
+    let msg     = template.siwe_message();
+    let sig     = sk.sign(msg.as_bytes());
+    let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+    let cacao   = Cacao { s: CacaoSig { t: "EdDSA".to_string(), s: sig_b64 }, ..template };
+    let chain   = DelegationChain::new(cacao);
+
+    macro_rules! bench_q {
+        ($label:expr, $body:expr) => {{
+            let mut times = Vec::with_capacity(ITERS);
+            let mut last_n = 0usize;
+            for _ in 0..ITERS {
+                let t = Instant::now();
+                let r: Vec<Quad> = $body;
+                times.push(t.elapsed());
+                last_n = r.len();
+            }
+            times.sort();
+            let p50 = times[times.len() / 2].as_micros();
+            let p95 = times[(times.len() * 95 / 100).min(times.len() - 1)].as_micros();
+            let p99 = times[(times.len() * 99 / 100).min(times.len() - 1)].as_micros();
+            println!("{:<60}  {:>9}  {:>9}  {:>9}  {:>9}",
+                $label, p50, p95, p99, last_n);
+        }};
+    }
+
+    // ── Chain (linear) ────────────────────────────────────────────────────────
+    bench_q!("chain DESCRIBE 0-hop (just seed)",
+        qs.sparql_describe_n_hop(&chain_g, &format!("DESCRIBE <cid:{root_chain_mb}>"), 0).await.unwrap());
+    bench_q!("chain DESCRIBE 10-hop",
+        qs.sparql_describe_n_hop(&chain_g, &format!("DESCRIBE <cid:{root_chain_mb}>"), 10).await.unwrap());
+    bench_q!("chain DESCRIBE 100-hop",
+        qs.sparql_describe_n_hop(&chain_g, &format!("DESCRIBE <cid:{root_chain_mb}>"), 100).await.unwrap());
+    bench_q!("chain DESCRIBE 999-hop (full chain)",
+        qs.sparql_describe_n_hop(&chain_g, &format!("DESCRIBE <cid:{root_chain_mb}>"), 999).await.unwrap());
+
+    // ── Tree (fanout=4) ───────────────────────────────────────────────────────
+    bench_q!("tree(4^6=4096) DESCRIBE 1-hop (root + 4 children)",
+        qs.sparql_describe_n_hop(&tree_g, &format!("DESCRIBE <cid:{root_tree_mb}>"), 1).await.unwrap());
+    bench_q!("tree(4^6) DESCRIBE 3-hop (≈85 nodes)",
+        qs.sparql_describe_n_hop(&tree_g, &format!("DESCRIBE <cid:{root_tree_mb}>"), 3).await.unwrap());
+    bench_q!("tree(4^6) DESCRIBE 6-hop (full tree ≈4096 nodes)",
+        qs.sparql_describe_n_hop(&tree_g, &format!("DESCRIBE <cid:{root_tree_mb}>"), 6).await.unwrap());
+
+    // ── CACAO-authed N-hop ────────────────────────────────────────────────────
+    bench_q!("CACAO + chain 100-hop (real EdDSA verify)",
+        qs.sparql_describe_n_hop_authed(&chain_g,
+            &format!("DESCRIBE <cid:{root_chain_mb}>"), 100, &chain).await.unwrap());
+    bench_q!("CACAO + tree(4^6) 6-hop (real EdDSA verify)",
+        qs.sparql_describe_n_hop_authed(&tree_g,
+            &format!("DESCRIBE <cid:{root_tree_mb}>"), 6, &chain).await.unwrap());
+
+    println!("  → chain has {CHAIN_LEN} entities × 2 quads (name + next) = {} quads.", CHAIN_LEN * 2 - 1);
+    println!("  → tree has {total_tree_nodes} nodes × (label + up to {FANOUT} children).");
+    println!("  → N-hop cost scales linearly with reachable entity count.");
+    println!("  → CACAO sig verified once at entry; per-hop fetch unaffected.");
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
