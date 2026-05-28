@@ -409,6 +409,12 @@ MemoryBlockStore、10K entities × 4 quads (name/role/status/knows)。reset_arra
   - 6-hop: **27 304 quads (full tree)**, p50 **65 ms / 14 QPS**
   - 6-hop c=16: 27304 quads, p50 188 ms / **75 QPS** (5.3× concurrent speedup)
   Latency scales sub-linearly with reach (1700× quads → 500× latency) thanks to parallel per-layer `try_join_all`.  Concurrent dispatch additionally hides per-layer fan-out cost.  CLI now drives this end-to-end: `kotoba bench --max-hops N "DESCRIBE <cid:root>"`.
+- **Real Kubo daemon E2E — IPFS substrate verified end-to-end (2026-05-28)**: Kubo 0.41.0 via `docker run -p 5001 ipfs/kubo:latest`, `kotoba serve` with `KOTOBA_STORE_PATH=/tmp/kotoba-realipfs` (triggers TieredBlockStore<BudgetedMemory, KuboIpfs>). Startup probe logs `IPFS daemon reachable kubo_version=0.41.0 kubo_commit=d719fb8`. Measured (release, default `KOTOBA_IPFS_ENDPOINT=http://localhost:5001`):
+  - ingest 100 entities (write-through to Kubo `block/put` per ProllyTree block): **142 entities/sec** (0.70s)
+  - resulting Kubo state: **4045 blocks** stored, **1 recursive pin** (commit block — durable across Kubo restart)
+  - SELECT after warm cache: **570 QPS** (1.14ms p50)
+  - ASK: **638 QPS** (1.09ms p50)
+  Ingest rate is ~35× lower than KOTOBA_IPFS=off (5222 ent/sec) because each ProllyTree block now round-trips to Kubo HTTP. Read path stays fast — hot cache absorbs subsequent queries; IPFS only hit on cache miss. Confirms the IPFS-default story works against a real daemon, not just synthetic MemoryBlockStore.
 - **SPARQL property path depth cap 8→64 + O(R²) dedupe fix (2026-05-28)**: `eval_property_path` was capping `<pred>+` / `<pred>*` at 8 hops (silently truncating long transitive chains) and using linear `results.iter().any()` dedupe (O(R²)). Lifted to `PROPERTY_PATH_MAX_HOPS = 64`; replaced `ZeroOrMore` dedupe with `HashSet<(s, p, o-bytes)>`. Measured at 1000-entity knows-chain (release, KOTOBA_IPFS=off): `<knows>+` returns **64 results / 0.33ms p50 / 2441 QPS** (was 8 results / 0.12ms — same QPS, 8× more reachable nodes); `<knows>*` returns 67 (64 + start own quads) / 0.35ms / 2450 QPS. 209 kotoba-graph tests still pass.
 - **CACAO-gated wide-fanout multi-pop matrix (2026-05-28)**: identical 4-ary tree depth-6 workload + `kotoba bench --max-hops N --cacao-seed $SEED --cacao-private`, server in `KOTOBA_DEFAULT_VISIBILITY=private`:
 
