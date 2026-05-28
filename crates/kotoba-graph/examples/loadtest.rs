@@ -1583,36 +1583,39 @@ async fn phase13_nhop_describe() {
     let root_chain_mb = chain_nodes[0].to_multibase();
     let root_tree_mb  = tree_nodes[0].to_multibase();
 
-    // Real EdDSA CACAO authorizing both graphs
+    // Real EdDSA CACAO — separate chain per graph (single-graph scope per chain)
     let sk  = SigningKey::from_bytes(&[111u8; 32]);
     let pk  = sk.verifying_key();
     let did = ed25519_pubkey_to_did_key(pk.as_bytes());
     let chain_mb = chain_g.to_multibase();
     let tree_mb  = tree_g.to_multibase();
-    let template = Cacao {
-        h: CacaoHeader { t: "eip4361".to_string() },
-        p: CacaoPayload {
-            iss:       did,
-            aud:       "https://kotoba.bench".to_string(),
-            issued_at: "2026-01-01T00:00:00Z".to_string(),
-            expiry:    Some("2099-01-01T00:00:00Z".to_string()),
-            nonce:     "bench13-nhop".to_string(),
-            domain:    "kotoba.bench".to_string(),
-            statement: None,
-            version:   "1".to_string(),
-            resources: vec![
-                "kotoba://can/quad:read".to_string(),
-                format!("kotoba://graph/{chain_mb}"),
-                format!("kotoba://graph/{tree_mb}"),
-            ],
-        },
-        s: CacaoSig { t: "EdDSA".to_string(), s: String::new() },
+    let make_chain = |graph_mb: &str, nonce: &str| {
+        let template = Cacao {
+            h: CacaoHeader { t: "eip4361".to_string() },
+            p: CacaoPayload {
+                iss:       did.clone(),
+                aud:       "https://kotoba.bench".to_string(),
+                issued_at: "2026-01-01T00:00:00Z".to_string(),
+                expiry:    Some("2099-01-01T00:00:00Z".to_string()),
+                nonce:     nonce.to_string(),
+                domain:    "kotoba.bench".to_string(),
+                statement: None,
+                version:   "1".to_string(),
+                resources: vec![
+                    "kotoba://can/quad:read".to_string(),
+                    format!("kotoba://graph/{graph_mb}"),
+                ],
+            },
+            s: CacaoSig { t: "EdDSA".to_string(), s: String::new() },
+        };
+        let msg     = template.siwe_message();
+        let sig     = sk.sign(msg.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+        let cacao   = Cacao { s: CacaoSig { t: "EdDSA".to_string(), s: sig_b64 }, ..template };
+        DelegationChain::new(cacao)
     };
-    let msg     = template.siwe_message();
-    let sig     = sk.sign(msg.as_bytes());
-    let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
-    let cacao   = Cacao { s: CacaoSig { t: "EdDSA".to_string(), s: sig_b64 }, ..template };
-    let chain   = DelegationChain::new(cacao);
+    let chain_for_chain_g = make_chain(&chain_mb, "bench13-chain");
+    let chain_for_tree_g  = make_chain(&tree_mb,  "bench13-tree");
 
     macro_rules! bench_q {
         ($label:expr, $body:expr) => {{
@@ -1654,10 +1657,10 @@ async fn phase13_nhop_describe() {
     // ── CACAO-authed N-hop ────────────────────────────────────────────────────
     bench_q!("CACAO + chain 100-hop (real EdDSA verify)",
         qs.sparql_describe_n_hop_authed(&chain_g,
-            &format!("DESCRIBE <cid:{root_chain_mb}>"), 100, &chain).await.unwrap());
+            &format!("DESCRIBE <cid:{root_chain_mb}>"), 100, &chain_for_chain_g).await.unwrap());
     bench_q!("CACAO + tree(4^6) 6-hop (real EdDSA verify)",
         qs.sparql_describe_n_hop_authed(&tree_g,
-            &format!("DESCRIBE <cid:{root_tree_mb}>"), 6, &chain).await.unwrap());
+            &format!("DESCRIBE <cid:{root_tree_mb}>"), 6, &chain_for_tree_g).await.unwrap());
 
     println!("  → chain has {CHAIN_LEN} entities × 2 quads (name + next) = {} quads.", CHAIN_LEN * 2 - 1);
     println!("  → tree has {total_tree_nodes} nodes × (label + up to {FANOUT} children).");
