@@ -95,6 +95,17 @@ enum Cmd {
     /// Print the local deployment-config summary (env-driven): identity
     /// source, IPFS endpoint, peer list, default visibility, hot-cache size.
     Whoami,
+
+    /// End-to-end smoke: ingest a sample entity via kg.ingest, then run
+    /// SELECT / ASK / DESCRIBE / CONSTRUCT through the direct-SPARQL endpoint.
+    /// Useful for verifying that `kotoba serve` is wired up against the
+    /// expected IPFS + CACAO + graph stack.
+    Demo {
+        /// Bearer token used for the Authenticated tier (kg graph default).
+        /// If absent, falls back to `KOTOBA_TOKEN` or "demo-token".
+        #[arg(long, env = "KOTOBA_DEMO_TOKEN")]
+        token: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -196,6 +207,13 @@ async fn main() -> Result<()> {
                 println!("KOTOBA_AGENT_X25519_HEX={}",  hex::encode(id.dh_secret.to_bytes()));
                 println!("KOTOBA_AGENT_DID={}",         id.did);
             }
+        }
+
+        Cmd::Demo { token } => {
+            let tok = token
+                .or_else(|| cli.token.clone())
+                .unwrap_or_else(|| "demo-token".into());
+            run_demo(&cli.url, &tok).await?;
         }
 
         Cmd::Whoami => {
@@ -395,6 +413,100 @@ fn check_status(resp: &reqwest::Response) -> Result<()> {
         anyhow::bail!("server returned {status}");
     }
     Ok(())
+}
+
+/// Build a non-expiring JWT-shaped token. The kotoba server's Authenticated
+/// tier accepts any Bearer token whose `exp` claim is in the future — it does
+/// NOT verify the signature (the upstream PDS / edge BFF is the trust
+/// boundary).  This lets the demo run without an external identity service.
+fn demo_token() -> String {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let header  = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+    let payload = URL_SAFE_NO_PAD.encode(
+        br#"{"sub":"did:key:zKotobaDemo","exp":9999999999}"#
+    );
+    format!("{header}.{payload}.demosig")
+}
+
+/// End-to-end smoke: ingest a sample entity then run all four SPARQL forms.
+async fn run_demo(base_url: &str, token_in: &str) -> Result<()> {
+    let base   = base_url.trim_end_matches('/');
+    let client = reqwest::Client::new();
+    // If the caller passed a placeholder lacking JWT shape, upgrade to a
+    // proper JWT-shaped token so the Bearer-auth gate accepts us.
+    let token: String = if token_in.contains('.') {
+        token_in.to_string()
+    } else {
+        demo_token()
+    };
+    let token = &token;
+
+    let bearer = |req: reqwest::RequestBuilder| {
+        req.header("Authorization", format!("Bearer {token}"))
+    };
+
+    // 1. ingest
+    println!("→ ingest sample entity (kg.ingest)");
+    let ingest_body = serde_json::json!({
+        "id":         "kotoba-demo-001",
+        "type":       "Person",
+        "labelEn":    "Demo Subject",
+        "confidence": "0.95",
+        "license":    "CC0-1.0",
+        "sourceId":   "kotoba-demo",
+        "claims": [
+            { "pred": "role",       "value": "admin" },
+            { "pred": "occupation", "value": "engineer" }
+        ],
+        "relations": []
+    });
+    let resp = bearer(client.post(format!("{base}/xrpc/ai.gftd.apps.yata.kg.ingest"))
+        .json(&ingest_body))
+        .send().await.context("kg.ingest POST")?;
+    check_status(&resp)?;
+    let put: serde_json::Value = resp.json().await.context("ingest JSON")?;
+    let subj_cid = put["subjectCid"].as_str()
+        .ok_or_else(|| anyhow::anyhow!("ingest response missing subjectCid: {put}"))?
+        .to_string();
+    println!("  ingested subjectCid: {subj_cid}");
+
+    // 2. SELECT
+    println!("→ SELECT * WHERE {{ ?s <kg/claim/role> ?o }}");
+    let sel = sparql_req(&client, base, token.as_str(),
+        r#"SELECT * WHERE { ?s <kg/claim/role> ?o }"#).await?;
+    println!("  count={} (≥1 expected)", sel["count"]);
+
+    // 3. ASK true
+    println!("→ ASK {{ ?s <kg/claim/role> \"admin\" }}");
+    let ask = sparql_req(&client, base, token.as_str(),
+        r#"ASK { ?s <kg/claim/role> "admin" }"#).await?;
+    println!("  result={}", ask["result"]);
+
+    // 4. DESCRIBE the subject
+    println!("→ DESCRIBE <cid:{subj_cid}>");
+    let descr = sparql_req(&client, base, token.as_str(),
+        &format!("DESCRIBE <cid:{subj_cid}>")).await?;
+    println!("  count={} quads about the subject", descr["count"]);
+
+    // 5. CONSTRUCT
+    println!("→ CONSTRUCT {{ ?s <admin> \"yes\" }} WHERE {{ ?s <kg/claim/role> \"admin\" }}");
+    let con = sparql_req(&client, base, token.as_str(),
+        r#"CONSTRUCT { ?s <admin> "yes" } WHERE { ?s <kg/claim/role> "admin" }"#).await?;
+    println!("  count={} constructed quads", con["count"]);
+
+    println!("\n✓ demo complete — all four SPARQL forms executed against IPFS-backed cold path");
+    Ok(())
+}
+
+async fn sparql_req(client: &reqwest::Client, base: &str, token: &str, query: &str)
+    -> Result<serde_json::Value>
+{
+    let resp = client.post(format!("{base}/xrpc/ai.gftd.apps.kotoba.graph.sparql"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({ "query": query, "limit": 1000 }))
+        .send().await.context("kg.sparql POST")?;
+    check_status(&resp)?;
+    resp.json().await.context("sparql JSON")
 }
 
 /// POST a SPARQL query (any form) to the direct-SPARQL endpoint.

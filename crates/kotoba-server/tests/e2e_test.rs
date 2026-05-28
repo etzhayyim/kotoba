@@ -2361,6 +2361,91 @@ async fn kg_sparql_roundtrip_ingest_then_select_describe_ask() {
 }
 
 #[tokio::test]
+async fn kg_sparql_roundtrip_ingest_then_describe_subject() {
+    // HTTP roundtrip: ingest → DESCRIBE <cid:subject> via kg.sparql
+    let s   = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zSparqlDescribe1");
+
+    let (status, put) = s.post_auth(
+        "/xrpc/ai.gftd.apps.yata.kg.ingest",
+        json!({
+            "id":        "sparql-describe-001",
+            "type":      "Person",
+            "labelEn":   "Describe Test",
+            "confidence":"0.9",
+            "license":   "CC0-1.0",
+            "sourceId":  "src-d",
+            "claims": [
+                { "pred": "role", "value": "admin" }
+            ],
+            "relations": []
+        }),
+        &tok,
+    ).await;
+    assert_eq!(status, 200, "ingest: {put}");
+    let subj_cid = put["subjectCid"].as_str().expect("subjectCid present").to_string();
+
+    // DESCRIBE the just-ingested subject → expects all its quads back
+    let (status, body) = s.post_auth(
+        "/xrpc/ai.gftd.apps.kotoba.graph.sparql",
+        json!({ "query": format!("DESCRIBE <cid:{subj_cid}>") }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "describe: {body}");
+    assert_eq!(body["form"], "describe", "{body}");
+    let count = body["count"].as_u64().unwrap_or(0);
+    assert!(count >= 1, "DESCRIBE should return ≥1 quad for ingested subject, got {count}: {body}");
+    // Every returned quad must be about the requested subject
+    for q in body["quads"].as_array().unwrap_or(&vec![]) {
+        assert_eq!(q["subject"], subj_cid,
+            "DESCRIBE returned quad about a different subject: {q}");
+    }
+}
+
+#[tokio::test]
+async fn kg_sparql_roundtrip_ingest_then_construct() {
+    // HTTP roundtrip: ingest → CONSTRUCT { ?s <label> ?n } WHERE { ?s <kg/claim/role> "admin" }
+    // Validates template instantiation over ingested data.
+    let s   = TestServer::start(false).await;
+    let tok = tenant_jwt("did:key:zSparqlConstruct1");
+
+    let (status, put) = s.post_auth(
+        "/xrpc/ai.gftd.apps.yata.kg.ingest",
+        json!({
+            "id":        "sparql-construct-001",
+            "type":      "Person",
+            "labelEn":   "Construct Test",
+            "confidence":"0.9",
+            "license":   "CC0-1.0",
+            "sourceId":  "src-c",
+            "claims": [
+                { "pred": "role", "value": "admin" }
+            ],
+            "relations": []
+        }),
+        &tok,
+    ).await;
+    assert_eq!(status, 200, "ingest: {put}");
+
+    let (status, body) = s.post_auth(
+        "/xrpc/ai.gftd.apps.kotoba.graph.sparql",
+        json!({
+            "query": r#"CONSTRUCT { ?s <admin> "yes" } WHERE { ?s <kg/claim/role> "admin" }"#,
+        }),
+        "test-token",
+    ).await;
+    assert_eq!(status, 200, "construct: {body}");
+    assert_eq!(body["form"], "construct", "{body}");
+    let count = body["count"].as_u64().unwrap_or(0);
+    assert!(count >= 1,
+        "CONSTRUCT should materialise ≥1 admin-label quad, got {count}: {body}");
+    for q in body["quads"].as_array().unwrap_or(&vec![]) {
+        assert_eq!(q["predicate"], "admin", "{q}");
+        assert_eq!(q["object"]["text"], "yes", "{q}");
+    }
+}
+
+#[tokio::test]
 async fn kg_sparql_select_empty_graph_returns_select_form() {
     let s = TestServer::start(false).await;
     let (status, body) = s.post_auth(
