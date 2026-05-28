@@ -312,6 +312,10 @@ pub fn build_router(state: Arc<KotobaState>) -> Router {
             post(kg::kg_ingest),
         )
         .route(
+            &format!("/xrpc/{}", kg::NSID_KG_INGEST_BATCH),
+            post(kg::kg_ingest_batch),
+        )
+        .route(
             &format!("/xrpc/{}", kg::NSID_KG_DELETE),
             post(kg::kg_delete),
         )

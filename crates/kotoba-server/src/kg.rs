@@ -63,6 +63,7 @@ pub const NSID_KG_SEARCH:  &str = "ai.gftd.apps.yata.kg.search";
 pub const NSID_KG_QUERY:   &str = "ai.gftd.apps.yata.kg.query";
 pub const NSID_KG_SPARQL:  &str = "ai.gftd.apps.kotoba.graph.sparql";
 pub const NSID_KG_INGEST:  &str = "ai.gftd.apps.yata.kg.ingest";
+pub const NSID_KG_INGEST_BATCH: &str = "ai.gftd.apps.yata.kg.ingest_batch";
 pub const NSID_KG_DELETE:  &str = "ai.gftd.apps.yata.kg.delete";
 
 /// All yatabase KG quads are written into this named graph.
@@ -650,6 +651,180 @@ pub async fn kg_ingest(
         subject_cid: subject.to_multibase(),
         quad_count:  count,
     }).into_response()
+}
+
+// ── kg.ingest_batch ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KgIngestBatchReq {
+    /// Up to MAX_KG_BATCH_SIZE entities to ingest in a single HTTP request.
+    pub entities: Vec<KgIngestReq>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KgIngestBatchResp {
+    pub ok:           bool,
+    /// CIDs of subjects ingested, in input order.
+    pub subject_cids: Vec<String>,
+    /// Total quads written across all entities.
+    pub quad_count:   usize,
+    /// Number of entities ingested.
+    pub entity_count: usize,
+}
+
+/// Maximum number of entities accepted in a single batch request.
+/// Bounds per-request memory + amortises HTTP overhead.
+const MAX_KG_BATCH_SIZE: usize = 1_000;
+
+/// POST /xrpc/ai.gftd.apps.yata.kg.ingest_batch
+///
+/// Ingest up to `MAX_KG_BATCH_SIZE` entities in a single HTTP request.
+/// Validation is run once before any writes; if any entity fails the entire
+/// batch is rejected (all-or-nothing semantics).  Inserts are then performed
+/// serially through the same QuadStore path as single-ingest, amortising the
+/// HTTP + JSON + auth-gate cost across the whole batch.
+pub async fn kg_ingest_batch(
+    State(state): State<Arc<KotobaState>>,
+    headers:      HeaderMap,
+    Json(req):    Json<KgIngestBatchReq>,
+) -> impl IntoResponse {
+    use axum::Json as AxumJson;
+    if let Err((code, msg)) = require_kg_write_auth(&headers) {
+        return (code, AxumJson(serde_json::json!({"ok": false, "error": msg}))).into_response();
+    }
+    if req.entities.is_empty() {
+        return (StatusCode::BAD_REQUEST,
+            AxumJson(serde_json::json!({"ok": false,
+                "error": "entities[] is empty"}))).into_response();
+    }
+    if req.entities.len() > MAX_KG_BATCH_SIZE {
+        return (StatusCode::BAD_REQUEST,
+            AxumJson(serde_json::json!({"ok": false,
+                "error": format!("batch size {} exceeds limit {MAX_KG_BATCH_SIZE}",
+                    req.entities.len())}))).into_response();
+    }
+
+    // Validate ALL entities up front so we never partially-write a batch.
+    for (i, e) in req.entities.iter().enumerate() {
+        if let Err(msg) = validate_ingest_req(e) {
+            return (StatusCode::BAD_REQUEST,
+                AxumJson(serde_json::json!({"ok": false,
+                    "error": format!("entity[{i}]: {msg}")}))).into_response();
+        }
+    }
+
+    use kotoba_kqe::quad::Quad;
+    let graph = kg_graph_cid();
+    let mut subject_cids = Vec::with_capacity(req.entities.len());
+    let mut total_quads  = 0usize;
+
+    for e in &req.entities {
+        let subject = KotobaCid::from_bytes(e.id.as_bytes());
+        subject_cids.push(subject.to_multibase());
+        let mut count = 0usize;
+
+        macro_rules! assert_text {
+            ($pred:expr, $val:expr) => {{
+                state.quad_store.assert(Quad {
+                    graph:     graph.clone(),
+                    subject:   subject.clone(),
+                    predicate: $pred.to_string(),
+                    object:    QuadObject::Text($val.to_string()),
+                }).await;
+                count += 1;
+            }};
+        }
+
+        assert_text!("kg/id", e.id);
+        if let Some(v) = &e.qid         { assert_text!("kg/qid",         v); }
+        if let Some(v) = &e.kind        { assert_text!("kg/type",        v); }
+        if let Some(v) = &e.label_ja    { assert_text!("kg/label/ja",    v); }
+        if let Some(v) = &e.label_en    { assert_text!("kg/label/en",    v); }
+        if let Some(v) = &e.confidence  { assert_text!("kg/confidence",  v); }
+        if let Some(v) = &e.license     { assert_text!("kg/license",     v); }
+        if let Some(v) = &e.extractor   { assert_text!("kg/extractor",   v); }
+        if let Some(v) = &e.valid_from  { assert_text!("kg/valid_from",  v); }
+        if let Some(v) = &e.valid_to    { assert_text!("kg/valid_to",    v); }
+        if let Some(v) = &e.ingested_at { assert_text!("kg/ingested_at", v); }
+        if let Some(v) = &e.source_id   { assert_text!("kg/source_id",   v); }
+
+        for claim in &e.claims {
+            assert_text!(format!("kg/claim/{}", claim.pred), claim.value);
+        }
+        for rel in &e.relations {
+            let dst_cid = KotobaCid::from_bytes(rel.dst_id.as_bytes());
+            state.quad_store.assert(Quad {
+                graph:     graph.clone(),
+                subject:   subject.clone(),
+                predicate: format!("kg/relation/{}", rel.pred),
+                object:    QuadObject::Cid(dst_cid),
+            }).await;
+            count += 1;
+        }
+        if !e.label_vec.is_empty() {
+            state.quad_store.assert(Quad {
+                graph:     graph.clone(),
+                subject:   subject.clone(),
+                predicate: "kg/label_vec".to_string(),
+                object:    QuadObject::VectorF32(e.label_vec.clone()),
+            }).await;
+            count += 1;
+        }
+        total_quads += count;
+    }
+
+    AxumJson(KgIngestBatchResp {
+        ok:           true,
+        subject_cids,
+        quad_count:   total_quads,
+        entity_count: req.entities.len(),
+    }).into_response()
+}
+
+/// Validate a single ingest entity; returns `Err(human-message)` on any failure.
+fn validate_ingest_req(e: &KgIngestReq) -> Result<(), String> {
+    if e.id.is_empty() || e.id.len() > MAX_KG_ID_LEN {
+        return Err(format!("id must be 1–{MAX_KG_ID_LEN} bytes"));
+    }
+    if e.claims.len() > MAX_KG_CLAIMS {
+        return Err(format!("claims array exceeds {MAX_KG_CLAIMS} entries"));
+    }
+    if e.relations.len() > MAX_KG_RELATIONS {
+        return Err(format!("relations array exceeds {MAX_KG_RELATIONS} entries"));
+    }
+    if e.label_vec.len() > MAX_KG_VEC_DIMS {
+        return Err(format!("labelVec exceeds {MAX_KG_VEC_DIMS} dimensions"));
+    }
+    if e.label_vec.iter().any(|f| !f.is_finite()) {
+        return Err("labelVec contains non-finite values (NaN/Inf)".into());
+    }
+    for v in [&e.qid, &e.kind, &e.label_ja, &e.label_en, &e.license,
+              &e.extractor, &e.valid_from, &e.valid_to, &e.ingested_at, &e.source_id]
+        .into_iter().flatten()
+    {
+        if v.len() > MAX_KG_FIELD_LEN {
+            return Err(format!("field value exceeds {MAX_KG_FIELD_LEN} bytes"));
+        }
+    }
+    for c in &e.claims {
+        if c.pred.is_empty() || c.pred.len() > MAX_KG_ID_LEN {
+            return Err(format!("claim.pred must be 1–{MAX_KG_ID_LEN} bytes"));
+        }
+        if c.value.len() > MAX_KG_FIELD_LEN {
+            return Err(format!("claim.value must be ≤{MAX_KG_FIELD_LEN} bytes"));
+        }
+    }
+    for r in &e.relations {
+        if r.pred.is_empty() || r.pred.len() > MAX_KG_ID_LEN {
+            return Err(format!("relation.pred must be 1–{MAX_KG_ID_LEN} bytes"));
+        }
+        if r.dst_id.is_empty() || r.dst_id.len() > MAX_KG_ID_LEN {
+            return Err(format!("relation.dstId must be 1–{MAX_KG_ID_LEN} bytes"));
+        }
+    }
+    Ok(())
 }
 
 // ── kg.delete ─────────────────────────────────────────────────────────────────
