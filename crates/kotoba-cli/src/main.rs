@@ -108,16 +108,18 @@ enum Cmd {
     },
 
     /// HTTP-level loadtest for the direct-SPARQL endpoint.  Issues `iters`
-    /// sequential POSTs of the same query and reports p50 / p95 / p99 / mean
-    /// in milliseconds.  Use after `kotoba demo` has seeded a quad so the
-    /// query has non-empty results.
+    /// POSTs of the same query (sequential or concurrent) and reports
+    /// p50/p95/p99/mean in milliseconds plus aggregate QPS.
     Bench {
         /// SPARQL query to repeat.
         #[arg(default_value = r#"SELECT * WHERE { ?s <kg/claim/role> ?o }"#)]
         query: String,
-        /// Number of sequential iterations (default 100).
+        /// Total iterations (default 100).
         #[arg(long, default_value = "100")]
         iters: usize,
+        /// Concurrent in-flight clients (default 1 = sequential).
+        #[arg(long, short = 'c', default_value = "1")]
+        concurrency: usize,
         /// Bearer token (defaults to a fresh JWT-shaped demo token).
         #[arg(long, env = "KOTOBA_DEMO_TOKEN")]
         token: Option<String>,
@@ -232,11 +234,11 @@ async fn main() -> Result<()> {
             run_demo(&cli.url, &tok).await?;
         }
 
-        Cmd::Bench { query, iters, token } => {
+        Cmd::Bench { query, iters, concurrency, token } => {
             let tok = token
                 .or_else(|| cli.token.clone())
                 .unwrap_or_else(|| "demo-token".into());
-            run_bench(&cli.url, &tok, &query, iters).await?;
+            run_bench(&cli.url, &tok, &query, iters, concurrency).await?;
         }
 
         Cmd::Whoami => {
@@ -451,9 +453,16 @@ fn demo_token() -> String {
     format!("{header}.{payload}.demosig")
 }
 
-/// Sequential SPARQL loadtest.  Issues `iters` POSTs of the same query and
-/// prints p50/p95/p99/mean in milliseconds plus the response count.
-async fn run_bench(base_url: &str, token_in: &str, query: &str, iters: usize) -> Result<()> {
+/// HTTP SPARQL loadtest.  Issues `iters` POSTs of the same query with up to
+/// `concurrency` in-flight clients; prints latency percentiles + aggregate QPS.
+async fn run_bench(
+    base_url:    &str,
+    token_in:    &str,
+    query:       &str,
+    iters:       usize,
+    concurrency: usize,
+) -> Result<()> {
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     let base   = base_url.trim_end_matches('/');
@@ -464,24 +473,64 @@ async fn run_bench(base_url: &str, token_in: &str, query: &str, iters: usize) ->
         demo_token()
     };
 
-    println!("→ benchmarking {iters} iterations of:");
+    let concurrency = concurrency.max(1);
+    println!("→ benchmarking {iters} iters × concurrency {concurrency} of:");
     println!("    {query}");
 
-    let url = format!("{base}/xrpc/ai.gftd.apps.kotoba.graph.sparql");
-    let body = serde_json::json!({ "query": query, "limit": 10_000 });
+    let url   = Arc::new(format!("{base}/xrpc/ai.gftd.apps.kotoba.graph.sparql"));
+    let body  = Arc::new(serde_json::json!({ "query": query, "limit": 10_000 }));
+    let token = Arc::new(token);
 
-    let mut samples: Vec<Duration> = Vec::with_capacity(iters);
-    let mut last_count: u64 = 0;
-    for _ in 0..iters {
-        let t0 = Instant::now();
-        let resp = client.post(&url)
-            .header("Authorization", format!("Bearer {token}"))
-            .json(&body)
-            .send().await.context("bench POST")?;
-        check_status(&resp)?;
-        let v: serde_json::Value = resp.json().await.context("bench JSON")?;
-        samples.push(t0.elapsed());
-        last_count = v["count"].as_u64().unwrap_or(0);
+    let wall_start = Instant::now();
+
+    // Spawn `concurrency` workers; each consumes from a shared atomic counter
+    // until `iters` requests have been dispatched.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let next = Arc::new(AtomicUsize::new(0));
+    let mut handles = Vec::with_capacity(concurrency);
+
+    for _ in 0..concurrency {
+        let client = client.clone();
+        let url    = Arc::clone(&url);
+        let body   = Arc::clone(&body);
+        let token  = Arc::clone(&token);
+        let next   = Arc::clone(&next);
+        handles.push(tokio::spawn(async move {
+            let mut local: Vec<Duration> = Vec::new();
+            let mut last_count: u64 = 0;
+            loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= iters { break; }
+                let t0 = Instant::now();
+                let resp = match client.post(url.as_str())
+                    .header("Authorization", format!("Bearer {token}"))
+                    .json(&*body)
+                    .send().await {
+                    Ok(r)  => r,
+                    Err(_) => continue,
+                };
+                if !resp.status().is_success() { continue; }
+                let v: serde_json::Value = match resp.json().await {
+                    Ok(v)  => v,
+                    Err(_) => continue,
+                };
+                local.push(t0.elapsed());
+                last_count = v["count"].as_u64().unwrap_or(0);
+            }
+            (local, last_count)
+        }));
+    }
+
+    let mut samples:    Vec<Duration> = Vec::with_capacity(iters);
+    let mut last_count: u64           = 0;
+    for h in handles {
+        let (mut local, n) = h.await.context("bench worker join")?;
+        samples.append(&mut local);
+        if n > 0 { last_count = n; }
+    }
+    let wall = wall_start.elapsed();
+    if samples.is_empty() {
+        anyhow::bail!("no successful samples — server may be unreachable");
     }
     samples.sort_unstable();
 
@@ -491,14 +540,17 @@ async fn run_bench(base_url: &str, token_in: &str, query: &str, iters: usize) ->
     };
     let mean: u128 =
         (samples.iter().map(|d| d.as_micros()).sum::<u128>()) / (samples.len() as u128);
+    let qps = samples.len() as f64 / wall.as_secs_f64();
 
-    println!("\nresults (sequential, single client):");
+    println!("\nresults (concurrency = {concurrency}):");
     println!("  count per query : {last_count}");
+    println!("  successful      : {} / {iters}", samples.len());
     println!("  p50             : {:.2} ms", pct(0.50) as f64 / 1000.0);
     println!("  p95             : {:.2} ms", pct(0.95) as f64 / 1000.0);
     println!("  p99             : {:.2} ms", pct(0.99) as f64 / 1000.0);
-    println!("  mean            : {:.2} ms", mean   as f64 / 1000.0);
-    println!("  total           : {:.2} s",  samples.iter().sum::<Duration>().as_secs_f64());
+    println!("  mean            : {:.2} ms", mean       as f64 / 1000.0);
+    println!("  wall            : {:.2} s",  wall.as_secs_f64());
+    println!("  qps             : {:.1} req/s", qps);
     Ok(())
 }
 
