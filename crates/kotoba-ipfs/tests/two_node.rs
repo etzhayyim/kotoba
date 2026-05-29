@@ -720,6 +720,17 @@ async fn kubo_compatible_local_api_surface() {
     assert!(docs_after_mkdir
         .iter()
         .any(|entry| entry.path == "/docs/archive" && entry.cid.is_none()));
+    node.files_mkdir("/docs/empty-dir", true)
+        .await
+        .expect("files/mkdir empty-dir");
+    assert_eq!(
+        node.files_rm("/docs/empty-dir", false)
+            .await
+            .expect("files/rm empty dir"),
+        1
+    );
+    assert!(node.files_rm("/docs", false).await.is_err());
+    assert!(node.files_read("/docs/hello.txt").await.is_ok());
     node.files_cp("/docs/hello.txt", "/docs/archive/hello-copy.txt")
         .await
         .expect("files/cp");

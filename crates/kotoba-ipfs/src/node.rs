@@ -1479,6 +1479,15 @@ impl KotobaIpfsNode {
             persist_repo_state(&self.state).await?;
             return Ok(removed);
         }
+
+        if dirs.contains(&path) {
+            let child_prefix = format!("{path}/");
+            if files.keys().any(|p| p.starts_with(&child_prefix))
+                || dirs.iter().any(|p| p.starts_with(&child_prefix))
+            {
+                bail!("mfs directory is not empty; use recursive=true: {path}");
+            }
+        }
         removed += files.remove(&path).is_some() as usize;
         removed += dirs.remove(&path) as usize;
         drop(files);

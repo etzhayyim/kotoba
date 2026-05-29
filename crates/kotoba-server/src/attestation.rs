@@ -179,6 +179,98 @@ fn sign_attestation_credential(
     Ok(credential)
 }
 
+fn attestation_claim_datoms(
+    req: &AttestClaimReq,
+    claim_cid: &KotobaCid,
+    credential: &VerifiableCredential,
+    credential_cid: &KotobaCid,
+    tx_cid: &KotobaCid,
+    ts_unix: u64,
+) -> Vec<kotoba_datomic::Datom> {
+    fn assert_claim(
+        out: &mut Vec<kotoba_datomic::Datom>,
+        claim_cid: &KotobaCid,
+        attr: &str,
+        value: kotoba_edn::EdnValue,
+        tx_cid: &KotobaCid,
+    ) {
+        out.push(kotoba_datomic::Datom::assert(
+            claim_cid.clone(),
+            attr.to_string(),
+            value,
+            tx_cid.clone(),
+        ));
+    }
+
+    let mut out = Vec::new();
+    assert_claim(
+        &mut out,
+        claim_cid,
+        "attest/credentialCid",
+        kotoba_edn::EdnValue::string(credential_cid.to_multibase()),
+        tx_cid,
+    );
+    assert_claim(
+        &mut out,
+        claim_cid,
+        "attest/credentialId",
+        kotoba_edn::EdnValue::string(&credential.id),
+        tx_cid,
+    );
+    assert_claim(
+        &mut out,
+        claim_cid,
+        "attest/credentialStatus",
+        kotoba_edn::EdnValue::string("active"),
+        tx_cid,
+    );
+    assert_claim(
+        &mut out,
+        claim_cid,
+        "attest/entity",
+        kotoba_edn::EdnValue::string(&req.entity_did),
+        tx_cid,
+    );
+    assert_claim(
+        &mut out,
+        claim_cid,
+        "attest/type",
+        kotoba_edn::EdnValue::string(&req.claim_type),
+        tx_cid,
+    );
+    assert_claim(
+        &mut out,
+        claim_cid,
+        "attest/attester",
+        kotoba_edn::EdnValue::string(&req.attester_did),
+        tx_cid,
+    );
+    assert_claim(
+        &mut out,
+        claim_cid,
+        "attest/stake_mkoto",
+        kotoba_edn::EdnValue::Integer(req.stake_mkoto as i64),
+        tx_cid,
+    );
+    assert_claim(
+        &mut out,
+        claim_cid,
+        "attest/ts_unix",
+        kotoba_edn::EdnValue::Integer(ts_unix as i64),
+        tx_cid,
+    );
+    if let Some(evidence) = &req.evidence {
+        assert_claim(
+            &mut out,
+            claim_cid,
+            "attest/evidence",
+            kotoba_edn::EdnValue::string(evidence),
+            tx_cid,
+        );
+    }
+    out
+}
+
 // ── Request / Response types ──────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -390,7 +482,7 @@ pub async fn attest_claim(
         )
         .as_bytes(),
     );
-    let datoms = match credential.to_datoms(tx_cid.clone()) {
+    let mut datoms = match credential.to_datoms(tx_cid.clone()) {
         Ok(datoms) => datoms,
         Err(e) => {
             return (
@@ -400,6 +492,14 @@ pub async fn attest_claim(
                 .into_response();
         }
     };
+    datoms.extend(attestation_claim_datoms(
+        &req,
+        &claim_cid,
+        &credential,
+        &credential_cid,
+        &tx_cid,
+        ts,
+    ));
     let distributed = match crate::xrpc::commit_protocol_datoms(
         &state,
         graph.clone(),
@@ -419,72 +519,6 @@ pub async fn attest_claim(
             return (code, Json(serde_json::json!({ "error": msg }))).into_response();
         }
     };
-
-    // Store entity/attester as Text so the DID string is recoverable in queries.
-    // (KotobaCid::from_bytes is a blake3 hash — non-invertible.)
-    let mut datoms = vec![
-        KqeDatom::assert(
-            claim_cid.clone(),
-            "attest/credentialCid".to_string(),
-            KqeValue::Text(credential_cid.to_multibase()),
-            graph.clone(),
-        ),
-        KqeDatom::assert(
-            claim_cid.clone(),
-            "attest/credentialId".to_string(),
-            KqeValue::Text(credential.id.clone()),
-            graph.clone(),
-        ),
-        KqeDatom::assert(
-            claim_cid.clone(),
-            "attest/credentialStatus".to_string(),
-            KqeValue::Text("active".to_string()),
-            graph.clone(),
-        ),
-        KqeDatom::assert(
-            claim_cid.clone(),
-            "attest/entity".to_string(),
-            KqeValue::Text(req.entity_did.clone()),
-            graph.clone(),
-        ),
-        KqeDatom::assert(
-            claim_cid.clone(),
-            "attest/type".to_string(),
-            KqeValue::Text(req.claim_type.clone()),
-            graph.clone(),
-        ),
-        KqeDatom::assert(
-            claim_cid.clone(),
-            "attest/attester".to_string(),
-            KqeValue::Text(req.attester_did.clone()),
-            graph.clone(),
-        ),
-        KqeDatom::assert(
-            claim_cid.clone(),
-            "attest/stake_mkoto".to_string(),
-            KqeValue::Integer(req.stake_mkoto as i64),
-            graph.clone(),
-        ),
-        KqeDatom::assert(
-            claim_cid.clone(),
-            "attest/ts_unix".to_string(),
-            KqeValue::Integer(ts as i64),
-            graph.clone(),
-        ),
-    ];
-
-    if let Some(evidence) = req.evidence {
-        datoms.push(KqeDatom::assert(
-            claim_cid.clone(),
-            "attest/evidence".to_string(),
-            KqeValue::Text(evidence),
-            graph.clone(),
-        ));
-    }
-
-    for datom in datoms {
-        state.assert_datom_compat(graph.clone(), datom).await;
-    }
 
     let claim_cid_str = claim_cid.to_multibase();
     tracing::info!(
@@ -835,6 +869,95 @@ mod tests {
             attest.0, audit.0,
             "attestation and audit graphs must have different CIDs"
         );
+    }
+
+    #[test]
+    fn attestation_claim_projects_vc_and_attest_datoms_to_one_distributed_head() {
+        let store = kotoba_store::MemoryBlockStore::new();
+        let ipns = kotoba_ipfs::InMemoryIpnsRegistry::new();
+        let writer = kotoba_datomic::distributed::DistributedCommitWriter::new(&store, &ipns);
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let issuer_did =
+            kotoba_auth::ed25519_pubkey_to_did_key(signing_key.verifying_key().as_bytes());
+        let graph = attest_graph_cid();
+        let req = AttestClaimReq {
+            entity_did: "did:plc:attestedentity".into(),
+            claim_type: "verified_entity".into(),
+            attester_did: "did:plc:attester".into(),
+            stake_mkoto: MIN_STAKE_VERIFIED_ENTITY,
+            evidence: Some("ipfs://bafyattestationevidence".into()),
+        };
+        let claim_cid = KotobaCid::from_bytes(b"attestation-vc-claim");
+        let credential = sign_attestation_credential(
+            attestation_credential(&req, &claim_cid, &issuer_did, 1_779_945_600),
+            &issuer_did,
+            &signing_key,
+        )
+        .unwrap();
+        let credential_cid = credential.cid().unwrap();
+        let tx_cid = KotobaCid::from_bytes(b"attestation-vc-datomic-tx");
+        let mut datoms = credential.to_datoms(tx_cid.clone()).unwrap();
+        datoms.extend(attestation_claim_datoms(
+            &req,
+            &claim_cid,
+            &credential,
+            &credential_cid,
+            &tx_cid,
+            1_779_945_600,
+        ));
+
+        let commit = writer
+            .commit_datoms(kotoba_datomic::distributed::CommitDatomsRequest {
+                ipns_name: "k51-attestation-vc-distributed".into(),
+                graph,
+                datoms,
+                expected_parent: None,
+                tx_cid: Some(tx_cid.clone()),
+                author: issuer_did.clone(),
+                seq: 1,
+                valid_until: "2099-01-01T00:00:00Z".into(),
+                ttl_secs: Some(60),
+                cacao_proof_cid: None,
+                ipns_controller_did: None,
+                ipns_signing_key: None,
+            })
+            .unwrap();
+
+        let reader = kotoba_datomic::distributed::DistributedDatomReader::new(&store, &ipns);
+        let query = kotoba_edn::parse(
+            r#"{:find [?issuer ?entity ?claimType ?credStatus ?attestStatus ?evidence]
+                :where [[?vc :credential/issuer ?issuer]
+                        [?vc :credential/subject/id ?entity]
+                        [?vc :credential/subject/claimType ?claimType]
+                        [?vc :credential/status/type ?credStatus]
+                        [?vc :credential/id ?credentialId]
+                        [?claim :attest/credentialId ?credentialId]
+                        [?claim :attest/credentialStatus ?attestStatus]
+                        [?claim :attest/evidence ?evidence]]}"#,
+        )
+        .unwrap();
+        let rows = reader.q_triples(&commit.commit.cid, &query).unwrap();
+
+        assert_eq!(
+            rows,
+            vec![vec![
+                kotoba_edn::EdnValue::string(issuer_did),
+                kotoba_edn::EdnValue::string("did:plc:attestedentity"),
+                kotoba_edn::EdnValue::string("verified_entity"),
+                kotoba_edn::EdnValue::string("KotobaAttestationStatus"),
+                kotoba_edn::EdnValue::string("active"),
+                kotoba_edn::EdnValue::string("ipfs://bafyattestationevidence"),
+            ]]
+        );
+        assert!(reader
+            .history_datoms_index(
+                &commit.commit.cid,
+                kotoba_datomic::DatomIndex::Tea,
+                &[kotoba_edn::EdnValue::string(tx_cid.to_multibase())],
+            )
+            .unwrap()
+            .iter()
+            .all(|datom| datom.t == tx_cid));
     }
 
     #[test]
