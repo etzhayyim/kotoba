@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use ed25519_dalek::Signer;
 use kotoba_core::cid::KotobaCid;
-use kotoba_kqe::{quad::LegacyQuadObject as QuadObject, Datom as KqeDatom, Value as KqeValue};
+use kotoba_kqe::quad::LegacyQuadObject as QuadObject;
 use kotoba_vc::{CredentialStatus, DataIntegrityProof, VerifiableCredential, VC_CONTEXT_V2};
 
 use crate::server::KotobaState;
@@ -271,6 +271,48 @@ fn attestation_claim_datoms(
     out
 }
 
+fn attestation_challenge_datoms(
+    req: &AttestChallengeReq,
+    claim_cid: &KotobaCid,
+    challenge_cid: &KotobaCid,
+    tx_cid: &KotobaCid,
+    ts_unix: u64,
+) -> Vec<kotoba_datomic::Datom> {
+    let challenger_cid = KotobaCid::from_bytes(req.challenger_did.as_bytes());
+    vec![
+        kotoba_datomic::Datom::assert(
+            challenge_cid.clone(),
+            "challenge/claim".to_string(),
+            kotoba_edn::EdnValue::string(claim_cid.to_multibase()),
+            tx_cid.clone(),
+        ),
+        kotoba_datomic::Datom::assert(
+            challenge_cid.clone(),
+            "challenge/challenger".to_string(),
+            kotoba_edn::EdnValue::string(&req.challenger_did),
+            tx_cid.clone(),
+        ),
+        kotoba_datomic::Datom::assert(
+            challenge_cid.clone(),
+            "challenge/challengerCid".to_string(),
+            kotoba_edn::EdnValue::string(challenger_cid.to_multibase()),
+            tx_cid.clone(),
+        ),
+        kotoba_datomic::Datom::assert(
+            challenge_cid.clone(),
+            "challenge/reason".to_string(),
+            kotoba_edn::EdnValue::string(&req.reason),
+            tx_cid.clone(),
+        ),
+        kotoba_datomic::Datom::assert(
+            challenge_cid.clone(),
+            "challenge/ts_unix".to_string(),
+            kotoba_edn::EdnValue::Integer(ts_unix as i64),
+            tx_cid.clone(),
+        ),
+    ]
+}
+
 // ── Request / Response types ──────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -317,6 +359,12 @@ pub struct AttestChallengeResp {
     pub status: &'static str,
     /// Multibase CID of the challenge quad.
     pub challenge_cid: String,
+    /// Distributed Datomic commit CID containing the challenge datoms.
+    pub commit_cid: String,
+    /// IPNS name for the attestation graph head.
+    pub ipns_name: String,
+    /// Monotonic IPNS sequence for the attestation graph head.
+    pub ipns_sequence: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -587,38 +635,35 @@ pub async fn attest_challenge(
     let challenge_seed = format!("challenge/{}/{}/{}", req.claim_cid, req.challenger_did, ts);
     let challenge_cid = KotobaCid::from_bytes(challenge_seed.as_bytes());
 
-    let challenger_cid = KotobaCid::from_bytes(req.challenger_did.as_bytes());
-
-    let datoms = vec![
-        KqeDatom::assert(
-            challenge_cid.clone(),
-            "challenge/claim".to_string(),
-            KqeValue::Cid(claim_cid),
-            graph.clone(),
-        ),
-        KqeDatom::assert(
-            challenge_cid.clone(),
-            "challenge/challenger".to_string(),
-            KqeValue::Cid(challenger_cid),
-            graph.clone(),
-        ),
-        KqeDatom::assert(
-            challenge_cid.clone(),
-            "challenge/reason".to_string(),
-            KqeValue::Text(req.reason.clone()),
-            graph.clone(),
-        ),
-        KqeDatom::assert(
-            challenge_cid.clone(),
-            "challenge/ts_unix".to_string(),
-            KqeValue::Integer(ts as i64),
-            graph.clone(),
-        ),
-    ];
-
-    for datom in datoms {
-        state.assert_datom_compat(graph.clone(), datom).await;
-    }
+    let tx_cid = KotobaCid::from_bytes(
+        format!(
+            "attest.challenge:{}:{}:{}",
+            graph.to_multibase(),
+            req.claim_cid,
+            challenge_cid.to_multibase()
+        )
+        .as_bytes(),
+    );
+    let datoms = attestation_challenge_datoms(&req, &claim_cid, &challenge_cid, &tx_cid, ts);
+    let distributed = match crate::xrpc::commit_protocol_datoms(
+        &state,
+        graph.clone(),
+        graph.to_multibase(),
+        challenge_cid.clone(),
+        datoms,
+        tx_cid,
+        state.operator_did.clone(),
+        kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT,
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(resp) => resp,
+        Err((code, msg)) => {
+            return (code, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
 
     let challenge_cid_str = challenge_cid.to_multibase();
     tracing::info!(
@@ -633,6 +678,9 @@ pub async fn attest_challenge(
         Json(AttestChallengeResp {
             status: "challenged",
             challenge_cid: challenge_cid_str,
+            commit_cid: distributed.commit_cid,
+            ipns_name: distributed.ipns_name,
+            ipns_sequence: distributed.ipns_sequence,
         }),
     )
         .into_response()
@@ -961,6 +1009,77 @@ mod tests {
     }
 
     #[test]
+    fn attestation_challenge_projects_to_distributed_datomic_datoms() {
+        let store = kotoba_store::MemoryBlockStore::new();
+        let ipns = kotoba_ipfs::InMemoryIpnsRegistry::new();
+        let writer = kotoba_datomic::distributed::DistributedCommitWriter::new(&store, &ipns);
+        let graph = attest_graph_cid();
+        let claim_cid = KotobaCid::from_bytes(b"attestation-challenge-claim");
+        let challenge_cid = KotobaCid::from_bytes(b"attestation-challenge");
+        let tx_cid = KotobaCid::from_bytes(b"attestation-challenge-tx");
+        let req = AttestChallengeReq {
+            claim_cid: claim_cid.to_multibase(),
+            challenger_did: "did:plc:challenger".into(),
+            reason: "counter-evidence".into(),
+        };
+
+        let commit = writer
+            .commit_datoms(kotoba_datomic::distributed::CommitDatomsRequest {
+                ipns_name: "k51-attestation-challenge-distributed".into(),
+                graph,
+                datoms: attestation_challenge_datoms(
+                    &req,
+                    &claim_cid,
+                    &challenge_cid,
+                    &tx_cid,
+                    1_779_945_601,
+                ),
+                expected_parent: None,
+                tx_cid: Some(tx_cid.clone()),
+                author: "did:plc:challenger".into(),
+                seq: 1,
+                valid_until: "2099-01-01T00:00:00Z".into(),
+                ttl_secs: Some(60),
+                cacao_proof_cid: None,
+                ipns_controller_did: None,
+                ipns_signing_key: None,
+            })
+            .unwrap();
+
+        let reader = kotoba_datomic::distributed::DistributedDatomReader::new(&store, &ipns);
+        let rows = reader
+            .q_triples(
+                &commit.commit.cid,
+                &kotoba_edn::parse(
+                    r#"{:find [?claim ?challenger ?reason]
+                        :where [[?challenge :challenge/claim ?claim]
+                                [?challenge :challenge/challenger ?challenger]
+                                [?challenge :challenge/reason ?reason]]}"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![vec![
+                kotoba_edn::EdnValue::string(claim_cid.to_multibase()),
+                kotoba_edn::EdnValue::string("did:plc:challenger"),
+                kotoba_edn::EdnValue::string("counter-evidence"),
+            ]]
+        );
+        assert!(reader
+            .history_datoms_index(
+                &commit.commit.cid,
+                kotoba_datomic::DatomIndex::Tea,
+                &[kotoba_edn::EdnValue::string(tx_cid.to_multibase())],
+            )
+            .unwrap()
+            .iter()
+            .all(|datom| datom.t == tx_cid));
+    }
+
+    #[test]
     fn quad_object_text_returns_text_clone() {
         let obj = QuadObject::Text("hello world".to_string());
         assert_eq!(quad_object_text(&obj), "hello world");
@@ -1058,7 +1177,17 @@ mod tests {
         );
 
         let challenge = include_str!("../../../lexicons/ai/gftd/apps/kotoba/attest/challenge.json");
-        assert_lexicon_output_fields(challenge, &["status", "challenge_cid"], &[]);
+        assert_lexicon_output_fields(
+            challenge,
+            &[
+                "status",
+                "challenge_cid",
+                "commit_cid",
+                "ipns_name",
+                "ipns_sequence",
+            ],
+            &[],
+        );
 
         let query = include_str!("../../../lexicons/ai/gftd/apps/kotoba/attest/query.json");
         assert_lexicon_output_fields(query, &["claims", "total"], &[]);

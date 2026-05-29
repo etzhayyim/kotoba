@@ -21,10 +21,13 @@
         "encoding": "application/json",
         "schema": {
           "type": "object",
-          "required": ["status", "challenge_cid"],
+          "required": ["status", "challenge_cid", "commit_cid", "ipns_name", "ipns_sequence"],
           "properties": {
             "status": { "type": "string", "knownValues": ["challenged"] },
-            "challenge_cid": { "type": "string" }
+            "challenge_cid": { "type": "string" },
+            "commit_cid": { "type": "string" },
+            "ipns_name": { "type": "string" },
+            "ipns_sequence": { "type": "integer" }
           }
         }
       }

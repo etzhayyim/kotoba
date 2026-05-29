@@ -1253,14 +1253,51 @@ impl KotobaIpfsNode {
             return Ok(());
         }
         let source = normalize_mfs_path(source)?;
-        let cid = *self
-            .state
-            .files
-            .read()
-            .await
-            .get(&source)
-            .ok_or_else(|| anyhow!("mfs path not found: {source}"))?;
-        self.state.files.write().await.insert(dest, cid);
+        if dest == source || dest.starts_with(&format!("{source}/")) {
+            bail!("cannot copy MFS path into itself: {source} -> {dest}");
+        }
+
+        let mut files = self.state.files.write().await;
+        let mut dirs = self.state.dirs.write().await;
+        if let Some(cid) = files.get(&source).copied() {
+            files.insert(dest, cid);
+            drop(files);
+            drop(dirs);
+            persist_repo_state(&self.state).await?;
+            return Ok(());
+        }
+        if source != "/" && !dirs.contains(&source) {
+            bail!("mfs path not found: {source}");
+        }
+        if files.contains_key(&dest) || dirs.contains(&dest) {
+            bail!("mfs destination already exists: {dest}");
+        }
+
+        let source_prefix = if source == "/" {
+            "/".to_string()
+        } else {
+            format!("{source}/")
+        };
+        let file_copies: Vec<_> = files
+            .iter()
+            .filter(|(path, _)| path.starts_with(&source_prefix))
+            .map(|(path, cid)| (path.clone(), *cid))
+            .collect();
+        let dir_copies: Vec<_> = dirs
+            .iter()
+            .filter(|path| *path == &source || path.starts_with(&source_prefix))
+            .cloned()
+            .collect();
+
+        dirs.insert(dest.clone());
+        for path in dir_copies {
+            dirs.insert(rebase_mfs_path(&path, &source, &dest));
+        }
+        for (path, cid) in file_copies {
+            files.insert(rebase_mfs_path(&path, &source, &dest), cid);
+        }
+        drop(files);
+        drop(dirs);
         persist_repo_state(&self.state).await?;
         Ok(())
     }
@@ -2211,6 +2248,13 @@ fn read_uvarint(data: &[u8], pos: &mut usize) -> Result<u64> {
 fn rebase_mfs_path(path: &str, source: &str, dest: &str) -> String {
     if path == source {
         return dest.to_string();
+    }
+    if source == "/" {
+        return format!(
+            "{}/{}",
+            dest.trim_end_matches('/'),
+            path.trim_start_matches('/')
+        );
     }
     let suffix = path.strip_prefix(source).unwrap_or_default();
     format!("{dest}{suffix}")

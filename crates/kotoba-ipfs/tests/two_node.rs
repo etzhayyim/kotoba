@@ -788,6 +788,26 @@ async fn kubo_compatible_local_api_surface() {
             .expect("files/read moved dir child"),
         b"hello"[..]
     );
+    node.files_cp("/docs/archive", "/docs/archive-copy")
+        .await
+        .expect("files/cp directory");
+    assert_eq!(
+        node.files_read("/docs/archive-copy/hello-copy.txt")
+            .await
+            .expect("files/read copied dir file"),
+        b"hello"[..]
+    );
+    assert_eq!(
+        node.files_read("/docs/archive-copy/moved-dir/nested.txt")
+            .await
+            .expect("files/read copied nested dir file"),
+        b"hello"[..]
+    );
+    assert!(node
+        .files_cp("/docs/archive", "/docs/archive-copy")
+        .await
+        .is_err());
+    assert!(node.files_cp("/docs", "/docs/archive/self").await.is_err());
 
     let refs = node.refs_local().await.expect("refs/local");
     assert!(refs.contains(&raw));
@@ -857,7 +877,7 @@ async fn kubo_compatible_local_api_surface() {
         .contains(&raw));
     assert!(node.has_block(&raw).await.expect("has raw under mfs"));
     assert!(!node.has_block(&dag).await.expect("has dag after gc"));
-    assert_eq!(node.files_rm("/docs", true).await.expect("files/rm"), 9);
+    assert_eq!(node.files_rm("/docs", true).await.expect("files/rm"), 14);
     assert!(node
         .files_ls("/docs")
         .await

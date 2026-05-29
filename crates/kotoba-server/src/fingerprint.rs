@@ -1,8 +1,8 @@
 //! Request fingerprint middleware.
 //!
 //! Every inbound XRPC / MCP request is fingerprinted with blake3 and stored
-//! as Datoms in the `kotoba/audit/requests` named graph.  Storage is
-//! fire-and-forget (background task) so latency impact is negligible.
+//! as distributed Datoms in the `kotoba/audit/requests` named graph.  Storage
+//! is fire-and-forget (background task) so latency impact is negligible.
 //!
 //! Quads emitted per request:
 //! - `(audit_graph, request_cid, "request/method",  Text(method))`
@@ -17,7 +17,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::{body::Body, extract::State, http::Request, middleware::Next, response::Response};
 use kotoba_core::cid::KotobaCid;
 use kotoba_kqe::quad::{LegacyQuad as Quad, LegacyQuadObject as QuadObject};
-use kotoba_kqe::Datom;
 
 use crate::server::KotobaState;
 
@@ -100,26 +99,44 @@ pub async fn fingerprint_middleware(
     let node_hex = hex::encode(node_id);
 
     // Fire-and-forget: clone what we need into the background task.
-    let quad_store = Arc::clone(&state.quad_store);
+    let state_c = Arc::clone(&state);
     let method_c = method.clone();
     let path_c = path.clone();
     let peer_ip_c = peer_ip.clone();
 
     tokio::spawn(async move {
-        let quads = build_request_quads(
-            graph,
-            req_cid,
+        let tx_cid = KotobaCid::from_bytes(
+            format!(
+                "request.audit:{}:{}",
+                graph.to_multibase(),
+                req_cid.to_multibase()
+            )
+            .as_bytes(),
+        );
+        let datoms = build_request_datoms(
+            req_cid.clone(),
             &method_c,
             &path_c,
             &node_hex,
             ts,
             peer_ip_c.as_deref(),
+            &tx_cid,
         );
-        for quad in quads {
-            let graph_cid = quad.graph.clone();
-            quad_store
-                .assert_datom(graph_cid, Datom::from_legacy_quad(quad, true))
-                .await;
+        if let Err((status, message)) = crate::xrpc::commit_protocol_datoms(
+            &state_c,
+            graph.clone(),
+            graph.to_multibase(),
+            req_cid,
+            datoms,
+            tx_cid,
+            state_c.operator_did.clone(),
+            kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT,
+            None,
+            None,
+        )
+        .await
+        {
+            tracing::warn!(status = %status, error = %message, "request audit distributed commit failed");
         }
     });
 
@@ -176,6 +193,54 @@ fn build_request_quads(
     quads
 }
 
+fn build_request_datoms(
+    subject: KotobaCid,
+    method: &str,
+    path: &str,
+    node_hex: &str,
+    ts: u64,
+    peer_ip: Option<&str>,
+    tx_cid: &KotobaCid,
+) -> Vec<kotoba_datomic::Datom> {
+    let mut datoms = vec![
+        kotoba_datomic::Datom::assert(
+            subject.clone(),
+            "request/method".to_string(),
+            kotoba_edn::EdnValue::string(method),
+            tx_cid.clone(),
+        ),
+        kotoba_datomic::Datom::assert(
+            subject.clone(),
+            "request/path".to_string(),
+            kotoba_edn::EdnValue::string(path),
+            tx_cid.clone(),
+        ),
+        kotoba_datomic::Datom::assert(
+            subject.clone(),
+            "request/node_id".to_string(),
+            kotoba_edn::EdnValue::string(node_hex),
+            tx_cid.clone(),
+        ),
+        kotoba_datomic::Datom::assert(
+            subject.clone(),
+            "request/ts_unix".to_string(),
+            kotoba_edn::EdnValue::Integer(ts as i64),
+            tx_cid.clone(),
+        ),
+    ];
+
+    if let Some(ip) = peer_ip {
+        datoms.push(kotoba_datomic::Datom::assert(
+            subject,
+            "request/peer_ip".to_string(),
+            kotoba_edn::EdnValue::string(ip),
+            tx_cid.clone(),
+        ));
+    }
+
+    datoms
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,6 +282,74 @@ mod tests {
         let subject = KotobaCid::from_bytes(b"test-req");
         let quads = build_request_quads(graph, subject, "GET", "/health", "deadbeef", 42, None);
         assert_eq!(quads.len(), 4);
+    }
+
+    #[test]
+    fn request_audit_datoms_commit_to_distributed_head() {
+        let store = kotoba_store::MemoryBlockStore::new();
+        let ipns = kotoba_ipfs::InMemoryIpnsRegistry::new();
+        let writer = kotoba_datomic::distributed::DistributedCommitWriter::new(&store, &ipns);
+        let graph = audit_graph_cid();
+        let subject = KotobaCid::from_bytes(b"request-audit-distributed");
+        let tx_cid = KotobaCid::from_bytes(b"request-audit-distributed-tx");
+        let datoms = build_request_datoms(
+            subject,
+            "POST",
+            "/xrpc/ai.gftd.apps.kotoba.datomic.q",
+            "deadbeef",
+            1_779_945_602,
+            Some("203.0.113.1"),
+            &tx_cid,
+        );
+
+        let commit = writer
+            .commit_datoms(kotoba_datomic::distributed::CommitDatomsRequest {
+                ipns_name: "k51-request-audit-distributed".into(),
+                graph,
+                datoms,
+                expected_parent: None,
+                tx_cid: Some(tx_cid.clone()),
+                author: "did:plc:audit-node".into(),
+                seq: 1,
+                valid_until: "2099-01-01T00:00:00Z".into(),
+                ttl_secs: Some(60),
+                cacao_proof_cid: None,
+                ipns_controller_did: None,
+                ipns_signing_key: None,
+            })
+            .unwrap();
+
+        let reader = kotoba_datomic::distributed::DistributedDatomReader::new(&store, &ipns);
+        let rows = reader
+            .q_triples(
+                &commit.commit.cid,
+                &kotoba_edn::parse(
+                    r#"{:find [?method ?path ?ip]
+                        :where [[?req :request/method ?method]
+                                [?req :request/path ?path]
+                                [?req :request/peer_ip ?ip]]}"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![vec![
+                kotoba_edn::EdnValue::string("POST"),
+                kotoba_edn::EdnValue::string("/xrpc/ai.gftd.apps.kotoba.datomic.q"),
+                kotoba_edn::EdnValue::string("203.0.113.1"),
+            ]]
+        );
+        assert!(reader
+            .history_datoms_index(
+                &commit.commit.cid,
+                kotoba_datomic::DatomIndex::Tea,
+                &[kotoba_edn::EdnValue::string(tx_cid.to_multibase())],
+            )
+            .unwrap()
+            .iter()
+            .all(|datom| datom.t == tx_cid));
     }
 
     #[test]
