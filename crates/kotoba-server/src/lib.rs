@@ -276,6 +276,10 @@ pub fn build_router(state: Arc<KotobaState>) -> Router {
             post(xrpc::datomic_index_range),
         )
         .route(
+            &format!("/xrpc/{}", xrpc::NSID_DATOMIC_INDEX_PULL),
+            post(xrpc::datomic_index_pull),
+        )
+        .route(
             &format!("/xrpc/{}", xrpc::NSID_DATOMIC_PULL),
             post(xrpc::datomic_pull),
         )

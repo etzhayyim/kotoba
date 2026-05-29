@@ -8229,6 +8229,7 @@ mod tests {
             super::NSID_DATOMIC_DATOMS,
             super::NSID_DATOMIC_SEEK_DATOMS,
             super::NSID_DATOMIC_INDEX_RANGE,
+            super::NSID_DATOMIC_INDEX_PULL,
             super::NSID_DATOMIC_PULL,
             super::NSID_DATOMIC_PULL_MANY,
             super::NSID_DATOMIC_Q,
@@ -8285,10 +8286,13 @@ mod tests {
             super::NSID_DATOMIC_DATOMS,
             super::NSID_DATOMIC_SEEK_DATOMS,
             super::NSID_DATOMIC_INDEX_RANGE,
+            super::NSID_DATOMIC_INDEX_PULL,
             super::NSID_DATOMIC_PULL,
             super::NSID_DATOMIC_PULL_MANY,
             super::NSID_DATOMIC_Q,
             super::NSID_DATOMIC_WITH,
+            super::NSID_DATOMIC_AS_OF,
+            super::NSID_DATOMIC_SINCE,
             super::NSID_DATOMIC_HISTORY,
             super::NSID_DATOMIC_TX_RANGE,
             super::NSID_DATOMIC_LOG,
@@ -8363,6 +8367,10 @@ mod tests {
         assert_eq!(
             super::NSID_DATOMIC_INDEX_RANGE,
             "ai.gftd.apps.kotoba.datomic.indexRange"
+        );
+        assert_eq!(
+            super::NSID_DATOMIC_INDEX_PULL,
+            "ai.gftd.apps.kotoba.datomic.indexPull"
         );
         assert_eq!(super::NSID_DATOMIC_PULL, "ai.gftd.apps.kotoba.datomic.pull");
         assert_eq!(
@@ -8442,6 +8450,10 @@ mod tests {
             (
                 super::NSID_DATOMIC_INDEX_RANGE,
                 include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/indexRange.json"),
+            ),
+            (
+                super::NSID_DATOMIC_INDEX_PULL,
+                include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/indexPull.json"),
             ),
             (
                 super::NSID_DATOMIC_PULL,
@@ -8618,6 +8630,35 @@ mod tests {
         assert_lexicon_array_item_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/with.json"),
             "db_after_datoms",
+            &["e", "a", "v_edn", "t", "added"],
+        );
+        assert_lexicon_input_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/indexPull.json"),
+            &["graph", "index"],
+            &[
+                "components_edn",
+                "pattern_edn",
+                "as_of",
+                "since",
+                "cacao_b64",
+                "presentation",
+                "limit",
+            ],
+        );
+        assert_lexicon_output_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/indexPull.json"),
+            &["graph", "entity_count", "entities"],
+            &["basis_t"],
+        );
+        assert_lexicon_array_item_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/indexPull.json"),
+            "entities",
+            &["entity", "entity_edn", "datom_count", "datoms"],
+        );
+        assert_lexicon_nested_array_item_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/indexPull.json"),
+            "entities",
+            "datoms",
             &["e", "a", "v_edn", "t", "added"],
         );
         for src in [
@@ -8845,6 +8886,7 @@ mod tests {
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/datoms.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/seekDatoms.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/indexRange.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/indexPull.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/pull.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/pullMany.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/history.json"),

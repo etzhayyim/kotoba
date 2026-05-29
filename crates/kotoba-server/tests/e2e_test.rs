@@ -928,6 +928,48 @@ async fn datomic_transact_q_pull_history_roundtrip_via_distributed_head() {
     assert_eq!(range_body["datoms"][0]["a"], ":person/age", "{range_body}");
     assert_eq!(range_body["datoms"][0]["v_edn"], "30", "{range_body}");
 
+    let (status, index_pull_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.indexPull",
+            json!({
+                "graph": graph,
+                "index": ":avet",
+                "components_edn": [":person/name", "\"Bob\""],
+                "pattern_edn": "[:person/name :person/age]",
+                "limit": 10
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{index_pull_body}");
+    assert_eq!(
+        index_pull_body["basis_t"], second_tx_body["tx_cid"],
+        "{index_pull_body}"
+    );
+    assert_eq!(index_pull_body["entity_count"], 1, "{index_pull_body}");
+    assert_eq!(
+        index_pull_body["entities"][0]["entity"], bob,
+        "{index_pull_body}"
+    );
+    assert!(
+        index_pull_body["entities"][0]["entity_edn"]
+            .as_str()
+            .unwrap()
+            .contains("Bob"),
+        "{index_pull_body}"
+    );
+    assert!(
+        index_pull_body["entities"][0]["datoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|datom| datom["a"] == ":person/name"
+                && datom["v_edn"] == "\"Bob\""
+                && datom["t"] == second_tx_body["tx_cid"]
+                && datom["added"] == true),
+        "{index_pull_body}"
+    );
+
     let (status, ban_tx_body) = s
         .post_auth(
             "/xrpc/ai.gftd.apps.kotoba.datomic.transact",
@@ -3038,6 +3080,120 @@ async fn datomic_datoms_vaet_scans_ref_values_from_distributed_head() {
         .await;
     assert_eq!(status, 200, "{entid_lookup_body}");
     assert_eq!(entid_lookup_body["entity"], alice, "{entid_lookup_body}");
+}
+
+#[tokio::test]
+async fn datomic_index_pull_pulls_entities_from_distributed_index() {
+    let s = TestServer::start(false).await;
+    let tok = tenant_jwt(&s.operator_did);
+    let graph = kotoba_core::cid::KotobaCid::from_bytes(b"datomic-index-pull-e2e").to_multibase();
+
+    let (status, first_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.transact",
+            json!({
+                "graph": graph,
+                "tx_edn": r#"[{:db/id "alice" :person/name "Alice" :person/role :admin}]"#
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{first_body}");
+    let first_tx = first_body["tx_cid"].as_str().unwrap();
+
+    let (status, second_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.transact",
+            json!({
+                "graph": graph,
+                "tx_edn": r#"[{:db/id "bob" :person/name "Bob" :person/role :guest}]"#
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{second_body}");
+    let second_tx = second_body["tx_cid"].as_str().unwrap();
+
+    let (status, body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.indexPull",
+            json!({
+                "graph": graph,
+                "index": ":aevt",
+                "components_edn": [":person/name"],
+                "pattern_edn": r#"[:person/name :person/role]"#,
+                "limit": 10
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["basis_t"], second_tx, "{body}");
+    assert_eq!(body["entity_count"], 2, "{body}");
+    let entities = body["entities"].as_array().expect("entities");
+    assert!(
+        entities.iter().any(|entity| entity["entity_edn"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Alice")
+            && entity["entity_edn"]
+                .as_str()
+                .unwrap_or("")
+                .contains(":person/role :admin")),
+        "{body}"
+    );
+    assert!(
+        entities.iter().any(
+            |entity| entity["entity_edn"].as_str().unwrap_or("").contains("Bob")
+                && entity["entity_edn"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains(":person/role :guest")
+        ),
+        "{body}"
+    );
+
+    let (status, as_of_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.indexPull",
+            json!({
+                "graph": graph,
+                "index": ":aevt",
+                "components_edn": [":person/name"],
+                "pattern_edn": r#"[:person/name]"#,
+                "as_of": first_tx
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{as_of_body}");
+    assert_eq!(as_of_body["basis_t"], first_tx, "{as_of_body}");
+    assert_eq!(as_of_body["entity_count"], 1, "{as_of_body}");
+    assert!(as_of_body["entities"][0]["entity_edn"]
+        .as_str()
+        .unwrap_or("")
+        .contains("Alice"));
+
+    let (status, since_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.indexPull",
+            json!({
+                "graph": graph,
+                "index": ":aevt",
+                "components_edn": [":person/name"],
+                "pattern_edn": r#"[:person/name]"#,
+                "since": first_tx
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{since_body}");
+    assert_eq!(since_body["basis_t"], second_tx, "{since_body}");
+    assert_eq!(since_body["entity_count"], 1, "{since_body}");
+    assert!(since_body["entities"][0]["entity_edn"]
+        .as_str()
+        .unwrap_or("")
+        .contains("Bob"));
 }
 
 #[tokio::test]

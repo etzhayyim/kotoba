@@ -1,0 +1,93 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.datomic.indexPull",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Datomic index-pull against a Kotoba distributed Datom graph: scan a distributed Prolly index, then pull matching entities.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["graph", "index"],
+          "properties": {
+            "graph": { "type": "string" },
+            "index": {
+              "type": "string",
+              "description": "Datomic index name. Supported values: :eavt, :aevt, :avet, :vaet, :tea."
+            },
+            "components_edn": { "type": "array", "items": { "type": "string" } },
+            "pattern_edn": { "type": "string" },
+            "as_of": { "type": "string" },
+            "since": { "type": "string" },
+            "cacao_b64": { "type": "string" },
+            "presentation": {
+              "type": "object",
+              "required": ["@context", "id", "type"],
+              "properties": {
+                "@context": { "type": "array", "items": { "type": "string" } },
+                "id": { "type": "string" },
+                "type": { "type": "array", "items": { "type": "string" } },
+                "holder": { "type": "string" },
+                "verifiableCredential": { "type": "array", "items": { "type": "object" } },
+                "proof": {
+                  "type": "object",
+                  "required": ["type", "proofPurpose", "verificationMethod", "proofValue"],
+                  "properties": {
+                    "type": { "type": "string" },
+                    "cryptosuite": { "type": "string" },
+                    "proofPurpose": { "type": "string" },
+                    "verificationMethod": { "type": "string" },
+                    "created": { "type": "string" },
+                    "proofValue": { "type": "string" },
+                    "challenge": { "type": "string" },
+                    "domain": { "type": "string" }
+                  }
+                }
+              }
+            },
+            "limit": { "type": "integer", "minimum": 0 }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["graph", "entity_count", "entities"],
+          "properties": {
+            "graph": { "type": "string" },
+            "basis_t": { "type": "string" },
+            "entity_count": { "type": "integer", "minimum": 0 },
+            "entities": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["entity", "entity_edn", "datom_count", "datoms"],
+                "properties": {
+                  "entity": { "type": "string" },
+                  "entity_edn": { "type": "string" },
+                  "datom_count": { "type": "integer", "minimum": 0 },
+                  "datoms": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["e", "a", "v_edn", "t", "added"],
+                      "properties": {
+                        "e": { "type": "string" },
+                        "a": { "type": "string" },
+                        "v_edn": { "type": "string" },
+                        "t": { "type": "string" },
+                        "added": { "type": "boolean" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
