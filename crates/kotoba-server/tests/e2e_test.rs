@@ -5160,6 +5160,36 @@ async fn did_document_publish_projects_protocol_services_to_distributed_datoms()
         }),
         "missing Kotoba protocol service completeness projection: {entity_body}"
     );
+    let (status, protocol_endpoint_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.q",
+            json!({
+                "graph": graph,
+                "query_edn": r#"{:find [?didcomm ?pds ?node ?membership]
+                                 :where [[?did :did/id "did:plc:kotobaagent"]
+                                         [?did :did/didcommMessagingEndpoint ?didcomm]
+                                         [?did :did/atprotoPdsEndpoint ?pds]
+                                         [?did :did/kotobaNodeEndpoint ?node]
+                                         [?did :did/kotobaGraphMembership ?membership]]}"#
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{protocol_endpoint_body}");
+    let endpoint_rows = protocol_endpoint_body["rows_edn"].as_array().unwrap();
+    for membership in ["kotoba://graph/a", "kotoba://graph/b"] {
+        assert!(
+            endpoint_rows.iter().any(|row| {
+                row.as_array().is_some_and(|row| {
+                    row[0] == "\"didcomm://mediator/kotobaagent\""
+                        && row[1] == "\"https://pds.example.com\""
+                        && row[2] == "\"/ip4/127.0.0.1/tcp/4001\""
+                        && row[3] == format!("\"{membership}\"")
+                })
+            }),
+            "missing direct protocol endpoint projection for {membership}: {protocol_endpoint_body}"
+        );
+    }
     for attr in ["did/keyAgreement", "https://www.w3.org/ns/did#keyAgreement"] {
         assert!(
             entity_datoms.iter().any(|datom| {
