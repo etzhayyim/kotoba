@@ -213,7 +213,7 @@ impl IpfsConfig {
 #[derive(Default)]
 struct State {
     blocks: RwLock<HashMap<IpldCid, Bytes>>,
-    pins: RwLock<HashSet<IpldCid>>,
+    pins: RwLock<HashMap<IpldCid, PinKind>>,
     peers: RwLock<HashMap<PeerId, SocketAddr>>,
     bootstrap: RwLock<HashSet<Multiaddr>>,
     providers: RwLock<HashMap<IpldCid, HashSet<PeerId>>>,
@@ -906,8 +906,17 @@ impl KotobaIpfsNode {
     }
 
     pub async fn pin(&self, cid: &IpldCid) -> Result<()> {
+        self.pin_add(cid).await
+    }
+
+    /// Kubo-like `pin/add` with `recursive=true`.
+    pub async fn pin_add(&self, cid: &IpldCid) -> Result<()> {
         self.get_block(cid).await?;
-        self.state.pins.write().await.insert(*cid);
+        self.state
+            .pins
+            .write()
+            .await
+            .insert(*cid, PinKind::Recursive);
         self.state
             .providers
             .write()
@@ -915,13 +924,16 @@ impl KotobaIpfsNode {
             .entry(*cid)
             .or_default()
             .insert(self.peer_id);
-        persist_pin(&self.state, cid).await?;
+        persist_pin(&self.state, cid, PinKind::Recursive).await?;
         Ok(())
     }
 
-    /// Kubo-like `pin/add`.
-    pub async fn pin_add(&self, cid: &IpldCid) -> Result<()> {
-        self.pin(cid).await
+    /// Kubo-like `pin/add` with `recursive=false`.
+    pub async fn pin_add_direct(&self, cid: &IpldCid) -> Result<()> {
+        self.get_block(cid).await?;
+        self.state.pins.write().await.insert(*cid, PinKind::Direct);
+        persist_pin(&self.state, cid, PinKind::Direct).await?;
+        Ok(())
     }
 
     pub async fn unpin(&self, cid: &IpldCid) -> Result<()> {
@@ -939,39 +951,42 @@ impl KotobaIpfsNode {
     pub async fn pin_update(&self, old: &IpldCid, new: &IpldCid) -> Result<()> {
         self.get_block(new).await?;
         let mut pins = self.state.pins.write().await;
-        if !pins.remove(old) {
+        if pins.remove(old).is_none() {
             bail!("pin not found: {old}");
         }
-        pins.insert(*new);
+        pins.insert(*new, PinKind::Recursive);
         drop(pins);
         remove_pin_file(&self.state, old).await?;
-        persist_pin(&self.state, new).await?;
+        persist_pin(&self.state, new, PinKind::Recursive).await?;
         Ok(())
     }
 
     pub async fn is_pinned(&self, cid: &IpldCid) -> Result<bool> {
-        Ok(self.state.pins.read().await.contains(cid))
+        Ok(self.state.pins.read().await.contains_key(cid))
     }
 
     /// Kubo-like `pin/ls`.
     pub async fn list_pins(&self) -> Result<Vec<IpldCid>> {
-        let mut pins: Vec<IpldCid> = self.state.pins.read().await.iter().copied().collect();
+        let mut pins: Vec<IpldCid> = self.state.pins.read().await.keys().copied().collect();
         pins.sort();
         Ok(pins)
     }
 
     /// Kubo-like `pin/ls`.
     ///
-    /// Recursive pin roots are returned as `recursive`; locally reachable
-    /// descendants are returned as `indirect`, matching Kubo's default `pin ls`
-    /// view closely enough for callers that need root-vs-child pin semantics.
+    /// Direct and recursive pin roots preserve their kind; locally reachable
+    /// descendants of recursive roots are returned as `indirect`, matching
+    /// Kubo's root-vs-child pin semantics.
     pub async fn pin_ls(&self) -> Result<Vec<PinLsEntry>> {
-        let roots = self.list_pins().await?;
+        let roots = self.state.pins.read().await.clone();
         let mut entries = BTreeMap::<IpldCid, PinKind>::new();
-        for root in &roots {
-            entries.insert(*root, PinKind::Recursive);
+        for (root, kind) in &roots {
+            entries.insert(*root, *kind);
         }
-        for root in roots {
+        for (root, kind) in roots {
+            if kind != PinKind::Recursive {
+                continue;
+            }
             for child in self.refs(&root, true).await? {
                 entries.entry(child).or_insert(PinKind::Indirect);
             }
@@ -984,14 +999,16 @@ impl KotobaIpfsNode {
 
     /// Kubo-like `pin/verify` for locally pinned roots.
     pub async fn pin_verify(&self) -> Result<Vec<PinVerify>> {
-        let pins = self.list_pins().await?;
+        let mut pins: Vec<_> = self.state.pins.read().await.clone().into_iter().collect();
+        pins.sort_by_key(|(cid, _)| *cid);
         let mut out = Vec::with_capacity(pins.len());
-        for cid in pins {
+        for (cid, kind) in pins {
             let error = match self.get_block(&cid).await {
-                Ok(_) => match self.refs(&cid, true).await {
+                Ok(_) if kind == PinKind::Recursive => match self.refs(&cid, true).await {
                     Ok(_) => None,
                     Err(err) => Some(format!("pinned DAG is incomplete: {err}")),
                 },
+                Ok(_) => None,
                 Err(err) => Some(format!("pinned block not found: {cid}: {err}")),
             };
             out.push(PinVerify {
@@ -1487,17 +1504,20 @@ impl KotobaIpfsNode {
     }
 
     async fn live_roots(&self) -> HashSet<IpldCid> {
-        let mut roots = self.state.pins.read().await.clone();
+        let mut roots: HashSet<_> = self.state.pins.read().await.keys().copied().collect();
         roots.extend(self.state.files.read().await.values().copied());
         roots
     }
 
     async fn is_pinned_or_indirect(&self, cid: &IpldCid) -> Result<bool> {
         let pins = self.state.pins.read().await.clone();
-        if pins.contains(cid) {
+        if pins.contains_key(cid) {
             return Ok(true);
         }
-        for root in pins {
+        for (root, kind) in pins {
+            if kind != PinKind::Recursive {
+                continue;
+            }
             if self.refs(&root, true).await?.contains(cid) {
                 return Ok(true);
             }
@@ -1663,6 +1683,7 @@ pub struct PinVerify {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PinKind {
+    Direct,
     Recursive,
     Indirect,
 }
@@ -1670,8 +1691,17 @@ pub enum PinKind {
 impl PinKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Direct => "direct",
             Self::Recursive => "recursive",
             Self::Indirect => "indirect",
+        }
+    }
+
+    fn stored_from_str(value: &str) -> Option<Self> {
+        match value.trim() {
+            "direct" => Some(Self::Direct),
+            "recursive" | "" => Some(Self::Recursive),
+            _ => None,
         }
     }
 }
@@ -2201,7 +2231,11 @@ async fn load_repo(state: &Arc<State>) -> Result<()> {
             continue;
         };
         if let Ok(cid) = name.parse::<IpldCid>() {
-            state.pins.write().await.insert(cid);
+            let kind = match tokio::fs::read_to_string(entry.path()).await {
+                Ok(value) => PinKind::stored_from_str(&value).unwrap_or(PinKind::Recursive),
+                Err(_) => PinKind::Recursive,
+            };
+            state.pins.write().await.insert(cid, kind);
         }
     }
 
@@ -2297,12 +2331,12 @@ async fn load_block(state: &State, cid: &IpldCid) -> Result<Option<Bytes>> {
     }
 }
 
-async fn persist_pin(state: &State, cid: &IpldCid) -> Result<()> {
+async fn persist_pin(state: &State, cid: &IpldCid, kind: PinKind) -> Result<()> {
     let Some(repo) = &state.repo_path else {
         return Ok(());
     };
     let path = pins_dir(repo).join(cid.to_string());
-    tokio::fs::write(&path, b"recursive\n")
+    tokio::fs::write(&path, format!("{}\n", kind.as_str()))
         .await
         .with_context(|| format!("write pin {path:?}"))?;
     Ok(())

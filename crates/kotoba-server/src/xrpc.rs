@@ -1235,6 +1235,61 @@ async fn require_datomic_read_any_operation(
     .map_err(AccessDenied::into_response)
 }
 
+async fn require_datomic_read_tx_range(
+    state: &KotobaState,
+    headers: &axum::http::HeaderMap,
+    graph: &kotoba_core::cid::KotobaCid,
+    cacao_b64: Option<&str>,
+    presentation: Option<&kotoba_vc::VerifiablePresentation>,
+    operations: &[&str],
+    start: Option<&str>,
+    end: Option<&str>,
+) -> Result<(), (StatusCode, String)> {
+    use crate::graph_auth::{check_read_access, AccessDenied};
+
+    let graph_scope = graph.to_multibase();
+    if cacao_b64.is_some() {
+        if let Ok(payload) = verify_datomic_cacao_payload_with_any_operation(
+            state,
+            &graph_scope,
+            cacao_b64,
+            operations,
+        ) {
+            enforce_datomic_range_tx_scope(&payload, start, end)?;
+            return Ok(());
+        }
+    }
+    if let Some(presentation) = presentation {
+        verify_vc_presentation_capability_any_operation(
+            state,
+            &graph_scope,
+            presentation,
+            operations,
+        )?;
+        if vc_presentation_declares_tx_scope(presentation) {
+            enforce_vc_presentation_range_tx_scope(
+                state,
+                &graph_scope,
+                presentation,
+                operations,
+                start,
+                end,
+            )?;
+        }
+        return Ok(());
+    }
+
+    let visibility = state.graph_visibility(graph).await;
+    check_read_access(
+        &visibility,
+        headers,
+        cacao_b64,
+        Some(state.operator_did.as_str()),
+        None,
+    )
+    .map_err(AccessDenied::into_response)
+}
+
 fn enforce_datomic_temporal_tx_scope(
     payload: &kotoba_auth::CacaoPayload,
     as_of: Option<&str>,
@@ -1254,6 +1309,28 @@ fn enforce_datomic_temporal_tx_scope(
             format!("CACAO missing temporal tx scope kotoba://tx/{tx}"),
         ))
     }
+}
+
+fn enforce_datomic_range_tx_scope(
+    payload: &kotoba_auth::CacaoPayload,
+    start: Option<&str>,
+    end: Option<&str>,
+) -> Result<(), (StatusCode, String)> {
+    if !payload.has_tx_scope() {
+        return Ok(());
+    }
+    for (label, tx) in [("start", start), ("end", end)] {
+        let Some(tx) = tx else {
+            continue;
+        };
+        if !payload.authorizes_tx(tx) {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                format!("CACAO missing {label} tx scope kotoba://tx/{tx}"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn enforce_datomic_write_tx_scope(
@@ -1301,6 +1378,56 @@ fn verify_vc_presentation_capability_any_operation(
             operations.join(",")
         ),
     ))
+}
+
+fn verify_vc_presentation_capability_any_operation_scope(
+    state: &KotobaState,
+    graph: &str,
+    presentation: &kotoba_vc::VerifiablePresentation,
+    operations: &[&str],
+    required_scope: &str,
+) -> Result<(), (StatusCode, String)> {
+    for operation in operations {
+        if verify_vc_presentation_capability_scope(
+            state,
+            graph,
+            presentation,
+            operation,
+            Some(required_scope),
+        )
+        .is_ok()
+        {
+            return Ok(());
+        }
+    }
+    Err((
+        StatusCode::UNAUTHORIZED,
+        format!(
+            "VP missing operator-issued capability for any of {} on {graph} with scope {required_scope}",
+            operations.join(",")
+        ),
+    ))
+}
+
+fn enforce_vc_presentation_range_tx_scope(
+    state: &KotobaState,
+    graph: &str,
+    presentation: &kotoba_vc::VerifiablePresentation,
+    operations: &[&str],
+    start: Option<&str>,
+    end: Option<&str>,
+) -> Result<(), (StatusCode, String)> {
+    for tx in [start, end].into_iter().flatten() {
+        let tx_scope = format!("kotoba://tx/{tx}");
+        verify_vc_presentation_capability_any_operation_scope(
+            state,
+            graph,
+            presentation,
+            operations,
+            &tx_scope,
+        )?;
+    }
+    Ok(())
 }
 
 fn verify_vc_presentation_capability_scope(
@@ -4329,15 +4456,15 @@ pub async fn datomic_tx_range(
     Json(req): Json<DatomicTxRangeReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let graph_cid = parse_graph_cid(&req.graph)?;
-    require_datomic_read(
+    require_datomic_read_tx_range(
         &state,
         &headers,
         &graph_cid,
         req.cacao_b64.as_deref(),
         req.presentation.as_ref(),
-        kotoba_auth::CacaoPayload::OP_DATOM_READ,
-        None,
-        None,
+        &[kotoba_auth::CacaoPayload::OP_DATOM_READ],
+        req.start.as_deref(),
+        req.end.as_deref(),
     )
     .await?;
     let limit = req.limit.unwrap_or(100).min(10_000);
@@ -4384,15 +4511,15 @@ pub async fn datomic_log(
     Json(req): Json<DatomicLogReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let graph_cid = parse_graph_cid(&req.graph)?;
-    require_datomic_read(
+    require_datomic_read_tx_range(
         &state,
         &headers,
         &graph_cid,
         req.cacao_b64.as_deref(),
         req.presentation.as_ref(),
-        kotoba_auth::CacaoPayload::OP_DATOM_READ,
-        None,
-        None,
+        &[kotoba_auth::CacaoPayload::OP_DATOM_READ],
+        req.start.as_deref(),
+        req.end.as_deref(),
     )
     .await?;
     let limit = req.limit.unwrap_or(100).min(10_000);
@@ -7006,11 +7133,12 @@ mod tests {
         append_auth_capability_datoms, atproto_repo_record_entity_cid, atproto_repo_write_datoms,
         datomic_basis_t, datomic_db_stats, datomic_entid, datomic_entity, datomic_history,
         datomic_ident, datomic_log, datomic_pull, datomic_pull_many, datomic_transact,
-        datomic_tx_range, distributed_graph_ipns_name, is_did_web_ip_host, AtprotoRepoWriteReq,
-        AuthCapabilityProjection, DatomicBasisTReq, DatomicDbStatsReq, DatomicEntidReq,
-        DatomicEntityReq, DatomicHistoryReq, DatomicIdentReq, DatomicLogReq, DatomicPullManyReq,
-        DatomicPullReq, DatomicTransactReq, DatomicTxRangeReq, ZCAP_ALLOWED_ACTION_IRI,
-        ZCAP_CONTROLLER_IRI, ZCAP_INVOCATION_PROOF_IRI, ZCAP_INVOCATION_TARGET_IRI,
+        datomic_tx_range, distributed_graph_ipns_name, enforce_datomic_range_tx_scope,
+        is_did_web_ip_host, AtprotoRepoWriteReq, AuthCapabilityProjection, DatomicBasisTReq,
+        DatomicDbStatsReq, DatomicEntidReq, DatomicEntityReq, DatomicHistoryReq, DatomicIdentReq,
+        DatomicLogReq, DatomicPullManyReq, DatomicPullReq, DatomicTransactReq, DatomicTxRangeReq,
+        ZCAP_ALLOWED_ACTION_IRI, ZCAP_CONTROLLER_IRI, ZCAP_INVOCATION_PROOF_IRI,
+        ZCAP_INVOCATION_TARGET_IRI,
     };
     use crate::server::KotobaState;
     use axum::response::IntoResponse;
@@ -7037,7 +7165,55 @@ mod tests {
         );
         format!("{header}.{payload}.")
     }
+
+    fn test_cacao_payload(resources: Vec<String>) -> kotoba_auth::CacaoPayload {
+        kotoba_auth::CacaoPayload {
+            iss: "did:key:zIssuer".into(),
+            aud: "did:key:zAudience".into(),
+            issued_at: "2026-05-30T00:00:00Z".into(),
+            expiry: Some("2099-01-01T00:00:00Z".into()),
+            nonce: "n-test".into(),
+            domain: "kotoba.test".into(),
+            statement: None,
+            version: "1".into(),
+            resources,
+        }
+    }
     use serde_json::json;
+
+    #[test]
+    fn datomic_range_tx_scope_requires_requested_start_and_end_scopes() {
+        let start = KotobaCid::from_bytes(b"range-start").to_multibase();
+        let end = KotobaCid::from_bytes(b"range-end").to_multibase();
+        let wrong = KotobaCid::from_bytes(b"range-wrong").to_multibase();
+        let payload = test_cacao_payload(vec![
+            format!("kotoba://op/{}", kotoba_auth::CacaoPayload::OP_DATOM_READ),
+            format!("kotoba://tx/{start}"),
+            format!("kotoba://tx/{wrong}"),
+        ]);
+
+        let err = enforce_datomic_range_tx_scope(&payload, Some(&start), Some(&end)).unwrap_err();
+        assert_eq!(err.0, axum::http::StatusCode::UNAUTHORIZED);
+        assert!(err.1.contains(&format!("kotoba://tx/{end}")), "{}", err.1);
+
+        let payload = test_cacao_payload(vec![
+            format!("kotoba://op/{}", kotoba_auth::CacaoPayload::OP_DATOM_READ),
+            format!("kotoba://tx/{start}"),
+            format!("kotoba://tx/{end}"),
+        ]);
+        enforce_datomic_range_tx_scope(&payload, Some(&start), Some(&end)).unwrap();
+    }
+
+    #[test]
+    fn datomic_range_tx_scope_is_optional_when_cacao_has_no_tx_resources() {
+        let start = KotobaCid::from_bytes(b"range-start-no-scope").to_multibase();
+        let payload = test_cacao_payload(vec![format!(
+            "kotoba://op/{}",
+            kotoba_auth::CacaoPayload::OP_DATOM_READ
+        )]);
+
+        enforce_datomic_range_tx_scope(&payload, Some(&start), None).unwrap();
+    }
 
     #[test]
     fn vc_didcomm_and_atproto_project_to_one_distributed_datom_head() {

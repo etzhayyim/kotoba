@@ -133,7 +133,12 @@ async fn repo_persists_blocks_and_pins() {
         .await
         .expect("node start");
     let cid = node.put_raw_block(&data).await.expect("put");
+    let direct_cid = node
+        .put_raw_block(b"persistent direct pin")
+        .await
+        .expect("put direct");
     node.pin(&cid).await.expect("pin");
+    node.pin_add_direct(&direct_cid).await.expect("pin direct");
     node.files_write_bytes("/persisted/file.txt", &data, true)
         .await
         .expect("files/write bytes");
@@ -144,8 +149,16 @@ async fn repo_persists_blocks_and_pins() {
         node.block_stat(&cid).await.expect("stat").size,
         data.len() as u64
     );
-    assert_eq!(node.list_blocks().await.expect("blocks"), vec![cid]);
-    assert_eq!(node.list_pins().await.expect("pins"), vec![cid]);
+    let blocks = node.list_blocks().await.expect("blocks");
+    assert!(blocks.contains(&cid));
+    assert!(blocks.contains(&direct_cid));
+    let pins = node.pin_ls().await.expect("pin/ls persisted");
+    assert!(pins
+        .iter()
+        .any(|entry| entry.cid == cid && entry.kind == kotoba_ipfs::PinKind::Recursive));
+    assert!(pins
+        .iter()
+        .any(|entry| entry.cid == direct_cid && entry.kind == kotoba_ipfs::PinKind::Direct));
     node.shutdown().await;
 
     let restarted = IpfsConfig::new()
@@ -155,6 +168,16 @@ async fn repo_persists_blocks_and_pins() {
         .expect("restart");
     assert_eq!(restarted.get_block(&cid).await.expect("get"), data);
     assert!(restarted.is_pinned(&cid).await.expect("is pinned"));
+    assert!(restarted
+        .is_pinned(&direct_cid)
+        .await
+        .expect("direct is pinned"));
+    assert!(restarted
+        .pin_ls()
+        .await
+        .expect("pin/ls restarted")
+        .iter()
+        .any(|entry| entry.cid == direct_cid && entry.kind == kotoba_ipfs::PinKind::Direct));
     assert_eq!(
         restarted
             .files_read("/persisted/file.txt")
@@ -471,6 +494,57 @@ async fn kubo_compatible_local_api_surface() {
         .expect("pin/verify recursive dag")
         .iter()
         .any(|entry| entry.cid == linked && entry.ok));
+    node.pin_rm(&linked)
+        .await
+        .expect("pin/rm recursive before direct");
+    node.pin_add_direct(&linked)
+        .await
+        .expect("pin/add direct dag");
+    let direct_pins = node.pin_ls().await.expect("pin/ls direct dag");
+    assert!(direct_pins
+        .iter()
+        .any(|entry| entry.cid == linked && entry.kind == kotoba_ipfs::PinKind::Direct));
+    assert!(!direct_pins
+        .iter()
+        .any(|entry| entry.cid == child && entry.kind == kotoba_ipfs::PinKind::Indirect));
+    assert!(node.block_rm(&linked).await.is_err());
+    assert!(node
+        .block_rm(&child)
+        .await
+        .expect("direct pin does not protect child"));
+    assert!(!node
+        .has_block(&child)
+        .await
+        .expect("child removed under direct pin"));
+    assert!(node
+        .pin_verify()
+        .await
+        .expect("pin/verify direct dag")
+        .iter()
+        .any(|entry| entry.cid == linked && entry.ok));
+    assert_eq!(
+        put_cbor_value(
+            &node,
+            CborValue::Map(vec![(
+                CborValue::Text("leaf".into()),
+                CborValue::Tag(
+                    42,
+                    Box::new(CborValue::Bytes({
+                        let mut bytes = vec![0];
+                        bytes.extend(leaf.to_bytes());
+                        bytes
+                    }))
+                ),
+            )])
+        )
+        .await
+        .expect("re-add child after direct pin test"),
+        child
+    );
+    node.pin_rm(&linked).await.expect("pin/rm direct dag");
+    node.pin_add(&linked)
+        .await
+        .expect("pin/add recursive dag again");
     let dag_gc = node.repo_gc().await.expect("repo/gc pinned dag");
     assert!(!dag_gc.contains(&linked));
     assert!(!dag_gc.contains(&child));
