@@ -1212,17 +1212,42 @@ pub async fn kg_delete(
     let graph = kg_graph_cid();
     let subject = KotobaCid::from_bytes(req.id.as_bytes());
 
-    let quads = state
-        .quad_store
-        .get_entity_quads(Some(&graph), &subject)
-        .await;
+    let db = match crate::xrpc::current_db_for_graph(&state, &graph).await {
+        Ok(db) => db,
+        Err((code, msg)) => {
+            return (code, Json(serde_json::json!({"ok": false, "error": msg}))).into_response()
+        }
+    };
+    let current_datoms: Vec<_> = db
+        .datoms()
+        .into_iter()
+        .filter(|datom| datom.e == subject)
+        .collect();
 
-    let retracted = quads.len();
+    let retracted = current_datoms.len();
 
-    for quad in quads {
-        let graph_cid = quad.graph.clone();
-        let datom = KqeDatom::from_legacy_quad(quad, false);
-        state.retract_datom_compat(graph_cid, datom).await;
+    if retracted > 0 {
+        let tx_cid = KotobaCid::from_bytes(format!("kg.delete:{}", req.id).as_bytes());
+        let retract_datoms: Vec<_> = current_datoms
+            .into_iter()
+            .map(|datom| kotoba_datomic::Datom::retract(datom.e, datom.a, datom.v, tx_cid.clone()))
+            .collect();
+        if let Err((code, msg)) = crate::xrpc::commit_protocol_datoms(
+            &state,
+            graph.clone(),
+            graph.to_multibase(),
+            subject.clone(),
+            retract_datoms,
+            tx_cid,
+            state.operator_did.clone(),
+            kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT,
+            None,
+            None,
+        )
+        .await
+        {
+            return (code, Json(serde_json::json!({"ok": false, "error": msg}))).into_response();
+        }
     }
 
     (
