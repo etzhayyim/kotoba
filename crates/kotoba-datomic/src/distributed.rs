@@ -6,8 +6,8 @@
 
 use crate::{
     current_datoms, edn_to_kqe_value, index_range_datoms, plan_datom_lookup_for_triple,
-    seek_datoms_index, Connection, Datom, DatomIndex, DatomicError, Db, LogEntry, TransactReport,
-    Value,
+    seek_datoms_index, Connection, Datom, DatomIndex, DatomicError, Db, Entity, LogEntry,
+    TransactReport, Value,
 };
 use kotoba_core::cid::KotobaCid;
 use kotoba_core::prolly::ProllyTree;
@@ -644,6 +644,125 @@ where
 
     pub fn db_from_head(&self, head: &KotobaCid) -> Result<Db, DistributedCommitError> {
         self.current_db_from_head(head)
+    }
+
+    pub fn pull_from_head(
+        &self,
+        head: &KotobaCid,
+        pattern: Value,
+        eid: Entity,
+    ) -> Result<Value, DistributedCommitError> {
+        self.current_db_from_head(head)?
+            .pull(pattern, eid)
+            .map_err(Into::into)
+    }
+
+    pub fn pull_for_name(
+        &self,
+        ipns_name: &str,
+        pattern: Value,
+        eid: Entity,
+    ) -> Result<Option<Value>, DistributedCommitError> {
+        let Some(head) = self.resolve_head(ipns_name)? else {
+            return Ok(None);
+        };
+        self.pull_from_head(&head.cid, pattern, eid).map(Some)
+    }
+
+    pub fn pull_many_from_head(
+        &self,
+        head: &KotobaCid,
+        pattern: Value,
+        eids: Vec<Entity>,
+    ) -> Result<Vec<Value>, DistributedCommitError> {
+        self.current_db_from_head(head)?
+            .pull_many(pattern, eids)
+            .map_err(Into::into)
+    }
+
+    pub fn pull_many_for_name(
+        &self,
+        ipns_name: &str,
+        pattern: Value,
+        eids: Vec<Entity>,
+    ) -> Result<Option<Vec<Value>>, DistributedCommitError> {
+        let Some(head) = self.resolve_head(ipns_name)? else {
+            return Ok(None);
+        };
+        self.pull_many_from_head(&head.cid, pattern, eids).map(Some)
+    }
+
+    pub fn entity_from_head(
+        &self,
+        head: &KotobaCid,
+        eid: Entity,
+    ) -> Result<Value, DistributedCommitError> {
+        self.current_db_from_head(head)?
+            .entity(eid)
+            .map_err(Into::into)
+    }
+
+    pub fn entity_for_name(
+        &self,
+        ipns_name: &str,
+        eid: Entity,
+    ) -> Result<Option<Value>, DistributedCommitError> {
+        let Some(head) = self.resolve_head(ipns_name)? else {
+            return Ok(None);
+        };
+        self.entity_from_head(&head.cid, eid).map(Some)
+    }
+
+    pub fn pull_as_of_tx(
+        &self,
+        head: &KotobaCid,
+        tx_cid: &KotobaCid,
+        pattern: Value,
+        eid: Entity,
+    ) -> Result<Value, DistributedCommitError> {
+        self.db_as_of_tx(head, tx_cid)?
+            .pull(pattern, eid)
+            .map_err(Into::into)
+    }
+
+    pub fn pull_as_of_tx_for_name(
+        &self,
+        ipns_name: &str,
+        tx_cid: &KotobaCid,
+        pattern: Value,
+        eid: Entity,
+    ) -> Result<Option<Value>, DistributedCommitError> {
+        let Some(head) = self.resolve_head(ipns_name)? else {
+            return Ok(None);
+        };
+        self.pull_as_of_tx(&head.cid, tx_cid, pattern, eid)
+            .map(Some)
+    }
+
+    pub fn pull_since_tx(
+        &self,
+        head: &KotobaCid,
+        tx_cid: &KotobaCid,
+        pattern: Value,
+        eid: Entity,
+    ) -> Result<Value, DistributedCommitError> {
+        self.db_since_tx(head, tx_cid)?
+            .pull(pattern, eid)
+            .map_err(Into::into)
+    }
+
+    pub fn pull_since_tx_for_name(
+        &self,
+        ipns_name: &str,
+        tx_cid: &KotobaCid,
+        pattern: Value,
+        eid: Entity,
+    ) -> Result<Option<Value>, DistributedCommitError> {
+        let Some(head) = self.resolve_head(ipns_name)? else {
+            return Ok(None);
+        };
+        self.pull_since_tx(&head.cid, tx_cid, pattern, eid)
+            .map(Some)
     }
 
     pub fn db_as_of_tx(
@@ -4400,6 +4519,120 @@ mod tests {
                 .unwrap(),
             vec![vec![EdnValue::String("Alice".into())]]
         );
+    }
+
+    #[test]
+    fn reader_pulls_entities_from_distributed_ipns_head_and_time_views() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let alice = KotobaCid::from_bytes(b"alice");
+        let bob = KotobaCid::from_bytes(b"bob");
+        let first = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph.clone(),
+                vec![
+                    Datom::assert(
+                        alice.clone(),
+                        ":person/name".into(),
+                        EdnValue::String("Alice".into()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        alice.clone(),
+                        ":person/role".into(),
+                        EdnValue::String("admin".into()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                ],
+            ))
+            .unwrap();
+        let mut second_req = request(
+            "k51-kotoba-db",
+            graph,
+            vec![
+                Datom::assert(
+                    bob.clone(),
+                    ":person/name".into(),
+                    EdnValue::String("Bob".into()),
+                    KotobaCid::from_bytes(b"tx2"),
+                ),
+                Datom::assert(
+                    bob.clone(),
+                    ":person/role".into(),
+                    EdnValue::String("operator".into()),
+                    KotobaCid::from_bytes(b"tx2"),
+                ),
+            ],
+        );
+        second_req.expected_parent = Some(first.commit.cid.clone());
+        second_req.seq = 2;
+        let second = writer.commit_datoms(second_req).unwrap();
+
+        let reader = DistributedDatomReader::new(&store, &ipns);
+        let pattern = kotoba_edn::parse(r#"[:person/name :person/role]"#).unwrap();
+        let name_key = kotoba_edn::parse(":person/name").unwrap();
+        let role_key = kotoba_edn::parse(":person/role").unwrap();
+
+        let pulled = reader
+            .pull_for_name("k51-kotoba-db", pattern.clone(), alice.clone())
+            .unwrap()
+            .expect("ipns head");
+        let pulled_map = pulled.as_map().unwrap();
+        assert_eq!(
+            pulled_map.get(&name_key),
+            Some(&EdnValue::String("Alice".into()))
+        );
+        assert_eq!(
+            pulled_map.get(&role_key),
+            Some(&EdnValue::String("admin".into()))
+        );
+
+        let pulled_many = reader
+            .pull_many_for_name(
+                "k51-kotoba-db",
+                pattern.clone(),
+                vec![alice.clone(), bob.clone()],
+            )
+            .unwrap()
+            .expect("ipns head");
+        assert_eq!(pulled_many.len(), 2);
+        assert_eq!(
+            pulled_many[1].as_map().unwrap().get(&name_key),
+            Some(&EdnValue::String("Bob".into()))
+        );
+
+        let as_of = reader
+            .pull_as_of_tx_for_name(
+                "k51-kotoba-db",
+                &first.commit.tx_cid,
+                pattern.clone(),
+                alice,
+            )
+            .unwrap()
+            .expect("ipns head");
+        assert_eq!(
+            as_of.as_map().unwrap().get(&name_key),
+            Some(&EdnValue::String("Alice".into()))
+        );
+
+        let since = reader
+            .pull_since_tx_for_name("k51-kotoba-db", &first.commit.tx_cid, pattern, bob)
+            .unwrap()
+            .expect("ipns head");
+        assert_eq!(
+            since.as_map().unwrap().get(&name_key),
+            Some(&EdnValue::String("Bob".into()))
+        );
+        assert_eq!(
+            reader
+                .entity_for_name("k51-missing-db", KotobaCid::from_bytes(b"alice"))
+                .unwrap(),
+            None
+        );
+        assert_eq!(second.commit.prev, Some(first.commit.cid));
     }
 
     #[tokio::test]

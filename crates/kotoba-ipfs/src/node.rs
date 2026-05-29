@@ -1308,26 +1308,27 @@ impl KotobaIpfsNode {
         };
         let dirs = self.state.dirs.read().await;
         let files = self.state.files.read().await;
-        let mut entries: Vec<_> = dirs
+        let mut entries = BTreeMap::<String, Option<IpldCid>>::new();
+        for path in dirs
             .iter()
             .filter(|path| *path != &prefix && path.starts_with(&child_prefix))
-            .map(|path| MfsEntry {
-                path: path.clone(),
-                cid: None,
-            })
-            .chain(
-                files
-                    .iter()
-                    .filter(|(path, _)| *path == &prefix || path.starts_with(&child_prefix))
-                    .map(|(path, cid)| MfsEntry {
-                        path: path.clone(),
-                        cid: Some(*cid),
-                    }),
-            )
-            .collect();
-        entries.sort_by(|a, b| a.path.cmp(&b.path));
-        entries.dedup_by(|a, b| a.path == b.path && a.cid == b.cid);
-        Ok(entries)
+        {
+            if let Some(child) = immediate_mfs_child(&prefix, path) {
+                entries.entry(child).or_insert(None);
+            }
+        }
+        for (path, cid) in files
+            .iter()
+            .filter(|(path, _)| *path == &prefix || path.starts_with(&child_prefix))
+        {
+            if let Some(child) = immediate_mfs_child(&prefix, path) {
+                entries.entry(child).or_insert(Some(*cid));
+            }
+        }
+        Ok(entries
+            .into_iter()
+            .map(|(path, cid)| MfsEntry { path, cid })
+            .collect())
     }
 
     /// Kubo-like MFS `files/rm`.
@@ -1762,6 +1763,23 @@ fn parent_mfs_dir(path: &str) -> Option<String> {
         "/".to_string()
     } else {
         parent.to_string()
+    })
+}
+
+fn immediate_mfs_child(prefix: &str, path: &str) -> Option<String> {
+    if path == prefix {
+        return Some(path.to_string());
+    }
+    let rest = if prefix == "/" {
+        path.strip_prefix('/')?
+    } else {
+        path.strip_prefix(&format!("{prefix}/"))?
+    };
+    let name = rest.split('/').next().filter(|name| !name.is_empty())?;
+    Some(if prefix == "/" {
+        format!("/{name}")
+    } else {
+        format!("{prefix}/{name}")
     })
 }
 

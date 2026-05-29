@@ -508,7 +508,13 @@ async fn kubo_compatible_local_api_surface() {
     assert!(files
         .iter()
         .any(|entry| entry.path == "/docs/empty.txt" && entry.cid == Some(touched.cid)));
-    assert_eq!(node.files_ls("/").await.expect("files/ls root").len(), 4);
+    assert_eq!(
+        node.files_ls("/").await.expect("files/ls root"),
+        vec![kotoba_ipfs::MfsEntry {
+            path: "/docs".into(),
+            cid: None,
+        }]
+    );
     assert_eq!(
         node.files_du("/docs/hello.txt", false)
             .await
@@ -532,6 +538,13 @@ async fn kubo_compatible_local_api_surface() {
     node.files_cp("/docs/hello.txt", "/docs/archive/hello-copy.txt")
         .await
         .expect("files/cp");
+    let docs_after_copy = node.files_ls("/docs").await.expect("files/ls after copy");
+    assert!(docs_after_copy
+        .iter()
+        .any(|entry| entry.path == "/docs/archive" && entry.cid.is_none()));
+    assert!(!docs_after_copy
+        .iter()
+        .any(|entry| entry.path == "/docs/archive/hello-copy.txt"));
     assert_eq!(
         node.files_read("/docs/archive/hello-copy.txt")
             .await
