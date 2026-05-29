@@ -385,7 +385,6 @@ fn decode_sig_bytes(s: &str) -> Result<Vec<u8>, CacaoError> {
 impl CacaoPayload {
     pub const OP_DATOM_TRANSACT: &'static str = "datom:transact";
     pub const OP_DATOM_READ: &'static str = "datom:read";
-    pub const OP_DATOM_WRITE: &'static str = "datom:write";
     pub const OP_TX_CREATE: &'static str = "tx:create";
     pub const OP_GRAPH_QUERY: &'static str = "graph:query";
     pub const OP_VC_ISSUE: &'static str = "vc:issue";
@@ -1025,7 +1024,7 @@ mod tests {
         use crate::delegation::DelegationChain;
         let cacao = make_signed_eddsa_cacao("g", "datom:read", Some("2099-01-01T00:00:00Z"));
         let chain = DelegationChain::new(cacao);
-        let result = chain.verify("g", "datom:write");
+        let result = chain.verify("g", "datom:transact");
         assert!(result.is_err(), "wrong capability must be rejected");
     }
 }

@@ -58,6 +58,8 @@
             "ipns_name",
             "ipns_sequence",
             "datom_count",
+            "assert_count",
+            "retract_count",
             "journal_cids"
           ],
           "properties": {
@@ -70,6 +72,8 @@
             "ipns_name": { "type": "string" },
             "ipns_sequence": { "type": "integer", "minimum": 0 },
             "datom_count": { "type": "integer", "minimum": 0 },
+            "assert_count": { "type": "integer", "minimum": 0 },
+            "retract_count": { "type": "integer", "minimum": 0 },
             "journal_cids": {
               "type": "array",
               "items": { "type": "string" }

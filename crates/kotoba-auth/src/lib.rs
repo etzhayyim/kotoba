@@ -118,8 +118,8 @@ mod tests {
 
     #[test]
     fn payload_capability_extracts_correctly() {
-        let p = test_payload(vec!["kotoba://can/datom:write".into()]);
-        assert_eq!(p.capability(), Some("datom:write"));
+        let p = test_payload(vec!["kotoba://can/datom:transact".into()]);
+        assert_eq!(p.capability(), Some("datom:transact"));
     }
 
     #[test]
@@ -180,7 +180,7 @@ mod tests {
     fn siwe_message_includes_resources_when_present() {
         let p = test_payload(vec![
             "kotoba://graph/bafy123".into(),
-            "kotoba://can/datom:write".into(),
+            "kotoba://can/datom:transact".into(),
         ]);
         let cacao = Cacao {
             h: CacaoHeader {
@@ -317,7 +317,7 @@ mod tests {
             domain: "kotoba.test".into(),
             statement: None,
             version: "1".into(),
-            resources: vec!["kotoba://can/datom:write".into()],
+            resources: vec!["kotoba://can/datom:transact".into()],
         };
         let mut cacao = Cacao {
             h: CacaoHeader {
@@ -381,7 +381,7 @@ mod tests {
         let mut chain = delegation::DelegationChain::new(cacao1);
         chain.chain.push(cacao2);
         chain.chain.push(cacao3); // depth-3 chain
-        let err = chain.verify("graph_cid", "datom:write").unwrap_err();
+        let err = chain.verify("graph_cid", "datom:transact").unwrap_err();
         assert!(
             matches!(err, DelegationError::ChainDepthExceeded(3)),
             "expected ChainDepthExceeded(3), got {err:?}"
@@ -403,7 +403,7 @@ mod tests {
             },
         };
         let chain = delegation::DelegationChain::new(cacao);
-        let err = chain.verify("graph_cid", "datom:write").unwrap_err();
+        let err = chain.verify("graph_cid", "datom:transact").unwrap_err();
         assert!(
             matches!(err, DelegationError::Expired),
             "expected Expired, got {err:?}"
@@ -426,7 +426,7 @@ mod tests {
             },
         };
         let chain = delegation::DelegationChain::new(cacao);
-        let err = chain.verify("graph_cid", "datom:write").unwrap_err();
+        let err = chain.verify("graph_cid", "datom:transact").unwrap_err();
         assert!(
             matches!(err, DelegationError::InvalidExpiry(_)),
             "expected InvalidExpiry, got {err:?}"
@@ -450,7 +450,7 @@ mod tests {
             },
         };
         let chain = delegation::DelegationChain::new(cacao);
-        let err = chain.verify("graph_cid", "datom:write").unwrap_err();
+        let err = chain.verify("graph_cid", "datom:transact").unwrap_err();
         assert!(
             matches!(err, DelegationError::Expired),
             "expected Expired (max-age), got {err:?}"
@@ -473,7 +473,7 @@ mod tests {
             },
         };
         let chain = delegation::DelegationChain::new(cacao);
-        let err = chain.verify("graph_cid", "datom:write").unwrap_err();
+        let err = chain.verify("graph_cid", "datom:transact").unwrap_err();
         assert!(
             matches!(err, DelegationError::InvalidExpiry(_)),
             "expected InvalidExpiry, got {err:?}"

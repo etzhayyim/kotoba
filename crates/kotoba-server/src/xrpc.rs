@@ -441,6 +441,8 @@ pub struct ProtocolDatomWriteResp {
     pub ipns_name: String,
     pub ipns_sequence: u64,
     pub datom_count: usize,
+    pub assert_count: usize,
+    pub retract_count: usize,
     pub journal_cids: Vec<String>,
 }
 
@@ -736,10 +738,13 @@ async fn resolve_and_verify_did_web(
 
     // P3 — capability check
     if let Some(cap) = cacao.p.capability() {
-        if cap != "datom:write" {
+        if cap != kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT {
             return Err((
                 StatusCode::UNAUTHORIZED,
-                format!("capability denied: need 'datom:write', CACAO grants '{cap}'"),
+                format!(
+                    "capability denied: need '{}', CACAO grants '{cap}'",
+                    kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT
+                ),
             ));
         }
     }
@@ -888,7 +893,7 @@ pub async fn quad_create(
         resolve_and_verify_did_web(&cacao, &req.graph, &state.http_client).await?
     } else {
         kotoba_auth::DelegationChain::new(cacao)
-            .verify(&req.graph, "datom:write")
+            .verify(&req.graph, kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT)
             .map_err(map_delegation_error)?
     };
 
@@ -1263,7 +1268,7 @@ fn enforce_datomic_write_tx_scope(
     } else {
         Err((
             StatusCode::UNAUTHORIZED,
-            format!("CACAO missing write tx scope kotoba://tx/{tx}"),
+            format!("CACAO missing transact tx scope kotoba://tx/{tx}"),
         ))
     }
 }
@@ -2151,6 +2156,9 @@ pub(crate) async fn commit_protocol_datoms(
         journal_cids.push(journal_cid);
     }
 
+    let assert_count = datoms.iter().filter(|datom| datom.added).count();
+    let retract_count = datoms.len().saturating_sub(assert_count);
+
     Ok(ProtocolDatomWriteResp {
         status: "ok",
         graph,
@@ -2165,6 +2173,8 @@ pub(crate) async fn commit_protocol_datoms(
         ipns_name,
         ipns_sequence: distributed.ipns_record.sequence,
         datom_count: datoms.len(),
+        assert_count,
+        retract_count,
         journal_cids,
     })
 }
@@ -2289,6 +2299,10 @@ fn append_json_record_field_datoms(
     }
 }
 
+fn atproto_repo_record_entity_cid(uri: &str) -> kotoba_core::cid::KotobaCid {
+    kotoba_core::cid::KotobaCid::from_bytes(uri.as_bytes())
+}
+
 fn atproto_repo_write_datoms(
     req: &AtprotoRepoWriteReq,
     uri: &kotoba_graph::AtUri,
@@ -2318,6 +2332,12 @@ fn atproto_repo_write_datoms(
         ),
         kotoba_datomic::Datom::assert(
             entity_cid.clone(),
+            "atproto/nsid".to_string(),
+            kotoba_edn::EdnValue::string(&uri.collection),
+            tx_cid.clone(),
+        ),
+        kotoba_datomic::Datom::assert(
+            entity_cid.clone(),
             "atproto/rkey".to_string(),
             kotoba_edn::EdnValue::string(&uri.rkey),
             tx_cid.clone(),
@@ -2329,6 +2349,14 @@ fn atproto_repo_write_datoms(
             tx_cid.clone(),
         ),
     ];
+    if uri.authority.starts_with("did:") {
+        out.push(kotoba_datomic::Datom::assert(
+            entity_cid.clone(),
+            "atproto/did".to_string(),
+            kotoba_edn::EdnValue::string(&uri.authority),
+            tx_cid.clone(),
+        ));
+    }
     if let Some(record_edn) = &record_edn {
         out.push(kotoba_datomic::Datom::assert(
             entity_cid.clone(),
@@ -2391,6 +2419,85 @@ fn atproto_repo_write_datoms(
             record,
             tx_cid,
         );
+    }
+    out
+}
+
+fn atproto_repo_delete_datoms(
+    db: &kotoba_datomic::Db,
+    req: &AtprotoRepoWriteReq,
+    uri: &kotoba_graph::AtUri,
+    entity_cid: &kotoba_core::cid::KotobaCid,
+    tx_cid: &kotoba_core::cid::KotobaCid,
+) -> Vec<kotoba_datomic::Datom> {
+    let mut out = db
+        .datoms()
+        .into_iter()
+        .filter(|datom| {
+            datom.e == *entity_cid
+                && !matches!(
+                    datom.a.as_str(),
+                    "atproto/uri"
+                        | "atproto/authority"
+                        | "atproto/collection"
+                        | "atproto/nsid"
+                        | "atproto/rkey"
+                        | "atproto/did"
+                )
+        })
+        .map(|datom| kotoba_datomic::Datom::retract(datom.e, datom.a, datom.v, tx_cid.clone()))
+        .collect::<Vec<_>>();
+    out.extend([
+        kotoba_datomic::Datom::assert(
+            entity_cid.clone(),
+            "atproto/uri".to_string(),
+            kotoba_edn::EdnValue::string(&req.uri),
+            tx_cid.clone(),
+        ),
+        kotoba_datomic::Datom::assert(
+            entity_cid.clone(),
+            "atproto/authority".to_string(),
+            kotoba_edn::EdnValue::string(&uri.authority),
+            tx_cid.clone(),
+        ),
+        kotoba_datomic::Datom::assert(
+            entity_cid.clone(),
+            "atproto/collection".to_string(),
+            kotoba_edn::EdnValue::string(&uri.collection),
+            tx_cid.clone(),
+        ),
+        kotoba_datomic::Datom::assert(
+            entity_cid.clone(),
+            "atproto/nsid".to_string(),
+            kotoba_edn::EdnValue::string(&uri.collection),
+            tx_cid.clone(),
+        ),
+        kotoba_datomic::Datom::assert(
+            entity_cid.clone(),
+            "atproto/rkey".to_string(),
+            kotoba_edn::EdnValue::string(&uri.rkey),
+            tx_cid.clone(),
+        ),
+        kotoba_datomic::Datom::assert(
+            entity_cid.clone(),
+            "atproto/operation".to_string(),
+            kotoba_edn::EdnValue::string("delete"),
+            tx_cid.clone(),
+        ),
+        kotoba_datomic::Datom::assert(
+            entity_cid.clone(),
+            "atproto/deleted".to_string(),
+            kotoba_edn::EdnValue::Bool(true),
+            tx_cid.clone(),
+        ),
+    ]);
+    if uri.authority.starts_with("did:") {
+        out.push(kotoba_datomic::Datom::assert(
+            entity_cid.clone(),
+            "atproto/did".to_string(),
+            kotoba_edn::EdnValue::string(&uri.authority),
+            tx_cid.clone(),
+        ));
     }
     out
 }
@@ -4967,31 +5074,26 @@ pub async fn atproto_repo_write(
     }
 
     let graph_cid = parse_graph_cid(&req.graph)?;
-    let entity_cid = req
-        .cid
-        .as_deref()
-        .and_then(kotoba_graph::at_cid_str_to_kotoba)
-        .unwrap_or_else(|| {
-            kotoba_core::cid::KotobaCid::from_bytes(
-                serde_json::to_vec(&serde_json::json!({
-                    "uri": req.uri,
-                    "operation": req.operation,
-                    "record": req.record,
-                }))
-                .unwrap_or_default()
-                .as_slice(),
-            )
-        });
+    let entity_cid = atproto_repo_record_entity_cid(&req.uri);
+    let operation = req.operation.as_deref().unwrap_or("create");
     let tx_cid = kotoba_core::cid::KotobaCid::from_bytes(
-        format!(
-            "atproto.repo.write:{}:{}:{}",
-            req.graph,
-            req.uri,
-            entity_cid.to_multibase()
-        )
-        .as_bytes(),
+        serde_json::to_vec(&serde_json::json!({
+            "op": "atproto.repo.write",
+            "graph": req.graph,
+            "uri": req.uri,
+            "operation": operation,
+            "cid": req.cid,
+            "record": req.record,
+        }))
+        .unwrap_or_default()
+        .as_slice(),
     );
-    let datoms = atproto_repo_write_datoms(&req, &uri, &entity_cid, &tx_cid);
+    let datoms = if operation == "delete" {
+        let db = current_db_for_graph(&state, &graph_cid).await?;
+        atproto_repo_delete_datoms(&db, &req, &uri, &entity_cid, &tx_cid)
+    } else {
+        atproto_repo_write_datoms(&req, &uri, &entity_cid, &tx_cid)
+    };
     let resp = commit_protocol_datoms(
         &state,
         graph_cid,
@@ -5594,7 +5696,7 @@ pub struct CommitStoreReq {
     pub graph: String,
     pub author: String,
     pub seq: u64,
-    /// CACAO delegation proof (CBOR, base64) — required; must carry `datom:write` capability.
+    /// CACAO delegation proof (CBOR, base64) — required; must carry `datom:transact` capability.
     pub cacao_b64: Option<String>,
 }
 
@@ -5642,7 +5744,7 @@ pub async fn commit_store(
         resolve_and_verify_did_web(&cacao, &req.graph, &state.http_client).await?
     } else {
         kotoba_auth::DelegationChain::new(cacao)
-            .verify(&req.graph, "datom:write")
+            .verify(&req.graph, kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT)
             .map_err(map_delegation_error)?
     };
     tracing::info!(issuer = %issuer_did, graph = %req.graph, "commit.store: CACAO verified");
@@ -5813,7 +5915,7 @@ pub struct WeightPutReq {
     pub dtype: String,
     /// named graph CID (multibase) to index this weight in
     pub graph: String,
-    /// CACAO delegation proof (CBOR, base64) — required; must carry `datom:write` capability
+    /// CACAO delegation proof (CBOR, base64) — required; must carry `datom:transact` capability
     pub cacao_b64: Option<String>,
 }
 
@@ -5828,7 +5930,7 @@ pub struct WeightPutResp {
 ///
 /// `cacao_b64` is required. The CACAO is verified before the write:
 /// - did:web issuer → HTTP resolution + expiry check
-/// - everything else → DelegationChain verifies expiry + `datom:write` capability + graph + sig
+/// - everything else → DelegationChain verifies expiry + `datom:transact` capability + graph + sig
 pub async fn weight_put(
     State(state): State<Arc<KotobaState>>,
     Json(req): Json<WeightPutReq>,
@@ -5894,7 +5996,7 @@ pub async fn weight_put(
         resolve_and_verify_did_web(&cacao, &req.graph, &state.http_client).await?
     } else {
         kotoba_auth::DelegationChain::new(cacao)
-            .verify(&req.graph, "datom:write")
+            .verify(&req.graph, kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT)
             .map_err(map_delegation_error)?
     };
     tracing::info!(issuer = %issuer_did, graph = %req.graph, "weight.put: CACAO verified");
@@ -6041,7 +6143,7 @@ pub async fn quad_retract(
         resolve_and_verify_did_web(&cacao, &req.graph, &state.http_client).await?
     } else {
         kotoba_auth::DelegationChain::new(cacao)
-            .verify(&req.graph, "datom:write")
+            .verify(&req.graph, kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT)
             .map_err(map_delegation_error)?
     };
 
@@ -6173,7 +6275,7 @@ pub struct LoraApplyReq {
     pub graph: String,
     /// Raw LoRA adapter bytes, base64-encoded
     pub adapter_b64: String,
-    /// CACAO delegation proof (CBOR, base64) — required; must carry `datom:write` capability
+    /// CACAO delegation proof (CBOR, base64) — required; must carry `datom:transact` capability
     pub cacao_b64: Option<String>,
 }
 
@@ -6187,7 +6289,7 @@ pub struct LoraApplyResp {
 ///
 /// `cacao_b64` is required. The CACAO is verified before the write:
 /// - did:web issuer → HTTP resolution + expiry check
-/// - everything else → DelegationChain verifies expiry + `datom:write` capability + graph + sig
+/// - everything else → DelegationChain verifies expiry + `datom:transact` capability + graph + sig
 pub async fn lora_apply(
     State(state): State<Arc<KotobaState>>,
     Json(req): Json<LoraApplyReq>,
@@ -6243,7 +6345,7 @@ pub async fn lora_apply(
         resolve_and_verify_did_web(&cacao, &req.graph, &state.http_client).await?
     } else {
         kotoba_auth::DelegationChain::new(cacao)
-            .verify(&req.graph, "datom:write")
+            .verify(&req.graph, kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT)
             .map_err(map_delegation_error)?
     };
     tracing::info!(issuer = %issuer_did, graph = %req.graph, "lora.apply: CACAO verified");
@@ -7604,6 +7706,8 @@ mod tests {
                 "ipns_name",
                 "ipns_sequence",
                 "datom_count",
+                "assert_count",
+                "retract_count",
                 "journal_cids",
             ],
             &["auth_proof_cid"],

@@ -2947,6 +2947,8 @@ async fn datomic_transact_accepts_cacao_datom_transact_operation_scope() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["status"], "ok");
     assert!(body["commit_cid"].as_str().is_some(), "{body}");
+    assert!(body["assert_count"].as_u64().unwrap_or(0) > 0, "{body}");
+    assert_eq!(body["retract_count"], 0, "{body}");
     let proof_cid = body["auth_proof_cid"]
         .as_str()
         .expect("auth_proof_cid")
@@ -3138,7 +3140,7 @@ async fn datomic_transact_rejects_mismatched_cacao_tx_scope() {
     assert!(
         body.as_str()
             .unwrap_or_default()
-            .contains("CACAO missing write tx scope kotoba://tx/"),
+            .contains("CACAO missing transact tx scope kotoba://tx/"),
         "{body}"
     );
 }
@@ -4740,13 +4742,20 @@ async fn didcomm_send_projects_message_to_distributed_datoms() {
             "/xrpc/ai.gftd.apps.kotoba.datomic.q",
             json!({
                 "graph": graph,
-                "query_edn": r#"{:find [?thread] :where [[?e :didcomm/thread ?thread]]}"#
+                "query_edn": r#"{:find [?protocol ?service ?thread]
+                                 :where [[?e :didcomm/protocol ?protocol]
+                                         [?e :didcomm/serviceType ?service]
+                                         [?e :didcomm/thread ?thread]]}"#
             }),
             &tok,
         )
         .await;
     assert_eq!(status, 200, "{q_body}");
-    assert_eq!(q_body["rows_edn"][0][0], "\"thread-e2e-1\"", "{q_body}");
+    assert_eq!(
+        q_body["rows_edn"],
+        json!([["\"DIDComm v2\"", "\"DIDCommMessaging\"", "\"thread-e2e-1\""]]),
+        "{q_body}"
+    );
 
     let (status, body_field_body) = s
         .post_auth(
@@ -5033,14 +5042,22 @@ async fn atproto_repo_write_projects_record_to_distributed_datoms() {
             "/xrpc/ai.gftd.apps.kotoba.datomic.q",
             json!({
                 "graph": graph,
-                "query_edn": r#"{:find [?collection] :where [[?e :atproto/collection ?collection]]}"#
+                "query_edn": r#"{:find [?did ?collection ?nsid]
+                                 :where [[?e :atproto/did ?did]
+                                         [?e :atproto/collection ?collection]
+                                         [?e :atproto/nsid ?nsid]]}"#
             }),
             &tok,
         )
         .await;
     assert_eq!(status, 200, "{q_body}");
     assert_eq!(
-        q_body["rows_edn"][0][0], "\"app.bsky.feed.post\"",
+        q_body["rows_edn"],
+        json!([[
+            "\"did:plc:alice\"",
+            "\"app.bsky.feed.post\"",
+            "\"app.bsky.feed.post\""
+        ]]),
         "{q_body}"
     );
 
@@ -5116,6 +5133,102 @@ async fn atproto_repo_write_projects_record_to_distributed_datoms() {
     assert!(
         sparql_body["count"].as_u64().unwrap_or(0) >= 1,
         "{sparql_body}"
+    );
+
+    let delete_cacao_b64 = build_ed25519_cacao_for_operation_with_resources(
+        &graph,
+        &s.operator_did,
+        kotoba_auth::CacaoPayload::OP_ATPROTO_REPO_WRITE,
+        "nonce-atproto-delete-e2e",
+        vec![at_uri.to_string()],
+    );
+    let (status, delete_body) = s
+        .post(
+            "/xrpc/ai.gftd.apps.kotoba.atproto.repo.write",
+            json!({
+                "graph": graph,
+                "cacao_b64": delete_cacao_b64,
+                "uri": at_uri,
+                "operation": "delete"
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{delete_body}");
+    assert_eq!(delete_body["status"], "ok", "{delete_body}");
+    assert!(
+        delete_body["assert_count"].as_u64().unwrap_or(0) > 0,
+        "{delete_body}"
+    );
+    assert!(
+        delete_body["retract_count"].as_u64().unwrap_or(0) > 0,
+        "{delete_body}"
+    );
+
+    let (status, deleted_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.q",
+            json!({
+                "graph": graph,
+                "query_edn": r#"{:find [?deleted ?operation]
+                                 :where [[?e :atproto/uri ?uri]
+                                         [?e :atproto/deleted ?deleted]
+                                         [?e :atproto/operation ?operation]]}"#
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{deleted_body}");
+    assert_eq!(
+        deleted_body["rows_edn"],
+        json!([["true", "\"delete\""]]),
+        "{deleted_body}"
+    );
+
+    let (status, deleted_text_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.q",
+            json!({
+                "graph": graph,
+                "query_edn": r#"{:find [?text] :where [[?e :atproto/record/text ?text]]}"#
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{deleted_text_body}");
+    assert_eq!(
+        deleted_text_body["rows_edn"],
+        json!([]),
+        "{deleted_text_body}"
+    );
+
+    let (status, deleted_history_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.q",
+            json!({
+                "graph": graph,
+                "history": true,
+                "query_edn": r#"{:find [?text ?added]
+                                 :where [[?e :atproto/record/text ?text ?tx ?added]]}"#
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{deleted_history_body}");
+    assert!(
+        deleted_history_body["rows_edn"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row[0] == "\"hello kotoba\"" && row[1] == "true"),
+        "{deleted_history_body}"
+    );
+    assert!(
+        deleted_history_body["rows_edn"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row[0] == "\"hello kotoba\"" && row[1] == "false"),
+        "{deleted_history_body}"
     );
 }
 
@@ -6997,7 +7110,7 @@ async fn kg_catalog_reflects_ingested_entities() {
 
 // ── quad.create CACAO auth tests ─────────────────────────────────────────────
 
-/// Build a signed Ed25519 CACAO granting `datom:write` on `graph`. Returns `(issuer_did, cacao_b64)`.
+/// Build a signed Ed25519 CACAO granting `datom:transact` on `graph`. Returns `(issuer_did, cacao_b64)`.
 fn build_ed25519_cacao(graph: &str) -> (String, String) {
     use base64::{
         engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD},
@@ -7021,11 +7134,11 @@ fn build_ed25519_cacao(graph: &str) -> (String, String) {
             expiry: Some("2030-01-01T00:00:00Z".into()),
             nonce: "nonce-42".into(),
             domain: "kotoba.test".into(),
-            statement: Some("Authorize quad write".into()),
+            statement: Some("Authorize datom transaction".into()),
             version: "1".into(),
             resources: vec![
                 format!("kotoba://graph/{graph}"),
-                "kotoba://can/datom:write".into(),
+                "kotoba://can/datom:transact".into(),
             ],
         },
         s: kotoba_auth::CacaoSig {

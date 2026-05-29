@@ -939,7 +939,7 @@ mod tests {
             &leaf_sk,
             &leaf_did,
             "did:final",
-            "datom:write",
+            "datom:transact",
             graph,
             "n-leaf",
         );
@@ -947,7 +947,7 @@ mod tests {
             chain: vec![root, leaf],
         };
 
-        let err = chain.verify(graph, "datom:write").unwrap_err();
+        let err = chain.verify(graph, "datom:transact").unwrap_err();
         assert!(
             matches!(err, DelegationError::AttenuationViolation(_)),
             "capability escalation must be rejected: {err:?}"
