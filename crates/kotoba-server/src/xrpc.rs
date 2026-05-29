@@ -893,7 +893,7 @@ pub async fn quad_create(
     let issuer_did = if cacao.p.iss.starts_with("did:web:") {
         resolve_and_verify_did_web(&cacao, &req.graph, &state.http_client).await?
     } else {
-        kotoba_auth::DelegationChain::new(cacao)
+        kotoba_auth::DelegationChain::new(cacao.clone())
             .verify(&req.graph, kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT)
             .map_err(map_delegation_error)?
     };
@@ -945,35 +945,70 @@ pub async fn quad_create(
     }
 
     let graph_cid = KotobaCid::from_bytes(req.graph.as_bytes());
+    let tx_cid = KotobaCid::from_bytes(
+        format!(
+            "quad.create:{}:{}:{}:{}",
+            req.graph, req.subject, req.predicate, req.object
+        )
+        .as_bytes(),
+    );
     let datom = KqeDatom::assert(
         KotobaCid::from_bytes(req.subject.as_bytes()),
         req.predicate.clone(),
         KqeValue::Text(req.object.clone()),
-        KotobaCid::from_bytes(b"kotoba-pending-tx"),
+        tx_cid.clone(),
     );
-
-    let journal_cid = state.assert_datom_compat(graph_cid.clone(), datom).await;
-    let tx_cid = KotobaCid::from_multibase(&journal_cid)
-        .unwrap_or_else(|| KotobaCid::from_bytes(journal_cid.as_bytes()));
+    let auth_proof_cid = Some(persist_cacao_auth_proof(&state, b64)?);
+    let auth_capability = Some(cacao_capability_projection(
+        &cacao.p,
+        auth_proof_cid.clone(),
+    ));
+    let resp = commit_protocol_datoms(
+        &state,
+        graph_cid.clone(),
+        req.graph.clone(),
+        KotobaCid::from_bytes(req.subject.as_bytes()),
+        vec![kotoba_datomic::Datom::from_kqe(datom)],
+        tx_cid,
+        issuer_did.clone(),
+        kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT,
+        auth_proof_cid.clone(),
+        auth_capability.clone(),
+    )
+    .await?;
+    let journal_cid = resp
+        .journal_cids
+        .first()
+        .cloned()
+        .unwrap_or_else(|| resp.tx_cid.clone());
 
     // ── Store author provenance ───────────────────────────────────────────
-    // Subject = journal CID of the write so (graph, journal_cid, meta/author) is
-    // globally unique and references the exact write event.
-    // Use from_multibase so the subject CID matches what graph.query decodes.
+    // Subject = journal CID of the write so legacy graph.query callers can
+    // still resolve the exact write event's author.
     let author_subject = KotobaCid::from_multibase(&journal_cid)
         .unwrap_or_else(|| KotobaCid::from_bytes(journal_cid.as_bytes()));
-    state
-        .quad_store
-        .apply_journaled_datom(
-            graph_cid,
-            KqeDatom::assert(
-                author_subject,
-                "meta/author".to_string(),
-                KqeValue::Text(issuer_did.clone()),
-                tx_cid,
-            ),
-        )
-        .await;
+    let author_tx_cid =
+        KotobaCid::from_bytes(format!("quad.create.author:{journal_cid}").as_bytes());
+    let author_datom = KqeDatom::assert(
+        author_subject,
+        "meta/author".to_string(),
+        KqeValue::Text(issuer_did.clone()),
+        author_tx_cid.clone(),
+    );
+    commit_protocol_datoms(
+        &state,
+        graph_cid,
+        req.graph.clone(),
+        KotobaCid::from_multibase(&journal_cid)
+            .unwrap_or_else(|| KotobaCid::from_bytes(journal_cid.as_bytes())),
+        vec![kotoba_datomic::Datom::from_kqe(author_datom)],
+        author_tx_cid,
+        issuer_did.clone(),
+        kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT,
+        auth_proof_cid,
+        auth_capability,
+    )
+    .await?;
 
     tracing::info!(
         graph     = %req.graph,
@@ -981,7 +1016,8 @@ pub async fn quad_create(
         predicate = %req.predicate,
         cid       = %journal_cid,
         author    = %issuer_did,
-        "quad.create → Journal + QuadStore"
+        commit_cid = %resp.commit_cid,
+        "quad.create → distributed Datomic commit"
     );
 
     Ok((
@@ -6150,7 +6186,7 @@ pub async fn weight_put(
     let issuer_did = if cacao.p.iss.starts_with("did:web:") {
         resolve_and_verify_did_web(&cacao, &req.graph, &state.http_client).await?
     } else {
-        kotoba_auth::DelegationChain::new(cacao)
+        kotoba_auth::DelegationChain::new(cacao.clone())
             .verify(&req.graph, kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT)
             .map_err(map_delegation_error)?
     };
@@ -6212,7 +6248,22 @@ pub async fn weight_put(
         _ => DatomTensorDtype::F32,
     };
 
-    // 4. Assert WeightRef Datom: (model_cid, weight/layer/N, tensor_ref, tx, true)
+    let auth_proof_cid = Some(persist_cacao_auth_proof(&state, b64)?);
+    let auth_capability = Some(cacao_capability_projection(
+        &cacao.p,
+        auth_proof_cid.clone(),
+    ));
+    let tx_cid = KotobaCid::from_bytes(
+        format!(
+            "weight.put:{}:{}:{}",
+            req.graph,
+            model_cid.to_multibase(),
+            blob_cid.to_multibase()
+        )
+        .as_bytes(),
+    );
+
+    // 4. Assert WeightRef Datom through the distributed Datomic/IPNS commit log.
     let datom = KqeDatom::assert(
         model_cid,
         format!("weight/layer/{}", req.layer),
@@ -6221,14 +6272,32 @@ pub async fn weight_put(
             shape: req.shape.clone(),
             dtype,
         },
-        KotobaCid::from_bytes(b"kotoba-pending-tx"),
+        tx_cid.clone(),
     );
-    let quad_cid = state.assert_datom_compat(graph_cid, datom).await;
+    let resp = commit_protocol_datoms(
+        &state,
+        graph_cid,
+        req.graph.clone(),
+        blob_cid.clone(),
+        vec![kotoba_datomic::Datom::from_kqe(datom)],
+        tx_cid,
+        issuer_did.clone(),
+        kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT,
+        auth_proof_cid,
+        auth_capability,
+    )
+    .await?;
+    let quad_cid = resp
+        .journal_cids
+        .first()
+        .cloned()
+        .unwrap_or_else(|| resp.tx_cid.clone());
 
     tracing::info!(
         blob_cid = %blob_cid.to_multibase(),
         layer    = req.layer,
         bytes    = bytes.len(),
+        commit_cid = %resp.commit_cid,
         "weight.put stored"
     );
 
@@ -6499,7 +6568,7 @@ pub async fn lora_apply(
     let issuer_did = if cacao.p.iss.starts_with("did:web:") {
         resolve_and_verify_did_web(&cacao, &req.graph, &state.http_client).await?
     } else {
-        kotoba_auth::DelegationChain::new(cacao)
+        kotoba_auth::DelegationChain::new(cacao.clone())
             .verify(&req.graph, kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT)
             .map_err(map_delegation_error)?
     };
@@ -6534,7 +6603,22 @@ pub async fn lora_apply(
     let graph_cid = KotobaCid::from_multibase(&req.graph)
         .unwrap_or_else(|| KotobaCid::from_bytes(req.graph.as_bytes()));
 
-    // Assert LoRA Datom: (model_cid, lora/adapter, tensor_ref, tx, true)
+    let auth_proof_cid = Some(persist_cacao_auth_proof(&state, b64)?);
+    let auth_capability = Some(cacao_capability_projection(
+        &cacao.p,
+        auth_proof_cid.clone(),
+    ));
+    let tx_cid = KotobaCid::from_bytes(
+        format!(
+            "lora.apply:{}:{}:{}",
+            req.graph,
+            model_cid.to_multibase(),
+            adapter_cid.to_multibase()
+        )
+        .as_bytes(),
+    );
+
+    // Assert LoRA Datom through the distributed Datomic/IPNS commit log.
     let datom = KqeDatom::assert(
         model_cid,
         "lora/adapter".to_string(),
@@ -6543,14 +6627,32 @@ pub async fn lora_apply(
             shape: vec![req.rank],
             dtype: DatomTensorDtype::F8E4M3,
         },
-        KotobaCid::from_bytes(b"kotoba-pending-tx"),
+        tx_cid.clone(),
     );
-    let quad_cid = state.assert_datom_compat(graph_cid, datom).await;
+    let resp = commit_protocol_datoms(
+        &state,
+        graph_cid,
+        req.graph.clone(),
+        adapter_cid.clone(),
+        vec![kotoba_datomic::Datom::from_kqe(datom)],
+        tx_cid,
+        issuer_did.clone(),
+        kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT,
+        auth_proof_cid,
+        auth_capability,
+    )
+    .await?;
+    let quad_cid = resp
+        .journal_cids
+        .first()
+        .cloned()
+        .unwrap_or_else(|| resp.tx_cid.clone());
 
     tracing::info!(
         adapter_cid = %adapter_cid.to_multibase(),
         model_cid   = %req.model_cid,
         rank        = req.rank,
+        commit_cid = %resp.commit_cid,
         "lora.apply stored"
     );
 
@@ -6640,21 +6742,40 @@ pub async fn embed_create(
 
     let dims = vector.len();
     let emb = Embedding {
-        doc_cid,
-        model_cid,
+        doc_cid: doc_cid.clone(),
+        model_cid: model_cid.clone(),
         vector,
     };
+    let tx_cid = KotobaCid::from_bytes(
+        format!(
+            "embed.create:{}:{}:{}",
+            req.graph,
+            doc_cid.to_multibase(),
+            model_cid.to_multibase()
+        )
+        .as_bytes(),
+    );
     let delta = embed_to_quad(&emb, graph_cid.clone());
-
-    let quad_cid = state.journal_assert_datom(&graph_cid, &delta.datom).await;
-    let tx_cid = KotobaCid::from_multibase(&quad_cid)
-        .unwrap_or_else(|| KotobaCid::from_bytes(quad_cid.as_bytes()));
     let mut datom = delta.datom;
-    datom.tx = tx_cid;
-    state
-        .quad_store
-        .apply_journaled_datom(graph_cid, datom)
-        .await;
+    datom.tx = tx_cid.clone();
+    let resp = commit_protocol_datoms(
+        &state,
+        graph_cid,
+        req.graph.clone(),
+        doc_cid.clone(),
+        vec![kotoba_datomic::Datom::from_kqe(datom)],
+        tx_cid,
+        state.operator_did.clone(),
+        kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT,
+        None,
+        None,
+    )
+    .await?;
+    let quad_cid = resp
+        .journal_cids
+        .first()
+        .cloned()
+        .unwrap_or_else(|| resp.tx_cid.clone());
 
     Ok(Json(EmbedCreateResp {
         status: "ok",

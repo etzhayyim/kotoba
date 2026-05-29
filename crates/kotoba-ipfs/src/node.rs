@@ -1241,14 +1241,21 @@ impl KotobaIpfsNode {
         Ok(())
     }
 
-    /// Kubo-like MFS `files/cp` for local MFS paths and `/ipfs/<cid>` sources.
+    /// Kubo-like MFS `files/cp` for local MFS paths and resolved `/ipfs`/`/ipns` sources.
     pub async fn files_cp(&self, source: impl AsRef<str>, dest: impl AsRef<str>) -> Result<()> {
         let source = source.as_ref();
         let dest = normalize_mfs_path(dest.as_ref())?;
         self.ensure_mfs_parent(&dest).await?;
-        if let Some(cid) = ipfs_path_cid(source)? {
-            self.get_block(&cid).await?;
-            self.state.files.write().await.insert(dest, cid);
+        if is_ipld_path(source) {
+            let resolved = self.resolve_path(source).await?;
+            if !resolved.rem_path.is_empty() {
+                bail!(
+                    "files/cp source did not resolve to a block CID; remaining path: {}",
+                    resolved.rem_path
+                );
+            }
+            self.get_block(&resolved.cid).await?;
+            self.state.files.write().await.insert(dest, resolved.cid);
             persist_repo_state(&self.state).await?;
             return Ok(());
         }
@@ -2079,18 +2086,8 @@ fn immediate_mfs_child(prefix: &str, path: &str) -> Option<String> {
     })
 }
 
-fn ipfs_path_cid(path: &str) -> Result<Option<IpldCid>> {
-    let Some(rest) = path.strip_prefix("/ipfs/") else {
-        return Ok(None);
-    };
-    let cid = rest
-        .split('/')
-        .next()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("invalid IPFS path: {path}"))?
-        .parse::<IpldCid>()
-        .map_err(|err| anyhow!("invalid IPFS path CID: {err}"))?;
-    Ok(Some(cid))
+fn is_ipld_path(path: &str) -> bool {
+    path.starts_with("/ipfs/") || path.starts_with("/ipns/")
 }
 
 fn split_ipld_path(path: &str) -> Result<(&str, String)> {

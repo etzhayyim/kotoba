@@ -41,10 +41,17 @@ pub const MCP_TOOL_COMMIT_PRUNE: &str = "kotoba_commit_prune";
 pub const MCP_TOOL_SPARQL_QUERY: &str = "kotoba_sparql_query";
 pub const MCP_TOOL_MULTI_HOP: &str = "kotoba_multi_hop";
 
-use axum::{extract::State, http::HeaderMap, response::IntoResponse, Json};
+use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+    Json,
+};
+use kotoba_core::cid::KotobaCid;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::server::KotobaState;
 
@@ -386,6 +393,53 @@ const ADMIN_ONLY_TOOLS: &[&str] = &[
     MCP_TOOL_NODE_REGISTER,
 ];
 
+fn map_xrpc_err((status, msg): (StatusCode, String)) -> (i32, String) {
+    let code = match status {
+        StatusCode::BAD_REQUEST => ERR_INVALID_PARAMS,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => ERR_AUTH,
+        StatusCode::NOT_FOUND => ERR_NOT_FOUND,
+        _ => ERR_INTERNAL,
+    };
+    (code, msg)
+}
+
+fn mcp_tx_cid(label: &str, parts: &[&str]) -> KotobaCid {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    KotobaCid::from_bytes(format!("mcp:{label}:{nanos}:{}", parts.join(":")).as_bytes())
+}
+
+async fn commit_mcp_datoms(
+    state: &Arc<KotobaState>,
+    graph_cid: KotobaCid,
+    graph: String,
+    entity_cid: KotobaCid,
+    datoms: Vec<kotoba_kqe::Datom>,
+    tx_cid: KotobaCid,
+    caller: Option<&str>,
+) -> Result<crate::xrpc::ProtocolDatomWriteResp, (i32, String)> {
+    let datoms = datoms
+        .into_iter()
+        .map(kotoba_datomic::Datom::from_kqe)
+        .collect();
+    crate::xrpc::commit_protocol_datoms(
+        state,
+        graph_cid,
+        graph,
+        entity_cid,
+        datoms,
+        tx_cid,
+        caller.unwrap_or(&state.operator_did).to_string(),
+        kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT,
+        None,
+        None,
+    )
+    .await
+    .map_err(map_xrpc_err)
+}
+
 // ── Dispatch to state methods ────────────────────────────────────────────────
 
 async fn call_tool(
@@ -451,13 +505,25 @@ async fn call_tool(
             }
 
             let graph_cid = KotobaCid::from_bytes(graph.as_bytes());
+            let subject_cid = KotobaCid::from_bytes(subject.as_bytes());
+            let tx_cid = mcp_tx_cid("datom.create", &[&graph, &subject, &predicate, &object]);
             let datom = KqeDatom::assert(
-                KotobaCid::from_bytes(subject.as_bytes()),
+                subject_cid.clone(),
                 predicate,
                 KqeValue::Text(object),
-                KotobaCid::from_bytes(b"kotoba-pending-tx"),
+                tx_cid.clone(),
             );
-            let journal_cid = state.assert_datom_compat(graph_cid, datom).await;
+            let resp = commit_mcp_datoms(
+                state,
+                graph_cid,
+                graph,
+                subject_cid,
+                vec![datom],
+                tx_cid,
+                caller,
+            )
+            .await?;
+            let journal_cid = resp.journal_cids.first().cloned().unwrap_or(resp.tx_cid);
 
             Ok(json!({
                 "status": "ok",
@@ -653,21 +719,32 @@ async fn call_tool(
 
             let dims = vector.len();
             let emb = Embedding {
-                doc_cid,
-                model_cid,
+                doc_cid: doc_cid.clone(),
+                model_cid: model_cid.clone(),
                 vector,
             };
             let delta = embed_to_quad(&emb, graph_cid.clone());
-
-            let quad_cid = state.journal_assert_datom(&graph_cid, &delta.datom).await;
-            let tx_cid = KotobaCid::from_multibase(&quad_cid)
-                .unwrap_or_else(|| KotobaCid::from_bytes(quad_cid.as_bytes()));
+            let tx_cid = mcp_tx_cid(
+                "embed.create",
+                &[
+                    graph.as_str(),
+                    &doc_cid.to_multibase(),
+                    &model_cid.to_multibase(),
+                ],
+            );
             let mut datom = delta.datom;
-            datom.tx = tx_cid;
-            state
-                .quad_store
-                .apply_journaled_datom(graph_cid, datom)
-                .await;
+            datom.tx = tx_cid.clone();
+            let resp = commit_mcp_datoms(
+                state,
+                graph_cid,
+                graph,
+                doc_cid,
+                vec![datom],
+                tx_cid,
+                caller,
+            )
+            .await?;
+            let quad_cid = resp.journal_cids.first().cloned().unwrap_or(resp.tx_cid);
 
             Ok(json!({ "status": "ok", "quad_cid": quad_cid, "dims": dims }))
         }
@@ -734,16 +811,34 @@ async fn call_tool(
             };
 
             let datom = KqeDatom::assert(
-                model_cid,
+                model_cid.clone(),
                 format!("weight/layer/{layer}"),
                 KqeValue::TensorCid {
                     cid: blob_cid.clone(),
                     shape,
                     dtype,
                 },
-                KotobaCid::from_bytes(b"kotoba-pending-tx"),
+                mcp_tx_cid(
+                    "weight.put",
+                    &[
+                        graph_str.as_str(),
+                        &model_cid.to_multibase(),
+                        &blob_cid.to_multibase(),
+                    ],
+                ),
             );
-            let quad_cid = state.assert_datom_compat(graph_cid, datom).await;
+            let tx_cid = datom.tx.clone();
+            let resp = commit_mcp_datoms(
+                state,
+                graph_cid,
+                graph_str,
+                blob_cid.clone(),
+                vec![datom],
+                tx_cid,
+                caller,
+            )
+            .await?;
+            let quad_cid = resp.journal_cids.first().cloned().unwrap_or(resp.tx_cid);
 
             Ok(json!({
                 "status":   "ok",
@@ -797,16 +892,34 @@ async fn call_tool(
                 .map_err(|e| (ERR_INTERNAL, e.to_string()))?;
 
             let datom = KqeDatom::assert(
-                model_cid,
+                model_cid.clone(),
                 "lora/adapter".to_string(),
                 KqeValue::TensorCid {
                     cid: adapter_cid.clone(),
                     shape: vec![rank],
                     dtype: DatomTensorDtype::F8E4M3,
                 },
-                KotobaCid::from_bytes(b"kotoba-pending-tx"),
+                mcp_tx_cid(
+                    "lora.apply",
+                    &[
+                        graph_str.as_str(),
+                        &model_cid.to_multibase(),
+                        &adapter_cid.to_multibase(),
+                    ],
+                ),
             );
-            let quad_cid = state.assert_datom_compat(graph_cid, datom).await;
+            let tx_cid = datom.tx.clone();
+            let resp = commit_mcp_datoms(
+                state,
+                graph_cid,
+                graph_str,
+                adapter_cid.clone(),
+                vec![datom],
+                tx_cid,
+                caller,
+            )
+            .await?;
+            let quad_cid = resp.journal_cids.first().cloned().unwrap_or(resp.tx_cid);
 
             Ok(json!({
                 "status":      "ok",
@@ -1698,6 +1811,46 @@ mod tests {
         assert_eq!(value["status"], "ok");
         assert!(value["datom_cid"].is_string());
         assert_eq!(value["datom_cid"], value["journal_cid"]);
+    }
+
+    #[tokio::test]
+    async fn call_tool_datom_create_commits_to_distributed_datomic_head() {
+        let state = Arc::new(crate::server::KotobaState::new(None).expect("state"));
+        let graph = "mcp_distributed_graph";
+        let subject = "mcp_subject";
+        let predicate = "mcp/predicate";
+        let object = "mcp object";
+        call_tool(
+            MCP_TOOL_DATOM_CREATE,
+            &json!({
+                "graph": graph,
+                "subject": subject,
+                "predicate": predicate,
+                "object": object
+            }),
+            &state,
+            Some("did:key:mcp-caller"),
+        )
+        .await
+        .expect("mcp datom create");
+
+        let graph_cid = KotobaCid::from_bytes(graph.as_bytes());
+        let reader = kotoba_datomic::distributed::DistributedDatomReader::new(
+            &*state.block_store,
+            &*state.ipns_registry,
+        );
+        let history = reader
+            .history_for_name(&crate::xrpc::distributed_graph_ipns_name(&graph_cid))
+            .expect("distributed history");
+        assert!(
+            history.iter().any(|datom| {
+                datom.e == KotobaCid::from_bytes(subject.as_bytes())
+                    && datom.a == predicate
+                    && datom.v == kotoba_edn::EdnValue::string(object)
+                    && datom.added
+            }),
+            "MCP datom.create must write through the distributed Datomic/IPNS head"
+        );
     }
 
     #[tokio::test]

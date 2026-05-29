@@ -763,6 +763,21 @@ async fn kubo_compatible_local_api_surface() {
             .expect("files/read /ipfs copy"),
         b"hello"[..]
     );
+    node.block_put(&pb_dir, &pb_dir_block)
+        .await
+        .expect("re-add dag-pb dir before files/cp path source");
+    node.files_cp(
+        format!("/ipfs/{pb_dir}/hello.txt"),
+        "/docs/from-ipfs-path.txt",
+    )
+    .await
+    .expect("files/cp resolved /ipfs path source");
+    assert_eq!(
+        node.files_read("/docs/from-ipfs-path.txt")
+            .await
+            .expect("files/read resolved /ipfs path copy"),
+        b"hello"[..]
+    );
     node.files_mv("/docs/from-ipfs.txt", "/docs/archive/from-ipfs-moved.txt")
         .await
         .expect("files/mv file");
@@ -877,7 +892,7 @@ async fn kubo_compatible_local_api_surface() {
         .contains(&raw));
     assert!(node.has_block(&raw).await.expect("has raw under mfs"));
     assert!(!node.has_block(&dag).await.expect("has dag after gc"));
-    assert_eq!(node.files_rm("/docs", true).await.expect("files/rm"), 14);
+    assert_eq!(node.files_rm("/docs", true).await.expect("files/rm"), 15);
     assert!(node
         .files_ls("/docs")
         .await

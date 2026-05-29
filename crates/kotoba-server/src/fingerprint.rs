@@ -16,6 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{body::Body, extract::State, http::Request, middleware::Next, response::Response};
 use kotoba_core::cid::KotobaCid;
+#[cfg(test)]
 use kotoba_kqe::quad::{LegacyQuad as Quad, LegacyQuadObject as QuadObject};
 
 use crate::server::KotobaState;
@@ -145,6 +146,7 @@ pub async fn fingerprint_middleware(
 }
 
 /// Build the set of audit Quads for a single request.
+#[cfg(test)]
 fn build_request_quads(
     graph: KotobaCid,
     subject: KotobaCid,
