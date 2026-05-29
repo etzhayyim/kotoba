@@ -7325,6 +7325,17 @@ mod tests {
             "datoms",
             &["e", "a", "v_edn", "t", "added"],
         );
+        for src in [
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/seekDatoms.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/indexRange.json"),
+        ] {
+            assert_lexicon_output_fields(
+                src,
+                &["graph", "index", "datom_count", "datoms"],
+                &["basis_t"],
+            );
+            assert_lexicon_array_item_fields(src, "datoms", &["e", "a", "v_edn", "t", "added"]);
+        }
         assert_lexicon_output_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/txRange.json"),
             &["graph", "tx_count", "txes"],
@@ -7366,8 +7377,6 @@ mod tests {
             &["e", "a", "v_edn", "t", "added"],
         );
         for src in [
-            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/seekDatoms.json"),
-            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/indexRange.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/pull.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/pullMany.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/basisT.json"),
