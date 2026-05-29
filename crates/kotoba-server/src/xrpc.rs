@@ -2666,7 +2666,7 @@ fn atproto_repo_delete_datoms(
     out
 }
 
-async fn current_db_for_graph(
+pub(crate) async fn current_db_for_graph(
     state: &KotobaState,
     graph_cid: &kotoba_core::cid::KotobaCid,
 ) -> Result<kotoba_datomic::Db, (StatusCode, String)> {
@@ -6031,7 +6031,8 @@ pub struct GraphQueryReq {
 }
 
 /// GET /xrpc/ai.gftd.apps.kotoba.graph.query
-/// SPO pattern query over the in-memory Arrangement.
+/// SPO pattern query over the distributed Datomic head, with legacy hot/cold
+/// projection fallback handled by `current_db_for_graph`.
 /// Full Datalog evaluation: use invoke.run with program_type=datalog.
 pub async fn graph_query(
     State(state): State<Arc<KotobaState>>,
@@ -6092,19 +6093,15 @@ pub async fn graph_query(
         .map_err(AccessDenied::into_response)?;
     }
 
-    let arrangement = match state.quad_store.arrangement(&graph_cid).await {
-        None => {
-            return Ok(Json(
-                serde_json::json!({ "graph": req.graph, "count": 0, "quads": [] }),
-            ));
-        }
-        Some(a) => a,
-    };
-
     const MAX_QUERY_RESULTS: u64 = 1_000;
     let limit = req.limit.unwrap_or(100).min(MAX_QUERY_RESULTS) as usize;
 
-    let mut quads = arrangement.quads(&graph_cid);
+    let db = current_db_for_graph(&state, &graph_cid).await?;
+    let mut quads: Vec<_> = db
+        .datoms()
+        .into_iter()
+        .map(|datom| datom_to_projection_quad(&datom, &graph_cid))
+        .collect();
 
     // Subject filter (accept multibase CID or raw string → hash to CID)
     if let Some(s) = &req.subject {

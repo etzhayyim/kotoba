@@ -1688,11 +1688,16 @@ impl KotobaIpfsNode {
                 });
             }
             let node = decode_dag_pb_node(&self.get_block(&current).await?)?;
-            let link = node
-                .links
-                .into_iter()
-                .find(|link| link.name == *segment)
-                .ok_or_else(|| anyhow!("dag-pb path not found: {path}"))?;
+            let link = if let Some(named) = node.links.iter().find(|link| link.name == *segment) {
+                named
+            } else {
+                let index = segment
+                    .parse::<usize>()
+                    .map_err(|_| anyhow!("dag-pb path not found: {path}"))?;
+                node.links
+                    .get(index)
+                    .ok_or_else(|| anyhow!("dag-pb path not found: {path}"))?
+            };
             current = link.cid;
         }
         Ok(DagResolve {

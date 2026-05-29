@@ -395,6 +395,20 @@ async fn kubo_compatible_local_api_surface() {
         raw
     );
     assert_eq!(
+        node.dag_resolve(&pb_dir, "0")
+            .await
+            .expect("dag/resolve dag-pb link index")
+            .cid,
+        raw
+    );
+    assert_eq!(
+        node.resolve_path(format!("/ipfs/{pb_dir}/0"))
+            .await
+            .expect("resolve dag-pb link index path")
+            .cid,
+        raw
+    );
+    assert_eq!(
         node.cat_path(format!("/ipfs/{pb_dir}/hello.txt"))
             .await
             .expect("cat dag-pb named link"),
