@@ -3645,7 +3645,10 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use kotoba_ipfs::{InMemoryIpnsRegistry, KuboIpnsRegistry, SignedIpnsRegistry};
     use kotoba_store::MemoryBlockStore;
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
     use std::sync::Arc;
+    use std::sync::Mutex;
 
     fn datom(e: &[u8], a: &str, v: &str, tx: &[u8]) -> Datom {
         Datom::assert(
@@ -3718,6 +3721,131 @@ mod tests {
         .map_err(Into::into)
     }
 
+    struct PeerBlockStore {
+        socket: SocketAddr,
+        cache: Mutex<HashMap<KotobaCid, bytes::Bytes>>,
+    }
+
+    impl PeerBlockStore {
+        fn new(socket: SocketAddr) -> Self {
+            Self {
+                socket,
+                cache: Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl kotoba_core::store::BlockStore for PeerBlockStore {
+        fn put(&self, cid: &KotobaCid, data: &[u8]) -> anyhow::Result<()> {
+            self.cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("peer block cache lock poisoned"))?
+                .insert(cid.clone(), bytes::Bytes::copy_from_slice(data));
+            Ok(())
+        }
+
+        fn get(&self, cid: &KotobaCid) -> anyhow::Result<Option<bytes::Bytes>> {
+            if let Some(bytes) = self
+                .cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("peer block cache lock poisoned"))?
+                .get(cid)
+                .cloned()
+            {
+                return Ok(Some(bytes));
+            }
+            let mut stream = TcpStream::connect(self.socket)?;
+            stream.write_all(format!("GET kotoba-ipfs/1 {}\n", cid.to_multibase()).as_bytes())?;
+            stream.flush()?;
+            let mut len_buf = [0u8; 8];
+            stream.read_exact(&mut len_buf)?;
+            let len = u64::from_be_bytes(len_buf);
+            if len == u64::MAX {
+                return Ok(None);
+            }
+            let mut buf = vec![0u8; len as usize];
+            stream.read_exact(&mut buf)?;
+            if KotobaCid::from_bytes(&buf) != *cid {
+                return Err(anyhow::anyhow!("remote block CID mismatch: {cid}"));
+            }
+            let bytes = bytes::Bytes::from(buf);
+            self.cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("peer block cache lock poisoned"))?
+                .insert(cid.clone(), bytes.clone());
+            Ok(Some(bytes))
+        }
+
+        fn has(&self, cid: &KotobaCid) -> bool {
+            self.get(cid).ok().flatten().is_some()
+        }
+    }
+
+    struct PeerIpnsRegistry {
+        socket: SocketAddr,
+    }
+
+    impl PeerIpnsRegistry {
+        fn new(socket: SocketAddr) -> Self {
+            Self { socket }
+        }
+    }
+
+    impl kotoba_ipfs::IpnsRegistry for PeerIpnsRegistry {
+        fn publish(
+            &self,
+            _record: kotoba_ipfs::IpnsRecord,
+        ) -> Result<(), kotoba_ipfs::IpnsRegistryError> {
+            Err(kotoba_ipfs::IpnsRegistryError::Kubo(
+                "test peer registry is read-only".into(),
+            ))
+        }
+
+        fn resolve(
+            &self,
+            name: &kotoba_ipfs::IpnsName,
+        ) -> Result<kotoba_ipfs::IpnsRecord, kotoba_ipfs::IpnsRegistryError> {
+            let mut stream = TcpStream::connect(self.socket)
+                .map_err(|e| kotoba_ipfs::IpnsRegistryError::Kubo(e.to_string()))?;
+            stream
+                .write_all(format!("NAME kotoba-ipfs/1 {}\n", name.0).as_bytes())
+                .map_err(|e| kotoba_ipfs::IpnsRegistryError::Kubo(e.to_string()))?;
+            stream
+                .flush()
+                .map_err(|e| kotoba_ipfs::IpnsRegistryError::Kubo(e.to_string()))?;
+            let mut len_buf = [0u8; 8];
+            stream
+                .read_exact(&mut len_buf)
+                .map_err(|e| kotoba_ipfs::IpnsRegistryError::Kubo(e.to_string()))?;
+            let len = u64::from_be_bytes(len_buf);
+            if len == u64::MAX {
+                return Err(kotoba_ipfs::IpnsRegistryError::NotFound(name.0.clone()));
+            }
+            let mut buf = vec![0u8; len as usize];
+            stream
+                .read_exact(&mut buf)
+                .map_err(|e| kotoba_ipfs::IpnsRegistryError::Kubo(e.to_string()))?;
+            ciborium::from_reader(&buf[..])
+                .map_err(|e| kotoba_ipfs::IpnsRegistryError::Kubo(e.to_string()))
+        }
+    }
+
+    fn socket_from_listen_addr(addr: &kotoba_ipfs::Multiaddr) -> SocketAddr {
+        let parts = addr.to_string();
+        let segments = parts.split('/').collect::<Vec<_>>();
+        let ip = segments
+            .windows(2)
+            .find_map(|window| (window[0] == "ip4").then_some(window[1]))
+            .expect("ip4 segment");
+        let port = segments
+            .windows(2)
+            .find_map(|window| (window[0] == "tcp").then_some(window[1]))
+            .expect("tcp segment")
+            .parse::<u16>()
+            .expect("tcp port");
+        format!("{ip}:{port}").parse().expect("socket addr")
+    }
+
     #[test]
     fn commit_datoms_writes_five_roots_and_ipns_head() {
         let store = MemoryBlockStore::new();
@@ -3765,6 +3893,86 @@ mod tests {
         assert!(stored[0].added);
         let resolved = ipns.resolve(&IpnsName::new("k51-kotoba-db")).unwrap();
         assert_eq!(resolved.value, report.commit.cid.to_multibase());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reader_queries_remote_ipfs_ipns_dag_cbor_prolly_head() {
+        let source_node = kotoba_ipfs::IpfsConfig::new()
+            .with_listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+            .start()
+            .await
+            .expect("source ipfs node");
+        let source_addr = source_node
+            .listen_addrs()
+            .await
+            .expect("source listen addrs")
+            .into_iter()
+            .next()
+            .expect("source listen addr");
+        let source_socket = socket_from_listen_addr(&source_addr);
+
+        let local_store = MemoryBlockStore::new();
+        let local_ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&local_store, &local_ipns);
+        let graph = KotobaCid::from_bytes(b"remote-datomic-graph");
+        let ipns_name = "k51-kotoba-remote-datomic";
+        let report = writer
+            .commit_datoms(request(
+                ipns_name,
+                graph,
+                vec![
+                    datom(b"alice", "person/name", "Alice", b"tx-remote"),
+                    datom(b"alice", "person/role", "admin", b"tx-remote"),
+                ],
+            ))
+            .expect("commit distributed datoms");
+
+        for cid in local_store.all_cids() {
+            let bytes = local_store.get(&cid).unwrap().expect("stored block");
+            let ipfs_cid = cid.to_standard_cid().expect("ipfs-compatible cid");
+            source_node
+                .put_block(&ipfs_cid, &bytes)
+                .await
+                .expect("seed remote ipfs block");
+        }
+        let commit_ipfs_cid = report
+            .commit
+            .cid
+            .to_standard_cid()
+            .expect("commit cid is ipfs-compatible");
+        source_node
+            .name_publish(
+                ipns_name,
+                &commit_ipfs_cid,
+                report.ipns_record.valid_until.clone(),
+            )
+            .await
+            .expect("publish remote ipns head");
+
+        let remote_store = PeerBlockStore::new(source_socket);
+        let remote_ipns = PeerIpnsRegistry::new(source_socket);
+        let reader = DistributedDatomReader::new(&remote_store, &remote_ipns);
+        let query = kotoba_edn::parse(
+            r#"{:find [?name ?role]
+               :where [[?e :person/name ?name]
+                       [?e :person/role ?role]]}"#,
+        )
+        .expect("query parse");
+        let rows = reader
+            .q_triples_for_name(ipns_name, &query)
+            .expect("remote distributed query");
+
+        assert_eq!(
+            rows,
+            vec![vec![EdnValue::string("Alice"), EdnValue::string("admin")]]
+        );
+        assert!(remote_store.has(&report.commit.cid));
+        for root in report.commit.index_roots.values() {
+            assert!(
+                remote_store.has(root),
+                "remote store should fetch Prolly root {root}"
+            );
+        }
     }
 
     #[test]

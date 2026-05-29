@@ -3595,6 +3595,7 @@ name = "kotoba-datomic"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "ciborium",
  "ed25519-dalek",
  "hex",

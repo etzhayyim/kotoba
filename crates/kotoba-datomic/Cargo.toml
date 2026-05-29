@@ -18,5 +18,6 @@ thiserror.workspace = true
 hex.workspace = true
 
 [dev-dependencies]
+bytes = { workspace = true }
 kotoba-store = { path = "../kotoba-store" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
