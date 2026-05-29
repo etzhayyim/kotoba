@@ -26,9 +26,7 @@ use axum::{
     Json,
 };
 use kotoba_core::cid::KotobaCid;
-use kotoba_kqe::datom::Datom as KqeDatom;
 use kotoba_kqe::quad::{LegacyQuad as Quad, LegacyQuadObject as QuadObject};
-use kotoba_kqe::Value as KqeValue;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -175,20 +173,96 @@ fn int_quad(graph: &str, subject: &str, predicate: &str, value: i64) -> Quad {
     }
 }
 
-async fn assert_quads_as_datoms_silent(state: &KotobaState, graph: &str, quads: Vec<Quad>) {
-    state
-        .quad_store
-        .assert_datom_batch_silent(
-            cid(graph),
-            quads
-                .into_iter()
-                .map(|quad| KqeDatom::from_legacy_quad(quad, true))
-                .collect(),
-        )
-        .await;
+fn graph_tx_cid(graph: &str, entity: &str) -> KotobaCid {
+    KotobaCid::from_bytes(format!("kotobase:{graph}:{entity}:{}", new_pin_id()).as_bytes())
 }
 
-// ── Arrangement read helpers ───────────────────────────────────────────────
+async fn commit_quads_as_datoms(
+    state: &KotobaState,
+    graph: &str,
+    entity: &str,
+    author: &str,
+    quads: Vec<Quad>,
+) -> Result<(), (StatusCode, String)> {
+    let tx_cid = graph_tx_cid(graph, entity);
+    let datoms = quads
+        .into_iter()
+        .map(|quad| {
+            let mut datom = kotoba_kqe::Datom::from_legacy_quad(quad, true);
+            datom.tx = tx_cid.clone();
+            kotoba_datomic::Datom::from_kqe(datom)
+        })
+        .collect::<Vec<_>>();
+    crate::xrpc::commit_protocol_datoms(
+        state,
+        cid(graph),
+        graph.to_string(),
+        cid(entity),
+        datoms,
+        tx_cid,
+        author.to_string(),
+        kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT,
+        None,
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn commit_retractions(
+    state: &KotobaState,
+    graph: &str,
+    entity: &str,
+    author: &str,
+    datoms: Vec<kotoba_datomic::Datom>,
+) -> Result<(), (StatusCode, String)> {
+    let tx_cid = graph_tx_cid(graph, entity);
+    let retractions = datoms
+        .into_iter()
+        .map(|datom| kotoba_datomic::Datom::retract(datom.e, datom.a, datom.v, tx_cid.clone()))
+        .collect::<Vec<_>>();
+    crate::xrpc::commit_protocol_datoms(
+        state,
+        cid(graph),
+        graph.to_string(),
+        cid(entity),
+        retractions,
+        tx_cid,
+        author.to_string(),
+        kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT,
+        None,
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn graph_datoms(
+    state: &KotobaState,
+    graph: &str,
+) -> Result<Vec<kotoba_datomic::Datom>, (StatusCode, String)> {
+    Ok(crate::xrpc::current_db_for_graph(state, &cid(graph))
+        .await?
+        .datoms())
+}
+
+fn datom_text(value: &kotoba_edn::EdnValue) -> Option<String> {
+    if let kotoba_edn::EdnValue::String(text) = value {
+        Some(text.clone())
+    } else {
+        None
+    }
+}
+
+fn datom_int(value: &kotoba_edn::EdnValue) -> Option<i64> {
+    if let kotoba_edn::EdnValue::Integer(value) = value {
+        Some(*value)
+    } else {
+        None
+    }
+}
+
+// ── Distributed Datom read helpers ─────────────────────────────────────────
 
 async fn get_text(
     state: &KotobaState,
@@ -196,34 +270,28 @@ async fn get_text(
     subject: &str,
     predicate: &str,
 ) -> Option<String> {
-    let arr = state.quad_store.arrangement(&cid(graph)).await?;
-    arr.get_values(&cid(subject), predicate)
+    let subject = cid(subject);
+    graph_datoms(state, graph)
+        .await
+        .ok()?
         .into_iter()
-        .find_map(|value| {
-            if let KqeValue::Text(t) = value {
-                Some(t)
-            } else {
-                None
-            }
-        })
+        .find(|datom| datom.e == subject && datom.a == predicate)
+        .and_then(|datom| datom_text(&datom.v))
 }
 
 #[allow(dead_code)]
 async fn get_int(state: &KotobaState, graph: &str, subject: &str, predicate: &str) -> i64 {
-    if let Some(arr) = state.quad_store.arrangement(&cid(graph)).await {
-        arr.get_values(&cid(subject), predicate)
-            .into_iter()
-            .find_map(|value| {
-                if let KqeValue::Integer(v) = value {
-                    Some(v)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0)
-    } else {
-        0
-    }
+    let subject = cid(subject);
+    graph_datoms(state, graph)
+        .await
+        .ok()
+        .and_then(|datoms| {
+            datoms
+                .into_iter()
+                .find(|datom| datom.e == subject && datom.a == predicate)
+                .and_then(|datom| datom_int(&datom.v))
+        })
+        .unwrap_or(0)
 }
 
 async fn read_tier(state: &KotobaState, tenant_did: &str) -> String {
@@ -240,45 +308,58 @@ async fn count_pins(
     status_filter: Option<&str>,
 ) -> (i64, i64) {
     let g = format!("kotobase/pins/{tenant_did}");
-    let arr = match state.quad_store.arrangement(&cid(&g)).await {
-        Some(a) => a,
-        None => return (0, 0),
+    let datoms = match graph_datoms(state, &g).await {
+        Ok(datoms) => datoms,
+        Err(_) => return (0, 0),
     };
-    let pin_subjects = arr.get_entities_by_attribute("kotobase/pin/cid");
+    let mut pin_subjects = datoms
+        .iter()
+        .filter(|datom| datom.a == "kotobase/pin/cid")
+        .map(|datom| datom.e.clone())
+        .collect::<Vec<_>>();
+    pin_subjects.sort_by_key(|cid| cid.to_multibase());
+    pin_subjects.dedup();
     let mut count = 0i64;
     let mut bytes = 0i64;
     for subj_cid in pin_subjects {
         if let Some(sf) = status_filter {
-            let status = arr
-                .get_values(&subj_cid, "kotobase/pin/status")
-                .into_iter()
-                .find_map(|value| {
-                    if let KqeValue::Text(t) = value {
-                        Some(t)
-                    } else {
-                        None
-                    }
-                })
+            let status = datoms
+                .iter()
+                .find(|datom| datom.e == subj_cid && datom.a == "kotobase/pin/status")
+                .and_then(|datom| datom_text(&datom.v))
                 .unwrap_or_default();
             if status != sf {
                 continue;
             }
         }
         count += 1;
-        let sz: i64 = arr
-            .get_values(&subj_cid, "kotobase/pin/size_bytes")
-            .into_iter()
-            .find_map(|value| {
-                if let KqeValue::Integer(v) = value {
-                    Some(v)
-                } else {
-                    None
-                }
-            })
+        let sz: i64 = datoms
+            .iter()
+            .find(|datom| datom.e == subj_cid && datom.a == "kotobase/pin/size_bytes")
+            .and_then(|datom| datom_int(&datom.v))
             .unwrap_or(0);
         bytes += sz;
     }
     (count, bytes)
+}
+
+fn text_for_subject(
+    datoms: &[kotoba_datomic::Datom],
+    subject: &KotobaCid,
+    predicate: &str,
+) -> Option<String> {
+    datoms
+        .iter()
+        .find(|datom| datom.e == *subject && datom.a == predicate)
+        .and_then(|datom| datom_text(&datom.v))
+}
+
+fn int_for_subject(datoms: &[kotoba_datomic::Datom], subject: &KotobaCid, predicate: &str) -> i64 {
+    datoms
+        .iter()
+        .find(|datom| datom.e == *subject && datom.a == predicate)
+        .and_then(|datom| datom_int(&datom.v))
+        .unwrap_or(0)
 }
 
 fn now_unix_str() -> String {
@@ -466,7 +547,7 @@ pub async fn handle_account_create(
         text_quad(&g, &req.tenant_did, "kotobase/account/tier", &tier),
         text_quad(&g, &req.tenant_did, "kotobase/account/created_at", &now),
     ];
-    assert_quads_as_datoms_silent(&state, &g, quads).await;
+    commit_quads_as_datoms(&state, &g, &req.tenant_did, &req.tenant_did, quads).await?;
 
     Ok((
         StatusCode::OK,
@@ -698,7 +779,21 @@ pub async fn handle_pin_create(
             quads.push(text_quad(&graph, &t.subject, &t.predicate, &t.object));
         }
         let gc = KotobaCid::from_bytes(graph.as_bytes());
-        assert_quads_as_datoms_silent(&state, &graph, quads).await;
+        if let Err((status, msg)) =
+            commit_quads_as_datoms(&state, &graph, &graph, &req.tenant_did, quads).await
+        {
+            return (
+                status,
+                Json(PinCreateResp {
+                    ok: false,
+                    pin_id: String::new(),
+                    cid: String::new(),
+                    status: "failed".into(),
+                    size_bytes: 0,
+                    error: Some(msg),
+                }),
+            );
+        }
         gc.to_multibase()
     };
 
@@ -713,7 +808,21 @@ pub async fn handle_pin_create(
         int_quad(&pin_g, &pin_id, "kotobase/pin/size_bytes", size),
         text_quad(&pin_g, &pin_id, "kotobase/pin/created_at", &now),
     ];
-    assert_quads_as_datoms_silent(&state, &pin_g, pin_quads).await;
+    if let Err((status, msg)) =
+        commit_quads_as_datoms(&state, &pin_g, &pin_id, &req.tenant_did, pin_quads).await
+    {
+        return (
+            status,
+            Json(PinCreateResp {
+                ok: false,
+                pin_id: String::new(),
+                cid: String::new(),
+                status: "failed".into(),
+                size_bytes: 0,
+                error: Some(msg),
+            }),
+        );
+    }
 
     // Fire-and-forget IPFS pin
     {
@@ -722,13 +831,18 @@ pub async fn handle_pin_create(
         let state_c = Arc::clone(&state);
         let pin_id_c = pin_id.clone();
         let pin_g_c = pin_g.clone();
+        let tenant_did_c = req.tenant_did.clone();
         tokio::spawn(async move {
             ipfs_c.pin(&cid_c).await;
             let done = vec![
                 text_quad(&pin_g_c, &pin_id_c, "kotobase/pin/status", "pinned"),
                 text_quad(&pin_g_c, &pin_id_c, "kotobase/pin/ipfs_status", "pinned"),
             ];
-            assert_quads_as_datoms_silent(&state_c, &pin_g_c, done).await;
+            if let Err((status, msg)) =
+                commit_quads_as_datoms(&state_c, &pin_g_c, &pin_id_c, &tenant_did_c, done).await
+            {
+                tracing::warn!(%status, error = %msg, "kotobase pin status distributed commit failed");
+            }
         });
     }
 
@@ -755,59 +869,27 @@ pub async fn handle_pin_list(
     let limit = req.limit.unwrap_or(20).min(100);
     let offset = req.offset.unwrap_or(0);
     let g = format!("kotobase/pins/{}", req.tenant_did);
-    let gc = cid(&g);
+    let datoms = graph_datoms(&state, &g).await?;
 
-    let arr = match state.quad_store.arrangement(&gc).await {
-        Some(a) => a,
-        None => {
-            return Ok((
-                StatusCode::OK,
-                Json(PinListResp {
-                    ok: true,
-                    pins: vec![],
-                    total: 0,
-                    offset,
-                    limit,
-                }),
-            ))
-        }
-    };
-
-    let pin_subjects = arr.get_entities_by_attribute("kotobase/pin/cid");
+    let mut pin_subjects = datoms
+        .iter()
+        .filter(|datom| datom.a == "kotobase/pin/cid")
+        .map(|datom| datom.e.clone())
+        .collect::<Vec<_>>();
+    pin_subjects.sort_by_key(|cid| cid.to_multibase());
+    pin_subjects.dedup();
     let records: Vec<PinRecord> = pin_subjects
         .iter()
         .filter_map(|subj_cid| {
-            let get_text_local = |pred: &str| -> Option<String> {
-                arr.get_values(subj_cid, pred)
-                    .into_iter()
-                    .find_map(|value| {
-                        if let KqeValue::Text(t) = value {
-                            Some(t)
-                        } else {
-                            None
-                        }
-                    })
-            };
-            let get_int_local = |pred: &str| -> i64 {
-                arr.get_values(subj_cid, pred)
-                    .into_iter()
-                    .find_map(|value| {
-                        if let KqeValue::Integer(v) = value {
-                            Some(v)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or(0)
-            };
-
             let pin_id = subj_cid.to_multibase();
-            let cid_val = get_text_local("kotobase/pin/cid")?;
-            let name = get_text_local("kotobase/pin/name").unwrap_or_default();
-            let status = get_text_local("kotobase/pin/status").unwrap_or_else(|| "pinning".into());
-            let ipfs_status = get_text_local("kotobase/pin/ipfs_status");
-            let size_bytes = get_int_local("kotobase/pin/size_bytes");
-            let created_at = get_text_local("kotobase/pin/created_at").unwrap_or_default();
+            let cid_val = text_for_subject(&datoms, subj_cid, "kotobase/pin/cid")?;
+            let name = text_for_subject(&datoms, subj_cid, "kotobase/pin/name").unwrap_or_default();
+            let status = text_for_subject(&datoms, subj_cid, "kotobase/pin/status")
+                .unwrap_or_else(|| "pinning".into());
+            let ipfs_status = text_for_subject(&datoms, subj_cid, "kotobase/pin/ipfs_status");
+            let size_bytes = int_for_subject(&datoms, subj_cid, "kotobase/pin/size_bytes");
+            let created_at =
+                text_for_subject(&datoms, subj_cid, "kotobase/pin/created_at").unwrap_or_default();
 
             if let Some(sf) = req.status.as_deref() {
                 if status != sf {
@@ -859,23 +941,12 @@ pub async fn handle_pin_delete(
         ));
     }
     let g = format!("kotobase/pins/{}", req.tenant_did);
-    let gc = cid(&g);
     let subj = cid(&req.pin_id);
-
-    let arr = match state.quad_store.arrangement(&gc).await {
-        Some(a) => a,
-        None => {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(PinDeleteResp {
-                    ok: false,
-                    error: Some("NotFound: no pins for this tenant".into()),
-                }),
-            ))
-        }
-    };
-
-    let datoms = arr.get_subject_datoms(&gc, &subj);
+    let datoms = graph_datoms(&state, &g)
+        .await?
+        .into_iter()
+        .filter(|datom| datom.e == subj)
+        .collect::<Vec<_>>();
     if datoms.is_empty() {
         return Ok((
             StatusCode::NOT_FOUND,
@@ -886,12 +957,7 @@ pub async fn handle_pin_delete(
         ));
     }
 
-    for datom in datoms {
-        state
-            .quad_store
-            .retract_datom_silent(gc.clone(), datom)
-            .await;
-    }
+    commit_retractions(&state, &g, &req.pin_id, &req.tenant_did, datoms).await?;
 
     Ok((
         StatusCode::OK,
