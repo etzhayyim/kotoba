@@ -462,8 +462,14 @@ async fn kubo_compatible_local_api_surface() {
         .files_stat("/unixfs/hello.txt")
         .await
         .expect("files/stat unixfs");
-    assert_eq!(unixfs_stat.cid, unixfs);
+    assert_eq!(unixfs_stat.cid, Some(unixfs));
+    assert_eq!(unixfs_stat.kind, kotoba_ipfs::MfsKind::File);
     assert_eq!(unixfs_stat.size, 5);
+    assert_eq!(unixfs_stat.blocks, 1);
+    assert!(
+        unixfs_stat.cumulative_size >= unixfs_stat.size,
+        "{unixfs_stat:?}"
+    );
     assert_eq!(
         node.files_du("/unixfs/hello.txt", false)
             .await
@@ -511,8 +517,12 @@ async fn kubo_compatible_local_api_surface() {
         .await
         .expect("files/stat");
     assert_eq!(file_stat.path, "/docs/hello.txt");
-    assert_eq!(file_stat.cid, raw);
+    assert_eq!(file_stat.cid, Some(raw));
+    assert_eq!(file_stat.kind, kotoba_ipfs::MfsKind::File);
+    assert_eq!(file_stat.kind.as_str(), "file");
     assert_eq!(file_stat.size, 5);
+    assert_eq!(file_stat.cumulative_size, 5);
+    assert_eq!(file_stat.blocks, 1);
     assert_eq!(
         node.files_flush("/docs/hello.txt")
             .await
@@ -524,12 +534,12 @@ async fn kubo_compatible_local_api_surface() {
     assert!(files
         .iter()
         .any(|entry| entry.path == "/docs/hello.txt" && entry.cid == Some(raw)));
-    assert!(files.iter().any(
-        |entry| entry.path == "/docs/generated.txt" && entry.cid == Some(write_bytes_stat.cid)
-    ));
     assert!(files
         .iter()
-        .any(|entry| entry.path == "/docs/empty.txt" && entry.cid == Some(touched.cid)));
+        .any(|entry| entry.path == "/docs/generated.txt" && entry.cid == write_bytes_stat.cid));
+    assert!(files
+        .iter()
+        .any(|entry| entry.path == "/docs/empty.txt" && entry.cid == touched.cid));
     assert_eq!(
         node.files_ls("/").await.expect("files/ls root"),
         vec![kotoba_ipfs::MfsEntry {
@@ -537,6 +547,14 @@ async fn kubo_compatible_local_api_surface() {
             cid: None,
         }]
     );
+    let docs_stat = node.files_stat("/docs").await.expect("files/stat dir");
+    assert_eq!(docs_stat.path, "/docs");
+    assert_eq!(docs_stat.cid, None);
+    assert_eq!(docs_stat.kind, kotoba_ipfs::MfsKind::Directory);
+    assert_eq!(docs_stat.kind.as_str(), "directory");
+    assert_eq!(docs_stat.size, 14);
+    assert_eq!(docs_stat.cumulative_size, 14);
+    assert_eq!(docs_stat.blocks, 3);
     assert_eq!(
         node.files_du("/docs/hello.txt", false)
             .await
@@ -577,7 +595,8 @@ async fn kubo_compatible_local_api_surface() {
         .files_stat("/docs/archive/hello-copy.txt")
         .await
         .expect("files/stat copy");
-    assert_eq!(copy_stat.cid, raw);
+    assert_eq!(copy_stat.cid, Some(raw));
+    assert_eq!(copy_stat.kind, kotoba_ipfs::MfsKind::File);
     assert_eq!(copy_stat.size, 5);
     node.files_cp(format!("/ipfs/{raw}"), "/docs/from-ipfs.txt")
         .await

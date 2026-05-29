@@ -7004,11 +7004,11 @@ pub async fn agent_sync_close(
 mod tests {
     use super::{
         append_auth_capability_datoms, atproto_repo_record_entity_cid, atproto_repo_write_datoms,
-        datomic_entity, datomic_pull, datomic_pull_many, datomic_transact,
-        distributed_graph_ipns_name, is_did_web_ip_host, AtprotoRepoWriteReq,
-        AuthCapabilityProjection, DatomicEntityReq, DatomicPullManyReq, DatomicPullReq,
-        DatomicTransactReq, ZCAP_ALLOWED_ACTION_IRI, ZCAP_CONTROLLER_IRI,
-        ZCAP_INVOCATION_PROOF_IRI, ZCAP_INVOCATION_TARGET_IRI,
+        datomic_entid, datomic_entity, datomic_ident, datomic_pull, datomic_pull_many,
+        datomic_transact, distributed_graph_ipns_name, is_did_web_ip_host, AtprotoRepoWriteReq,
+        AuthCapabilityProjection, DatomicEntidReq, DatomicEntityReq, DatomicIdentReq,
+        DatomicPullManyReq, DatomicPullReq, DatomicTransactReq, ZCAP_ALLOWED_ACTION_IRI,
+        ZCAP_CONTROLLER_IRI, ZCAP_INVOCATION_PROOF_IRI, ZCAP_INVOCATION_TARGET_IRI,
     };
     use crate::server::KotobaState;
     use axum::response::IntoResponse;
@@ -7342,7 +7342,9 @@ mod tests {
             axum::Json(DatomicTransactReq {
                 graph: graph_mb.clone(),
                 tx_edn: r#"[[:db/add "alice" :person/name "Alice"]
-                            [:db/add "alice" :person/role "admin"]]"#
+                            [:db/add "alice" :person/role "admin"]
+                            [:db/add "alice" :person/email "alice@example.com"]
+                            [:db/add "alice" :db/ident :person/alice]]"#
                     .into(),
                 cacao_b64: None,
                 cacao_proof_cid: None,
@@ -7405,12 +7407,39 @@ mod tests {
         assert!(pull_body["entity_edn"].as_str().unwrap().contains("admin"));
         assert!(!pull_body["entity_edn"].as_str().unwrap().contains("Bob"));
 
+        let lookup_pull = datomic_pull(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicPullReq {
+                graph: graph_mb.clone(),
+                entity: r#"[:person/email "alice@example.com"]"#.into(),
+                pattern_edn: Some(r#"[:person/name :person/email]"#.into()),
+                as_of: None,
+                since: None,
+                cacao_b64: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(lookup_pull.status(), axum::http::StatusCode::OK);
+        let lookup_pull_body = axum::body::to_bytes(lookup_pull.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let lookup_pull_body: serde_json::Value =
+            serde_json::from_slice(&lookup_pull_body).unwrap();
+        assert!(lookup_pull_body["entity_edn"]
+            .as_str()
+            .unwrap()
+            .contains("alice@example.com"));
+
         let pull_many = datomic_pull_many(
             axum::extract::State(Arc::clone(&state)),
             headers.clone(),
             axum::Json(DatomicPullManyReq {
                 graph: graph_mb.clone(),
-                entities: vec![alice, bob.clone()],
+                entities: vec![alice.clone(), bob.clone()],
                 pattern_edn: Some(r#"[:person/name]"#.into()),
                 as_of: None,
                 since: None,
@@ -7435,6 +7464,74 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Bob"));
+
+        let ident = datomic_ident(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicIdentReq {
+                graph: graph_mb.clone(),
+                entity: alice.clone(),
+                as_of: Some(first_tx.clone()),
+                since: None,
+                cacao_b64: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(ident.status(), axum::http::StatusCode::OK);
+        let ident_body = axum::body::to_bytes(ident.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let ident_body: serde_json::Value = serde_json::from_slice(&ident_body).unwrap();
+        assert_eq!(ident_body["basis_t"], first_tx);
+        assert_eq!(ident_body["ident_edn"], ":person/alice");
+
+        let entid = datomic_entid(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicEntidReq {
+                graph: graph_mb.clone(),
+                ident_edn: ":person/alice".into(),
+                as_of: None,
+                since: None,
+                cacao_b64: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(entid.status(), axum::http::StatusCode::OK);
+        let entid_body = axum::body::to_bytes(entid.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let entid_body: serde_json::Value = serde_json::from_slice(&entid_body).unwrap();
+        assert_eq!(entid_body["entity"], alice);
+
+        let lookup_entid = datomic_entid(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicEntidReq {
+                graph: graph_mb.clone(),
+                ident_edn: r#"[:person/email "alice@example.com"]"#.into(),
+                as_of: None,
+                since: None,
+                cacao_b64: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(lookup_entid.status(), axum::http::StatusCode::OK);
+        let lookup_entid_body = axum::body::to_bytes(lookup_entid.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let lookup_entid_body: serde_json::Value =
+            serde_json::from_slice(&lookup_entid_body).unwrap();
+        assert_eq!(lookup_entid_body["entity"], alice);
 
         let entity = datomic_entity(
             axum::extract::State(Arc::clone(&state)),

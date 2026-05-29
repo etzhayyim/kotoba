@@ -1262,15 +1262,40 @@ impl KotobaIpfsNode {
     /// Kubo-like MFS `files/stat`.
     pub async fn files_stat(&self, path: impl AsRef<str>) -> Result<MfsStat> {
         let path = normalize_mfs_path(path.as_ref())?;
-        let cid = *self
-            .state
-            .files
-            .read()
-            .await
-            .get(&path)
-            .ok_or_else(|| anyhow!("mfs path not found: {path}"))?;
-        let size = self.mfs_file_size(&cid).await?;
-        Ok(MfsStat { path, cid, size })
+        if let Some(cid) = self.state.files.read().await.get(&path).copied() {
+            let size = self.mfs_file_size(&cid).await?;
+            let object = self.object_stat(&cid).await?;
+            return Ok(MfsStat {
+                path,
+                cid: Some(cid),
+                kind: MfsKind::File,
+                size,
+                cumulative_size: object.cumulative_size,
+                blocks: self.block_count(&cid).await?,
+            });
+        }
+
+        if path == "/" || self.state.dirs.read().await.contains(&path) {
+            let cids = self.mfs_file_cids_under(&path).await;
+            let mut size = 0;
+            let mut cumulative_size = 0;
+            let mut blocks = HashSet::new();
+            for cid in cids {
+                size += self.mfs_file_size(&cid).await?;
+                cumulative_size += self.object_stat(&cid).await?.cumulative_size;
+                self.collect_reachable_blocks(&cid, &mut blocks).await?;
+            }
+            return Ok(MfsStat {
+                path,
+                cid: None,
+                kind: MfsKind::Directory,
+                size,
+                cumulative_size,
+                blocks: blocks.len() as u64,
+            });
+        }
+
+        Err(anyhow!("mfs path not found: {path}"))
     }
 
     /// Kubo-like MFS `files/flush`.
@@ -1464,6 +1489,42 @@ impl KotobaIpfsNode {
             _ => Ok(self.block_stat(cid).await?.size),
         }
     }
+
+    async fn block_count(&self, cid: &IpldCid) -> Result<u64> {
+        let mut blocks = HashSet::new();
+        self.collect_reachable_blocks(cid, &mut blocks).await?;
+        Ok(blocks.len() as u64)
+    }
+
+    async fn collect_reachable_blocks(
+        &self,
+        cid: &IpldCid,
+        blocks: &mut HashSet<IpldCid>,
+    ) -> Result<()> {
+        if !blocks.insert(*cid) {
+            return Ok(());
+        }
+        for child in self.refs(cid, false).await? {
+            Box::pin(self.collect_reachable_blocks(&child, blocks)).await?;
+        }
+        Ok(())
+    }
+
+    async fn mfs_file_cids_under(&self, path: &str) -> Vec<IpldCid> {
+        let child_prefix = if path == "/" {
+            "/".to_string()
+        } else {
+            format!("{path}/")
+        };
+        self.state
+            .files
+            .read()
+            .await
+            .iter()
+            .filter(|(file_path, _)| *file_path == path || file_path.starts_with(&child_prefix))
+            .map(|(_, cid)| *cid)
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1532,6 +1593,21 @@ pub struct MfsEntry {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MfsKind {
+    File,
+    Directory,
+}
+
+impl MfsKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Directory => "directory",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockStat {
     pub cid: IpldCid,
     pub size: u64,
@@ -1585,8 +1661,11 @@ pub struct PathResolve {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MfsStat {
     pub path: String,
-    pub cid: IpldCid,
+    pub cid: Option<IpldCid>,
+    pub kind: MfsKind,
     pub size: u64,
+    pub cumulative_size: u64,
+    pub blocks: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

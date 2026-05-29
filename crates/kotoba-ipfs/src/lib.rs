@@ -21,7 +21,7 @@ pub use ipns::{
 };
 pub use node::{
     BandwidthStats, BitswapStats, BlockPut, BlockStat, DagImport, DagResolve, DagStat, IpfsConfig,
-    KotobaIpfsNode, MfsEntry, MfsStat, Multiaddr, NameResolve, NodeId, NodeVersion, ObjectLink,
-    ObjectStat, PathResolve, PeerId, PinKind, PinLsEntry, PinVerify, Provider, RepoStat,
-    RepoVerify, RepoVerifyError, SwarmConnect, SwarmPeer,
+    KotobaIpfsNode, MfsEntry, MfsKind, MfsStat, Multiaddr, NameResolve, NodeId, NodeVersion,
+    ObjectLink, ObjectStat, PathResolve, PeerId, PinKind, PinLsEntry, PinVerify, Provider,
+    RepoStat, RepoVerify, RepoVerifyError, SwarmConnect, SwarmPeer,
 };
