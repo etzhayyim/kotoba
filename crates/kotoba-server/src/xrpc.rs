@@ -6991,8 +6991,9 @@ pub async fn agent_sync_close(
 #[cfg(test)]
 mod tests {
     use super::{
-        atproto_repo_record_entity_cid, atproto_repo_write_datoms, is_did_web_ip_host,
-        AtprotoRepoWriteReq,
+        append_auth_capability_datoms, atproto_repo_record_entity_cid, atproto_repo_write_datoms,
+        is_did_web_ip_host, AtprotoRepoWriteReq, AuthCapabilityProjection, ZCAP_ALLOWED_ACTION_IRI,
+        ZCAP_CONTROLLER_IRI, ZCAP_INVOCATION_PROOF_IRI, ZCAP_INVOCATION_TARGET_IRI,
     };
     use kotoba_core::cid::KotobaCid;
     use kotoba_datomic::distributed::{
@@ -7104,6 +7105,104 @@ mod tests {
             .unwrap()
             .iter()
             .all(|datom| datom.t == tx));
+    }
+
+    #[test]
+    fn capability_projection_scopes_survive_distributed_datom_commit() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"capability-scope-graph");
+        let tx = KotobaCid::from_bytes(b"capability-scope-tx");
+        let proof_cid = KotobaCid::from_bytes(b"capability-proof");
+        let tx_scope = KotobaCid::from_bytes(b"capability-target-tx");
+        let graph_scope = format!("kotoba://graph/{}", graph.to_multibase());
+        let tx_scope = format!("kotoba://tx/{}", tx_scope.to_multibase());
+        let didcomm_scope = "didcomm://thread/thread-capability-1".to_string();
+        let atproto_scope = "at://did:plc:alice/app.bsky.feed.post/r1".to_string();
+        let actions = vec![
+            kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT.to_string(),
+            kotoba_auth::CacaoPayload::OP_DATOM_READ.to_string(),
+            kotoba_auth::CacaoPayload::OP_GRAPH_QUERY.to_string(),
+            kotoba_auth::CacaoPayload::OP_VC_ISSUE.to_string(),
+            kotoba_auth::CacaoPayload::OP_VC_PRESENT.to_string(),
+            kotoba_auth::CacaoPayload::OP_DIDCOMM_SEND.to_string(),
+            kotoba_auth::CacaoPayload::OP_ATPROTO_REPO_WRITE.to_string(),
+        ];
+        let targets = vec![
+            graph_scope.clone(),
+            tx_scope.clone(),
+            didcomm_scope.clone(),
+            atproto_scope.clone(),
+        ];
+        let projection = AuthCapabilityProjection {
+            proof_format: "CACAO",
+            controller: "did:key:zController".into(),
+            invoker: "did:key:zInvoker".into(),
+            allowed_actions: actions.clone(),
+            invocation_targets: targets.clone(),
+            proof_cid: Some(proof_cid.clone()),
+            credential_ids: vec!["urn:uuid:capability-vc-1".into()],
+        };
+        let mut datoms = Vec::<Datom>::new();
+        append_auth_capability_datoms(&mut datoms, &tx, &projection);
+
+        let report = writer
+            .commit_datoms(CommitDatomsRequest {
+                ipns_name: "k51-capability-scope".into(),
+                graph,
+                datoms,
+                expected_parent: None,
+                tx_cid: Some(tx.clone()),
+                author: "did:key:zController".into(),
+                seq: 1,
+                valid_until: "2026-05-29T00:00:00Z".into(),
+                ttl_secs: Some(60),
+                cacao_proof_cid: Some(proof_cid.clone()),
+                ipns_controller_did: None,
+                ipns_signing_key: None,
+            })
+            .unwrap();
+
+        let reader = DistributedDatomReader::new(&store, &ipns);
+        let tea_datoms = reader
+            .history_datoms_index(
+                &report.commit.cid,
+                kotoba_datomic::DatomIndex::Tea,
+                &[EdnValue::string(tx.to_multibase())],
+            )
+            .unwrap();
+        let has = |attr: &str, value: &str| {
+            tea_datoms
+                .iter()
+                .any(|datom| datom.e == tx && datom.a == attr && datom.v == EdnValue::string(value))
+        };
+
+        for action in actions {
+            assert!(has(":capability/allowedAction", &action));
+            assert!(has(ZCAP_ALLOWED_ACTION_IRI, &action));
+        }
+        for target in targets {
+            assert!(has(":capability/invocationTarget", &target));
+            assert!(has(ZCAP_INVOCATION_TARGET_IRI, &target));
+        }
+        assert!(has(":capability/controller", "did:key:zController"));
+        assert!(has(ZCAP_CONTROLLER_IRI, "did:key:zController"));
+        assert!(has(":capability/invoker", "did:key:zInvoker"));
+        assert!(has(
+            ":capability/graph",
+            graph_scope.trim_start_matches("kotoba://graph/")
+        ));
+        assert!(has(
+            ":capability/tx",
+            tx_scope.trim_start_matches("kotoba://tx/")
+        ));
+        assert!(has(":capability/didcommThread", "thread-capability-1"));
+        assert!(has(":capability/atprotoResource", &atproto_scope));
+        assert!(has(":capability/proofCid", &proof_cid.to_multibase()));
+        assert!(has(ZCAP_INVOCATION_PROOF_IRI, &proof_cid.to_multibase()));
+        assert!(has(":capability/credential", "urn:uuid:capability-vc-1"));
+        assert!(tea_datoms.iter().all(|datom| datom.t == tx));
     }
 
     #[test]
