@@ -7315,12 +7315,59 @@ mod tests {
             "datoms",
             &["e", "a", "v_edn", "t", "added"],
         );
+        assert_lexicon_output_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/history.json"),
+            &["graph", "datom_count", "datoms"],
+            &["basis_t"],
+        );
+        assert_lexicon_array_item_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/history.json"),
+            "datoms",
+            &["e", "a", "v_edn", "t", "added"],
+        );
+        assert_lexicon_output_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/txRange.json"),
+            &["graph", "tx_count", "txes"],
+            &["basis_t"],
+        );
+        assert_lexicon_array_item_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/txRange.json"),
+            "txes",
+            &[
+                "tx_cid",
+                "commit_cid",
+                "seq",
+                "author",
+                "ts",
+                "datom_count",
+                "datoms",
+            ],
+        );
+        assert_lexicon_nested_array_item_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/txRange.json"),
+            "txes",
+            "datoms",
+            &["e", "a", "v_edn", "t", "added"],
+        );
+        assert_lexicon_output_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/log.json"),
+            &["graph", "tx_count", "txes"],
+            &["basis_t"],
+        );
+        assert_lexicon_array_item_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/log.json"),
+            "txes",
+            &["tx_cid", "datom_count", "datoms"],
+        );
+        assert_lexicon_nested_array_item_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/log.json"),
+            "txes",
+            "datoms",
+            &["e", "a", "v_edn", "t", "added"],
+        );
         for src in [
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/seekDatoms.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/indexRange.json"),
-            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/history.json"),
-            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/txRange.json"),
-            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/log.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/pull.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/pullMany.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/basisT.json"),
@@ -7351,6 +7398,39 @@ mod tests {
             assert!(
                 property_values.contains_key(*field),
                 "{} missing input property {field}",
+                value["id"]
+            );
+        }
+    }
+
+    fn assert_lexicon_nested_array_item_fields(
+        src: &str,
+        outer_field: &str,
+        inner_field: &str,
+        required: &[&str],
+    ) {
+        let value: serde_json::Value = serde_json::from_str(src).expect("lexicon JSON");
+        let item = &value["defs"]["main"]["output"]["schema"]["properties"][outer_field]["items"]
+            ["properties"][inner_field]["items"];
+        assert_eq!(
+            item["type"], "object",
+            "{} output {outer_field}.{inner_field} items must be object",
+            value["id"]
+        );
+        let required_values = item["required"].as_array().expect("required array");
+        for field in required {
+            assert!(
+                required_values
+                    .iter()
+                    .any(|value| value.as_str() == Some(field)),
+                "{} output nested array item missing required field {field}",
+                value["id"]
+            );
+            assert!(
+                item["properties"]
+                    .as_object()
+                    .is_some_and(|props| props.contains_key(*field)),
+                "{} output nested array item missing property {field}",
                 value["id"]
             );
         }

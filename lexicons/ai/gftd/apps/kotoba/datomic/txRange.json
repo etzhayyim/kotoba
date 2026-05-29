@@ -22,7 +22,53 @@
       },
       "output": {
         "encoding": "application/json",
-        "schema": { "type": "unknown" }
+        "schema": {
+          "type": "object",
+          "required": ["graph", "tx_count", "txes"],
+          "properties": {
+            "graph": { "type": "string" },
+            "basis_t": { "type": "string" },
+            "tx_count": { "type": "integer", "minimum": 0 },
+            "txes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "tx_cid",
+                  "commit_cid",
+                  "seq",
+                  "author",
+                  "ts",
+                  "datom_count",
+                  "datoms"
+                ],
+                "properties": {
+                  "tx_cid": { "type": "string" },
+                  "commit_cid": { "type": "string" },
+                  "prev_commit_cid": { "type": "string" },
+                  "seq": { "type": "integer", "minimum": 0 },
+                  "author": { "type": "string" },
+                  "ts": { "type": "integer", "minimum": 0 },
+                  "datom_count": { "type": "integer", "minimum": 0 },
+                  "datoms": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["e", "a", "v_edn", "t", "added"],
+                      "properties": {
+                        "e": { "type": "string" },
+                        "a": { "type": "string" },
+                        "v_edn": { "type": "string" },
+                        "t": { "type": "string" },
+                        "added": { "type": "boolean" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
