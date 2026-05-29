@@ -5,7 +5,8 @@
 //! pin state, and a tiny TCP block exchange protocol between kotoba nodes.
 
 use crate::cid::{
-    cid_for_bytes, dag_cbor_block, decode_unixfs_file_block, raw_cid, unixfs_file_block,
+    cid_for_bytes, dag_cbor_block, decode_dag_pb_node, decode_unixfs_file_data, raw_cid,
+    unixfs_file_block,
 };
 use crate::ipns::{IpnsName, IpnsRecord};
 use anyhow::{anyhow, bail, Context, Result};
@@ -521,16 +522,13 @@ impl KotobaIpfsNode {
         self.get_block(cid).await
     }
 
-    /// Kubo-like `cat` for raw blocks and single-block UnixFS/dag-pb files.
+    /// Kubo-like `cat` for raw blocks and UnixFS/dag-pb files.
     pub async fn cat(&self, cid: &IpldCid) -> Result<Bytes> {
-        let bytes = self.get_block(cid).await?;
         if cid.codec() == crate::cid::CODEC_RAW {
-            return Ok(bytes);
+            return self.get_block(cid).await;
         }
         if cid.codec() == crate::cid::CODEC_DAG_PB {
-            return decode_unixfs_file_block(&bytes)
-                .map(Bytes::from)
-                .map_err(Into::into);
+            return self.cat_dag_pb(cid).await.map(Bytes::from);
         }
         bail!(
             "cat only supports raw blocks and UnixFS dag-pb files, got codec {}",
@@ -770,11 +768,17 @@ impl KotobaIpfsNode {
     /// Kubo-like `object/stat` for local single-block objects.
     pub async fn object_stat(&self, cid: &IpldCid) -> Result<ObjectStat> {
         let bytes = self.get_block(cid).await?;
+        let mut cumulative_size = bytes.len() as u64;
+        if cid.codec() == crate::cid::CODEC_DAG_PB {
+            for link in decode_dag_pb_node(&bytes)?.links {
+                cumulative_size += Box::pin(self.object_stat(&link.cid)).await?.cumulative_size;
+            }
+        }
         Ok(ObjectStat {
             cid: *cid,
             codec: cid.codec(),
             block_size: bytes.len() as u64,
-            cumulative_size: bytes.len() as u64,
+            cumulative_size,
         })
     }
 
@@ -1401,7 +1405,16 @@ impl KotobaIpfsNode {
             return Ok(());
         }
         if cid.codec() != crate::cid::CODEC_DAG_CBOR {
-            self.get_block(cid).await?;
+            if cid.codec() == crate::cid::CODEC_DAG_PB {
+                for link in decode_dag_pb_node(&self.get_block(cid).await?)?.links {
+                    out.push(link.cid);
+                    if recursive {
+                        Box::pin(self.refs_inner(&link.cid, true, seen, out)).await?;
+                    }
+                }
+            } else {
+                self.get_block(cid).await?;
+            }
             return Ok(());
         }
         let root = self.dag_get_ipld(cid).await?;
@@ -1416,6 +1429,17 @@ impl KotobaIpfsNode {
             }
         }
         Ok(())
+    }
+
+    async fn cat_dag_pb(&self, cid: &IpldCid) -> Result<Vec<u8>> {
+        let bytes = self.get_block(cid).await?;
+        let node = decode_dag_pb_node(&bytes)?;
+        let mut out = decode_unixfs_file_data(node.data.as_deref().unwrap_or_default())?;
+        for link in node.links {
+            let child = Box::pin(self.cat(&link.cid)).await?;
+            out.extend_from_slice(&child);
+        }
+        Ok(out)
     }
 }
 

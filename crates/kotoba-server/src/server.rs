@@ -978,6 +978,9 @@ fn datom_journal_quad(graph_cid: &KotobaCid, datom: &KqeDatom) -> Quad {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kotoba_auth::did_document::{
+        ATTR_DID_CORE_ID, ATTR_DID_CORE_SERVICE, ATTR_DID_CORE_SERVICE_ENDPOINT, ATTR_RDF_TYPE,
+    };
 
     #[test]
     fn node_role_from_env_defaults_to_both() {
@@ -1157,6 +1160,112 @@ mod tests {
                 "kotoba://graph/distributed-a",
                 "kotoba://graph/distributed-b"
             ]
+        );
+        assert!(resolved.has_kotoba_protocol_services());
+    }
+
+    #[test]
+    fn distributed_did_resolver_reads_w3c_did_core_services_from_shared_head() {
+        let store: Arc<dyn BlockStore + Send + Sync> =
+            Arc::new(kotoba_store::MemoryBlockStore::new());
+        let ipns: Arc<dyn IpnsRegistry> = Arc::new(InMemoryIpnsRegistry::new());
+        let did = "did:web:shared.example";
+        let graph = KotobaCid::from_bytes(b"shared-did-document-registry");
+        let ipns_name = "k51-kotoba-shared-did-registry".to_string();
+        let tx_cid = KotobaCid::from_bytes(b"shared-did-w3c-service-tx");
+        let doc_entity = KotobaCid::from_bytes(did.as_bytes());
+        let service_specs = [
+            (
+                format!("{did}#didcomm"),
+                DIDCOMM_MESSAGING_SERVICE,
+                kotoba_datomic::Value::string("didcomm://mediator/shared"),
+            ),
+            (
+                format!("{did}#atproto-pds"),
+                ATPROTO_PDS_SERVICE,
+                kotoba_datomic::Value::string("https://pds.shared.example"),
+            ),
+            (
+                format!("{did}#kotoba-node"),
+                KOTOBA_NODE_SERVICE,
+                kotoba_datomic::Value::string("/ip4/127.0.0.1/tcp/4201"),
+            ),
+            (
+                format!("{did}#kotoba-graphs"),
+                kotoba_auth::KOTOBA_GRAPH_MEMBERSHIP_SERVICE,
+                kotoba_datomic::Value::vector([
+                    kotoba_datomic::Value::string("kotoba://graph/shared-a"),
+                    kotoba_datomic::Value::string("kotoba://graph/shared-b"),
+                ]),
+            ),
+        ];
+        let mut datoms = vec![kotoba_datomic::Datom::assert(
+            doc_entity.clone(),
+            ATTR_DID_CORE_ID.to_string(),
+            kotoba_datomic::Value::string(did),
+            tx_cid.clone(),
+        )];
+        for (service_id, service_type, endpoint) in service_specs {
+            let service_entity = KotobaCid::from_bytes(service_id.as_bytes());
+            datoms.push(kotoba_datomic::Datom::assert(
+                doc_entity.clone(),
+                ATTR_DID_CORE_SERVICE.to_string(),
+                kotoba_datomic::Value::string(&service_id),
+                tx_cid.clone(),
+            ));
+            datoms.push(kotoba_datomic::Datom::assert(
+                service_entity.clone(),
+                ATTR_DID_CORE_ID.to_string(),
+                kotoba_datomic::Value::string(&service_id),
+                tx_cid.clone(),
+            ));
+            datoms.push(kotoba_datomic::Datom::assert(
+                service_entity.clone(),
+                ATTR_RDF_TYPE.to_string(),
+                kotoba_datomic::Value::string(service_type),
+                tx_cid.clone(),
+            ));
+            datoms.push(kotoba_datomic::Datom::assert(
+                service_entity,
+                ATTR_DID_CORE_SERVICE_ENDPOINT.to_string(),
+                endpoint,
+                tx_cid.clone(),
+            ));
+        }
+
+        let writer = kotoba_datomic::distributed::DistributedCommitWriter::new(&*store, &*ipns);
+        writer
+            .commit_datoms(kotoba_datomic::distributed::CommitDatomsRequest {
+                ipns_name: ipns_name.clone(),
+                graph,
+                datoms,
+                expected_parent: None,
+                tx_cid: Some(tx_cid),
+                author: "did:key:zWriter".to_string(),
+                seq: 1,
+                valid_until: "2026-05-30T00:00:00Z".to_string(),
+                ttl_secs: Some(60),
+                cacao_proof_cid: None,
+                ipns_controller_did: None,
+                ipns_signing_key: None,
+            })
+            .expect("commit shared DID document registry");
+
+        let resolver = DistributedDidResolver::new(store, ipns, vec![ipns_name]);
+        let resolved = resolver.resolve(did).unwrap();
+
+        assert_eq!(
+            resolved.didcomm_endpoint(),
+            Some("didcomm://mediator/shared")
+        );
+        assert_eq!(
+            resolved.atproto_pds_endpoint(),
+            Some("https://pds.shared.example")
+        );
+        assert_eq!(resolved.kotoba_endpoint(), Some("/ip4/127.0.0.1/tcp/4201"));
+        assert_eq!(
+            resolved.graph_memberships(),
+            vec!["kotoba://graph/shared-a", "kotoba://graph/shared-b"]
         );
         assert!(resolved.has_kotoba_protocol_services());
     }

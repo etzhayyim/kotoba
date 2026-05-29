@@ -6990,7 +6990,121 @@ pub async fn agent_sync_close(
 
 #[cfg(test)]
 mod tests {
-    use super::is_did_web_ip_host;
+    use super::{
+        atproto_repo_record_entity_cid, atproto_repo_write_datoms, is_did_web_ip_host,
+        AtprotoRepoWriteReq,
+    };
+    use kotoba_core::cid::KotobaCid;
+    use kotoba_datomic::distributed::{
+        CommitDatomsRequest, DistributedCommitWriter, DistributedDatomReader,
+    };
+    use kotoba_datomic::Datom;
+    use kotoba_edn::EdnValue;
+    use kotoba_ipfs::InMemoryIpnsRegistry;
+    use kotoba_store::MemoryBlockStore;
+    use serde_json::json;
+
+    #[test]
+    fn vc_didcomm_and_atproto_project_to_one_distributed_datom_head() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"protocol-normalization-graph");
+        let tx = KotobaCid::from_bytes(b"protocol-normalization-tx");
+
+        let credential = kotoba_vc::VerifiableCredential::new(
+            "urn:uuid:vc-normalized-1",
+            "did:key:zIssuer",
+            json!({
+                "id": "did:key:zAlice",
+                "role": "issuer",
+                "profile": {"name": "Alice"}
+            }),
+        );
+        let message = kotoba_didcomm::DidCommMessage {
+            id: "msg-normalized-1".into(),
+            message_type: "https://didcomm.org/basicmessage/2.0/message".into(),
+            from: Some("did:key:zAlice".into()),
+            to: vec!["did:key:zBob".into()],
+            thid: Some("thread-normalized-1".into()),
+            pthid: None,
+            created_time: Some(1),
+            expires_time: None,
+            body: json!({"content": "hello from DIDComm"}),
+            attachments: vec![],
+        };
+        let atproto_req = AtprotoRepoWriteReq {
+            graph: graph.to_multibase(),
+            uri: "at://did:plc:alice/app.bsky.feed.post/r1".into(),
+            operation: Some("create".into()),
+            cid: Some("bafyreicid".into()),
+            record: Some(json!({
+                "$type": "app.bsky.feed.post",
+                "text": "hello from ATProto",
+                "createdAt": "2026-05-29T00:00:00Z"
+            })),
+            cacao_b64: None,
+            auth_presentation: None,
+        };
+        let at_uri = kotoba_graph::AtUri::parse(&atproto_req.uri).unwrap();
+        let at_entity = atproto_repo_record_entity_cid(&atproto_req.uri);
+
+        let mut datoms = Vec::<Datom>::new();
+        datoms.extend(credential.to_datoms(tx.clone()).unwrap());
+        datoms.extend(message.to_datoms(tx.clone()).unwrap());
+        datoms.extend(atproto_repo_write_datoms(
+            &atproto_req,
+            &at_uri,
+            &at_entity,
+            &tx,
+        ));
+
+        let report = writer
+            .commit_datoms(CommitDatomsRequest {
+                ipns_name: "k51-protocol-normalization".into(),
+                graph,
+                datoms,
+                expected_parent: None,
+                tx_cid: Some(tx.clone()),
+                author: "did:key:zIssuer".into(),
+                seq: 1,
+                valid_until: "2026-05-29T00:00:00Z".into(),
+                ttl_secs: Some(60),
+                cacao_proof_cid: None,
+                ipns_controller_did: None,
+                ipns_signing_key: None,
+            })
+            .unwrap();
+
+        let reader = DistributedDatomReader::new(&store, &ipns);
+        let query = kotoba_edn::parse(
+            r#"{:find [?issuer ?thread ?text]
+                :where [[?vc :credential/issuer ?issuer]
+                        [?vc :credential/subject/role "issuer"]
+                        [?msg :didcomm/thread ?thread]
+                        [?post :atproto/record/text ?text]]}"#,
+        )
+        .unwrap();
+        let rows = reader.q_triples(&report.commit.cid, &query).unwrap();
+
+        assert_eq!(
+            rows,
+            vec![vec![
+                EdnValue::string("did:key:zIssuer"),
+                EdnValue::string("thread-normalized-1"),
+                EdnValue::string("hello from ATProto"),
+            ]]
+        );
+        assert!(reader
+            .history_datoms_index(
+                &report.commit.cid,
+                kotoba_datomic::DatomIndex::Tea,
+                &[EdnValue::string(tx.to_multibase())],
+            )
+            .unwrap()
+            .iter()
+            .all(|datom| datom.t == tx));
+    }
 
     #[test]
     fn ip_literal_v4_rejected() {

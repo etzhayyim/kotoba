@@ -24,6 +24,19 @@ pub enum CidError {
     Unixfs(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DagPbLink {
+    pub name: String,
+    pub cid: Cid,
+    pub tsize: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DagPbNode {
+    pub data: Option<Vec<u8>>,
+    pub links: Vec<DagPbLink>,
+}
+
 /// Build a CIDv1 for an already-encoded IPFS block.
 pub fn cid_for_bytes(codec: u64, data: &[u8]) -> Cid {
     Cid::new_v1(codec, Code::Sha2_256.digest(data))
@@ -62,12 +75,19 @@ pub fn unixfs_file_block(data: &[u8]) -> (Cid, Vec<u8>) {
 /// Decode the single-file UnixFS dag-pb block shape produced by
 /// [`unixfs_file_block`].
 pub fn decode_unixfs_file_block(block: &[u8]) -> Result<Vec<u8>, CidError> {
+    let node = decode_dag_pb_node(block)?;
+    decode_unixfs_file_data(node.data.as_deref().unwrap_or_default())
+}
+
+pub fn decode_dag_pb_node(block: &[u8]) -> Result<DagPbNode, CidError> {
     let mut pos = 0;
     let mut unixfs_data = None;
+    let mut links = Vec::new();
     while pos < block.len() {
         let (field, wire) = read_key(block, &mut pos)?;
         match (field, wire) {
             (1, 2) => unixfs_data = Some(read_len_bytes(block, &mut pos)?.to_vec()),
+            (2, 2) => links.push(decode_dag_pb_link(read_len_bytes(block, &mut pos)?)?),
             (_, 0) => {
                 read_varint(block, &mut pos)?;
             }
@@ -81,7 +101,16 @@ pub fn decode_unixfs_file_block(block: &[u8]) -> Result<Vec<u8>, CidError> {
             }
         }
     }
-    let unixfs = unixfs_data.ok_or_else(|| CidError::Unixfs("missing PBNode.Data".into()))?;
+    Ok(DagPbNode {
+        data: unixfs_data,
+        links,
+    })
+}
+
+pub fn decode_unixfs_file_data(unixfs: &[u8]) -> Result<Vec<u8>, CidError> {
+    if unixfs.is_empty() {
+        return Ok(Vec::new());
+    }
 
     let mut pos = 0;
     let mut typ = None;
@@ -109,11 +138,49 @@ pub fn decode_unixfs_file_block(block: &[u8]) -> Result<Vec<u8>, CidError> {
     if typ != Some(2) {
         return Err(CidError::Unixfs("UnixFS block is not a file".into()));
     }
-    let file_data = file_data.ok_or_else(|| CidError::Unixfs("missing UnixFS Data".into()))?;
-    if filesize.is_some_and(|size| size != file_data.len() as u64) {
+    let data_len = file_data.as_ref().map(Vec::len);
+    let file_data = file_data.unwrap_or_default();
+    if data_len.is_some() && filesize.is_some_and(|size| size != file_data.len() as u64) {
         return Err(CidError::Unixfs("UnixFS filesize mismatch".into()));
     }
     Ok(file_data)
+}
+
+fn decode_dag_pb_link(input: &[u8]) -> Result<DagPbLink, CidError> {
+    let mut pos = 0;
+    let mut cid = None;
+    let mut name = String::new();
+    let mut tsize = None;
+    while pos < input.len() {
+        let (field, wire) = read_key(input, &mut pos)?;
+        match (field, wire) {
+            (1, 2) => {
+                let bytes = read_len_bytes(input, &mut pos)?;
+                cid = Some(
+                    Cid::read_bytes(bytes)
+                        .map_err(|e| CidError::Unixfs(format!("PBLink CID decode: {e}")))?,
+                );
+            }
+            (2, 2) => {
+                name = String::from_utf8(read_len_bytes(input, &mut pos)?.to_vec())
+                    .map_err(|e| CidError::Unixfs(format!("PBLink name utf8: {e}")))?;
+            }
+            (3, 0) => tsize = Some(read_varint(input, &mut pos)?),
+            (_, 0) => {
+                read_varint(input, &mut pos)?;
+            }
+            (_, 2) => {
+                read_len_bytes(input, &mut pos)?;
+            }
+            _ => {
+                return Err(CidError::Unixfs(format!(
+                    "unsupported PBLink field {field}/{wire}"
+                )))
+            }
+        }
+    }
+    let cid = cid.ok_or_else(|| CidError::Unixfs("missing PBLink.Hash".into()))?;
+    Ok(DagPbLink { name, cid, tsize })
 }
 
 /// Parse any valid IPFS CID string accepted by the upstream CID crate.

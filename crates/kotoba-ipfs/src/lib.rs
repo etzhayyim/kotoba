@@ -10,8 +10,9 @@ mod ipns;
 mod node;
 
 pub use cid::{
-    cid_for_bytes, dag_cbor_block, decode_unixfs_file_block, is_sha2_256, parse_cid, raw_cid,
-    unixfs_file_block, CidError, CODEC_DAG_CBOR, CODEC_DAG_PB, CODEC_RAW, MH_SHA2_256,
+    cid_for_bytes, dag_cbor_block, decode_dag_pb_node, decode_unixfs_file_block,
+    decode_unixfs_file_data, is_sha2_256, parse_cid, raw_cid, unixfs_file_block, CidError,
+    DagPbLink, DagPbNode, CODEC_DAG_CBOR, CODEC_DAG_PB, CODEC_RAW, MH_SHA2_256,
 };
 pub use ipld_core::cid::Cid as IpldCid;
 pub use ipns::{

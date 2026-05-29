@@ -1,4 +1,6 @@
-use kotoba_ipfs::{raw_cid, unixfs_file_block, IpfsConfig, IpldCid, CODEC_DAG_PB, CODEC_RAW};
+use kotoba_ipfs::{
+    decode_dag_pb_node, raw_cid, unixfs_file_block, IpfsConfig, IpldCid, CODEC_DAG_PB, CODEC_RAW,
+};
 use reqwest::blocking::{multipart, Client};
 use serde_json::Value;
 use std::process::{Command, Stdio};
@@ -97,6 +99,26 @@ fn kubo_add(client: &Client, api: &str, data: &'static [u8], raw_leaves: bool) -
         .expect("kubo add json")
 }
 
+fn kubo_add_with_chunker(client: &Client, api: &str, data: &'static [u8], chunker: &str) -> Value {
+    let form =
+        multipart::Form::new().part("file", multipart::Part::bytes(data).file_name("big.txt"));
+    client
+        .post(format!("{api}/add"))
+        .query(&[
+            ("cid-version", "1"),
+            ("pin", "false"),
+            ("raw-leaves", "true"),
+            ("chunker", chunker),
+        ])
+        .multipart(form)
+        .send()
+        .expect("kubo chunked add")
+        .error_for_status()
+        .expect("kubo chunked add status")
+        .json()
+        .expect("kubo chunked add json")
+}
+
 fn kubo_block_get(client: &Client, api: &str, cid: &IpldCid) -> Vec<u8> {
     client
         .post(format!("{api}/block/get"))
@@ -191,4 +213,69 @@ fn kubo_raw_and_unixfs_blocks_roundtrip_with_kotoba() {
     assert_eq!(unixfs_put["Key"], expected_unixfs.to_string());
     assert_eq!(kubo_cat(&client, &kubo.api, &expected_unixfs), data);
     assert_eq!(expected_raw.codec(), CODEC_RAW);
+}
+
+#[test]
+#[ignore = "requires Docker and a local Kubo image; run with --ignored"]
+fn kubo_chunked_unixfs_file_cats_through_kotoba_dag_pb_links() {
+    let kubo = start_kubo();
+    let client = Client::new();
+    let data = b"abcdefghijklmnopqrstuvwxyz";
+    let add = kubo_add_with_chunker(&client, &kubo.api, data, "size-5");
+    let root: IpldCid = add["Hash"]
+        .as_str()
+        .expect("root hash")
+        .parse()
+        .expect("root cid");
+    assert_eq!(root.codec(), CODEC_DAG_PB);
+
+    let root_block = kubo_block_get(&client, &kubo.api, &root);
+    let root_node = decode_dag_pb_node(&root_block).expect("decode kubo dag-pb root");
+    assert!(root_node.links.len() > 1, "{root_node:?}");
+    let linked_blocks = root_node
+        .links
+        .iter()
+        .map(|link| (link.cid, kubo_block_get(&client, &kubo.api, &link.cid)))
+        .collect::<Vec<_>>();
+
+    std::thread::spawn(move || {
+        tokio::runtime::Runtime::new()
+            .expect("tokio runtime")
+            .block_on(async {
+                let temp = tempfile::tempdir().expect("tempdir");
+                let node = IpfsConfig::new()
+                    .with_repo_path(temp.path())
+                    .start()
+                    .await
+                    .expect("kotoba node");
+                node.put_block(&root, &root_block)
+                    .await
+                    .expect("put root from kubo");
+                for (cid, block) in &linked_blocks {
+                    node.put_block(cid, block)
+                        .await
+                        .expect("put linked block from kubo");
+                }
+                assert_eq!(
+                    node.refs(&root, false).await.expect("refs"),
+                    root_node
+                        .links
+                        .iter()
+                        .map(|link| link.cid)
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(node.cat(&root).await.expect("cat chunked unixfs"), data[..]);
+                assert_eq!(
+                    node.cat_path(format!("/ipfs/{root}"))
+                        .await
+                        .expect("cat path chunked unixfs"),
+                    data[..]
+                );
+                let object = node.object_stat(&root).await.expect("object/stat root");
+                assert!(object.cumulative_size > object.block_size);
+                node.shutdown().await;
+            })
+    })
+    .join()
+    .expect("kotoba runtime thread");
 }

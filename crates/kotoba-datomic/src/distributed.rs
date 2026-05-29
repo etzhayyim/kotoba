@@ -3761,6 +3761,54 @@ mod tests {
         assert_eq!(seek[0].v, EdnValue::Integer(20));
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires a running Kubo HTTP API; set KOTOBA_IPFS_ENDPOINT and run with --ignored"]
+    async fn kubo_backed_commit_blocks_and_query_roundtrip() {
+        let store = kotoba_store::KuboBlockStore::from_env();
+        store.probe_version().await.expect("Kubo HTTP API is ready");
+        let ipns = InMemoryIpnsRegistry::new();
+        let ipns_name = "k51-kotoba-kubo-backed-datomic".to_string();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"kubo-backed-graph");
+        let alice = KotobaCid::from_bytes(b"kubo-alice");
+
+        let report = writer
+            .commit_datoms(request(
+                &ipns_name,
+                graph,
+                vec![Datom::assert(
+                    alice.clone(),
+                    ":person/name".into(),
+                    EdnValue::String("Alice via Kubo".into()),
+                    KotobaCid::from_bytes(b"ignored-client-tx"),
+                )],
+            ))
+            .expect("commit datoms to Kubo-backed IPLD blocks and IPNS head");
+        assert!(
+            store.has(&report.commit.cid),
+            "Kubo must persist commit block"
+        );
+        for root in report.commit.index_roots.values() {
+            assert!(store.has(root), "Kubo must persist every Prolly index root");
+        }
+
+        let reader = DistributedDatomReader::new(&store, &ipns);
+        let head = reader
+            .resolve_head(&ipns_name)
+            .expect("resolve Kubo-backed IPNS head")
+            .expect("IPNS head exists");
+        assert_eq!(head.cid, report.commit.cid);
+        let query = kotoba_edn::parse(
+            r#"{:find [?name]
+                :where [[?e :person/name ?name]]}"#,
+        )
+        .unwrap();
+        let rows = reader
+            .q_triples(&head.cid, &query)
+            .expect("query Kubo-backed distributed Datomic head");
+        assert_eq!(rows, vec![vec![EdnValue::String("Alice via Kubo".into())]]);
+    }
+
     #[test]
     fn reader_scans_vaet_only_for_ref_cid_values() {
         let store = MemoryBlockStore::new();
