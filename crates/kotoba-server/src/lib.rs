@@ -292,6 +292,14 @@ pub fn build_router(state: Arc<KotobaState>) -> Router {
             post(xrpc::datomic_with),
         )
         .route(
+            &format!("/xrpc/{}", xrpc::NSID_DATOMIC_AS_OF),
+            post(xrpc::datomic_as_of),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_DATOMIC_SINCE),
+            post(xrpc::datomic_since),
+        )
+        .route(
             &format!("/xrpc/{}", xrpc::NSID_DATOMIC_HISTORY),
             post(xrpc::datomic_history),
         )

@@ -2473,6 +2473,91 @@ async fn datomic_with_applies_tx_without_publishing_distributed_head() {
 }
 
 #[tokio::test]
+async fn datomic_as_of_and_since_expose_distributed_database_values() {
+    let s = TestServer::start(false).await;
+    let tok = tenant_jwt(&s.operator_did);
+    let graph = kotoba_core::cid::KotobaCid::from_bytes(b"datomic-as-of-since-e2e").to_multibase();
+
+    let (status, first_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.transact",
+            json!({
+                "graph": graph,
+                "tx_edn": r#"[{:db/id "alice" :person/name "Alice"}]"#
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{first_body}");
+    let first_tx = first_body["tx_cid"].as_str().unwrap();
+
+    let (status, second_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.transact",
+            json!({
+                "graph": graph,
+                "tx_edn": r#"[{:db/id "bob" :person/name "Bob"}]"#
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{second_body}");
+    let second_tx = second_body["tx_cid"].as_str().unwrap();
+
+    let (status, as_of_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.asOf",
+            json!({ "graph": graph, "tx": first_tx }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{as_of_body}");
+    assert_eq!(as_of_body["tx"], first_tx, "{as_of_body}");
+    assert_eq!(as_of_body["basis_t"], first_tx, "{as_of_body}");
+    assert_eq!(as_of_body["tx_count"], 1, "{as_of_body}");
+
+    let (status, since_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.since",
+            json!({ "graph": graph, "tx": first_tx }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{since_body}");
+    assert_eq!(since_body["tx"], first_tx, "{since_body}");
+    assert_eq!(since_body["basis_t"], second_tx, "{since_body}");
+    assert_eq!(since_body["tx_count"], 1, "{since_body}");
+
+    let (status, as_of_q) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.q",
+            json!({
+                "graph": graph,
+                "as_of": first_tx,
+                "query_edn": r#"{:find [?name] :where [[?e :person/name ?name]]}"#
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{as_of_q}");
+    assert_eq!(as_of_q["rows_edn"], json!([["\"Alice\""]]), "{as_of_q}");
+
+    let (status, since_q) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.q",
+            json!({
+                "graph": graph,
+                "since": first_tx,
+                "query_edn": r#"{:find [?name] :where [[?e :person/name ?name]]}"#
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{since_q}");
+    assert_eq!(since_q["rows_edn"], json!([["\"Bob\""]]), "{since_q}");
+}
+
+#[tokio::test]
 async fn datomic_transact_applies_schema_upsert_cas_and_retract_entity_on_distributed_head() {
     let s = TestServer::start(false).await;
     let tok = tenant_jwt(&s.operator_did);

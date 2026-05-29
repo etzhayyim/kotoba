@@ -1,0 +1,72 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.datomic.asOf",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Return a Datomic as-of database value for a Kotoba distributed Datom graph at the end of a transaction CID.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["graph", "tx"],
+          "properties": {
+            "graph": { "type": "string" },
+            "tx": { "type": "string" },
+            "cacao_b64": { "type": "string" },
+            "presentation": {
+              "type": "object",
+              "required": ["@context", "id", "type"],
+              "properties": {
+                "@context": { "type": "array", "items": { "type": "string" } },
+                "id": { "type": "string" },
+                "type": { "type": "array", "items": { "type": "string" } },
+                "holder": { "type": "string" },
+                "verifiableCredential": { "type": "array", "items": { "type": "object" } },
+                "proof": {
+                  "type": "object",
+                  "required": ["type", "proofPurpose", "verificationMethod", "proofValue"],
+                  "properties": {
+                    "type": { "type": "string" },
+                    "cryptosuite": { "type": "string" },
+                    "proofPurpose": { "type": "string" },
+                    "verificationMethod": { "type": "string" },
+                    "created": { "type": "string" },
+                    "proofValue": { "type": "string" },
+                    "challenge": { "type": "string" },
+                    "domain": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "graph",
+            "tx",
+            "datom_count",
+            "history_datom_count",
+            "entity_count",
+            "attribute_count",
+            "tx_count"
+          ],
+          "properties": {
+            "graph": { "type": "string" },
+            "tx": { "type": "string" },
+            "basis_t": { "type": "string" },
+            "datom_count": { "type": "integer" },
+            "history_datom_count": { "type": "integer" },
+            "entity_count": { "type": "integer" },
+            "attribute_count": { "type": "integer" },
+            "tx_count": { "type": "integer" }
+          }
+        }
+      }
+    }
+  }
+}

@@ -8,10 +8,13 @@ pub const NSID_DATOMIC_TRANSACT: &str = "ai.gftd.apps.kotoba.datomic.transact";
 pub const NSID_DATOMIC_DATOMS: &str = "ai.gftd.apps.kotoba.datomic.datoms";
 pub const NSID_DATOMIC_SEEK_DATOMS: &str = "ai.gftd.apps.kotoba.datomic.seekDatoms";
 pub const NSID_DATOMIC_INDEX_RANGE: &str = "ai.gftd.apps.kotoba.datomic.indexRange";
+pub const NSID_DATOMIC_INDEX_PULL: &str = "ai.gftd.apps.kotoba.datomic.indexPull";
 pub const NSID_DATOMIC_PULL: &str = "ai.gftd.apps.kotoba.datomic.pull";
 pub const NSID_DATOMIC_PULL_MANY: &str = "ai.gftd.apps.kotoba.datomic.pullMany";
 pub const NSID_DATOMIC_Q: &str = "ai.gftd.apps.kotoba.datomic.q";
 pub const NSID_DATOMIC_WITH: &str = "ai.gftd.apps.kotoba.datomic.with";
+pub const NSID_DATOMIC_AS_OF: &str = "ai.gftd.apps.kotoba.datomic.asOf";
+pub const NSID_DATOMIC_SINCE: &str = "ai.gftd.apps.kotoba.datomic.since";
 pub const NSID_DATOMIC_HISTORY: &str = "ai.gftd.apps.kotoba.datomic.history";
 pub const NSID_DATOMIC_TX_RANGE: &str = "ai.gftd.apps.kotoba.datomic.txRange";
 pub const NSID_DATOMIC_LOG: &str = "ai.gftd.apps.kotoba.datomic.log";
@@ -127,6 +130,16 @@ pub struct DatomicWithReq {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct DatomicDbValueReq {
+    pub graph: String,
+    /// Transaction CID that selects the Datomic database value.
+    pub tx: String,
+    pub cacao_b64: Option<String>,
+    #[serde(default)]
+    pub presentation: Option<kotoba_vc::VerifiablePresentation>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct DatomicDatomsReq {
     pub graph: String,
     /// Datomic index name: `:eavt`, `:aevt`, `:avet`, or `:vaet`.
@@ -171,6 +184,25 @@ pub struct DatomicIndexRangeReq {
     pub start_edn: Option<String>,
     /// Exclusive upper bound for the AVET value position.
     pub end_edn: Option<String>,
+    /// Optional Datomic `as-of` transaction CID.
+    pub as_of: Option<String>,
+    /// Optional Datomic `since` transaction CID.
+    pub since: Option<String>,
+    pub cacao_b64: Option<String>,
+    #[serde(default)]
+    pub presentation: Option<kotoba_vc::VerifiablePresentation>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DatomicIndexPullReq {
+    pub graph: String,
+    /// Datomic index name: `:eavt`, `:aevt`, `:avet`, `:vaet`, or `:tea`.
+    pub index: String,
+    /// Optional EDN components for the chosen index prefix.
+    #[serde(default)]
+    pub components_edn: Vec<String>,
+    pub pattern_edn: Option<String>,
     /// Optional Datomic `as-of` transaction CID.
     pub as_of: Option<String>,
     /// Optional Datomic `since` transaction CID.
@@ -498,6 +530,18 @@ pub struct DatomicQResp {
     pub rows_map_edn: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rows_map_json: Option<Vec<std::collections::BTreeMap<String, String>>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DatomicDbValueResp {
+    pub graph: String,
+    pub tx: String,
+    pub basis_t: Option<String>,
+    pub datom_count: usize,
+    pub history_datom_count: usize,
+    pub entity_count: usize,
+    pub attribute_count: usize,
+    pub tx_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -2749,6 +2793,20 @@ fn datomic_db_stats_resp(graph: String, db: &kotoba_datomic::Db) -> DatomicDbSta
     }
 }
 
+fn datomic_db_value_resp(graph: String, tx: String, db: &kotoba_datomic::Db) -> DatomicDbValueResp {
+    let stats = datomic_db_stats_resp(graph.clone(), db);
+    DatomicDbValueResp {
+        graph,
+        tx,
+        basis_t: stats.basis_t,
+        datom_count: stats.datom_count,
+        history_datom_count: stats.history_datom_count,
+        entity_count: stats.entity_count,
+        attribute_count: stats.attribute_count,
+        tx_count: stats.tx_count,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum DatomicDatomsIndex {
     Eavt,
@@ -3795,6 +3853,58 @@ pub async fn datomic_with(
     ))
 }
 
+/// POST /xrpc/ai.gftd.apps.kotoba.datomic.asOf
+pub async fn datomic_as_of(
+    State(state): State<Arc<KotobaState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<DatomicDbValueReq>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let graph_cid = parse_graph_cid(&req.graph)?;
+    require_datomic_read(
+        &state,
+        &headers,
+        &graph_cid,
+        req.cacao_b64.as_deref(),
+        req.presentation.as_ref(),
+        kotoba_auth::CacaoPayload::OP_DATOM_READ,
+        Some(req.tx.as_str()),
+        None,
+    )
+    .await?;
+    let db = require_distributed_datomic_db(&state, &graph_cid, Some(req.tx.as_str()), None)?;
+
+    Ok((
+        StatusCode::OK,
+        Json(datomic_db_value_resp(req.graph, req.tx, &db)),
+    ))
+}
+
+/// POST /xrpc/ai.gftd.apps.kotoba.datomic.since
+pub async fn datomic_since(
+    State(state): State<Arc<KotobaState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<DatomicDbValueReq>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let graph_cid = parse_graph_cid(&req.graph)?;
+    require_datomic_read(
+        &state,
+        &headers,
+        &graph_cid,
+        req.cacao_b64.as_deref(),
+        req.presentation.as_ref(),
+        kotoba_auth::CacaoPayload::OP_DATOM_READ,
+        None,
+        Some(req.tx.as_str()),
+    )
+    .await?;
+    let db = require_distributed_datomic_db(&state, &graph_cid, None, Some(req.tx.as_str()))?;
+
+    Ok((
+        StatusCode::OK,
+        Json(datomic_db_value_resp(req.graph, req.tx, &db)),
+    ))
+}
+
 /// POST /xrpc/ai.gftd.apps.kotoba.datomic.datoms
 pub async fn datomic_datoms(
     State(state): State<Arc<KotobaState>>,
@@ -4057,6 +4167,101 @@ pub async fn datomic_index_range(
             basis_t: basis_t_resp(&db),
             datom_count,
             datoms: datoms.into_iter().map(datomic_datom_resp).collect(),
+        }),
+    ))
+}
+
+/// POST /xrpc/ai.gftd.apps.kotoba.datomic.indexPull
+pub async fn datomic_index_pull(
+    State(state): State<Arc<KotobaState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<DatomicIndexPullReq>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let graph_cid = parse_graph_cid(&req.graph)?;
+    require_datomic_read(
+        &state,
+        &headers,
+        &graph_cid,
+        req.cacao_b64.as_deref(),
+        req.presentation.as_ref(),
+        kotoba_auth::CacaoPayload::OP_DATOM_READ,
+        req.as_of.as_deref(),
+        req.since.as_deref(),
+    )
+    .await?;
+
+    let index = DatomicDatomsIndex::parse(&req.index)?;
+    let components = parse_datomic_datoms_components(&req.components_edn)?;
+    let pattern = match req.pattern_edn.as_deref() {
+        Some(src) => kotoba_edn::parse(src)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("pattern_edn parse: {e}")))?,
+        None => kotoba_edn::EdnValue::Vector(vec![]),
+    };
+    let db = require_distributed_datomic_db(
+        &state,
+        &graph_cid,
+        req.as_of.as_deref(),
+        req.since.as_deref(),
+    )?;
+    let components = resolve_datomic_index_components(&db, index, &components)?;
+    let (basis_t, mut datoms) = distributed_datomic_datoms(
+        &state,
+        &graph_cid,
+        index,
+        &components,
+        req.as_of.as_deref(),
+        req.since.as_deref(),
+    )?
+    .unwrap_or_else(|| {
+        let datoms = db
+            .datoms()
+            .into_iter()
+            .filter_map(
+                |datom| match datomic_datoms_match_components(&datom, index, &components) {
+                    Ok(true) => Some(datom),
+                    Ok(false) | Err(_) => None,
+                },
+            )
+            .collect::<Vec<_>>();
+        (basis_t_resp(&db), datoms)
+    });
+    datoms.sort_by_key(|datom| datomic_datoms_sort_key(datom, index));
+
+    let mut seen = BTreeSet::new();
+    let limit = req.limit.unwrap_or(1000).min(10_000);
+    let mut entities = Vec::new();
+    for datom in datoms {
+        if !seen.insert(datom.e.to_multibase()) {
+            continue;
+        }
+        let entity = datom.e;
+        let entity_edn = db
+            .pull(pattern.clone(), entity.clone())
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("datomic indexPull: {e}")))?;
+        let entity_datoms = db
+            .datoms()
+            .into_iter()
+            .filter(|datom| datom.e == entity)
+            .map(datomic_datom_resp)
+            .collect::<Vec<_>>();
+        entities.push(DatomicPullManyEntityResp {
+            entity: entity.to_multibase(),
+            entity_edn: kotoba_edn::to_string(&entity_edn),
+            datom_count: entity_datoms.len(),
+            datoms: entity_datoms,
+        });
+        if entities.len() >= limit {
+            break;
+        }
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(DatomicPullManyResp {
+            graph: req.graph,
+            basis_t,
+            entity_count: entities.len(),
+            entities,
         }),
     ))
 }
@@ -8028,6 +8233,8 @@ mod tests {
             super::NSID_DATOMIC_PULL_MANY,
             super::NSID_DATOMIC_Q,
             super::NSID_DATOMIC_WITH,
+            super::NSID_DATOMIC_AS_OF,
+            super::NSID_DATOMIC_SINCE,
             super::NSID_DATOMIC_HISTORY,
             super::NSID_DATOMIC_TX_RANGE,
             super::NSID_DATOMIC_LOG,
@@ -8164,6 +8371,14 @@ mod tests {
         );
         assert_eq!(super::NSID_DATOMIC_Q, "ai.gftd.apps.kotoba.datomic.q");
         assert_eq!(
+            super::NSID_DATOMIC_AS_OF,
+            "ai.gftd.apps.kotoba.datomic.asOf"
+        );
+        assert_eq!(
+            super::NSID_DATOMIC_SINCE,
+            "ai.gftd.apps.kotoba.datomic.since"
+        );
+        assert_eq!(
             super::NSID_DATOMIC_HISTORY,
             "ai.gftd.apps.kotoba.datomic.history"
         );
@@ -8243,6 +8458,14 @@ mod tests {
             (
                 super::NSID_DATOMIC_WITH,
                 include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/with.json"),
+            ),
+            (
+                super::NSID_DATOMIC_AS_OF,
+                include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/asOf.json"),
+            ),
+            (
+                super::NSID_DATOMIC_SINCE,
+                include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/since.json"),
             ),
             (
                 super::NSID_DATOMIC_HISTORY,
@@ -8397,6 +8620,25 @@ mod tests {
             "db_after_datoms",
             &["e", "a", "v_edn", "t", "added"],
         );
+        for src in [
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/asOf.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/since.json"),
+        ] {
+            assert_lexicon_input_fields(src, &["graph", "tx"], &["cacao_b64", "presentation"]);
+            assert_lexicon_output_fields(
+                src,
+                &[
+                    "graph",
+                    "tx",
+                    "datom_count",
+                    "history_datom_count",
+                    "entity_count",
+                    "attribute_count",
+                    "tx_count",
+                ],
+                &["basis_t"],
+            );
+        }
         assert_lexicon_input_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/q.json"),
             &["graph", "query_edn"],
@@ -8597,6 +8839,8 @@ mod tests {
         for src in [
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/transact.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/with.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/asOf.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/since.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/q.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/datoms.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/seekDatoms.json"),
