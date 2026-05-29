@@ -74,22 +74,17 @@ impl KotobaDidServiceConfig {
         }
     }
 
+    fn endpoint_for_did(endpoint: &str, did: &str) -> String {
+        endpoint.replace("{did}", did)
+    }
+
     pub fn apply_to(&self, doc: &mut DidDocument) {
-        doc.ensure_single_service(
-            "didcomm",
-            DIDCOMM_MESSAGING_SERVICE,
-            self.didcomm_endpoint.clone(),
-        );
-        doc.ensure_single_service(
-            "atproto-pds",
-            ATPROTO_PDS_SERVICE,
-            self.atproto_pds_endpoint.clone(),
-        );
-        doc.ensure_single_service(
-            "kotoba-node",
-            KOTOBA_NODE_SERVICE,
-            self.kotoba_node_endpoint.clone(),
-        );
+        let didcomm_endpoint = Self::endpoint_for_did(&self.didcomm_endpoint, &doc.id);
+        let atproto_pds_endpoint = Self::endpoint_for_did(&self.atproto_pds_endpoint, &doc.id);
+        let kotoba_node_endpoint = Self::endpoint_for_did(&self.kotoba_node_endpoint, &doc.id);
+        doc.ensure_single_service("didcomm", DIDCOMM_MESSAGING_SERVICE, didcomm_endpoint);
+        doc.ensure_single_service("atproto-pds", ATPROTO_PDS_SERVICE, atproto_pds_endpoint);
+        doc.ensure_single_service("kotoba-node", KOTOBA_NODE_SERVICE, kotoba_node_endpoint);
         doc.ensure_graph_membership_service(self.graph_memberships.clone());
     }
 }

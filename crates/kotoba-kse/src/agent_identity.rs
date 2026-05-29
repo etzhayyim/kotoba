@@ -13,6 +13,7 @@
 //! persistence across restarts).
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use kotoba_auth::ed25519_pubkey_to_did_key;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 /// Layer-1 identity keys for the Kotoba agent.
@@ -34,8 +35,7 @@ impl AgentIdentity {
         let signing_key = SigningKey::generate(&mut OsRng);
         let dh_secret = StaticSecret::random_from_rng(OsRng);
         let vk_bytes = VerifyingKey::from(&signing_key).to_bytes();
-        // Ephemeral DID uses hex-encoded verifying key bytes (dev only).
-        let did = format!("did:key:z{}", hex::encode(vk_bytes));
+        let did = ed25519_pubkey_to_did_key(&vk_bytes);
 
         Self {
             signing_key,
@@ -174,7 +174,7 @@ impl AgentIdentity {
     }
 
     /// Generate a fresh non-ephemeral identity intended for persistence.
-    /// The DID format is `did:key:z{hex(verifying_key)}`.
+    /// The DID format is W3C `did:key` Ed25519 multicodec/multibase.
     pub fn generate_persistent() -> Self {
         let mut id = Self::generate_ephemeral();
         id.ephemeral = false;
@@ -263,8 +263,8 @@ mod tests {
     fn ephemeral_did_starts_with_did_key() {
         let id = AgentIdentity::generate_ephemeral();
         assert!(
-            id.did.starts_with("did:key:z"),
-            "ephemeral DID should start with did:key:z"
+            id.did.starts_with("did:key:z6Mk"),
+            "ephemeral DID should start with Ed25519 did:key z6Mk"
         );
     }
 
@@ -316,11 +316,11 @@ mod tests {
     }
 
     #[test]
-    fn ephemeral_did_contains_hex_encoded_verifying_key() {
+    fn ephemeral_did_contains_multicodec_verifying_key() {
         let id = AgentIdentity::generate_ephemeral();
-        // DID format: "did:key:z{hex(vk_bytes)}"
-        let vk_hex = hex::encode(id.verifying_key().as_bytes());
-        let expected_suffix = format!("did:key:z{vk_hex}");
-        assert_eq!(id.did, expected_suffix);
+        assert_eq!(
+            kotoba_auth::parse_ed25519_did_key(&id.did).unwrap(),
+            *id.verifying_key().as_bytes()
+        );
     }
 }

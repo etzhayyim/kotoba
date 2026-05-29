@@ -4,8 +4,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use kotoba_auth::{
     CompositeDidResolver, DidDocument, DidDocumentFetcher, DidDocumentResolver, DidResolverError,
-    InMemoryDidResolver, LayeredDidResolver, VerificationMethod, ATPROTO_PDS_SERVICE,
-    DIDCOMM_MESSAGING_SERVICE, DID_CONTEXT_V1, KOTOBA_NODE_SERVICE,
+    InMemoryDidResolver, KotobaDidServiceConfig, LayeredDidResolver, ProtocolServiceDidResolver,
+    VerificationMethod, ATPROTO_PDS_SERVICE, DIDCOMM_MESSAGING_SERVICE, DID_CONTEXT_V1,
+    KOTOBA_NODE_SERVICE,
 };
 use kotoba_core::cid::KotobaCid;
 use kotoba_core::named_graph::{GraphVisibility, NamedGraph};
@@ -298,6 +299,30 @@ impl KotobaState {
         })
     }
 
+    fn did_protocol_service_config() -> KotobaDidServiceConfig {
+        let kotoba_endpoint = std::env::var("KOTOBA_NODE_ENDPOINT")
+            .or_else(|_| std::env::var("KOTOBA_PUBLIC_ENDPOINT"))
+            .unwrap_or_else(|_| "/ip4/127.0.0.1/tcp/4001".to_string());
+        let didcomm_endpoint =
+            std::env::var("KOTOBA_DIDCOMM_ENDPOINT").unwrap_or_else(|_| "didcomm://{did}".into());
+        let atproto_pds_endpoint = std::env::var("KOTOBA_ATPROTO_PDS_ENDPOINT")
+            .unwrap_or_else(|_| Self::public_http_endpoint_from_env());
+        let graph_memberships = [
+            NamedGraph::public().cid,
+            NamedGraph::authenticated().cid,
+            NamedGraph::new("kotobase-kg-v1", GraphVisibility::Authenticated).cid,
+        ]
+        .into_iter()
+        .map(|cid| format!("kotoba://graph/{}", cid.to_multibase()));
+
+        KotobaDidServiceConfig::new(
+            didcomm_endpoint,
+            atproto_pds_endpoint,
+            kotoba_endpoint,
+            graph_memberships,
+        )
+    }
+
     pub fn new(inference_engine: Option<InferenceFn>) -> anyhow::Result<Self> {
         // Hot block cache — BudgetedBlockStore<MemoryBlockStore>.
         // Capacity: KOTOBA_HOT_CACHE_BYTES (default 256 MiB) or
@@ -508,16 +533,21 @@ impl KotobaState {
             tracing::info!("CC embed client enabled (KOTOBA_EMBED_URL)");
         }
 
-        let did_resolver: Arc<dyn DidDocumentResolver> = Arc::new(LayeredDidResolver::new(vec![
-            Arc::new(DistributedDidResolver::new(
-                Arc::clone(&block_store),
-                Arc::clone(&ipns_registry),
-                did_document_resolver_ipns_names(),
-            )),
-            Arc::new(CompositeDidResolver::with_default_methods(Arc::new(
-                HttpDidDocumentFetcher::new(),
-            ))),
-        ]));
+        let did_resolver_base: Arc<dyn DidDocumentResolver> =
+            Arc::new(LayeredDidResolver::new(vec![
+                Arc::new(DistributedDidResolver::new(
+                    Arc::clone(&block_store),
+                    Arc::clone(&ipns_registry),
+                    did_document_resolver_ipns_names(),
+                )),
+                Arc::new(CompositeDidResolver::with_default_methods(Arc::new(
+                    HttpDidDocumentFetcher::new(),
+                ))),
+            ]));
+        let did_resolver: Arc<dyn DidDocumentResolver> = Arc::new(ProtocolServiceDidResolver::new(
+            did_resolver_base,
+            Self::did_protocol_service_config(),
+        ));
 
         // Named graph registry — pre-populate well-known graphs.
         //
@@ -1092,6 +1122,42 @@ mod tests {
             doc.atproto_pds_endpoint(),
             Some("https://kotoba.example.com")
         );
+    }
+
+    #[test]
+    fn kotoba_state_did_resolver_falls_back_to_did_key_with_protocol_services() {
+        std::env::set_var("KOTOBA_NO_KEYCHAIN", "1");
+        std::env::remove_var("KOTOBA_AGENT_DID");
+        std::env::remove_var("KOTOBA_AGENT_ED25519_HEX");
+        std::env::remove_var("KOTOBA_AGENT_X25519_HEX");
+        std::env::remove_var("KOTOBA_DIDCOMM_ENDPOINT");
+        std::env::set_var("KOTOBA_IPFS", "off");
+        std::env::remove_var("KOTOBA_IPNS");
+        std::env::set_var(
+            "KOTOBA_ATPROTO_PDS_ENDPOINT",
+            "https://pds.resolver.example",
+        );
+
+        let state = KotobaState::new(None).expect("new");
+        let resolved = state.did_resolver.resolve(&state.operator_did).unwrap();
+        let expected_didcomm = format!("didcomm://{}", state.operator_did);
+
+        std::env::remove_var("KOTOBA_ATPROTO_PDS_ENDPOINT");
+        std::env::remove_var("KOTOBA_NO_KEYCHAIN");
+        std::env::remove_var("KOTOBA_IPFS");
+
+        assert_eq!(resolved.id, state.operator_did);
+        assert_eq!(resolved.didcomm_endpoint(), Some(expected_didcomm.as_str()));
+        assert_eq!(
+            resolved.atproto_pds_endpoint(),
+            Some("https://pds.resolver.example")
+        );
+        assert!(resolved.kotoba_endpoint().is_some());
+        assert!(resolved
+            .graph_memberships()
+            .iter()
+            .all(|scope| scope.starts_with("kotoba://graph/")));
+        assert!(resolved.has_kotoba_protocol_services());
     }
 
     #[test]

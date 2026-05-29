@@ -1,7 +1,9 @@
 /// Two-node block exchange: A stores a block, B fetches it via `/kotoba/ipfs/1.0.0`.
 use ciborium::value::Value as CborValue;
 use ipld_core::ipld::Ipld;
-use kotoba_ipfs::{raw_cid, IpfsConfig, Multiaddr, CODEC_DAG_CBOR, CODEC_DAG_PB, CODEC_RAW};
+use kotoba_ipfs::{
+    cid_for_bytes, raw_cid, IpfsConfig, Multiaddr, CODEC_DAG_CBOR, CODEC_DAG_PB, CODEC_RAW,
+};
 use serde::{Deserialize, Serialize};
 use tokio::time::{timeout, Duration};
 
@@ -317,6 +319,44 @@ async fn kubo_compatible_local_api_surface() {
             name: String::new(),
             cid: child,
         }]
+    );
+    let pb_dir_block = dag_pb_node_with_link("hello.txt", &raw, 5);
+    let pb_dir = cid_for_bytes(CODEC_DAG_PB, &pb_dir_block);
+    node.block_put(&pb_dir, &pb_dir_block)
+        .await
+        .expect("block/put dag-pb dir");
+    assert_eq!(
+        node.object_data(&pb_dir).await.expect("object/data"),
+        b""[..]
+    );
+    let object = node.object_get(&pb_dir).await.expect("object/get dag-pb");
+    assert_eq!(object.cid, pb_dir);
+    assert_eq!(object.data, Vec::<u8>::new());
+    assert_eq!(
+        object.links,
+        vec![kotoba_ipfs::ObjectLink {
+            name: "hello.txt".into(),
+            cid: raw,
+        }]
+    );
+    assert_eq!(
+        node.object_links(&pb_dir)
+            .await
+            .expect("object/links dag-pb"),
+        object.links
+    );
+    assert_eq!(
+        node.resolve_path(format!("/ipfs/{pb_dir}/hello.txt"))
+            .await
+            .expect("resolve dag-pb named link")
+            .cid,
+        raw
+    );
+    assert_eq!(
+        node.cat_path(format!("/ipfs/{pb_dir}/hello.txt"))
+            .await
+            .expect("cat dag-pb named link"),
+        b"hello"[..]
     );
     assert_eq!(
         node.refs(&linked, true).await.expect("recursive refs"),
@@ -772,4 +812,38 @@ async fn put_cbor_value(
     let mut data = Vec::new();
     ciborium::into_writer(&value, &mut data)?;
     node.put_codec_block(CODEC_DAG_CBOR, &data).await
+}
+
+fn dag_pb_node_with_link(name: &str, cid: &kotoba_ipfs::IpldCid, tsize: u64) -> Vec<u8> {
+    let mut link = Vec::new();
+    write_pb_bytes(&mut link, 1, &cid.to_bytes());
+    write_pb_bytes(&mut link, 2, name.as_bytes());
+    write_pb_varint(&mut link, 3, tsize);
+
+    let mut node = Vec::new();
+    write_pb_bytes(&mut node, 2, &link);
+    node
+}
+
+fn write_pb_bytes(out: &mut Vec<u8>, field: u64, bytes: &[u8]) {
+    write_pb_key(out, field, 2);
+    write_pb_raw_varint(out, bytes.len() as u64);
+    out.extend_from_slice(bytes);
+}
+
+fn write_pb_varint(out: &mut Vec<u8>, field: u64, value: u64) {
+    write_pb_key(out, field, 0);
+    write_pb_raw_varint(out, value);
+}
+
+fn write_pb_key(out: &mut Vec<u8>, field: u64, wire: u64) {
+    write_pb_raw_varint(out, (field << 3) | wire);
+}
+
+fn write_pb_raw_varint(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
 }

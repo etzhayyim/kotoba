@@ -665,7 +665,7 @@ impl KotobaIpfsNode {
         Ok(DagImport { roots, blocks })
     }
 
-    /// Kubo-like `dag/resolve` for local dag-cbor roots and direct IPLD links.
+    /// Kubo-like `dag/resolve` for local dag-cbor roots, dag-pb links, and direct IPLD links.
     pub async fn dag_resolve(&self, cid: &IpldCid, path: impl AsRef<str>) -> Result<DagResolve> {
         let path = normalize_ipld_path(path.as_ref())?;
         if path.is_empty() {
@@ -675,9 +675,12 @@ impl KotobaIpfsNode {
                 rem_path: String::new(),
             });
         }
+        if cid.codec() == crate::cid::CODEC_DAG_PB {
+            return self.dag_resolve_pb(cid, &path).await;
+        }
         if cid.codec() != crate::cid::CODEC_DAG_CBOR {
             bail!(
-                "dag_resolve only traverses dag-cbor blocks, got codec {}",
+                "dag_resolve only traverses dag-cbor or dag-pb blocks, got codec {}",
                 cid.codec()
             );
         }
@@ -782,8 +785,56 @@ impl KotobaIpfsNode {
         })
     }
 
-    /// Kubo-like `object/links` for locally available dag-cbor objects.
+    /// Kubo-like `object/data` for locally available dag-pb objects.
+    pub async fn object_data(&self, cid: &IpldCid) -> Result<Bytes> {
+        if cid.codec() != crate::cid::CODEC_DAG_PB {
+            bail!(
+                "object_data only supports dag-pb blocks, got codec {}",
+                cid.codec()
+            );
+        }
+        Ok(Bytes::from(
+            decode_dag_pb_node(&self.get_block(cid).await?)?
+                .data
+                .unwrap_or_default(),
+        ))
+    }
+
+    /// Kubo-like `object/get` for locally available dag-pb objects.
+    pub async fn object_get(&self, cid: &IpldCid) -> Result<ObjectGet> {
+        if cid.codec() != crate::cid::CODEC_DAG_PB {
+            bail!(
+                "object_get only supports dag-pb blocks, got codec {}",
+                cid.codec()
+            );
+        }
+        let node = decode_dag_pb_node(&self.get_block(cid).await?)?;
+        Ok(ObjectGet {
+            cid: *cid,
+            data: node.data.unwrap_or_default(),
+            links: node
+                .links
+                .into_iter()
+                .map(|link| ObjectLink {
+                    name: link.name,
+                    cid: link.cid,
+                })
+                .collect(),
+        })
+    }
+
+    /// Kubo-like `object/links` for locally available dag-pb or dag-cbor objects.
     pub async fn object_links(&self, cid: &IpldCid) -> Result<Vec<ObjectLink>> {
+        if cid.codec() == crate::cid::CODEC_DAG_PB {
+            return Ok(decode_dag_pb_node(&self.get_block(cid).await?)?
+                .links
+                .into_iter()
+                .map(|link| ObjectLink {
+                    name: link.name,
+                    cid: link.cid,
+                })
+                .collect());
+        }
         Ok(self
             .refs(cid, false)
             .await?
@@ -1546,6 +1597,30 @@ impl KotobaIpfsNode {
             .map(|(_, cid)| *cid)
             .collect()
     }
+
+    async fn dag_resolve_pb(&self, cid: &IpldCid, path: &str) -> Result<DagResolve> {
+        let segments: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+        let mut current = *cid;
+        for (idx, segment) in segments.iter().enumerate() {
+            if current.codec() != crate::cid::CODEC_DAG_PB {
+                return Ok(DagResolve {
+                    cid: current,
+                    rem_path: segments[idx..].join("/"),
+                });
+            }
+            let node = decode_dag_pb_node(&self.get_block(&current).await?)?;
+            let link = node
+                .links
+                .into_iter()
+                .find(|link| link.name == *segment)
+                .ok_or_else(|| anyhow!("dag-pb path not found: {path}"))?;
+            current = link.cid;
+        }
+        Ok(DagResolve {
+            cid: current,
+            rem_path: String::new(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1652,6 +1727,13 @@ pub struct ObjectStat {
 pub struct ObjectLink {
     pub name: String,
     pub cid: IpldCid,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObjectGet {
+    pub cid: IpldCid,
+    pub data: Vec<u8>,
+    pub links: Vec<ObjectLink>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
