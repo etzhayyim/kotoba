@@ -819,6 +819,35 @@ async fn kubo_compatible_local_api_surface() {
             .expect("files/read generated"),
         b"generated"[..]
     );
+    let chcid_pb = node
+        .files_chcid("/docs/generated.txt", kotoba_ipfs::CODEC_DAG_PB)
+        .await
+        .expect("files/chcid dag-pb");
+    assert_eq!(chcid_pb.path, "/docs/generated.txt");
+    assert_eq!(chcid_pb.kind, kotoba_ipfs::MfsKind::File);
+    assert_eq!(chcid_pb.size, 9);
+    assert_eq!(
+        chcid_pb.cid.expect("files/chcid cid").codec(),
+        kotoba_ipfs::CODEC_DAG_PB
+    );
+    assert_eq!(
+        node.files_read("/docs/generated.txt")
+            .await
+            .expect("files/read generated dag-pb"),
+        b"generated"[..]
+    );
+    let chcid_raw = node
+        .files_chcid("/docs/generated.txt", kotoba_ipfs::CODEC_RAW)
+        .await
+        .expect("files/chcid raw");
+    assert_eq!(
+        chcid_raw.cid.expect("files/chcid raw cid").codec(),
+        kotoba_ipfs::CODEC_RAW
+    );
+    assert!(node
+        .files_chcid("/docs/generated.txt", kotoba_ipfs::CODEC_DAG_CBOR)
+        .await
+        .is_err());
     let touched = node
         .files_touch("/docs/empty.txt", true)
         .await
