@@ -17,6 +17,7 @@ pub const NSID_DATOMIC_AS_OF: &str = "ai.gftd.apps.kotoba.datomic.asOf";
 pub const NSID_DATOMIC_SINCE: &str = "ai.gftd.apps.kotoba.datomic.since";
 pub const NSID_DATOMIC_SYNC: &str = "ai.gftd.apps.kotoba.datomic.sync";
 pub const NSID_DATOMIC_HISTORY: &str = "ai.gftd.apps.kotoba.datomic.history";
+pub const NSID_DATOMIC_TX: &str = "ai.gftd.apps.kotoba.datomic.tx";
 pub const NSID_DATOMIC_TX_RANGE: &str = "ai.gftd.apps.kotoba.datomic.txRange";
 pub const NSID_DATOMIC_LOG: &str = "ai.gftd.apps.kotoba.datomic.log";
 pub const NSID_DATOMIC_BASIS_T: &str = "ai.gftd.apps.kotoba.datomic.basisT";
@@ -593,6 +594,13 @@ pub struct DatomicTxRangeResp {
     pub basis_t: Option<String>,
     pub tx_count: usize,
     pub txes: Vec<DatomicTxRangeTxResp>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DatomicTxResp {
+    pub graph: String,
+    pub basis_t: Option<String>,
+    pub tx: DatomicTxRangeTxResp,
 }
 
 #[derive(Debug, Serialize)]
@@ -2076,6 +2084,12 @@ fn append_tx_metadata_datoms(
     ipns_controller_did: &str,
     expected_parent: Option<&kotoba_core::cid::KotobaCid>,
 ) {
+    let tx_instant_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+        .min(i64::MAX as u128) as i64;
+
     fn assert_tx(
         datoms: &mut Vec<kotoba_datomic::Datom>,
         tx_cid: &kotoba_core::cid::KotobaCid,
@@ -2101,6 +2115,12 @@ fn append_tx_metadata_datoms(
         tx_cid,
         ":tx/operation",
         kotoba_edn::EdnValue::String(operation.to_string()),
+    );
+    assert_tx(
+        datoms,
+        tx_cid,
+        ":db/txInstant",
+        kotoba_edn::EdnValue::Integer(tx_instant_ms),
     );
     assert_tx(
         datoms,
@@ -3495,6 +3515,52 @@ fn distributed_datomic_sync(
     }))
 }
 
+fn distributed_datomic_tx(
+    state: &KotobaState,
+    graph_cid: &kotoba_core::cid::KotobaCid,
+    tx: &str,
+) -> Result<
+    Option<(
+        Option<String>,
+        kotoba_datomic::distributed::DistributedTxRangeEntry,
+    )>,
+    (StatusCode, String),
+> {
+    let reader = DistributedDatomReader::new(&*state.block_store, &*state.ipns_registry);
+    let Some(head) = reader
+        .resolve_head(&distributed_graph_ipns_name(graph_cid))
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("distributed datomic head read: {e}"),
+            )
+        })?
+    else {
+        return Ok(None);
+    };
+    let tx = parse_optional_tx_cid("tx", Some(tx))?.expect("Some input parsed to Some tx");
+    let entries = reader
+        .tx_range_from_head(&head.cid, Some(&tx), None)
+        .map_err(|e| {
+            let msg = format!("distributed datomic tx: {e}");
+            if msg.contains("start transaction not found") {
+                (StatusCode::NOT_FOUND, msg)
+            } else {
+                (StatusCode::BAD_REQUEST, msg)
+            }
+        })?;
+    let entry = entries
+        .into_iter()
+        .find(|entry| entry.commit.tx_cid == tx)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("distributed datomic tx not found: {}", tx.to_multibase()),
+            )
+        })?;
+    Ok(Some((Some(head.tx_cid.to_multibase()), entry)))
+}
+
 fn distributed_datomic_tx_range(
     state: &KotobaState,
     graph_cid: &kotoba_core::cid::KotobaCid,
@@ -4713,6 +4779,57 @@ pub async fn datomic_history(
     ))
 }
 
+fn datomic_tx_resp_from_entry(
+    entry: kotoba_datomic::distributed::DistributedTxRangeEntry,
+) -> DatomicTxRangeTxResp {
+    let datoms = entry
+        .datoms
+        .into_iter()
+        .map(datomic_datom_resp)
+        .collect::<Vec<_>>();
+    DatomicTxRangeTxResp {
+        tx_cid: entry.commit.tx_cid.to_multibase(),
+        commit_cid: entry.commit.cid.to_multibase(),
+        prev_commit_cid: entry.commit.prev.map(|cid| cid.to_multibase()),
+        seq: entry.commit.seq,
+        author: entry.commit.author,
+        ts: entry.commit.ts,
+        datom_count: datoms.len(),
+        datoms,
+    }
+}
+
+/// POST /xrpc/ai.gftd.apps.kotoba.datomic.tx
+pub async fn datomic_tx(
+    State(state): State<Arc<KotobaState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<DatomicDbValueReq>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let graph_cid = parse_graph_cid(&req.graph)?;
+    require_datomic_read(
+        &state,
+        &headers,
+        &graph_cid,
+        req.cacao_b64.as_deref(),
+        req.presentation.as_ref(),
+        kotoba_auth::CacaoPayload::OP_DATOM_READ,
+        Some(req.tx.as_str()),
+        None,
+    )
+    .await?;
+    let (basis_t, entry) = distributed_datomic_tx(&state, &graph_cid, &req.tx)?
+        .ok_or_else(|| missing_distributed_datomic_head(&graph_cid))?;
+
+    Ok((
+        StatusCode::OK,
+        Json(DatomicTxResp {
+            graph: req.graph,
+            basis_t,
+            tx: datomic_tx_resp_from_entry(entry),
+        }),
+    ))
+}
+
 /// POST /xrpc/ai.gftd.apps.kotoba.datomic.txRange
 pub async fn datomic_tx_range(
     State(state): State<Arc<KotobaState>>,
@@ -4738,23 +4855,7 @@ pub async fn datomic_tx_range(
     let txes = entries
         .into_iter()
         .take(limit)
-        .map(|entry| {
-            let datoms = entry
-                .datoms
-                .into_iter()
-                .map(datomic_datom_resp)
-                .collect::<Vec<_>>();
-            DatomicTxRangeTxResp {
-                tx_cid: entry.commit.tx_cid.to_multibase(),
-                commit_cid: entry.commit.cid.to_multibase(),
-                prev_commit_cid: entry.commit.prev.map(|cid| cid.to_multibase()),
-                seq: entry.commit.seq,
-                author: entry.commit.author,
-                ts: entry.commit.ts,
-                datom_count: datoms.len(),
-                datoms,
-            }
-        })
+        .map(datomic_tx_resp_from_entry)
         .collect::<Vec<_>>();
 
     Ok((
@@ -7850,6 +7951,11 @@ mod tests {
         ));
         assert!(has(":tx/ipnsName", EdnValue::string(ipns_name)));
         assert!(has(":tx/ipnsSequence", EdnValue::Integer(1)));
+        assert!(tx_datoms.iter().any(|datom| {
+            datom.e == tx_cid
+                && datom.a == ":db/txInstant"
+                && matches!(datom.v, EdnValue::Integer(value) if value > 0)
+        }));
         assert!(has(
             ":tx/ipnsControllerDid",
             EdnValue::string(state.operator_did.clone())
@@ -8327,6 +8433,7 @@ mod tests {
             super::NSID_DATOMIC_SINCE,
             super::NSID_DATOMIC_SYNC,
             super::NSID_DATOMIC_HISTORY,
+            super::NSID_DATOMIC_TX,
             super::NSID_DATOMIC_TX_RANGE,
             super::NSID_DATOMIC_LOG,
             super::NSID_DATOMIC_BASIS_T,
@@ -8385,6 +8492,7 @@ mod tests {
             super::NSID_DATOMIC_SINCE,
             super::NSID_DATOMIC_SYNC,
             super::NSID_DATOMIC_HISTORY,
+            super::NSID_DATOMIC_TX,
             super::NSID_DATOMIC_TX_RANGE,
             super::NSID_DATOMIC_LOG,
             super::NSID_DATOMIC_BASIS_T,
@@ -8482,6 +8590,7 @@ mod tests {
             super::NSID_DATOMIC_HISTORY,
             "ai.gftd.apps.kotoba.datomic.history"
         );
+        assert_eq!(super::NSID_DATOMIC_TX, "ai.gftd.apps.kotoba.datomic.tx");
         assert_eq!(
             super::NSID_DATOMIC_TX_RANGE,
             "ai.gftd.apps.kotoba.datomic.txRange"
@@ -8578,6 +8687,10 @@ mod tests {
             (
                 super::NSID_DATOMIC_HISTORY,
                 include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/history.json"),
+            ),
+            (
+                super::NSID_DATOMIC_TX,
+                include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/tx.json"),
             ),
             (
                 super::NSID_DATOMIC_TX_RANGE,
@@ -8846,6 +8959,36 @@ mod tests {
             "datoms",
             &["e", "a", "v_edn", "t", "added"],
         );
+        assert_lexicon_input_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/tx.json"),
+            &["graph", "tx"],
+            &["cacao_b64", "presentation"],
+        );
+        assert_lexicon_output_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/tx.json"),
+            &["graph", "tx"],
+            &["basis_t"],
+        );
+        assert_lexicon_output_object_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/tx.json"),
+            "tx",
+            &[
+                "tx_cid",
+                "commit_cid",
+                "seq",
+                "author",
+                "ts",
+                "datom_count",
+                "datoms",
+            ],
+            &["prev_commit_cid"],
+        );
+        assert_lexicon_output_object_nested_array_item_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/tx.json"),
+            "tx",
+            "datoms",
+            &["e", "a", "v_edn", "t", "added"],
+        );
         for src in [
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/seekDatoms.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/indexRange.json"),
@@ -9003,6 +9146,7 @@ mod tests {
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/pull.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/pullMany.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/history.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/tx.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/txRange.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/log.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/basisT.json"),
@@ -9279,6 +9423,39 @@ mod tests {
         }
     }
 
+    fn assert_lexicon_output_object_fields(
+        src: &str,
+        field: &str,
+        required: &[&str],
+        properties: &[&str],
+    ) {
+        let value: serde_json::Value = serde_json::from_str(src).expect("lexicon JSON");
+        let schema = &value["defs"]["main"]["output"]["schema"]["properties"][field];
+        assert_eq!(
+            schema["type"], "object",
+            "{} output {field} must be object",
+            value["id"]
+        );
+        let required_values = schema["required"].as_array();
+        for required in required {
+            assert!(
+                required_values.is_some_and(|values| values
+                    .iter()
+                    .any(|value| value.as_str() == Some(*required))),
+                "{} output {field} missing required field {required}",
+                value["id"]
+            );
+        }
+        let property_values = schema["properties"].as_object();
+        for property in required.iter().chain(properties.iter()) {
+            assert!(
+                property_values.is_some_and(|values| values.contains_key(*property)),
+                "{} output {field} missing property {property}",
+                value["id"]
+            );
+        }
+    }
+
     fn assert_lexicon_input_nested_array_item_fields(
         src: &str,
         outer_field: &str,
@@ -9444,6 +9621,39 @@ mod tests {
                     .as_object()
                     .is_some_and(|props| props.contains_key(*field)),
                 "{} output nested array item missing property {field}",
+                value["id"]
+            );
+        }
+    }
+
+    fn assert_lexicon_output_object_nested_array_item_fields(
+        src: &str,
+        object_field: &str,
+        inner_field: &str,
+        required: &[&str],
+    ) {
+        let value: serde_json::Value = serde_json::from_str(src).expect("lexicon JSON");
+        let item = &value["defs"]["main"]["output"]["schema"]["properties"][object_field]
+            ["properties"][inner_field]["items"];
+        assert_eq!(
+            item["type"], "object",
+            "{} output {object_field}.{inner_field} items must be object",
+            value["id"]
+        );
+        let required_values = item["required"].as_array().expect("required array");
+        for field in required {
+            assert!(
+                required_values
+                    .iter()
+                    .any(|value| value.as_str() == Some(field)),
+                "{} output object nested array item missing required field {field}",
+                value["id"]
+            );
+            assert!(
+                item["properties"]
+                    .as_object()
+                    .is_some_and(|props| props.contains_key(*field)),
+                "{} output object nested array item missing property {field}",
                 value["id"]
             );
         }

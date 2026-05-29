@@ -1021,6 +1021,46 @@ async fn datomic_transact_q_pull_history_roundtrip_via_distributed_head() {
         tx_range_body["txes"][2]["prev_commit_cid"], second_tx_body["commit_cid"],
         "{tx_range_body}"
     );
+
+    let (status, tx_one_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.tx",
+            json!({
+                "graph": graph,
+                "tx": second_tx
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{tx_one_body}");
+    assert_eq!(
+        tx_one_body["basis_t"], ban_tx_body["tx_cid"],
+        "{tx_one_body}"
+    );
+    assert_eq!(
+        tx_one_body["tx"]["tx_cid"], second_tx_body["tx_cid"],
+        "{tx_one_body}"
+    );
+    assert_eq!(
+        tx_one_body["tx"]["commit_cid"], second_tx_body["commit_cid"],
+        "{tx_one_body}"
+    );
+    assert_eq!(
+        tx_one_body["tx"]["prev_commit_cid"], tx_body["commit_cid"],
+        "{tx_one_body}"
+    );
+    assert!(
+        tx_one_body["tx"]["datoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|datom| datom["a"] == ":person/name"
+                && datom["v_edn"] == "\"Bob\""
+                && datom["t"] == second_tx_body["tx_cid"]
+                && datom["added"] == true),
+        "{tx_one_body}"
+    );
+
     for (body, expected_prev) in [
         (&second_tx_body, tx_body["commit_cid"].as_str().unwrap()),
         (&ban_tx_body, second_tx_body["commit_cid"].as_str().unwrap()),
@@ -2686,6 +2726,75 @@ async fn datomic_sync_reports_distributed_head_and_target_tx_reachability() {
     assert_eq!(missing_body["basis_t"], second_tx, "{missing_body}");
     assert_eq!(missing_body["target_tx"], missing_tx, "{missing_body}");
     assert_eq!(missing_body["reached"], false, "{missing_body}");
+}
+
+#[tokio::test]
+async fn datomic_tx_returns_single_distributed_transaction_entry() {
+    let s = TestServer::start(false).await;
+    let tok = tenant_jwt(&s.operator_did);
+    let graph = kotoba_core::cid::KotobaCid::from_bytes(b"datomic-tx-e2e").to_multibase();
+
+    let (status, first_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.transact",
+            json!({
+                "graph": graph,
+                "tx_edn": r#"[{:db/id "alice" :person/name "Alice"}]"#
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{first_body}");
+    let first_tx = first_body["tx_cid"].as_str().unwrap();
+
+    let (status, second_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.transact",
+            json!({
+                "graph": graph,
+                "tx_edn": r#"[{:db/id "bob" :person/name "Bob"}]"#
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{second_body}");
+    let second_tx = second_body["tx_cid"].as_str().unwrap();
+
+    let (status, tx_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.tx",
+            json!({ "graph": graph, "tx": first_tx }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{tx_body}");
+    assert_eq!(tx_body["basis_t"], second_tx, "{tx_body}");
+    assert_eq!(tx_body["tx"]["tx_cid"], first_tx, "{tx_body}");
+    assert_eq!(
+        tx_body["tx"]["commit_cid"], first_body["commit_cid"],
+        "{tx_body}"
+    );
+    assert_eq!(tx_body["tx"]["seq"], 1, "{tx_body}");
+    assert!(tx_body["tx"]["datoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|datom| {
+            datom["a"] == ":person/name"
+                && datom["v_edn"] == "\"Alice\""
+                && datom["t"] == first_tx
+                && datom["added"] == true
+        }));
+
+    let missing_tx = kotoba_core::cid::KotobaCid::from_bytes(b"datomic-tx-missing").to_multibase();
+    let (status, missing_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.tx",
+            json!({ "graph": graph, "tx": missing_tx }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 404, "{missing_body}");
 }
 
 #[tokio::test]
@@ -5897,11 +6006,13 @@ async fn assert_protocol_tx_metadata(
             "/xrpc/ai.gftd.apps.kotoba.datomic.q",
             json!({
                 "graph": graph,
-                "query_edn": r#"{:find [?proof ?operation ?ipns ?seq ?controller]
+                "query_edn": r#"{:find [?proof ?operation ?ipns ?seq ?controller ?instant]
                                  :where [[?tx :tx/authProofCid ?proof]
                                          [?tx :tx/operation ?operation]
                                          [?tx :tx/ipnsName ?ipns]
                                          [?tx :tx/ipnsSequence ?seq]
+                                         [?tx :db/txInstant ?instant]
+                                         [(pos? ?instant)]
                                          [?tx :tx/ipnsControllerDid ?controller]]}"#
             }),
             &tok,
@@ -5922,6 +6033,13 @@ async fn assert_protocol_tx_metadata(
         "{q_body}"
     );
     assert_eq!(row[4], format!("\"{}\"", s.operator_did), "{q_body}");
+    assert!(
+        row[5]
+            .as_str()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0)
+            > 0
+    );
 
     let (status, cap_body) = s
         .post_auth(

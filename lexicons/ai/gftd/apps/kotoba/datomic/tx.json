@@ -1,0 +1,93 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.datomic.tx",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Return one distributed Datomic transaction entry from the current IPNS head commit chain.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["graph", "tx"],
+          "properties": {
+            "graph": { "type": "string" },
+            "tx": { "type": "string" },
+            "cacao_b64": { "type": "string" },
+            "presentation": {
+              "type": "object",
+              "required": ["@context", "id", "type"],
+              "properties": {
+                "@context": { "type": "array", "items": { "type": "string" } },
+                "id": { "type": "string" },
+                "type": { "type": "array", "items": { "type": "string" } },
+                "holder": { "type": "string" },
+                "verifiableCredential": { "type": "array", "items": { "type": "object" } },
+                "proof": {
+                  "type": "object",
+                  "required": ["type", "proofPurpose", "verificationMethod", "proofValue"],
+                  "properties": {
+                    "type": { "type": "string" },
+                    "cryptosuite": { "type": "string" },
+                    "proofPurpose": { "type": "string" },
+                    "verificationMethod": { "type": "string" },
+                    "created": { "type": "string" },
+                    "proofValue": { "type": "string" },
+                    "challenge": { "type": "string" },
+                    "domain": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["graph", "tx"],
+          "properties": {
+            "graph": { "type": "string" },
+            "basis_t": { "type": "string" },
+            "tx": {
+              "type": "object",
+              "required": [
+                "tx_cid",
+                "commit_cid",
+                "seq",
+                "author",
+                "ts",
+                "datom_count",
+                "datoms"
+              ],
+              "properties": {
+                "tx_cid": { "type": "string" },
+                "commit_cid": { "type": "string" },
+                "prev_commit_cid": { "type": "string" },
+                "seq": { "type": "integer", "minimum": 0 },
+                "author": { "type": "string" },
+                "ts": { "type": "integer", "minimum": 0 },
+                "datom_count": { "type": "integer", "minimum": 0 },
+                "datoms": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["e", "a", "v_edn", "t", "added"],
+                    "properties": {
+                      "e": { "type": "string" },
+                      "a": { "type": "string" },
+                      "v_edn": { "type": "string" },
+                      "t": { "type": "string" },
+                      "added": { "type": "boolean" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
