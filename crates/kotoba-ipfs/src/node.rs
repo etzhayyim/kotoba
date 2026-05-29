@@ -417,7 +417,7 @@ impl KotobaIpfsNode {
         Ok(())
     }
 
-    /// Kubo-like `dht/findprovs` over the local provider table.
+    /// Kubo-like `dht/findprovs` over the local and known-peer provider tables.
     pub async fn dht_find_providers(&self, cid: &IpldCid) -> Result<Vec<Provider>> {
         let providers = self.state.providers.read().await;
         let peers = providers.get(cid).cloned().unwrap_or_default();
@@ -440,6 +440,52 @@ impl KotobaIpfsNode {
             })
             .collect();
         out.sort_by_key(|provider| provider.peer.0);
+        drop(peer_addrs);
+        drop(listen_addrs);
+
+        let mut remote = self.find_providers_from_known_peers(cid).await?;
+        out.append(&mut remote);
+        out.sort_by_key(|provider| provider.peer.0);
+        out.dedup_by_key(|provider| provider.peer.0);
+        Ok(out)
+    }
+
+    async fn find_providers_from_known_peers(&self, cid: &IpldCid) -> Result<Vec<Provider>> {
+        let mut peers: Vec<_> = self
+            .state
+            .peers
+            .read()
+            .await
+            .iter()
+            .map(|(peer, socket)| (*peer, *socket))
+            .collect();
+        peers.sort_by_key(|(peer, _)| peer.0);
+        let mut out = Vec::new();
+        let mut errors = Vec::new();
+        for (peer, socket) in peers {
+            let fut = fetch_providers_from_socket(socket, cid);
+            match tokio::time::timeout(self.fetch_timeout, fut).await {
+                Ok(Ok(mut providers)) => {
+                    self.state.bytes_out.fetch_add(
+                        format!("PROVIDERS {PROTOCOL} {cid}\n").len() as u64,
+                        Ordering::Relaxed,
+                    );
+                    let encoded = cbor_len(&provider_wire_rows(&providers))?;
+                    self.state
+                        .bytes_in
+                        .fetch_add(8 + encoded, Ordering::Relaxed);
+                    out.append(&mut providers);
+                }
+                Ok(Err(err)) => errors.push(format!("{peer}: {err}")),
+                Err(_) => errors.push(format!(
+                    "{peer}: dht_find_providers timeout after {:?}",
+                    self.fetch_timeout
+                )),
+            }
+        }
+        if !errors.is_empty() {
+            tracing::debug!(cid = %cid, errors = ?errors, "known peers did not return providers");
+        }
         Ok(out)
     }
 
@@ -2349,8 +2395,9 @@ async fn spawn_listener(
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let state = Arc::clone(&state);
+                    let peer_id = peer_id;
                     tokio::spawn(async move {
-                        if let Err(err) = serve_stream(state, stream).await {
+                        if let Err(err) = serve_stream(peer_id, state, stream).await {
                             tracing::debug!(error = %err, "kotoba-ipfs stream failed");
                         }
                     });
@@ -2365,7 +2412,7 @@ async fn spawn_listener(
     Ok(handle)
 }
 
-async fn serve_stream(state: Arc<State>, stream: TcpStream) -> Result<()> {
+async fn serve_stream(peer_id: PeerId, state: Arc<State>, stream: TcpStream) -> Result<()> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line).await?;
@@ -2427,6 +2474,46 @@ async fn serve_stream(state: Arc<State>, stream: TcpStream) -> Result<()> {
             stream.flush().await?;
             Ok(())
         }
+        (Some("PROVIDERS"), Some(protocol), Some(cid_s), None) if protocol == PROTOCOL => {
+            let cid: IpldCid = cid_s.parse().map_err(|e| anyhow!("parse cid: {e}"))?;
+            let providers = state.providers.read().await;
+            let peers = providers.get(&cid).cloned().unwrap_or_default();
+            drop(providers);
+            let peer_addrs = state.peers.read().await;
+            let listen_addrs = state.listen_addrs.read().await;
+            let out: Vec<_> = peers
+                .into_iter()
+                .map(|peer| {
+                    let addrs = if peer == peer_id {
+                        listen_addrs
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                    } else {
+                        peer_addrs
+                            .get(&peer)
+                            .map(|socket| {
+                                vec![socket_to_multiaddr(*socket).with_peer(peer).to_string()]
+                            })
+                            .unwrap_or_default()
+                    };
+                    (peer.0, addrs)
+                })
+                .collect();
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&out, &mut bytes)
+                .map_err(|e| anyhow!("providers cbor encode: {e}"))?;
+            let stream = reader.get_mut();
+            state
+                .bytes_out
+                .fetch_add(8 + bytes.len() as u64, Ordering::Relaxed);
+            stream
+                .write_all(&(bytes.len() as u64).to_be_bytes())
+                .await?;
+            stream.write_all(&bytes).await?;
+            stream.flush().await?;
+            Ok(())
+        }
         _ => bail!("invalid request"),
     }
 }
@@ -2477,10 +2564,55 @@ async fn fetch_name_from_socket(socket: SocketAddr, name: &IpnsName) -> Result<I
     ciborium::from_reader(&buf[..]).map_err(|e| anyhow!("ipns record cbor decode: {e}"))
 }
 
+async fn fetch_providers_from_socket(socket: SocketAddr, cid: &IpldCid) -> Result<Vec<Provider>> {
+    let mut stream = TcpStream::connect(socket)
+        .await
+        .with_context(|| format!("connect {socket}"))?;
+    stream
+        .write_all(format!("PROVIDERS {PROTOCOL} {cid}\n").as_bytes())
+        .await?;
+    stream.flush().await?;
+
+    let mut len_buf = [0u8; 8];
+    stream.read_exact(&mut len_buf).await?;
+    let len = u64::from_be_bytes(len_buf);
+    if len > usize::MAX as u64 {
+        bail!("provider response too large: {len}");
+    }
+    let mut buf = vec![0u8; len as usize];
+    stream.read_exact(&mut buf).await?;
+    let rows: Vec<(u64, Vec<String>)> =
+        ciborium::from_reader(&buf[..]).map_err(|e| anyhow!("providers cbor decode: {e}"))?;
+    rows.into_iter()
+        .map(|(peer, addrs)| {
+            let addrs = addrs
+                .into_iter()
+                .map(|addr| addr.parse::<Multiaddr>())
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Provider {
+                peer: PeerId(peer),
+                addrs,
+            })
+        })
+        .collect()
+}
+
 fn cbor_len<T: Serialize>(value: &T) -> Result<u64> {
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes).map_err(|e| anyhow!("cbor encode: {e}"))?;
     Ok(bytes.len() as u64)
+}
+
+fn provider_wire_rows(providers: &[Provider]) -> Vec<(u64, Vec<String>)> {
+    providers
+        .iter()
+        .map(|provider| {
+            (
+                provider.peer.0,
+                provider.addrs.iter().map(ToString::to_string).collect(),
+            )
+        })
+        .collect()
 }
 
 fn verify_cid(cid: &IpldCid, data: &[u8]) -> Result<()> {

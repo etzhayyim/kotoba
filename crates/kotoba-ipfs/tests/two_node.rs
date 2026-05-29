@@ -84,6 +84,13 @@ async fn two_node_block_exchange() {
     assert_eq!(providers.len(), 1);
     assert_eq!(providers[0].peer, peer_a);
     assert!(!providers[0].addrs.is_empty());
+    let remote_providers = node_b
+        .dht_find_providers(&cid)
+        .await
+        .expect("remote dht/findprovs");
+    assert_eq!(remote_providers.len(), 1);
+    assert_eq!(remote_providers[0].peer, peer_a);
+    assert!(!remote_providers[0].addrs.is_empty());
 
     // B fetches the block from A.
     let fetched = timeout(Duration::from_secs(5), node_b.fetch_block(&cid, peer_a))
