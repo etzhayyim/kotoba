@@ -139,6 +139,57 @@ const MAX_NPROBE: usize = 256; // cap IVF probe count to prevent brute-force fal
 #[cfg(feature = "cc-parquet")]
 const MAX_PARQUET_DIR: usize = 1_024;
 
+#[cfg(feature = "cc-parquet")]
+async fn bridge_cc_graph_to_distributed_head(
+    state: &KotobaState,
+    graph_cid: KotobaCid,
+    graph_name: &'static str,
+    author: &str,
+) -> Result<(String, usize), (StatusCode, String)> {
+    let history = state
+        .quad_store
+        .history_datoms_cold(&graph_cid)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("cc ingest history read: {e}"),
+            )
+        })?;
+    if history.is_empty() {
+        return Ok((String::new(), 0));
+    }
+    let datoms = history
+        .into_iter()
+        .map(kotoba_datomic::Datom::from_kqe)
+        .collect::<Vec<_>>();
+    let tx_cid = KotobaCid::from_bytes(
+        format!(
+            "cc.ingest:{graph_name}:{}:{}",
+            author,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        )
+        .as_bytes(),
+    );
+    let resp = crate::xrpc::commit_protocol_datoms(
+        state,
+        graph_cid.clone(),
+        graph_name.to_string(),
+        graph_cid,
+        datoms,
+        tx_cid,
+        author.to_string(),
+        kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT,
+        None,
+        None,
+    )
+    .await?;
+    Ok((resp.commit_cid, resp.assert_count))
+}
+
 #[derive(Serialize)]
 pub struct CcSearchResult {
     pub url: String,
@@ -457,7 +508,8 @@ pub async fn cc_ingest(
     let parquet_dir = body.parquet_dir.clone();
     let max_batches = body.max_batches;
     let mode = body.mode.clone();
-    let _owner_did = body.owner_did.clone();
+    let owner_did = body.owner_did.clone();
+    let state_for_ingest = Arc::clone(&state);
 
     // Use a timestamp-based job_id without chrono
     let job_id = format!(
@@ -473,7 +525,24 @@ pub async fn cc_ingest(
         if mode == "pages" || mode == "both" {
             let ingestor = CcPageIngestor::new(Arc::clone(&quad_store));
             match ingestor.ingest_dir(dir, max_batches).await {
-                Ok(s) => tracing::info!(?s, "CC pages ingest complete"),
+                Ok(s) => {
+                    tracing::info!(?s, "CC pages ingest complete");
+                    match bridge_cc_graph_to_distributed_head(
+                        &state_for_ingest,
+                        cc_pages_graph(),
+                        "cc:2026-12:pages",
+                        &owner_did,
+                    )
+                    .await
+                    {
+                        Ok((commit_cid, assert_count)) => {
+                            tracing::info!(%commit_cid, assert_count, "CC pages distributed commit complete");
+                        }
+                        Err((status, msg)) => {
+                            tracing::error!(%status, error = %msg, "CC pages distributed commit failed");
+                        }
+                    }
+                }
                 Err(e) => tracing::error!(err = %e, "CC pages ingest failed"),
             }
         }
@@ -482,7 +551,24 @@ pub async fn cc_ingest(
                 embed_client.unwrap_or_else(|| Arc::new(Blake3EmbedClient::new(384)));
             let ingestor = CcChunkIngestor::new(Arc::clone(&quad_store), client);
             match ingestor.ingest_dir(dir, max_batches).await {
-                Ok(s) => tracing::info!(?s, "CC chunks ingest complete"),
+                Ok(s) => {
+                    tracing::info!(?s, "CC chunks ingest complete");
+                    match bridge_cc_graph_to_distributed_head(
+                        &state_for_ingest,
+                        cc_chunks_graph(),
+                        "cc:2026-12:chunks",
+                        &owner_did,
+                    )
+                    .await
+                    {
+                        Ok((commit_cid, assert_count)) => {
+                            tracing::info!(%commit_cid, assert_count, "CC chunks distributed commit complete");
+                        }
+                        Err((status, msg)) => {
+                            tracing::error!(%status, error = %msg, "CC chunks distributed commit failed");
+                        }
+                    }
+                }
                 Err(e) => tracing::error!(err = %e, "CC chunks ingest failed"),
             }
         }
