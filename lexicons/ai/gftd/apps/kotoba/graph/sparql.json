@@ -21,7 +21,44 @@
       },
       "output": {
         "encoding": "application/json",
-        "schema": { "type": "unknown" }
+        "schema": {
+          "type": "object",
+          "required": ["ok", "form", "elapsedMs"],
+          "properties": {
+            "ok": { "type": "boolean" },
+            "form": {
+              "type": "string",
+              "knownValues": ["select", "ask", "describe", "construct"]
+            },
+            "result": { "type": "boolean" },
+            "count": { "type": "integer", "minimum": 0 },
+            "maxHops": { "type": "integer", "minimum": 0, "maximum": 16 },
+            "elapsedMs": { "type": "integer", "minimum": 0 },
+            "quads": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["graph", "subject", "predicate", "object"],
+                "properties": {
+                  "graph": { "type": "string" },
+                  "subject": { "type": "string" },
+                  "predicate": { "type": "string" },
+                  "object": {
+                    "type": "object",
+                    "properties": {
+                      "cid": { "type": "string" },
+                      "text": { "type": "string" },
+                      "int": { "type": "integer" },
+                      "float": { "type": "number" },
+                      "bool": { "type": "boolean" },
+                      "raw": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }

@@ -7585,6 +7585,14 @@ mod tests {
             "service",
             &["id", "type", "serviceEndpoint"],
         );
+        assert_lexicon_input_nested_array_item_property_schema(
+            src,
+            "document",
+            "service",
+            "serviceEndpoint",
+            "union",
+            &["#serviceEndpointString", "#serviceEndpointStringArray"],
+        );
         assert_lexicon_output_fields(
             src,
             &[
@@ -7640,6 +7648,87 @@ mod tests {
         assert_protocol_datom_write_output_fields(atproto_write);
     }
 
+    #[test]
+    fn graph_query_lexicons_expose_structured_sparql_and_quad_outputs() {
+        let graph_query = include_str!("../../../lexicons/ai/gftd/apps/kotoba/graph/query.json");
+        assert_lexicon_output_fields(
+            graph_query,
+            &["graph", "count", "quads"],
+            &["limit", "truncated", "note"],
+        );
+        assert_lexicon_array_item_fields(
+            graph_query,
+            "quads",
+            &["graph", "subject", "predicate", "object"],
+        );
+
+        let graph_sparql = include_str!("../../../lexicons/ai/gftd/apps/kotoba/graph/sparql.json");
+        assert_lexicon_input_fields(
+            graph_sparql,
+            &["query"],
+            &["graph", "cacaoB64", "limit", "maxHops"],
+        );
+        assert_lexicon_output_fields(
+            graph_sparql,
+            &["ok", "form", "elapsedMs"],
+            &["result", "count", "maxHops", "quads"],
+        );
+        assert_lexicon_array_item_fields(
+            graph_sparql,
+            "quads",
+            &["graph", "subject", "predicate", "object"],
+        );
+    }
+
+    #[test]
+    fn storage_lexicons_expose_ipld_commit_and_ipns_fields() {
+        let block_put = include_str!("../../../lexicons/ai/gftd/apps/kotoba/block/put.json");
+        assert_lexicon_input_fields(block_put, &["data_b64"], &[]);
+        assert_lexicon_output_fields(block_put, &["cid"], &[]);
+
+        let block_get = include_str!("../../../lexicons/ai/gftd/apps/kotoba/block/get.json");
+        assert_lexicon_parameter_fields(block_get, &["cid"], &[]);
+        assert_lexicon_output_fields(block_get, &["cid", "data_b64"], &[]);
+
+        let commit_store = include_str!("../../../lexicons/ai/gftd/apps/kotoba/commit/store.json");
+        assert_lexicon_input_fields(commit_store, &["graph", "author", "seq"], &["cacao_b64"]);
+        assert_lexicon_output_fields(commit_store, &["cid"], &[]);
+
+        let commit_get = include_str!("../../../lexicons/ai/gftd/apps/kotoba/commit/get.json");
+        assert_lexicon_parameter_fields(commit_get, &["graph"], &[]);
+        assert_lexicon_output_fields(
+            commit_get,
+            &[
+                "cid",
+                "graph",
+                "root",
+                "author",
+                "seq",
+                "ts",
+                "commit_type",
+                "index_roots",
+            ],
+            &[
+                "prev",
+                "tx_cid",
+                "cacao_proof_cid",
+                "ipns_name",
+                "ipns_value_cid",
+                "ipns_sequence",
+                "ipns_value_matches_commit",
+                "ipns_sequence_matches_commit",
+                "ipns_graph_matches_request",
+                "ipns_controller_did",
+                "ipns_controller_matches_node",
+                "ipns_controller_key_matches_did",
+                "ipns_public_key_multibase",
+                "ipns_signature_multibase",
+                "ipns_signature_verified",
+                "ipns_verified",
+            ],
+        );
+    }
+
     fn assert_protocol_datom_write_output_fields(src: &str) {
         assert_lexicon_output_fields(
             src,
@@ -7656,6 +7745,34 @@ mod tests {
             ],
             &["auth_proof_cid"],
         );
+    }
+
+    fn assert_lexicon_parameter_fields(src: &str, required: &[&str], properties: &[&str]) {
+        let value: serde_json::Value = serde_json::from_str(src).expect("lexicon JSON");
+        let params = &value["defs"]["main"]["parameters"];
+        assert_eq!(
+            params["type"], "params",
+            "{} parameters must be params",
+            value["id"]
+        );
+        let required_values = params["required"].as_array().expect("required array");
+        for field in required {
+            assert!(
+                required_values
+                    .iter()
+                    .any(|value| value.as_str() == Some(field)),
+                "{} missing required parameter {field}",
+                value["id"]
+            );
+        }
+        let property_values = params["properties"].as_object().expect("properties object");
+        for field in required.iter().chain(properties.iter()) {
+            assert!(
+                property_values.contains_key(*field),
+                "{} missing parameter property {field}",
+                value["id"]
+            );
+        }
     }
 
     fn assert_lexicon_input_object_fields(
@@ -7719,6 +7836,34 @@ mod tests {
                     .as_object()
                     .is_some_and(|props| props.contains_key(*field)),
                 "{} input nested array item missing property {field}",
+                value["id"]
+            );
+        }
+    }
+
+    fn assert_lexicon_input_nested_array_item_property_schema(
+        src: &str,
+        outer_field: &str,
+        inner_field: &str,
+        property_field: &str,
+        property_type: &str,
+        refs: &[&str],
+    ) {
+        let value: serde_json::Value = serde_json::from_str(src).expect("lexicon JSON");
+        let property = &value["defs"]["main"]["input"]["schema"]["properties"][outer_field]
+            ["properties"][inner_field]["items"]["properties"][property_field];
+        assert_eq!(
+            property["type"], property_type,
+            "{} input {outer_field}.{inner_field}.{property_field} must be {property_type}",
+            value["id"]
+        );
+        let ref_values = property["refs"].as_array().expect("refs array");
+        for expected in refs {
+            assert!(
+                ref_values
+                    .iter()
+                    .any(|value| value.as_str() == Some(expected)),
+                "{} input {outer_field}.{inner_field}.{property_field} missing ref {expected}",
                 value["id"]
             );
         }

@@ -15,7 +15,41 @@
       },
       "output": {
         "encoding": "application/json",
-        "schema": { "type": "unknown" }
+        "schema": {
+          "type": "object",
+          "required": ["claims", "total"],
+          "properties": {
+            "claims": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "claim_cid",
+                  "credential_cid",
+                  "credential_id",
+                  "credential_status",
+                  "entity_did",
+                  "claim_type",
+                  "attester_did",
+                  "stake_mkoto",
+                  "ts_unix"
+                ],
+                "properties": {
+                  "claim_cid": { "type": "string" },
+                  "credential_cid": { "type": "string" },
+                  "credential_id": { "type": "string" },
+                  "credential_status": { "type": "string" },
+                  "entity_did": { "type": "string" },
+                  "claim_type": { "type": "string" },
+                  "attester_did": { "type": "string" },
+                  "stake_mkoto": { "type": "integer", "minimum": 0 },
+                  "ts_unix": { "type": "integer", "minimum": 0 }
+                }
+              }
+            },
+            "total": { "type": "integer", "minimum": 0 }
+          }
+        }
       }
     }
   }

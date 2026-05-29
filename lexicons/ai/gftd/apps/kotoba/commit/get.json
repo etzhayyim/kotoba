@@ -14,7 +14,82 @@
       },
       "output": {
         "encoding": "application/json",
-        "schema": { "type": "unknown" }
+        "schema": {
+          "type": "object",
+          "required": [
+            "cid",
+            "graph",
+            "root",
+            "author",
+            "seq",
+            "ts",
+            "commit_type",
+            "index_roots"
+          ],
+          "properties": {
+            "cid": {
+              "type": "string",
+              "description": "CID of the current graph commit."
+            },
+            "graph": {
+              "type": "string",
+              "description": "CID of the named graph."
+            },
+            "root": {
+              "type": "string",
+              "description": "Root CID for the commit, usually the Prolly/Datomic TEA or EAVT index root."
+            },
+            "prev": {
+              "type": "string",
+              "description": "Previous commit CID, when present."
+            },
+            "author": { "type": "string" },
+            "seq": { "type": "integer", "minimum": 0 },
+            "ts": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Commit timestamp as Unix seconds."
+            },
+            "commit_type": {
+              "type": "string",
+              "description": "Commit storage path, such as distributed-datomic or quad-store."
+            },
+            "tx_cid": {
+              "type": "string",
+              "description": "CID of the Datomic transaction block for distributed-datomic commits."
+            },
+            "index_roots": {
+              "type": "object",
+              "description": "Map from Datomic index name to ProllyTree root CID."
+            },
+            "cacao_proof_cid": {
+              "type": "string",
+              "description": "CID of the persisted CACAO authorization proof."
+            },
+            "ipns_name": {
+              "type": "string",
+              "description": "IPNS name used as the distributed graph head."
+            },
+            "ipns_value_cid": {
+              "type": "string",
+              "description": "Commit CID currently resolved from IPNS."
+            },
+            "ipns_sequence": { "type": "integer", "minimum": 0 },
+            "ipns_value_matches_commit": { "type": "boolean" },
+            "ipns_sequence_matches_commit": { "type": "boolean" },
+            "ipns_graph_matches_request": { "type": "boolean" },
+            "ipns_controller_did": { "type": "string" },
+            "ipns_controller_matches_node": { "type": "boolean" },
+            "ipns_controller_key_matches_did": { "type": "boolean" },
+            "ipns_public_key_multibase": { "type": "string" },
+            "ipns_signature_multibase": { "type": "string" },
+            "ipns_signature_verified": { "type": "boolean" },
+            "ipns_verified": {
+              "type": "boolean",
+              "description": "True when the IPNS record, graph, sequence, controller DID, controller key, and signature all verify."
+            }
+          }
+        }
       }
     }
   }

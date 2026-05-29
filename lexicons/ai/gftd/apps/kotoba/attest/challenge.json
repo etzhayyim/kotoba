@@ -19,7 +19,14 @@
       },
       "output": {
         "encoding": "application/json",
-        "schema": { "type": "unknown" }
+        "schema": {
+          "type": "object",
+          "required": ["status", "challenge_cid"],
+          "properties": {
+            "status": { "type": "string", "knownValues": ["challenged"] },
+            "challenge_cid": { "type": "string" }
+          }
+        }
       }
     }
   }

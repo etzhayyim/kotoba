@@ -14,7 +14,20 @@
       },
       "output": {
         "encoding": "application/json",
-        "schema": { "type": "unknown" }
+        "schema": {
+          "type": "object",
+          "required": ["cid", "data_b64"],
+          "properties": {
+            "cid": {
+              "type": "string",
+              "description": "Content-addressed CID for the returned IPLD/DAG-CBOR block."
+            },
+            "data_b64": {
+              "type": "string",
+              "description": "Base64-encoded raw block bytes."
+            }
+          }
+        }
       }
     }
   }

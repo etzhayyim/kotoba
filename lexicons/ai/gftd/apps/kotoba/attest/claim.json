@@ -21,7 +21,25 @@
       },
       "output": {
         "encoding": "application/json",
-        "schema": { "type": "unknown" }
+        "schema": {
+          "type": "object",
+          "required": [
+            "status",
+            "claim_cid",
+            "credential_cid",
+            "commit_cid",
+            "ipns_name",
+            "ipns_sequence"
+          ],
+          "properties": {
+            "status": { "type": "string", "knownValues": ["attested"] },
+            "claim_cid": { "type": "string" },
+            "credential_cid": { "type": "string" },
+            "commit_cid": { "type": "string" },
+            "ipns_name": { "type": "string" },
+            "ipns_sequence": { "type": "integer", "minimum": 0 }
+          }
+        }
       }
     }
   }

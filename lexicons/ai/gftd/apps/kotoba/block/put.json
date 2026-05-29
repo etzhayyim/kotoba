@@ -17,7 +17,16 @@
       },
       "output": {
         "encoding": "application/json",
-        "schema": { "type": "unknown" }
+        "schema": {
+          "type": "object",
+          "required": ["cid"],
+          "properties": {
+            "cid": {
+              "type": "string",
+              "description": "Content-addressed CID for the stored IPLD/DAG-CBOR block."
+            }
+          }
+        }
       }
     }
   }

@@ -919,6 +919,99 @@ mod tests {
     }
 
     #[test]
+    fn attestation_lexicons_expose_vc_projection_response_fields() {
+        let claim = include_str!("../../../lexicons/ai/gftd/apps/kotoba/attest/claim.json");
+        assert_lexicon_output_fields(
+            claim,
+            &[
+                "status",
+                "claim_cid",
+                "credential_cid",
+                "commit_cid",
+                "ipns_name",
+                "ipns_sequence",
+            ],
+            &[],
+        );
+
+        let challenge = include_str!("../../../lexicons/ai/gftd/apps/kotoba/attest/challenge.json");
+        assert_lexicon_output_fields(challenge, &["status", "challenge_cid"], &[]);
+
+        let query = include_str!("../../../lexicons/ai/gftd/apps/kotoba/attest/query.json");
+        assert_lexicon_output_fields(query, &["claims", "total"], &[]);
+        assert_lexicon_array_item_fields(
+            query,
+            "claims",
+            &[
+                "claim_cid",
+                "credential_cid",
+                "credential_id",
+                "credential_status",
+                "entity_did",
+                "claim_type",
+                "attester_did",
+                "stake_mkoto",
+                "ts_unix",
+            ],
+        );
+    }
+
+    fn assert_lexicon_output_fields(src: &str, required: &[&str], properties: &[&str]) {
+        let value: serde_json::Value = serde_json::from_str(src).expect("lexicon JSON");
+        let schema = &value["defs"]["main"]["output"]["schema"];
+        assert_eq!(
+            schema["type"], "object",
+            "{} output must be object",
+            value["id"]
+        );
+        let required_values = schema["required"].as_array().expect("required array");
+        for field in required {
+            assert!(
+                required_values
+                    .iter()
+                    .any(|value| value.as_str() == Some(field)),
+                "{} missing required output field {field}",
+                value["id"]
+            );
+        }
+        let property_values = schema["properties"].as_object().expect("properties object");
+        for field in required.iter().chain(properties.iter()) {
+            assert!(
+                property_values.contains_key(*field),
+                "{} missing output property {field}",
+                value["id"]
+            );
+        }
+    }
+
+    fn assert_lexicon_array_item_fields(src: &str, field: &str, required: &[&str]) {
+        let value: serde_json::Value = serde_json::from_str(src).expect("lexicon JSON");
+        let item = &value["defs"]["main"]["output"]["schema"]["properties"][field]["items"];
+        assert_eq!(
+            item["type"], "object",
+            "{} output {field} items must be object",
+            value["id"]
+        );
+        let required_values = item["required"].as_array().expect("required array");
+        for field in required {
+            assert!(
+                required_values
+                    .iter()
+                    .any(|value| value.as_str() == Some(field)),
+                "{} output array item missing required field {field}",
+                value["id"]
+            );
+            assert!(
+                item["properties"]
+                    .as_object()
+                    .is_some_and(|props| props.contains_key(*field)),
+                "{} output array item missing property {field}",
+                value["id"]
+            );
+        }
+    }
+
+    #[test]
     fn stake_mkoto_overflow_guard_boundary() {
         // i64::MAX as u64 must pass; i64::MAX as u64 + 1 must fail.
         let just_below = i64::MAX as u64;
