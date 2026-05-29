@@ -11,8 +11,8 @@
 
 use anyhow::anyhow;
 use sqlparser::ast::{
-    BinaryOperator, Expr, Ident, JoinConstraint, JoinOperator, SelectItem, SetExpr,
-    Statement, TableFactor, Value,
+    BinaryOperator, Expr, Ident, JoinConstraint, JoinOperator, SelectItem, SetExpr, Statement,
+    TableFactor, Value,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -133,7 +133,10 @@ struct VarMap {
 
 impl VarMap {
     fn new() -> Self {
-        Self { slots: HashMap::new(), counter: 0 }
+        Self {
+            slots: HashMap::new(),
+            counter: 0,
+        }
     }
 
     /// Assign fresh `(S{N}, O{N})` variables for `alias`.
@@ -187,8 +190,6 @@ impl VarMap {
             Slot::Const(c) => Some(Term::Constant(c.clone())),
         }
     }
-
-
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -196,7 +197,12 @@ impl VarMap {
 fn extract_table_alias(factor: &TableFactor) -> anyhow::Result<(String, Option<String>)> {
     match factor {
         TableFactor::Table { name, alias, .. } => {
-            let tname = name.0.iter().map(|i: &Ident| i.value.as_str()).collect::<Vec<_>>().join(".");
+            let tname = name
+                .0
+                .iter()
+                .map(|i: &Ident| i.value.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
             let alias = alias.as_ref().map(|a| a.name.value.clone());
             Ok((tname, alias))
         }
@@ -206,7 +212,11 @@ fn extract_table_alias(factor: &TableFactor) -> anyhow::Result<(String, Option<S
 
 fn apply_on(expr: &Expr, var_map: &mut VarMap) -> anyhow::Result<()> {
     match expr {
-        Expr::BinaryOp { left, op: BinaryOperator::Eq, right } => {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } => {
             let (la, lc) = extract_alias_col(left)?;
             let (ra, rc) = extract_alias_col(right)?;
             var_map.merge(&la, &lc, &ra, &rc);
@@ -218,7 +228,11 @@ fn apply_on(expr: &Expr, var_map: &mut VarMap) -> anyhow::Result<()> {
 
 fn apply_where(expr: &Expr, var_map: &mut VarMap) -> anyhow::Result<()> {
     match expr {
-        Expr::BinaryOp { left, op: BinaryOperator::Eq, right } => {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } => {
             let (alias, col) = extract_alias_col(left)?;
             let value = expr_to_const(right)?;
             if alias == "_" {
@@ -241,7 +255,11 @@ fn apply_where(expr: &Expr, var_map: &mut VarMap) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Expr::BinaryOp { left, op: BinaryOperator::And, right } => {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => {
             apply_where(left, var_map)?;
             apply_where(right, var_map)
         }
@@ -263,7 +281,9 @@ fn expr_to_const(expr: &Expr) -> anyhow::Result<String> {
     match expr {
         Expr::Value(Value::SingleQuotedString(s)) => Ok(s.clone()),
         Expr::Value(Value::Number(n, _)) => Ok(n.clone()),
-        _ => anyhow::bail!("only string/number literals supported as WHERE constants; got {expr:?}"),
+        _ => {
+            anyhow::bail!("only string/number literals supported as WHERE constants; got {expr:?}")
+        }
     }
 }
 
@@ -323,7 +343,10 @@ fn resolve_select_expr(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{delta::Delta, quad::{Quad, QuadObject}};
+    use crate::{
+        datom::{Datom, Value},
+        delta::Delta,
+    };
     use kotoba_core::cid::KotobaCid;
 
     fn cid(s: &str) -> KotobaCid {
@@ -331,19 +354,19 @@ mod tests {
     }
 
     fn fact(relation: &str, s: &str, o: &str) -> Delta {
-        Delta::assert(Quad {
-            graph:     cid("g"),
-            subject:   cid(s),
-            predicate: relation.to_string(),
-            object:    QuadObject::Cid(cid(o)),
-        })
+        Delta::assert_datom(Datom::assert(
+            cid(s),
+            relation.to_string(),
+            Value::Cid(cid(o)),
+            cid("g"),
+        ))
     }
 
     fn has(derived: &[Delta], rel: &str, s: &str, o: &str) -> bool {
         derived.iter().any(|d| {
-            d.quad.predicate == rel
-                && d.quad.subject == cid(s)
-                && matches!(&d.quad.object, QuadObject::Cid(c) if *c == cid(o))
+            d.attribute() == rel
+                && d.entity() == &cid(s)
+                && matches!(d.value(), Value::Cid(c) if *c == cid(o))
         })
     }
 
@@ -378,7 +401,10 @@ mod tests {
             fact("parent", "bob", "carol"),
         ];
         let derived = mv.program.evaluate_delta(&input);
-        assert!(has(&derived, "ancestor", "alice", "carol"), "expected ancestor(alice, carol)");
+        assert!(
+            has(&derived, "ancestor", "alice", "carol"),
+            "expected ancestor(alice, carol)"
+        );
         // no spurious derivations
         assert!(!has(&derived, "ancestor", "bob", "alice"));
     }
@@ -403,11 +429,8 @@ mod tests {
 
     #[test]
     fn where_bare_column() {
-        let mv = SqlMvCompiler::compile(
-            "SELECT s, o FROM knows WHERE s = 'alice'",
-            "alice_knows",
-        )
-        .unwrap();
+        let mv = SqlMvCompiler::compile("SELECT s, o FROM knows WHERE s = 'alice'", "alice_knows")
+            .unwrap();
 
         let input = vec![
             fact("knows", "alice", "bob"),
@@ -448,24 +471,24 @@ mod tests {
         .unwrap();
         let input = vec![
             fact("parent", "alice", "bob"),
-            fact("parent", "bob",   "carol"),
+            fact("parent", "bob", "carol"),
             fact("parent", "alice", "bob2"),
-            fact("parent", "bob2",  "dave"),
+            fact("parent", "bob2", "dave"),
         ];
         let derived = mv.program.evaluate_delta(&input);
         // Only alice→carol path satisfies both conditions
         assert!(has(&derived, "filtered", "alice", "carol"));
-        assert!(!has(&derived, "filtered", "alice", "dave"),
-            "dave path should be filtered by b.o = 'carol'");
+        assert!(
+            !has(&derived, "filtered", "alice", "dave"),
+            "dave path should be filtered by b.o = 'carol'"
+        );
     }
 
     #[test]
     fn where_number_literal() {
         // WHERE with a numeric constant (sqlparser parses it as Value::Number)
-        let result = SqlMvCompiler::compile(
-            "SELECT a.s, a.o FROM knows a WHERE a.s = 42",
-            "output",
-        );
+        let result =
+            SqlMvCompiler::compile("SELECT a.s, a.o FROM knows a WHERE a.s = 42", "output");
         // Should compile without error — number literal becomes a constant Term
         assert!(result.is_ok(), "numeric WHERE literal should compile");
     }
@@ -473,10 +496,8 @@ mod tests {
     #[test]
     fn non_select_statement_error() {
         // INSERT is not a SELECT — the compiler must reject it
-        let result = SqlMvCompiler::compile(
-            "INSERT INTO knows (s, o) VALUES ('alice', 'bob')",
-            "output",
-        );
+        let result =
+            SqlMvCompiler::compile("INSERT INTO knows (s, o) VALUES ('alice', 'bob')", "output");
         assert!(result.is_err(), "INSERT statement should be rejected");
     }
 }

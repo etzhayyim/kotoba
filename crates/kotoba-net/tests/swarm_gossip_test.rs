@@ -9,9 +9,9 @@
 //! over the established QUIC connection.  Even so, GossipSub mesh formation
 //! can take 100–500 ms; tests use a 5 s deadline with 50 ms polling.
 
+use kotoba_net::{KotobaNetEvent, KotobaSwarm, Multiaddr, PREGEL_GOSSIP_TOPIC};
 use std::time::Duration;
-use tokio::time::{timeout, sleep, Instant};
-use kotoba_net::{KotobaSwarm, KotobaNetEvent, Multiaddr, PREGEL_GOSSIP_TOPIC};
+use tokio::time::{sleep, timeout, Instant};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -91,7 +91,8 @@ async fn gossip_message_delivered_between_two_swarms() {
     swarm2.subscribe(topic).expect("swarm2 subscribe");
 
     // Get swarm1's actual OS-assigned listen address
-    let listen_addr = get_listen_addr(&mut swarm1).await
+    let listen_addr = get_listen_addr(&mut swarm1)
+        .await
         .expect("swarm1 did not emit a ListenAddr event within timeout");
 
     // Connect swarm2 → swarm1
@@ -125,7 +126,10 @@ async fn gossip_message_delivered_between_two_swarms() {
     let mut published = false;
     for _ in 0..10 {
         match swarm1.publish(topic, payload.clone()) {
-            Ok(_) => { published = true; break; }
+            Ok(_) => {
+                published = true;
+                break;
+            }
             Err(_) => {
                 // Drive both swarms briefly then retry
                 tokio::select! {
@@ -136,12 +140,23 @@ async fn gossip_message_delivered_between_two_swarms() {
             }
         }
     }
-    assert!(published, "swarm1 could not publish to GossipSub topic within 10 retries");
+    assert!(
+        published,
+        "swarm1 could not publish to GossipSub topic within 10 retries"
+    );
 
     // Drive both swarms until swarm2 receives the message
-    let received = drive_until_gossip(&mut swarm1, &mut swarm2, topic, Duration::from_secs(5)).await;
-    assert!(received.is_some(), "swarm2 did not receive gossip message within 5 s");
-    assert_eq!(received.unwrap(), payload, "received payload must match sent payload");
+    let received =
+        drive_until_gossip(&mut swarm1, &mut swarm2, topic, Duration::from_secs(5)).await;
+    assert!(
+        received.is_some(),
+        "swarm2 did not receive gossip message within 5 s"
+    );
+    assert_eq!(
+        received.unwrap(),
+        payload,
+        "received payload must match sent payload"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -181,7 +196,8 @@ async fn pregel_gossip_topic_is_separate_from_quad_topic() {
     swarm1.subscribe(quad_topic).expect("swarm1 subscribe quad");
 
     // Connect
-    let listen_addr = get_listen_addr(&mut swarm1).await
+    let listen_addr = get_listen_addr(&mut swarm1)
+        .await
         .expect("swarm1 ListenAddr timeout");
     swarm2.add_peer(swarm1.local_peer_id, listen_addr);
 
@@ -207,7 +223,10 @@ async fn pregel_gossip_topic_is_separate_from_quad_topic() {
     let mut pregel_published = false;
     for _ in 0..10 {
         match swarm2.send_pregel_message("src-peer", "dst-peer", &pregel_payload) {
-            Ok(_)  => { pregel_published = true; break; }
+            Ok(_) => {
+                pregel_published = true;
+                break;
+            }
             Err(_) => {
                 tokio::select! {
                     _ = swarm1.next_event() => {}
@@ -217,15 +236,19 @@ async fn pregel_gossip_topic_is_separate_from_quad_topic() {
             }
         }
     }
-    assert!(pregel_published, "swarm2 could not publish pregel message within 10 retries");
+    assert!(
+        pregel_published,
+        "swarm2 could not publish pregel message within 10 retries"
+    );
 
     // swarm1 should receive the pregel message on the pregel topic
     let received_on_swarm1 = drive_until_gossip(
-        &mut swarm2,  // drive swarm2 to keep it alive
-        &mut swarm1,  // look for message on swarm1
+        &mut swarm2, // drive swarm2 to keep it alive
+        &mut swarm1, // look for message on swarm1
         PREGEL_GOSSIP_TOPIC,
         Duration::from_secs(5),
-    ).await;
+    )
+    .await;
     assert!(
         received_on_swarm1.is_some(),
         "swarm1 (subscribed to pregel topic) should receive the pregel message"
@@ -242,8 +265,9 @@ async fn pregel_gossip_topic_is_separate_from_quad_topic() {
     let quad_leak = timeout(Duration::from_millis(300), async {
         loop {
             match swarm1.next_event().await {
-                Some(KotobaNetEvent::GossipMessage { topic, .. })
-                    if topic.contains(quad_topic) => return true,
+                Some(KotobaNetEvent::GossipMessage { topic, .. }) if topic.contains(quad_topic) => {
+                    return true
+                }
                 None => return false,
                 _ => {}
             }

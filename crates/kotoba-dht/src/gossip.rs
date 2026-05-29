@@ -32,9 +32,9 @@ pub enum GossipError {
 
 #[cfg(test)]
 mod tests {
+    use super::super::source_chain::{ChainContent, ChainEntry};
     use super::*;
     use kotoba_core::cid::KotobaCid;
-    use super::super::source_chain::{ChainContent, ChainEntry};
 
     fn make_entry() -> ChainEntry {
         ChainEntry::new(
@@ -42,7 +42,7 @@ mod tests {
             "did:example:alice".to_string(),
             0,
             ChainContent::Commit {
-                graph_cid:   KotobaCid::from_bytes(b"graph"),
+                graph_cid: KotobaCid::from_bytes(b"graph"),
                 prolly_root: KotobaCid::from_bytes(b"root"),
             },
             vec![0u8; 64],
@@ -64,7 +64,9 @@ mod tests {
     #[test]
     fn gossip_message_entry_kind() {
         let entry = make_entry();
-        let msg = GossipMessage { kind: GossipKind::Entry(Box::new(entry.clone())) };
+        let msg = GossipMessage {
+            kind: GossipKind::Entry(Box::new(entry.clone())),
+        };
         if let GossipKind::Entry(e) = msg.kind {
             assert_eq!(e.agent, entry.agent);
         } else {
@@ -76,14 +78,16 @@ mod tests {
     fn gossip_message_warrant_kind() {
         use super::super::warrant::Warrant;
         let w = Warrant {
-            accused:   vec![0xAAu8; 32],
-            evidence:  KotobaCid::from_bytes(b"bad-entry"),
-            rule_id:   1,
+            accused: vec![0xAAu8; 32],
+            evidence: KotobaCid::from_bytes(b"bad-entry"),
+            rule_id: 1,
             validator: vec![0xBBu8; 32],
-            ts:        1_700_000_000_000,
-            sig:       vec![0xCCu8; 64],
+            ts: 1_700_000_000_000,
+            sig: vec![0xCCu8; 64],
         };
-        let msg = GossipMessage { kind: GossipKind::Warrant(w) };
+        let msg = GossipMessage {
+            kind: GossipKind::Warrant(w),
+        };
         assert!(matches!(msg.kind, GossipKind::Warrant(_)));
     }
 
@@ -119,7 +123,9 @@ mod tests {
     fn gossip_message_entry_preserves_seq() {
         let entry = make_entry();
         let expected_seq = entry.seq;
-        let msg = GossipMessage { kind: GossipKind::Entry(Box::new(entry)) };
+        let msg = GossipMessage {
+            kind: GossipKind::Entry(Box::new(entry)),
+        };
         if let GossipKind::Entry(e) = msg.kind {
             assert_eq!(e.seq, expected_seq);
         } else {

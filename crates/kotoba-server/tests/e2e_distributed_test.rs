@@ -5,11 +5,11 @@
 //! KotobaState's QuadStore so we can verify that asserted quads propagate
 //! correctly without the 10-second GossipSub heartbeat overhead.
 
+use kotoba_core::cid::KotobaCid;
+use kotoba_kqe::quad::{LegacyQuad as Quad, LegacyQuadObject as QuadObject};
+use kotoba_server::server::KotobaState;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use kotoba_core::cid::KotobaCid;
-use kotoba_kqe::quad::{Quad, QuadObject};
-use kotoba_server::server::KotobaState;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -17,10 +17,10 @@ use kotoba_server::server::KotobaState;
 
 fn make_quad(graph: &str, subject: &str, predicate: &str, object: &str) -> Quad {
     Quad {
-        graph:     KotobaCid::from_bytes(graph.as_bytes()),
-        subject:   KotobaCid::from_bytes(subject.as_bytes()),
+        graph: KotobaCid::from_bytes(graph.as_bytes()),
+        subject: KotobaCid::from_bytes(subject.as_bytes()),
         predicate: predicate.to_string(),
-        object:    QuadObject::Text(object.to_string()),
+        object: QuadObject::Text(object.to_string()),
     }
 }
 
@@ -48,9 +48,7 @@ async fn quad_propagation_via_gossip_tx() {
     let state1 = Arc::new(state1);
 
     // ── Node 2: plain state (no gossip sender — it only receives) ────────────
-    let state2 = Arc::new(
-        KotobaState::new(None).expect("KotobaState::new should succeed"),
-    );
+    let state2 = Arc::new(KotobaState::new(None).expect("KotobaState::new should succeed"));
 
     // ── Relay task: forward gossip messages to state2's QuadStore ────────────
     let state2_for_relay = Arc::clone(&state2);
@@ -68,10 +66,10 @@ async fn quad_propagation_via_gossip_tx() {
     });
 
     // ── Assert two quads on node1 ────────────────────────────────────────────
-    let graph_cid   = KotobaCid::from_bytes(b"test-graph-distributed");
+    let graph_cid = KotobaCid::from_bytes(b"test-graph-distributed");
     let subject_cid = KotobaCid::from_bytes(b"alice");
 
-    let quad1 = make_quad("test-graph-distributed", "alice", "knows",    "bob");
+    let quad1 = make_quad("test-graph-distributed", "alice", "knows", "bob");
     let quad2 = make_quad("test-graph-distributed", "alice", "location", "Tokyo");
 
     state1.journal_assert(&quad1).await;
@@ -81,7 +79,10 @@ async fn quad_propagation_via_gossip_tx() {
     drop(state1);
 
     let relayed_count = relay.await.expect("relay task should complete cleanly");
-    assert_eq!(relayed_count, 2, "relay should have forwarded 2 quad/assert messages");
+    assert_eq!(
+        relayed_count, 2,
+        "relay should have forwarded 2 quad/assert messages"
+    );
 
     // ── Verify node2's QuadStore contains the propagated quads ───────────────
     let quads = state2
@@ -89,11 +90,21 @@ async fn quad_propagation_via_gossip_tx() {
         .get_entity_quads(Some(&graph_cid), &subject_cid)
         .await;
 
-    assert_eq!(quads.len(), 2, "node2 should have received both quads for subject 'alice'");
+    assert_eq!(
+        quads.len(),
+        2,
+        "node2 should have received both quads for subject 'alice'"
+    );
 
     let predicates: Vec<&str> = quads.iter().map(|q| q.predicate.as_str()).collect();
-    assert!(predicates.contains(&"knows"),    "quad1 (knows) must be in node2's store");
-    assert!(predicates.contains(&"location"), "quad2 (location) must be in node2's store");
+    assert!(
+        predicates.contains(&"knows"),
+        "quad1 (knows) must be in node2's store"
+    );
+    assert!(
+        predicates.contains(&"location"),
+        "quad2 (location) must be in node2's store"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -113,9 +124,7 @@ async fn quad_retract_propagates_via_gossip_tx() {
             .attach_gossip(gossip_tx),
     );
 
-    let state2 = Arc::new(
-        KotobaState::new(None).expect("state2 init"),
-    );
+    let state2 = Arc::new(KotobaState::new(None).expect("state2 init"));
 
     let state2_relay = Arc::clone(&state2);
     let relay = tokio::spawn(async move {
@@ -123,8 +132,12 @@ async fn quad_retract_propagates_via_gossip_tx() {
         while let Some((topic, payload)) = gossip_rx.recv().await {
             if let Ok(quad) = serde_json::from_slice::<Quad>(&payload) {
                 match topic.as_str() {
-                    "quad/assert"  => { state2_relay.quad_store.assert(quad.clone()).await;  }
-                    "quad/retract" => { state2_relay.quad_store.retract(quad.clone()).await; }
+                    "quad/assert" => {
+                        state2_relay.quad_store.assert(quad.clone()).await;
+                    }
+                    "quad/retract" => {
+                        state2_relay.quad_store.retract(quad.clone()).await;
+                    }
                     _ => {}
                 }
                 ops.push((topic, quad));
@@ -133,7 +146,7 @@ async fn quad_retract_propagates_via_gossip_tx() {
         ops
     });
 
-    let graph_cid   = KotobaCid::from_bytes(b"retract-graph");
+    let graph_cid = KotobaCid::from_bytes(b"retract-graph");
     let subject_cid = KotobaCid::from_bytes(b"charlie");
 
     let quad = make_quad("retract-graph", "charlie", "status", "online");
@@ -146,7 +159,7 @@ async fn quad_retract_propagates_via_gossip_tx() {
 
     let ops = relay.await.expect("relay task must complete");
     assert_eq!(ops.len(), 2, "relay should see one assert + one retract");
-    assert_eq!(ops[0].0, "quad/assert",  "first op is assert");
+    assert_eq!(ops[0].0, "quad/assert", "first op is assert");
     assert_eq!(ops[1].0, "quad/retract", "second op is retract");
 
     // After assert + retract, the quad should not be in node2's QuadStore
@@ -169,21 +182,25 @@ async fn quad_retract_propagates_via_gossip_tx() {
 /// journal_assert must not panic when gossip_tx is None.
 #[tokio::test]
 async fn journal_assert_works_without_gossip_tx() {
-    let state = Arc::new(
-        KotobaState::new(None).expect("state init"),
+    let state = Arc::new(KotobaState::new(None).expect("state init"));
+    assert!(
+        state.gossip_tx.is_none(),
+        "gossip_tx should be None without attach_gossip"
     );
-    assert!(state.gossip_tx.is_none(), "gossip_tx should be None without attach_gossip");
 
     let quad = make_quad("solo-graph", "alice", "likes", "coffee");
 
     // Must not panic
     let cid_str = state.journal_assert(&quad).await;
-    assert!(!cid_str.is_empty(), "journal_assert must return a non-empty CID string");
+    assert!(
+        !cid_str.is_empty(),
+        "journal_assert must return a non-empty CID string"
+    );
 
     // Also available locally in the state's own quad_store via direct assert
     state.quad_store.assert(quad.clone()).await;
 
-    let graph_cid   = KotobaCid::from_bytes(b"solo-graph");
+    let graph_cid = KotobaCid::from_bytes(b"solo-graph");
     let subject_cid = KotobaCid::from_bytes(b"alice");
 
     let quads = state

@@ -4,12 +4,12 @@
 //! - `Public`         — no auth required
 //! - `Authenticated`  — `Authorization: Bearer <any-non-empty-token>` required
 //! - `Private`        — CACAO delegation chain (DAG-CBOR, base64-standard encoded)
-//!   in the `cacao_b64` query param, verified with `quad:read`
+//!   in the `cacao_b64` query param, verified with `datom:read`
 //!   capability and issuer == owner_did
 
 use axum::http::{HeaderMap, StatusCode};
-use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
-use kotoba_auth::{Cacao, DelegationChain};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use kotoba_auth::{Cacao, CacaoPayload, DelegationChain};
 use kotoba_core::named_graph::GraphVisibility;
 
 /// Error type returned by [`check_read_access`].
@@ -47,10 +47,9 @@ impl AccessDenied {
                 StatusCode::UNAUTHORIZED,
                 "Authorization: Bearer <token> required for authenticated graphs".into(),
             ),
-            AccessDenied::TokenExpired => (
-                StatusCode::UNAUTHORIZED,
-                "Bearer token has expired".into(),
-            ),
+            AccessDenied::TokenExpired => {
+                (StatusCode::UNAUTHORIZED, "Bearer token has expired".into())
+            }
             AccessDenied::MissingCacao => (
                 StatusCode::UNAUTHORIZED,
                 "cacao_b64 query param required for private graphs".into(),
@@ -59,10 +58,9 @@ impl AccessDenied {
                 StatusCode::BAD_REQUEST,
                 format!("cacao_b64 base64 decode error: {e}"),
             ),
-            AccessDenied::CacaoParseError(e) => (
-                StatusCode::BAD_REQUEST,
-                format!("cacao parse error: {e}"),
-            ),
+            AccessDenied::CacaoParseError(e) => {
+                (StatusCode::BAD_REQUEST, format!("cacao parse error: {e}"))
+            }
             AccessDenied::DelegationError(e) => (
                 StatusCode::UNAUTHORIZED,
                 format!("cacao delegation error: {e}"),
@@ -90,7 +88,7 @@ impl AccessDenied {
 /// Returns `None` if the token is malformed or has no `sub` claim.
 /// The signature is NOT verified — the edge BFF is the trust boundary.
 pub(crate) fn jwt_sub(token: &str) -> Option<String> {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     let payload_b64 = token.split('.').nth(1)?;
     let bytes = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
     let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
@@ -101,7 +99,7 @@ pub(crate) fn jwt_sub(token: &str) -> Option<String> {
 /// The edge BFF (AT Protocol PDS / CF Worker) is the trust boundary for signatures.
 /// Returns `false` for any token that cannot be decoded or has no `exp` claim.
 pub(crate) fn jwt_exp_elapsed(token: &str) -> bool {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
     // A JWT has three dot-separated segments: header.payload.signature
     let payload_b64 = match token.split('.').nth(1) {
@@ -128,6 +126,69 @@ pub(crate) fn jwt_exp_elapsed(token: &str) -> bool {
     now > exp
 }
 
+/// Verify a graph-scoped CACAO for an explicit operation such as `graph:query`.
+///
+/// This is used by protocol-level query endpoints that need operation-specific
+/// capability checks instead of the private-graph owner-only `datom:read` gate.
+pub(crate) fn verify_cacao_graph_operation(
+    cacao_b64: &str,
+    graph: &str,
+    operation: &str,
+    expected_aud: Option<&str>,
+    nonce_store: Option<&crate::nonce_store::NonceStore>,
+) -> Result<CacaoPayload, AccessDenied> {
+    const MAX_CACAO_B64_LEN: usize = 8 * 1024;
+    if cacao_b64.len() > MAX_CACAO_B64_LEN {
+        return Err(AccessDenied::CacaoDecodeError(format!(
+            "cacao_b64 too large ({} bytes, limit {MAX_CACAO_B64_LEN})",
+            cacao_b64.len()
+        )));
+    }
+
+    let cbor = B64
+        .decode(cacao_b64)
+        .map_err(|e| AccessDenied::CacaoDecodeError(e.to_string()))?;
+    let cacao =
+        Cacao::from_cbor(&cbor).map_err(|e| AccessDenied::CacaoParseError(e.to_string()))?;
+    let nonce = cacao.p.nonce.clone();
+    let payload = cacao.p.clone();
+    let chain = DelegationChain::new(cacao);
+
+    if let Some(aud) = expected_aud {
+        chain
+            .verify_with_aud(graph, operation, aud)
+            .map_err(|e| match e {
+                kotoba_auth::DelegationError::AudienceMismatch { expected, got } => {
+                    AccessDenied::AudienceMismatch { expected, got }
+                }
+                other => AccessDenied::DelegationError(other.to_string()),
+            })?;
+    } else {
+        chain
+            .verify(graph, operation)
+            .map_err(|e| AccessDenied::DelegationError(e.to_string()))?;
+    }
+
+    if nonce.is_empty() {
+        return Err(AccessDenied::DelegationError(
+            "CACAO nonce must not be empty".to_string(),
+        ));
+    }
+    if let Some(nonce_store) = nonce_store {
+        const MAX_CACAO_AGE_SECS: u64 = 7 * 24 * 3600;
+        let expiry_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .saturating_add(MAX_CACAO_AGE_SECS);
+        if !nonce_store.check_and_register(&nonce, expiry_unix) {
+            return Err(AccessDenied::ReplayedNonce(nonce));
+        }
+    }
+
+    Ok(payload)
+}
+
 /// Require that the request carries a Bearer JWT whose `sub` matches `operator_did`.
 ///
 /// Used by unauthenticated-write endpoints (`kg_ingest`, `kg_delete`, `kg_embed`,
@@ -144,23 +205,33 @@ pub fn require_operator_auth(
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or_else(|| {
             tracing::warn!("operator auth: missing Bearer token");
-            (StatusCode::UNAUTHORIZED, "Authorization: Bearer <token> required".to_string())
+            (
+                StatusCode::UNAUTHORIZED,
+                "Authorization: Bearer <token> required".to_string(),
+            )
         })?;
     if jwt_exp_elapsed(token) {
         tracing::warn!("operator auth: expired JWT");
-        return Err((StatusCode::UNAUTHORIZED, "Bearer token has expired".to_string()));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Bearer token has expired".to_string(),
+        ));
     }
-    let sub = jwt_sub(token)
-        .ok_or_else(|| {
-            tracing::warn!("operator auth: JWT missing sub claim");
-            (StatusCode::UNAUTHORIZED, "Bearer token missing sub claim".to_string())
-        })?;
+    let sub = jwt_sub(token).ok_or_else(|| {
+        tracing::warn!("operator auth: JWT missing sub claim");
+        (
+            StatusCode::UNAUTHORIZED,
+            "Bearer token missing sub claim".to_string(),
+        )
+    })?;
     if sub == operator_did {
         Ok(())
     } else {
         tracing::warn!(sub = %sub, "operator auth: sub mismatch");
-        Err((StatusCode::UNAUTHORIZED,
-            format!("Bearer sub {sub:?} is not the operator DID")))
+        Err((
+            StatusCode::UNAUTHORIZED,
+            format!("Bearer sub {sub:?} is not the operator DID"),
+        ))
     }
 }
 
@@ -178,44 +249,72 @@ pub(crate) fn require_any_bearer_auth(
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or_else(|| {
             tracing::warn!("{context}: missing Bearer token");
-            (StatusCode::UNAUTHORIZED, "Authorization: Bearer <token> required".to_string())
+            (
+                StatusCode::UNAUTHORIZED,
+                "Authorization: Bearer <token> required".to_string(),
+            )
         })?;
     if jwt_exp_elapsed(token) {
         tracing::warn!("{context}: expired JWT");
-        return Err((StatusCode::UNAUTHORIZED, "Bearer token has expired".to_string()));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Bearer token has expired".to_string(),
+        ));
     }
-    jwt_sub(token)
-        .map(|_| ())
-        .ok_or_else(|| {
-            tracing::warn!("{context}: JWT missing sub claim");
-            (StatusCode::UNAUTHORIZED, "Bearer token missing sub claim".to_string())
-        })
+    jwt_sub(token).map(|_| ()).ok_or_else(|| {
+        tracing::warn!("{context}: JWT missing sub claim");
+        (
+            StatusCode::UNAUTHORIZED,
+            "Bearer token missing sub claim".to_string(),
+        )
+    })
 }
 
 /// Validate a DID string: non-empty, `did:` prefix, within `max_len` bytes.
 ///
 /// Returns a `(StatusCode::BAD_REQUEST, message)` error tuple on failure.
-pub(crate) fn validate_did(did: &str, field: &str, max_len: usize) -> Result<(), (StatusCode, String)> {
+pub(crate) fn validate_did(
+    did: &str,
+    field: &str,
+    max_len: usize,
+) -> Result<(), (StatusCode, String)> {
     if did.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, format!("{field} must not be empty")));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("{field} must not be empty"),
+        ));
     }
     if did.contains(char::is_whitespace) {
-        return Err((StatusCode::BAD_REQUEST, format!("{field} must not contain whitespace")));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("{field} must not contain whitespace"),
+        ));
     }
     // DID spec requires did:{method}:{identifier} — at minimum two colons and
     // non-empty method + identifier segments.
     let after_did = did.strip_prefix("did:").ok_or_else(|| {
-        (StatusCode::BAD_REQUEST, format!("{field} is not a valid DID (must start with 'did:')"))
+        (
+            StatusCode::BAD_REQUEST,
+            format!("{field} is not a valid DID (must start with 'did:')"),
+        )
     })?;
     let colon = after_did.find(':').ok_or_else(|| {
-        (StatusCode::BAD_REQUEST, format!("{field} is not a valid DID (missing method:identifier segments)"))
+        (
+            StatusCode::BAD_REQUEST,
+            format!("{field} is not a valid DID (missing method:identifier segments)"),
+        )
     })?;
     if colon == 0 || colon + 1 >= after_did.len() {
-        return Err((StatusCode::BAD_REQUEST,
-            format!("{field} is not a valid DID (method or identifier segment is empty)")));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("{field} is not a valid DID (method or identifier segment is empty)"),
+        ));
     }
     if did.len() > max_len {
-        return Err((StatusCode::BAD_REQUEST, format!("{field} exceeds {max_len} bytes")));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("{field} exceeds {max_len} bytes"),
+        ));
     }
     Ok(())
 }
@@ -225,7 +324,7 @@ pub(crate) fn validate_did(did: &str, field: &str, max_len: usize) -> Result<(),
 /// - `Public`        → always `Ok(())`
 /// - `Authenticated` → requires a non-empty `Authorization: Bearer …` header
 /// - `Private`       → requires a valid CACAO delegation chain in `cacao_b64` with:
-///     1. `quad:read` capability
+///     1. `datom:read` capability
 ///     2. graph scope `kotoba://graph/private/{owner_did}` (or absent = all graphs)
 ///     3. valid cryptographic signature
 ///     4. issuer DID == `owner_did`
@@ -267,13 +366,15 @@ pub fn check_read_access(
             // Legitimate CACAOs are ~400-800 base64 chars. 8 KiB is generous.
             const MAX_CACAO_B64_LEN: usize = 8 * 1024;
             if b64.len() > MAX_CACAO_B64_LEN {
-                return Err(AccessDenied::CacaoDecodeError(
-                    format!("cacao_b64 too large ({} bytes, limit {MAX_CACAO_B64_LEN})", b64.len())
-                ));
+                return Err(AccessDenied::CacaoDecodeError(format!(
+                    "cacao_b64 too large ({} bytes, limit {MAX_CACAO_B64_LEN})",
+                    b64.len()
+                )));
             }
 
             // 2. Decode base64
-            let cbor = B64.decode(b64)
+            let cbor = B64
+                .decode(b64)
                 .map_err(|e| AccessDenied::CacaoDecodeError(e.to_string()))?;
 
             // 2. Parse CACAO from DAG-CBOR
@@ -282,7 +383,7 @@ pub fn check_read_access(
 
             // 3. Build DelegationChain and verify:
             //    - expiry
-            //    - capability == "quad:read" (if present)
+            //    - capability == "datom:read" (if present)
             //    - graph scope == "private/{owner_did}" (if present)
             //    - cryptographic signature → returns recovered issuer DID
             //
@@ -292,15 +393,16 @@ pub fn check_read_access(
             let chain = DelegationChain::new(cacao);
             let issuer_did = if let Some(aud) = expected_aud {
                 chain
-                    .verify_with_aud(&graph_scope, "quad:read", aud)
+                    .verify_with_aud(&graph_scope, "datom:read", aud)
                     .map_err(|e| match e {
-                        kotoba_auth::DelegationError::AudienceMismatch { expected, got } =>
-                            AccessDenied::AudienceMismatch { expected, got },
+                        kotoba_auth::DelegationError::AudienceMismatch { expected, got } => {
+                            AccessDenied::AudienceMismatch { expected, got }
+                        }
                         other => AccessDenied::DelegationError(other.to_string()),
                     })?
             } else {
                 chain
-                    .verify(&graph_scope, "quad:read")
+                    .verify(&graph_scope, "datom:read")
                     .map_err(|e| AccessDenied::DelegationError(e.to_string()))?
             };
 
@@ -309,7 +411,7 @@ pub fn check_read_access(
             if &issuer_did != owner_did {
                 return Err(AccessDenied::IssuerMismatch {
                     expected: owner_did.clone(),
-                    got:      issuer_did,
+                    got: issuer_did,
                 });
             }
 
@@ -324,7 +426,7 @@ pub fn check_read_access(
                 // Reject rather than silently bypass the guard.
                 if nonce.is_empty() {
                     return Err(AccessDenied::DelegationError(
-                        "CACAO nonce must not be empty".into()
+                        "CACAO nonce must not be empty".into(),
                     ));
                 }
                 // Conservative upper-bound: keep nonce until max possible expiry.
@@ -359,8 +461,8 @@ mod tests {
     }
 
     fn jwt_with_exp(exp: u64) -> String {
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-        let header  = URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA","typ":"JWT"}"#);
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA","typ":"JWT"}"#);
         let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"sub":"did:key:z6Mk","exp":{exp}}}"#));
         format!("{header}.{payload}.fakesig")
     }
@@ -393,7 +495,10 @@ mod tests {
         let token = jwt_with_exp(1);
         let h = bearer_headers(&token);
         let err = check_read_access(&vis, &h, None, None, None).unwrap_err();
-        assert!(matches!(err, AccessDenied::TokenExpired), "expected TokenExpired, got {err:?}");
+        assert!(
+            matches!(err, AccessDenied::TokenExpired),
+            "expected TokenExpired, got {err:?}"
+        );
     }
 
     #[test]
@@ -414,19 +519,19 @@ mod tests {
 
     #[test]
     fn jwt_exp_elapsed_missing_exp_returns_false() {
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-        let header  = URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA"}"#);
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA"}"#);
         let payload = URL_SAFE_NO_PAD.encode(r#"{"sub":"alice"}"#);
-        let token   = format!("{header}.{payload}.sig");
+        let token = format!("{header}.{payload}.sig");
         assert!(!jwt_exp_elapsed(&token));
     }
 
     #[test]
     fn jwt_sub_extracts_sub_claim() {
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-        let header  = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256"}"#);
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256"}"#);
         let payload = URL_SAFE_NO_PAD.encode(r#"{"sub":"did:key:zAlice","exp":9999999999}"#);
-        let token   = format!("{header}.{payload}.sig");
+        let token = format!("{header}.{payload}.sig");
         assert_eq!(jwt_sub(&token).as_deref(), Some("did:key:zAlice"));
     }
 
@@ -454,18 +559,26 @@ mod tests {
         let far_future = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs() + 3600;
-        assert!(store.check_and_register(nonce, far_future), "first empty-nonce accepted");
-        assert!(!store.check_and_register(nonce, far_future), "second empty-nonce blocked (all nonce-less CACAOs)");
+            .as_secs()
+            + 3600;
+        assert!(
+            store.check_and_register(nonce, far_future),
+            "first empty-nonce accepted"
+        );
+        assert!(
+            !store.check_and_register(nonce, far_future),
+            "second empty-nonce blocked (all nonce-less CACAOs)"
+        );
     }
 
     #[test]
     fn require_operator_auth_accepts_matching_sub() {
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
         let far_future: u64 = 4_102_444_800;
-        let header  = URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA","typ":"JWT"}"#);
-        let payload = URL_SAFE_NO_PAD.encode(
-            format!(r#"{{"sub":"did:key:zOperator","exp":{far_future}}}"#));
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(format!(
+            r#"{{"sub":"did:key:zOperator","exp":{far_future}}}"#
+        ));
         let token = format!("{header}.{payload}.fakesig");
         let h = bearer_headers(&token);
         assert!(require_operator_auth(&h, "did:key:zOperator").is_ok());
@@ -473,11 +586,11 @@ mod tests {
 
     #[test]
     fn require_operator_auth_rejects_wrong_sub() {
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
         let far_future: u64 = 4_102_444_800;
-        let header  = URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA","typ":"JWT"}"#);
-        let payload = URL_SAFE_NO_PAD.encode(
-            format!(r#"{{"sub":"did:key:zOther","exp":{far_future}}}"#));
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA","typ":"JWT"}"#);
+        let payload =
+            URL_SAFE_NO_PAD.encode(format!(r#"{{"sub":"did:key:zOther","exp":{far_future}}}"#));
         let token = format!("{header}.{payload}.fakesig");
         let h = bearer_headers(&token);
         let err = require_operator_auth(&h, "did:key:zOperator");
@@ -505,10 +618,10 @@ mod tests {
 
     #[test]
     fn jwt_sub_returns_none_when_sub_absent() {
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-        let header  = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256"}"#);
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256"}"#);
         let payload = URL_SAFE_NO_PAD.encode(r#"{"exp":9999999999}"#);
-        let token   = format!("{header}.{payload}.sig");
+        let token = format!("{header}.{payload}.sig");
         assert!(jwt_sub(&token).is_none());
     }
 
@@ -549,7 +662,12 @@ mod tests {
 
     #[test]
     fn validate_did_accepts_valid_did_key() {
-        assert!(validate_did("did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuias8sitwN1s", "did", 512).is_ok());
+        assert!(validate_did(
+            "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuias8sitwN1s",
+            "did",
+            512
+        )
+        .is_ok());
     }
 
     #[test]
@@ -617,20 +735,28 @@ mod tests {
         let h = bearer_headers(&token);
         let err = require_any_bearer_auth(&h, "test").unwrap_err();
         assert_eq!(err.0, StatusCode::UNAUTHORIZED);
-        assert!(err.1.contains("expired"), "expected 'expired' in: {}", err.1);
+        assert!(
+            err.1.contains("expired"),
+            "expected 'expired' in: {}",
+            err.1
+        );
     }
 
     #[test]
     fn require_any_bearer_auth_rejects_missing_sub() {
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
         let far_future: u64 = 4_102_444_800;
-        let header  = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256"}"#);
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256"}"#);
         let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{far_future}}}"#));
-        let token   = format!("{header}.{payload}.sig");
+        let token = format!("{header}.{payload}.sig");
         let h = bearer_headers(&token);
         let err = require_any_bearer_auth(&h, "test").unwrap_err();
         assert_eq!(err.0, StatusCode::UNAUTHORIZED);
-        assert!(err.1.to_lowercase().contains("sub"), "expected 'sub' in: {}", err.1);
+        assert!(
+            err.1.to_lowercase().contains("sub"),
+            "expected 'sub' in: {}",
+            err.1
+        );
     }
 
     #[test]

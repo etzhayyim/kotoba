@@ -13,20 +13,21 @@
 
 use sqlparser::dialect::GenericDialect;
 
-use crate::schema::SchemaMap;
 use super::{
-    CompiledEnterpriseQuery, EnterpriseDialect, EnterpriseFeature,
-    sql_base::SchemaBasedSqlCompiler,
+    sql_base::SchemaBasedSqlCompiler, CompiledEnterpriseQuery, EnterpriseDialect, EnterpriseFeature,
 };
+use crate::schema::SchemaMap;
 
 pub struct Db2Dialect;
 
 impl EnterpriseDialect for Db2Dialect {
-    fn dialect_name(&self) -> &'static str { "db2" }
+    fn dialect_name(&self) -> &'static str {
+        "db2"
+    }
 
     fn compile(
         &self,
-        query:  &str,
+        query: &str,
         schema: &SchemaMap,
         output: &str,
     ) -> anyhow::Result<CompiledEnterpriseQuery> {
@@ -42,12 +43,8 @@ impl EnterpriseDialect for Db2Dialect {
 
         let prepped = preprocess_db2(query);
 
-        let (program, pp) = SchemaBasedSqlCompiler::compile(
-            &prepped,
-            &GenericDialect {},
-            schema,
-            output,
-        )?;
+        let (program, pp) =
+            SchemaBasedSqlCompiler::compile(&prepped, &GenericDialect {}, schema, output)?;
 
         Ok(CompiledEnterpriseQuery {
             program,
@@ -65,8 +62,9 @@ fn preprocess_db2(sql: &str) -> String {
     let mut s = sql.to_string();
 
     // Strip isolation level clauses: WITH UR / WITH CS / WITH RS / WITH RR
-    for iso in &["WITH UR", "WITH CS", "WITH RS", "WITH RR",
-                 "with ur", "with cs", "with rs", "with rr"] {
+    for iso in &[
+        "WITH UR", "WITH CS", "WITH RS", "WITH RR", "with ur", "with cs", "with rs", "with rr",
+    ] {
         s = s.replace(iso, "");
     }
 
@@ -86,45 +84,64 @@ fn preprocess_db2(sql: &str) -> String {
 mod tests {
     use super::*;
     use crate::schema::{AttrDef, SchemaMap, TableSchema};
-    use crate::{delta::Delta, quad::{Quad, QuadObject}};
+    use crate::{
+        datom::{Datom, Value},
+        delta::Delta,
+    };
     use kotoba_core::cid::KotobaCid;
 
-    fn cid(s: &str) -> KotobaCid { KotobaCid::from_bytes(s.as_bytes()) }
+    fn cid(s: &str) -> KotobaCid {
+        KotobaCid::from_bytes(s.as_bytes())
+    }
     fn fact(pred: &str, s: &str, o: &str) -> Delta {
-        Delta::assert(Quad {
-            graph: cid("g"), subject: cid(s), predicate: pred.to_string(),
-            object: QuadObject::Cid(cid(o)),
-        })
+        Delta::assert_datom(Datom::assert(
+            cid(s),
+            pred.to_string(),
+            Value::Cid(cid(o)),
+            cid("g"),
+        ))
     }
     fn has(d: &[Delta], pred: &str, s: &str, o: &str) -> bool {
-        d.iter().any(|x| x.quad.predicate == pred
-            && x.quad.subject == cid(s)
-            && matches!(&x.quad.object, QuadObject::Cid(c) if *c == cid(o)))
+        d.iter().any(|x| {
+            x.attribute() == pred
+                && x.entity() == &cid(s)
+                && matches!(x.value(), Value::Cid(c) if *c == cid(o))
+        })
     }
 
     #[test]
     fn fetch_first_limit() {
         let mut schema = SchemaMap::new();
-        schema.add("accounts", TableSchema::new("id")
-            .with_attr(AttrDef::scalar("name", "accounts")));
+        schema.add(
+            "accounts",
+            TableSchema::new("id").with_attr(AttrDef::scalar("name", "accounts")),
+        );
 
-        let result = Db2Dialect.compile(
-            "SELECT a.id, a.name FROM accounts a FETCH FIRST 20 ROWS ONLY",
-            &schema, "out",
-        ).unwrap();
+        let result = Db2Dialect
+            .compile(
+                "SELECT a.id, a.name FROM accounts a FETCH FIRST 20 ROWS ONLY",
+                &schema,
+                "out",
+            )
+            .unwrap();
         assert_eq!(result.post_process.limit, Some(20));
     }
 
     #[test]
     fn isolation_stripped() {
         let mut schema = SchemaMap::new();
-        schema.add("ledger", TableSchema::new("id")
-            .with_attr(AttrDef::numeric("balance", "ledger")));
+        schema.add(
+            "ledger",
+            TableSchema::new("id").with_attr(AttrDef::numeric("balance", "ledger")),
+        );
 
-        let result = Db2Dialect.compile(
-            "SELECT l.id, l.balance FROM ledger l WITH UR",
-            &schema, "out",
-        ).unwrap();
+        let result = Db2Dialect
+            .compile(
+                "SELECT l.id, l.balance FROM ledger l WITH UR",
+                &schema,
+                "out",
+            )
+            .unwrap();
         // Should compile cleanly without the isolation clause
         assert_eq!(result.dialect, "db2");
 
@@ -138,7 +155,8 @@ mod tests {
         let schema = SchemaMap::new();
         let result = Db2Dialect.compile(
             "SELECT a.id, a.name FROM accounts a WHERE a.id = 'x'",
-            &schema, "out",
+            &schema,
+            "out",
         );
         // Standard query — no OLAP window
         if let Ok(r) = result {

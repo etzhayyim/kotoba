@@ -31,8 +31,8 @@ use zeroize::Zeroizing;
 
 use kotoba_core::cid::KotobaCid;
 use kotoba_core::store::BlockStore;
+use kotoba_crypto::hpke::{hpke_open, hpke_seal};
 use kotoba_crypto::{AgentCrypto, CryptoError, VaultKeyedCrypto};
-use kotoba_crypto::hpke::{hpke_seal, hpke_open};
 
 use crate::agent_identity::AgentIdentity;
 use crate::store::KseStore;
@@ -41,7 +41,7 @@ use crate::store::KseStore;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct KeyRef {
-    cid:     String,
+    cid: String,
     version: u64,
 }
 
@@ -65,11 +65,11 @@ impl SovereignCrypto {
     ///   2. If present: load wrapped blob from BlockStore, HPKE-unwrap with agent sk
     ///   3. If absent: generate random key, wrap, store, write pointer
     pub async fn load_or_genesis(
-        identity:    &AgentIdentity,
-        kse_store:   &KseStore,
+        identity: &AgentIdentity,
+        kse_store: &KseStore,
         block_store: &Arc<dyn BlockStore + Send + Sync>,
     ) -> Result<Self> {
-        let slug    = identity.did_slug();
+        let slug = identity.did_slug();
         let cur_key = format!("agent/crypto/{slug}/current.json");
 
         if kse_store.exists(&cur_key).await {
@@ -78,19 +78,25 @@ impl SovereignCrypto {
             // KseStore pointer file survived), fall through to genesis instead
             // of bricking the startup.
             let result: Result<Self> = (async {
-                let data  = kse_store.get(&cur_key).await
+                let data = kse_store
+                    .get(&cur_key)
+                    .await
                     .context("read key-ref pointer")?;
-                let key_ref: KeyRef = serde_json::from_slice(&data)
-                    .context("parse key-ref JSON")?;
+                let key_ref: KeyRef =
+                    serde_json::from_slice(&data).context("parse key-ref JSON")?;
                 let cid = KotobaCid::from_multibase(&key_ref.cid)
                     .ok_or_else(|| anyhow!("parse key ref CID: {}", key_ref.cid))?;
-                let wrapped = block_store.get(&cid)
+                let wrapped = block_store
+                    .get(&cid)
                     .context("load wrapped key block")?
                     .ok_or_else(|| anyhow!("wrapped key block not found: {}", key_ref.cid))?;
-                let vault_key_bytes = hpke_open(&identity.dh_secret, &wrapped)
-                    .context("HPKE unwrap vault key")?;
+                let vault_key_bytes =
+                    hpke_open(&identity.dh_secret, &wrapped).context("HPKE unwrap vault key")?;
                 if vault_key_bytes.len() != 32 {
-                    return Err(anyhow!("vault key has wrong length: {}", vault_key_bytes.len()));
+                    return Err(anyhow!(
+                        "vault key has wrong length: {}",
+                        vault_key_bytes.len()
+                    ));
                 }
                 let mut arr = Zeroizing::new([0u8; 32]);
                 arr.copy_from_slice(&vault_key_bytes);
@@ -100,8 +106,11 @@ impl SovereignCrypto {
                     cid = %key_ref.cid,
                     "SovereignCrypto: vault key loaded from store"
                 );
-                Ok(Self { inner: VaultKeyedCrypto::new(arr) })
-            }).await;
+                Ok(Self {
+                    inner: VaultKeyedCrypto::new(arr),
+                })
+            })
+            .await;
 
             match result {
                 Ok(c) => Ok(c),
@@ -123,8 +132,8 @@ impl SovereignCrypto {
 
     /// Genesis flow: generate a new random vault key, wrap it, persist.
     async fn genesis(
-        identity:    &AgentIdentity,
-        kse_store:   &KseStore,
+        identity: &AgentIdentity,
+        kse_store: &KseStore,
         block_store: &Arc<dyn BlockStore + Send + Sync>,
     ) -> Result<Self> {
         // Generate 32-byte random vault key
@@ -132,17 +141,19 @@ impl SovereignCrypto {
         rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, raw_key.as_mut());
 
         // HPKE-wrap with agent's X25519 public key
-        let pk      = identity.x25519_public_key();
-        let wrapped = hpke_seal(&pk, raw_key.as_ref())
-            .context("HPKE wrap vault key")?;
+        let pk = identity.x25519_public_key();
+        let wrapped = hpke_seal(&pk, raw_key.as_ref()).context("HPKE wrap vault key")?;
 
-        // Store wrapped blob; CID = blake3 of content
-        let cid    = store_block(block_store, &wrapped)?;
+        // Store wrapped blob under an IPFS-compatible content CID.
+        let cid = store_block(block_store, &wrapped)?;
         let cid_mb = cid.to_multibase();
 
         // Write key-ref pointer
-        let key_ref = KeyRef { cid: cid_mb.clone(), version: 1 };
-        let slug    = identity.did_slug();
+        let key_ref = KeyRef {
+            cid: cid_mb.clone(),
+            version: 1,
+        };
+        let slug = identity.did_slug();
         write_key_ref(kse_store, &slug, &key_ref).await?;
 
         tracing::info!(
@@ -151,7 +162,9 @@ impl SovereignCrypto {
             "SovereignCrypto: genesis — new vault key generated and wrapped"
         );
 
-        Ok(Self { inner: VaultKeyedCrypto::new(raw_key) })
+        Ok(Self {
+            inner: VaultKeyedCrypto::new(raw_key),
+        })
     }
 
     /// Rotate the vault key.
@@ -160,20 +173,24 @@ impl SovereignCrypto {
     /// wraps it, stores it, and updates `current.json`.
     pub async fn rotate(
         &self,
-        identity:    &AgentIdentity,
-        kse_store:   &KseStore,
+        identity: &AgentIdentity,
+        kse_store: &KseStore,
         block_store: &Arc<dyn BlockStore + Send + Sync>,
     ) -> Result<Self> {
-        let slug    = identity.did_slug();
+        let slug = identity.did_slug();
         let cur_key = format!("agent/crypto/{slug}/current.json");
 
         // Read current pointer for archiving
         let current_version = if kse_store.exists(&cur_key).await {
-            let data = kse_store.get(&cur_key).await.context("read current key-ref")?;
+            let data = kse_store
+                .get(&cur_key)
+                .await
+                .context("read current key-ref")?;
             let kr: KeyRef = serde_json::from_slice(&data).context("parse current key-ref")?;
             // Archive as v{N}
             let archive_key = format!("agent/crypto/{slug}/v{}.json", kr.version);
-            kse_store.put(&archive_key, data)
+            kse_store
+                .put(&archive_key, data)
                 .await
                 .context("archive key-ref")?;
             kr.version
@@ -186,14 +203,16 @@ impl SovereignCrypto {
         rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, raw_key.as_mut());
 
         // Wrap and store
-        let pk      = identity.x25519_public_key();
-        let wrapped = hpke_seal(&pk, raw_key.as_ref())
-            .context("HPKE wrap rotated vault key")?;
-        let cid    = store_block(block_store, &wrapped)?;
+        let pk = identity.x25519_public_key();
+        let wrapped = hpke_seal(&pk, raw_key.as_ref()).context("HPKE wrap rotated vault key")?;
+        let cid = store_block(block_store, &wrapped)?;
         let cid_mb = cid.to_multibase();
 
         let new_version = current_version + 1;
-        let key_ref     = KeyRef { cid: cid_mb.clone(), version: new_version };
+        let key_ref = KeyRef {
+            cid: cid_mb.clone(),
+            version: new_version,
+        };
         write_key_ref(kse_store, &slug, &key_ref).await?;
 
         tracing::info!(
@@ -203,7 +222,9 @@ impl SovereignCrypto {
             "SovereignCrypto: vault key rotated"
         );
 
-        Ok(Self { inner: VaultKeyedCrypto::new(raw_key) })
+        Ok(Self {
+            inner: VaultKeyedCrypto::new(raw_key),
+        })
     }
 
     /// Re-encrypt a blob after key rotation.
@@ -234,7 +255,11 @@ impl AgentCrypto for SovereignCrypto {
         self.inner.encrypt(scope, plaintext).await
     }
 
-    async fn decrypt(&self, scope: &[u8], ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    async fn decrypt(
+        &self,
+        scope: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
         self.inner.decrypt(scope, ciphertext).await
     }
 }
@@ -243,23 +268,21 @@ impl AgentCrypto for SovereignCrypto {
 
 /// Write a `KeyRef` as `current.json` (always overwrites).
 async fn write_key_ref(kse_store: &KseStore, slug: &str, key_ref: &KeyRef) -> Result<()> {
-    let json    = serde_json::to_vec(key_ref).context("serialize key-ref")?;
+    let json = serde_json::to_vec(key_ref).context("serialize key-ref")?;
     let cur_key = format!("agent/crypto/{slug}/current.json");
-    kse_store.put(&cur_key, Bytes::from(json))
+    kse_store
+        .put(&cur_key, Bytes::from(json))
         .await
         .context("write key-ref pointer")?;
     Ok(())
 }
 
 /// Store raw bytes in the BlockStore and return the CID.
-fn store_block(
-    block_store: &Arc<dyn BlockStore + Send + Sync>,
-    data: &[u8],
-) -> Result<KotobaCid> {
-    // CID = blake3(data) as the content-address
-    let hash = blake3::hash(data);
-    let cid  = KotobaCid::from_bytes(hash.as_bytes());
-    block_store.put(&cid, data)
+fn store_block(block_store: &Arc<dyn BlockStore + Send + Sync>, data: &[u8]) -> Result<KotobaCid> {
+    // CID = IPFS-compatible content-address of the stored bytes.
+    let cid = KotobaCid::from_bytes(data);
+    block_store
+        .put(&cid, data)
         .context("write wrapped key block")?;
     Ok(cid)
 }
@@ -267,9 +290,9 @@ fn store_block(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use object_store::local::LocalFileSystem;
     use kotoba_store::{BudgetedBlockStore, MemoryBlockStore};
+    use object_store::local::LocalFileSystem;
+    use std::sync::Arc;
 
     fn tmp_dir(prefix: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -282,7 +305,7 @@ mod tests {
     }
 
     fn make_stores(dir: &std::path::Path) -> (KseStore, Arc<dyn BlockStore + Send + Sync>) {
-        let fs  = Arc::new(LocalFileSystem::new_with_prefix(dir).unwrap());
+        let fs = Arc::new(LocalFileSystem::new_with_prefix(dir).unwrap());
         let kse = KseStore::new(fs, "");
         let blk = Arc::new(BudgetedBlockStore::new(
             MemoryBlockStore::new(),
@@ -295,12 +318,17 @@ mod tests {
     async fn genesis_creates_key_and_pointer() {
         let dir = tmp_dir("genesis");
         let (kse, blk) = make_stores(&dir);
-        let id  = AgentIdentity::generate_ephemeral();
-        let crypto = SovereignCrypto::load_or_genesis(&id, &kse, &blk).await.unwrap();
+        let id = AgentIdentity::generate_ephemeral();
+        let crypto = SovereignCrypto::load_or_genesis(&id, &kse, &blk)
+            .await
+            .unwrap();
 
-        let slug    = id.did_slug();
+        let slug = id.did_slug();
         let cur_key = format!("agent/crypto/{slug}/current.json");
-        assert!(kse.exists(&cur_key).await, "current.json should exist after genesis");
+        assert!(
+            kse.exists(&cur_key).await,
+            "current.json should exist after genesis"
+        );
 
         // Can encrypt/decrypt
         let ct = crypto.encrypt(b"test", b"hello").await.unwrap();
@@ -314,9 +342,13 @@ mod tests {
         let (kse, blk) = make_stores(&dir);
         let id = AgentIdentity::generate_ephemeral();
 
-        let c1 = SovereignCrypto::load_or_genesis(&id, &kse, &blk).await.unwrap();
+        let c1 = SovereignCrypto::load_or_genesis(&id, &kse, &blk)
+            .await
+            .unwrap();
         // Second call should load the same key
-        let c2 = SovereignCrypto::load_or_genesis(&id, &kse, &blk).await.unwrap();
+        let c2 = SovereignCrypto::load_or_genesis(&id, &kse, &blk)
+            .await
+            .unwrap();
 
         // Both should decrypt the same ciphertext
         let ct = c1.encrypt(b"scope", b"data").await.unwrap();
@@ -328,9 +360,11 @@ mod tests {
     async fn rotate_produces_new_key() {
         let dir = tmp_dir("rotate");
         let (kse, blk) = make_stores(&dir);
-        let id  = AgentIdentity::generate_ephemeral();
+        let id = AgentIdentity::generate_ephemeral();
 
-        let c1 = SovereignCrypto::load_or_genesis(&id, &kse, &blk).await.unwrap();
+        let c1 = SovereignCrypto::load_or_genesis(&id, &kse, &blk)
+            .await
+            .unwrap();
         // Encrypt with original key
         let ct_old = c1.encrypt(b"scope", b"original data").await.unwrap();
 
@@ -347,8 +381,11 @@ mod tests {
         assert!(kse.exists(&format!("agent/crypto/{slug}/v1.json")).await);
         // Current pointer should be at version 2
         let data: KeyRef = serde_json::from_slice(
-            &kse.get(&format!("agent/crypto/{slug}/current.json")).await.unwrap()
-        ).unwrap();
+            &kse.get(&format!("agent/crypto/{slug}/current.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(data.version, 2);
     }
 
@@ -358,7 +395,9 @@ mod tests {
         let (kse, blk) = make_stores(&dir);
         let id = AgentIdentity::generate_ephemeral();
 
-        let old_crypto = SovereignCrypto::load_or_genesis(&id, &kse, &blk).await.unwrap();
+        let old_crypto = SovereignCrypto::load_or_genesis(&id, &kse, &blk)
+            .await
+            .unwrap();
 
         // Encrypt with old key
         let plaintext = b"sensitive payload";
@@ -371,7 +410,10 @@ mod tests {
         assert!(new_crypto.decrypt(b"blob", &old_ct).await.is_err());
 
         // Re-encrypt produces ciphertext decryptable with new key
-        let new_ct = new_crypto.reencrypt_blob(&old_crypto, b"blob", &old_ct).await.unwrap();
+        let new_ct = new_crypto
+            .reencrypt_blob(&old_crypto, b"blob", &old_ct)
+            .await
+            .unwrap();
         let recovered = new_crypto.decrypt(b"blob", &new_ct).await.unwrap();
         assert_eq!(recovered.as_slice(), plaintext);
 
@@ -384,7 +426,9 @@ mod tests {
         let dir = tmp_dir("scopes");
         let (kse, blk) = make_stores(&dir);
         let id = AgentIdentity::generate_ephemeral();
-        let crypto = SovereignCrypto::load_or_genesis(&id, &kse, &blk).await.unwrap();
+        let crypto = SovereignCrypto::load_or_genesis(&id, &kse, &blk)
+            .await
+            .unwrap();
 
         let ct1 = crypto.encrypt(b"scope-a", b"hello").await.unwrap();
         let ct2 = crypto.encrypt(b"scope-b", b"hello").await.unwrap();
@@ -400,7 +444,9 @@ mod tests {
         let dir = tmp_dir("nonce");
         let (kse, blk) = make_stores(&dir);
         let id = AgentIdentity::generate_ephemeral();
-        let crypto = SovereignCrypto::load_or_genesis(&id, &kse, &blk).await.unwrap();
+        let crypto = SovereignCrypto::load_or_genesis(&id, &kse, &blk)
+            .await
+            .unwrap();
 
         // Random nonce → different ciphertexts for same plaintext
         let ct1 = crypto.encrypt(b"scope", b"repeat").await.unwrap();
@@ -420,14 +466,22 @@ mod tests {
         let (kse, blk) = make_stores(&dir);
         let id = AgentIdentity::generate_ephemeral();
 
-        let c1 = SovereignCrypto::load_or_genesis(&id, &kse, &blk).await.unwrap();
+        let c1 = SovereignCrypto::load_or_genesis(&id, &kse, &blk)
+            .await
+            .unwrap();
         let c2 = c1.rotate(&id, &kse, &blk).await.unwrap();
         let _c3 = c2.rotate(&id, &kse, &blk).await.unwrap();
 
         let slug = id.did_slug();
-        let data = kse.get(&format!("agent/crypto/{slug}/current.json")).await.unwrap();
+        let data = kse
+            .get(&format!("agent/crypto/{slug}/current.json"))
+            .await
+            .unwrap();
         let key_ref: serde_json::Value = serde_json::from_slice(&data).unwrap();
-        assert_eq!(key_ref["version"], 3, "three rotations should yield version 3");
+        assert_eq!(
+            key_ref["version"], 3,
+            "three rotations should yield version 3"
+        );
     }
 
     #[tokio::test]
@@ -440,8 +494,12 @@ mod tests {
         let id1 = AgentIdentity::generate_ephemeral();
         let id2 = AgentIdentity::generate_ephemeral();
 
-        let c1 = SovereignCrypto::load_or_genesis(&id1, &kse1, &blk1).await.unwrap();
-        let c2 = SovereignCrypto::load_or_genesis(&id2, &kse2, &blk2).await.unwrap();
+        let c1 = SovereignCrypto::load_or_genesis(&id1, &kse1, &blk1)
+            .await
+            .unwrap();
+        let c2 = SovereignCrypto::load_or_genesis(&id2, &kse2, &blk2)
+            .await
+            .unwrap();
 
         let ct = c1.encrypt(b"s", b"data").await.unwrap();
         // id2 should not be able to decrypt id1's ciphertext
@@ -456,10 +514,16 @@ mod tests {
         let dir = tmp_dir("empty-pt");
         let (kse, blk) = make_stores(&dir);
         let id = AgentIdentity::generate_ephemeral();
-        let crypto = SovereignCrypto::load_or_genesis(&id, &kse, &blk).await.unwrap();
+        let crypto = SovereignCrypto::load_or_genesis(&id, &kse, &blk)
+            .await
+            .unwrap();
 
         let ct = crypto.encrypt(b"s", b"").await.unwrap();
         let pt = crypto.decrypt(b"s", &ct).await.unwrap();
-        assert_eq!(pt.as_slice(), b"", "empty plaintext must round-trip correctly");
+        assert_eq!(
+            pt.as_slice(),
+            b"",
+            "empty plaintext must round-trip correctly"
+        );
     }
 }

@@ -18,20 +18,20 @@ pub enum MessageType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignalMessage {
-    pub message_type:   MessageType,
-    pub sender_did:     String,
-    pub recipient_did:  String,
-    pub device_id:      String,
+    pub message_type: MessageType,
+    pub sender_did: String,
+    pub recipient_did: String,
+    pub device_id: String,
     /// Optional group ID for GroupMessage.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub group_id:       Option<String>,
+    pub group_id: Option<String>,
     /// Serialised `RatchetMessage` or `SenderKeyMessage` (JSON).
     pub ciphertext_envelope: String,
     /// RFC 3339 timestamp.
-    pub timestamp:      String,
+    pub timestamp: String,
     /// For initial X3DH messages: sender's ephemeral public key (base64url).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ephemeral_key:  Option<String>,
+    pub ephemeral_key: Option<String>,
     /// For initial X3DH messages: consumed one-time pre-key ID.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub one_time_prekey_id: Option<u32>,
@@ -42,16 +42,16 @@ pub struct SignalMessage {
 #[serde(rename_all = "camelCase")]
 pub struct ThreadMessage {
     /// Message ID (CID or UUID).
-    pub id:          String,
-    pub sender_did:  String,
-    pub text:        String,
+    pub id: String,
+    pub sender_did: String,
+    pub text: String,
     /// Reply-to message ID.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reply_to:    Option<String>,
+    pub reply_to: Option<String>,
     /// Inline reactions at creation time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub reactions:   Vec<Reaction>,
-    pub timestamp:   String,
+    pub reactions: Vec<Reaction>,
+    pub timestamp: String,
 }
 
 /// Emoji reaction.
@@ -59,7 +59,7 @@ pub struct ThreadMessage {
 #[serde(rename_all = "camelCase")]
 pub struct Reaction {
     pub sender_did: String,
-    pub emoji:      String,
+    pub emoji: String,
     pub message_id: String,
 }
 
@@ -68,8 +68,8 @@ pub struct Reaction {
 #[serde(rename_all = "camelCase")]
 pub struct DeliveryReceipt {
     pub message_ids: Vec<String>,
-    pub status:      ReceiptStatus,
-    pub timestamp:   String,
+    pub status: ReceiptStatus,
+    pub timestamp: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,33 +90,48 @@ mod tests {
 
     #[test]
     fn message_type_json_is_camel_case() {
-        assert_eq!(serde_json::to_string(&MessageType::DirectMessage).unwrap(),  "\"directMessage\"");
-        assert_eq!(serde_json::to_string(&MessageType::GroupMessage).unwrap(),   "\"groupMessage\"");
-        assert_eq!(serde_json::to_string(&MessageType::Receipt).unwrap(),        "\"receipt\"");
+        assert_eq!(
+            serde_json::to_string(&MessageType::DirectMessage).unwrap(),
+            "\"directMessage\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MessageType::GroupMessage).unwrap(),
+            "\"groupMessage\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MessageType::Receipt).unwrap(),
+            "\"receipt\""
+        );
     }
 
     #[test]
     fn receipt_status_json_is_camel_case() {
-        assert_eq!(serde_json::to_string(&ReceiptStatus::Delivered).unwrap(), "\"delivered\"");
-        assert_eq!(serde_json::to_string(&ReceiptStatus::Read).unwrap(),      "\"read\"");
+        assert_eq!(
+            serde_json::to_string(&ReceiptStatus::Delivered).unwrap(),
+            "\"delivered\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ReceiptStatus::Read).unwrap(),
+            "\"read\""
+        );
     }
 
     #[test]
     fn signal_message_json_roundtrip() {
         let msg = SignalMessage {
-            message_type:       MessageType::DirectMessage,
-            sender_did:         "did:key:zSender".to_string(),
-            recipient_did:      "did:key:zRecip".to_string(),
-            device_id:          "device-1".to_string(),
-            group_id:           None,
+            message_type: MessageType::DirectMessage,
+            sender_did: "did:key:zSender".to_string(),
+            recipient_did: "did:key:zRecip".to_string(),
+            device_id: "device-1".to_string(),
+            group_id: None,
             ciphertext_envelope: "base64ciphertext==".to_string(),
-            timestamp:          "2026-01-01T00:00:00Z".to_string(),
-            ephemeral_key:      None,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            ephemeral_key: None,
             one_time_prekey_id: None,
         };
-        let json  = serde_json::to_string(&msg).unwrap();
+        let json = serde_json::to_string(&msg).unwrap();
         let back: SignalMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.sender_did,    msg.sender_did);
+        assert_eq!(back.sender_did, msg.sender_did);
         assert_eq!(back.recipient_did, msg.recipient_did);
         // Optional None fields should be absent from JSON
         assert!(!json.contains("groupId"));
@@ -127,22 +142,25 @@ mod tests {
     #[test]
     fn thread_message_reactions_omitted_when_empty() {
         let m = ThreadMessage {
-            id:         "msg-1".to_string(),
+            id: "msg-1".to_string(),
             sender_did: "did:key:z1".to_string(),
-            text:       "hello".to_string(),
-            reply_to:   None,
-            reactions:  vec![],
-            timestamp:  "2026-01-01T00:00:00Z".to_string(),
+            text: "hello".to_string(),
+            reply_to: None,
+            reactions: vec![],
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
         };
         let json = serde_json::to_string(&m).unwrap();
-        assert!(!json.contains("reactions"), "empty reactions must be omitted");
+        assert!(
+            !json.contains("reactions"),
+            "empty reactions must be omitted"
+        );
     }
 
     #[test]
     fn reaction_json_roundtrip() {
         let r = Reaction {
             sender_did: "did:key:zA".to_string(),
-            emoji:      "👍".to_string(),
+            emoji: "👍".to_string(),
             message_id: "msg-42".to_string(),
         };
         let json = serde_json::to_string(&r).unwrap();
@@ -155,8 +173,8 @@ mod tests {
     fn delivery_receipt_json_roundtrip() {
         let r = DeliveryReceipt {
             message_ids: vec!["msg-1".to_string(), "msg-2".to_string()],
-            status:      ReceiptStatus::Delivered,
-            timestamp:   "2026-01-01T00:00:00Z".to_string(),
+            status: ReceiptStatus::Delivered,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
         };
         let json = serde_json::to_string(&r).unwrap();
         let back: DeliveryReceipt = serde_json::from_str(&json).unwrap();
@@ -174,21 +192,21 @@ mod tests {
     fn message_type_equality() {
         assert_eq!(MessageType::DirectMessage, MessageType::DirectMessage);
         assert_ne!(MessageType::DirectMessage, MessageType::GroupMessage);
-        assert_ne!(MessageType::GroupMessage,   MessageType::Receipt);
+        assert_ne!(MessageType::GroupMessage, MessageType::Receipt);
     }
 
     #[test]
     fn signal_message_with_group_fields_roundtrip() {
         let msg = SignalMessage {
-            message_type:        MessageType::GroupMessage,
-            sender_did:          "did:key:zSender".to_string(),
-            recipient_did:       "did:key:zRecip".to_string(),
-            device_id:           "device-2".to_string(),
-            group_id:            Some("group-xyz".to_string()),
+            message_type: MessageType::GroupMessage,
+            sender_did: "did:key:zSender".to_string(),
+            recipient_did: "did:key:zRecip".to_string(),
+            device_id: "device-2".to_string(),
+            group_id: Some("group-xyz".to_string()),
             ciphertext_envelope: "abc".to_string(),
-            timestamp:           "2026-01-01T00:00:00Z".to_string(),
-            ephemeral_key:       Some("ephem-pub-key".to_string()),
-            one_time_prekey_id:  Some(42),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            ephemeral_key: Some("ephem-pub-key".to_string()),
+            one_time_prekey_id: Some(42),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: SignalMessage = serde_json::from_str(&json).unwrap();
@@ -204,12 +222,12 @@ mod tests {
     #[test]
     fn thread_message_reply_to_roundtrip() {
         let m = ThreadMessage {
-            id:         "msg-2".to_string(),
+            id: "msg-2".to_string(),
             sender_did: "did:key:zA".to_string(),
-            text:       "reply".to_string(),
-            reply_to:   Some("msg-1".to_string()),
-            reactions:  vec![],
-            timestamp:  "2026-01-01T00:00:00Z".to_string(),
+            text: "reply".to_string(),
+            reply_to: Some("msg-1".to_string()),
+            reactions: vec![],
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: ThreadMessage = serde_json::from_str(&json).unwrap();
@@ -220,14 +238,16 @@ mod tests {
     #[test]
     fn thread_message_with_reactions_roundtrip() {
         let m = ThreadMessage {
-            id:         "msg-3".to_string(),
+            id: "msg-3".to_string(),
             sender_did: "did:key:zA".to_string(),
-            text:       "hi".to_string(),
-            reply_to:   None,
-            reactions:  vec![
-                Reaction { sender_did: "did:key:zB".to_string(), emoji: "🔥".to_string(), message_id: "msg-3".to_string() },
-            ],
-            timestamp:  "2026-01-02T00:00:00Z".to_string(),
+            text: "hi".to_string(),
+            reply_to: None,
+            reactions: vec![Reaction {
+                sender_did: "did:key:zB".to_string(),
+                emoji: "🔥".to_string(),
+                message_id: "msg-3".to_string(),
+            }],
+            timestamp: "2026-01-02T00:00:00Z".to_string(),
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: ThreadMessage = serde_json::from_str(&json).unwrap();
@@ -240,15 +260,15 @@ mod tests {
     #[test]
     fn signal_message_clone_is_independent() {
         let msg = SignalMessage {
-            message_type:        MessageType::Receipt,
-            sender_did:          "did:key:zA".to_string(),
-            recipient_did:       "did:key:zB".to_string(),
-            device_id:           "d1".to_string(),
-            group_id:            None,
+            message_type: MessageType::Receipt,
+            sender_did: "did:key:zA".to_string(),
+            recipient_did: "did:key:zB".to_string(),
+            device_id: "d1".to_string(),
+            group_id: None,
             ciphertext_envelope: "cipher".to_string(),
-            timestamp:           "2026-01-01T00:00:00Z".to_string(),
-            ephemeral_key:       None,
-            one_time_prekey_id:  None,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            ephemeral_key: None,
+            one_time_prekey_id: None,
         };
         let cloned = msg.clone();
         assert_eq!(cloned.message_type, MessageType::Receipt);
@@ -259,11 +279,14 @@ mod tests {
     fn delivery_receipt_read_status_json() {
         let r = DeliveryReceipt {
             message_ids: vec!["id-1".to_string()],
-            status:      ReceiptStatus::Read,
-            timestamp:   "2026-01-01T00:00:00Z".to_string(),
+            status: ReceiptStatus::Read,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
         };
         let json = serde_json::to_string(&r).unwrap();
-        assert!(json.contains("\"read\""), "status should serialize as 'read'");
+        assert!(
+            json.contains("\"read\""),
+            "status should serialize as 'read'"
+        );
     }
 
     #[test]

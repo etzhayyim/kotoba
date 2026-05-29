@@ -1,0 +1,29 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.datomic.history",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Return Datomic history Datoms for a Kotoba graph.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["graph"],
+          "properties": {
+            "graph": { "type": "string" },
+            "cacao_b64": { "type": "string" },
+            "presentation": { "type": "unknown" },
+            "as_of": { "type": "string" },
+            "since": { "type": "string" },
+            "limit": { "type": "integer", "minimum": 0 }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": { "type": "unknown" }
+      }
+    }
+  }
+}

@@ -4,30 +4,30 @@
 //! These endpoints make kotoba-server the SSoT for Signal Protocol E2E,
 //! superseding `@gftd/signal` (`10-protocol/signal/`).
 
-pub const NSID_SIGNAL_REGISTER_PREKEYS:      &str = "ai.gftd.signal.register.prekeys";
-pub const NSID_SIGNAL_GET_PREKEY_BUNDLE:     &str = "ai.gftd.signal.get.prekey.bundle";
-pub const NSID_SIGNAL_SEND_MESSAGE:          &str = "ai.gftd.signal.send.message";
-pub const NSID_SIGNAL_SEND_GROUP_MESSAGE:    &str = "ai.gftd.signal.send.group.message";
+pub const NSID_SIGNAL_REGISTER_PREKEYS: &str = "ai.gftd.signal.register.prekeys";
+pub const NSID_SIGNAL_GET_PREKEY_BUNDLE: &str = "ai.gftd.signal.get.prekey.bundle";
+pub const NSID_SIGNAL_SEND_MESSAGE: &str = "ai.gftd.signal.send.message";
+pub const NSID_SIGNAL_SEND_GROUP_MESSAGE: &str = "ai.gftd.signal.send.group.message";
 pub const NSID_SIGNAL_DISTRIBUTE_SENDER_KEY: &str = "ai.gftd.signal.distribute.sender.key";
 
-use std::sync::Arc;
 use axum::{
-    Json,
-    extract::{State, Query},
+    extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
+    Json,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
-use kotoba_signal::message::SignalMessage;
 use crate::server::KotobaState;
+use kotoba_signal::message::SignalMessage;
 
 // Soft caps — prevent shelf key exhaustion and oversized payloads.
-const MAX_DID_LEN:       usize = 512;
+const MAX_DID_LEN: usize = 512;
 const MAX_DEVICE_ID_LEN: usize = 128;
-const MAX_GROUP_ID_LEN:  usize = 128;
+const MAX_GROUP_ID_LEN: usize = 128;
 const MAX_PAYLOAD_BYTES: usize = 256 * 1024; // 256 KiB per encrypted message
-const MAX_BUNDLE_BYTES:  usize = 64 * 1024;  // 64 KiB per prekey bundle / identity key
+const MAX_BUNDLE_BYTES: usize = 64 * 1024; // 64 KiB per prekey bundle / identity key
 
 /// Thin wrapper — delegates to the shared validator in `graph_auth`.
 fn validate_signal_did(did: &str, field: &str) -> Result<(), (StatusCode, String)> {
@@ -36,14 +36,25 @@ fn validate_signal_did(did: &str, field: &str) -> Result<(), (StatusCode, String
 
 /// Validates a value used as a path component in storage keys or topic names.
 /// Allows only `[A-Za-z0-9._-]` to prevent path-traversal / key-namespace pollution.
-fn validate_path_component(value: &str, field: &str, max_len: usize) -> Result<(), (StatusCode, String)> {
+fn validate_path_component(
+    value: &str,
+    field: &str,
+    max_len: usize,
+) -> Result<(), (StatusCode, String)> {
     if value.is_empty() || value.len() > max_len {
-        return Err((StatusCode::BAD_REQUEST,
-            format!("{field} must be 1–{max_len} bytes")));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("{field} must be 1–{max_len} bytes"),
+        ));
     }
-    if !value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
-        return Err((StatusCode::BAD_REQUEST,
-            format!("{field} must contain only [A-Za-z0-9._-]")));
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("{field} must contain only [A-Za-z0-9._-]"),
+        ));
     }
     Ok(())
 }
@@ -60,23 +71,33 @@ fn require_signal_auth(
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or_else(|| {
             tracing::warn!("signal auth: missing Bearer token");
-            (StatusCode::UNAUTHORIZED, "Authorization: Bearer <token> required".to_string())
+            (
+                StatusCode::UNAUTHORIZED,
+                "Authorization: Bearer <token> required".to_string(),
+            )
         })?;
     if crate::graph_auth::jwt_exp_elapsed(token) {
         tracing::warn!("signal auth: expired JWT");
-        return Err((StatusCode::UNAUTHORIZED, "Bearer token has expired".to_string()));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Bearer token has expired".to_string(),
+        ));
     }
-    let sub = crate::graph_auth::jwt_sub(token)
-        .ok_or_else(|| {
-            tracing::warn!("signal auth: JWT missing sub claim");
-            (StatusCode::UNAUTHORIZED, "Bearer token missing sub claim".to_string())
-        })?;
+    let sub = crate::graph_auth::jwt_sub(token).ok_or_else(|| {
+        tracing::warn!("signal auth: JWT missing sub claim");
+        (
+            StatusCode::UNAUTHORIZED,
+            "Bearer token missing sub claim".to_string(),
+        )
+    })?;
     if sub == did || sub == operator_did {
         Ok(())
     } else {
         tracing::warn!(sub = %sub, did = %did, "signal auth: sub mismatch");
-        Err((StatusCode::UNAUTHORIZED,
-            format!("Bearer sub does not match did {did:?}")))
+        Err((
+            StatusCode::UNAUTHORIZED,
+            format!("Bearer sub does not match did {did:?}"),
+        ))
     }
 }
 
@@ -85,19 +106,19 @@ fn require_signal_auth(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterPrekeysReq {
-    pub did:              String,
-    pub device_id:        String,
+    pub did: String,
+    pub device_id: String,
     /// Serialised `IdentityKey` (JSON).
-    pub identity_key:     serde_json::Value,
+    pub identity_key: serde_json::Value,
     /// Serialised `PreKeyBundle` (JSON) — signed_prekey + one_time_prekeys.
-    pub prekey_bundle:    serde_json::Value,
+    pub prekey_bundle: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterPrekeysResp {
     pub status: &'static str,
-    pub did:    String,
+    pub did: String,
 }
 
 pub async fn register_prekeys(
@@ -109,24 +130,45 @@ pub async fn register_prekeys(
     validate_path_component(&req.device_id, "device_id", MAX_DEVICE_ID_LEN)?;
     require_signal_auth(&headers, &req.did, &state.operator_did)?;
 
-    let bundle_bytes = serde_json::to_vec(&req.prekey_bundle)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("prekey_bundle serialize: {e}")))?;
+    let bundle_bytes = serde_json::to_vec(&req.prekey_bundle).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("prekey_bundle serialize: {e}"),
+        )
+    })?;
     if bundle_bytes.len() > MAX_BUNDLE_BYTES {
-        return Err((StatusCode::PAYLOAD_TOO_LARGE,
-            format!("prekey_bundle exceeds {MAX_BUNDLE_BYTES} bytes")));
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("prekey_bundle exceeds {MAX_BUNDLE_BYTES} bytes"),
+        ));
     }
-    let ik_bytes = serde_json::to_vec(&req.identity_key)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("identity_key serialize: {e}")))?;
+    let ik_bytes = serde_json::to_vec(&req.identity_key).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("identity_key serialize: {e}"),
+        )
+    })?;
     if ik_bytes.len() > MAX_BUNDLE_BYTES {
-        return Err((StatusCode::PAYLOAD_TOO_LARGE,
-            format!("identity_key exceeds {MAX_BUNDLE_BYTES} bytes")));
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("identity_key exceeds {MAX_BUNDLE_BYTES} bytes"),
+        ));
     }
 
     let key = format!("signal/bundle/{}/{}", req.did, req.device_id);
-    state.shelf.put("KOTOBA_SIGNAL", key, bytes::Bytes::from(bundle_bytes)).await;
+    state
+        .shelf
+        .put("KOTOBA_SIGNAL", key, bytes::Bytes::from(bundle_bytes))
+        .await;
     let ik_key = format!("signal/identity/{}/{}", req.did, req.device_id);
-    state.shelf.put("KOTOBA_SIGNAL", ik_key, bytes::Bytes::from(ik_bytes)).await;
-    Ok(Json(RegisterPrekeysResp { status: "ok", did: req.did }))
+    state
+        .shelf
+        .put("KOTOBA_SIGNAL", ik_key, bytes::Bytes::from(ik_bytes))
+        .await;
+    Ok(Json(RegisterPrekeysResp {
+        status: "ok",
+        did: req.did,
+    }))
 }
 
 // ── getPrekeyBundle ───────────────────────────────────────────────────────────
@@ -134,7 +176,7 @@ pub async fn register_prekeys(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetPreKeyBundleQuery {
-    pub did:       String,
+    pub did: String,
     pub device_id: Option<String>,
 }
 
@@ -146,30 +188,41 @@ pub async fn get_prekey_bundle(
     let device_id = q.device_id.as_deref().unwrap_or("default");
     validate_path_component(device_id, "device_id", MAX_DEVICE_ID_LEN)?;
     let bundle_key = format!("signal/bundle/{}/{}", q.did, device_id);
-    let ik_key     = format!("signal/identity/{}/{}", q.did, device_id);
+    let ik_key = format!("signal/identity/{}/{}", q.did, device_id);
 
     let bundle_bytes = state.shelf.get("KOTOBA_SIGNAL", &bundle_key).await;
-    let ik_bytes     = state.shelf.get("KOTOBA_SIGNAL", &ik_key).await;
+    let ik_bytes = state.shelf.get("KOTOBA_SIGNAL", &ik_key).await;
 
     Ok(match (bundle_bytes, ik_bytes) {
         (Some(b), Some(ik)) => {
-            let bundle: serde_json::Value = serde_json::from_slice(&b)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("stored prekey bundle is malformed: {e}")))?;
-            let identity_key: serde_json::Value = serde_json::from_slice(&ik)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("stored identity key is malformed: {e}")))?;
+            let bundle: serde_json::Value = serde_json::from_slice(&b).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("stored prekey bundle is malformed: {e}"),
+                )
+            })?;
+            let identity_key: serde_json::Value = serde_json::from_slice(&ik).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("stored identity key is malformed: {e}"),
+                )
+            })?;
             Json(serde_json::json!({
                 "did": q.did,
                 "deviceId": device_id,
                 "identityKey": identity_key,
                 "bundle": bundle,
-            })).into_response()
+            }))
+            .into_response()
         }
-        _ => (StatusCode::NOT_FOUND, Json(serde_json::json!({
-            "error": "prekey bundle not found",
-            "did": q.did,
-        }))).into_response(),
+        _ => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "prekey bundle not found",
+                "did": q.did,
+            })),
+        )
+            .into_response(),
     })
 }
 
@@ -184,7 +237,7 @@ pub struct SendMessageReq {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendMessageResp {
-    pub status:     &'static str,
+    pub status: &'static str,
     pub message_id: String,
 }
 
@@ -204,14 +257,19 @@ pub async fn send_message(
 
     let msg: SignalMessage = match serde_json::from_value(req.signal_message.clone()) {
         Ok(m) => m,
-        Err(e) => return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        ).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
     };
 
     // Require the caller to prove ownership of signal_message.sender_did.
-    if let Err((code, err_msg)) = require_signal_auth(&headers, &msg.sender_did, &state.operator_did) {
+    if let Err((code, err_msg)) =
+        require_signal_auth(&headers, &msg.sender_did, &state.operator_did)
+    {
         return (code, Json(serde_json::json!({ "error": err_msg }))).into_response();
     }
 
@@ -219,15 +277,24 @@ pub async fn send_message(
     let topic = kotoba_kse::topic::Topic(format!("kotoba/{topic_name}"));
     let payload_vec = match serde_json::to_vec(&req.signal_message) {
         Ok(v) => v,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("signal_message serialize: {e}") }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("signal_message serialize: {e}") })),
+            )
+                .into_response()
+        }
     };
-    let entry = state.journal.publish(topic, bytes::Bytes::from(payload_vec)).await;
+    let entry = state
+        .journal
+        .publish(topic, bytes::Bytes::from(payload_vec))
+        .await;
 
     Json(SendMessageResp {
         status: "ok",
         message_id: entry.cid.to_multibase(),
-    }).into_response()
+    })
+    .into_response()
 }
 
 // ── sendGroupMessage ──────────────────────────────────────────────────────────
@@ -235,8 +302,8 @@ pub async fn send_message(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendGroupMessageReq {
-    pub group_id:     String,
-    pub sender_did:   String,
+    pub group_id: String,
+    pub sender_did: String,
     pub sender_key_message: serde_json::Value,
 }
 
@@ -251,7 +318,9 @@ pub async fn send_group_message(
     if let Err((code, msg)) = validate_signal_did(&req.sender_did, "sender_did") {
         return (code, Json(serde_json::json!({ "error": msg }))).into_response();
     }
-    if let Err((code, err_msg)) = require_signal_auth(&headers, &req.sender_did, &state.operator_did) {
+    if let Err((code, err_msg)) =
+        require_signal_auth(&headers, &req.sender_did, &state.operator_did)
+    {
         return (code, Json(serde_json::json!({ "error": err_msg }))).into_response();
     }
     let raw_len = serde_json::to_vec(&req.sender_key_message)
@@ -263,21 +332,27 @@ pub async fn send_group_message(
         ).into_response();
     }
 
-    let topic = kotoba_kse::topic::Topic(
-        format!("kotoba/signal/group/{}", req.group_id),
-    );
-    let payload_vec = match serde_json::to_vec(&req.sender_key_message) {
-        Ok(v) => v,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("sender_key_message serialize: {e}") }))).into_response(),
-    };
-    let entry = state.journal.publish(topic, bytes::Bytes::from(payload_vec)).await;
+    let topic = kotoba_kse::topic::Topic(format!("kotoba/signal/group/{}", req.group_id));
+    let payload_vec =
+        match serde_json::to_vec(&req.sender_key_message) {
+            Ok(v) => v,
+            Err(e) => return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("sender_key_message serialize: {e}") })),
+            )
+                .into_response(),
+        };
+    let entry = state
+        .journal
+        .publish(topic, bytes::Bytes::from(payload_vec))
+        .await;
 
     Json(serde_json::json!({
         "status": "ok",
         "messageId": entry.cid.to_multibase(),
         "groupId": req.group_id,
-    })).into_response()
+    }))
+    .into_response()
 }
 
 // ── distributeSenderKey ───────────────────────────────────────────────────────
@@ -286,7 +361,7 @@ pub async fn send_group_message(
 #[serde(rename_all = "camelCase")]
 pub struct DistributeSenderKeyReq {
     /// Recipient DID — receives the distribution via their 1:1 inbox.
-    pub recipient_did:  String,
+    pub recipient_did: String,
     pub recipient_device: String,
     /// SenderKeyDistribution serialised as a SignalMessage ciphertext.
     pub signal_message: serde_json::Value,
@@ -300,7 +375,9 @@ pub async fn distribute_sender_key(
     if let Err((code, msg)) = validate_signal_did(&req.recipient_did, "recipient_did") {
         return (code, Json(serde_json::json!({ "error": msg }))).into_response();
     }
-    if let Err((code, msg)) = validate_path_component(&req.recipient_device, "recipient_device", MAX_DEVICE_ID_LEN) {
+    if let Err((code, msg)) =
+        validate_path_component(&req.recipient_device, "recipient_device", MAX_DEVICE_ID_LEN)
+    {
         return (code, Json(serde_json::json!({ "error": msg }))).into_response();
     }
     let raw_len = serde_json::to_vec(&req.signal_message)
@@ -313,24 +390,36 @@ pub async fn distribute_sender_key(
     }
     // Require any authenticated caller (the sender distributing their key).
     // We verify: Bearer present + non-expired + has sub claim.
-    if let Err((code, err_msg)) = crate::graph_auth::require_any_bearer_auth(&headers, "distribute_sender_key") {
+    if let Err((code, err_msg)) =
+        crate::graph_auth::require_any_bearer_auth(&headers, "distribute_sender_key")
+    {
         return (code, Json(serde_json::json!({ "error": err_msg }))).into_response();
     }
 
-    let topic = kotoba_kse::topic::Topic(
-        format!("kotoba/signal/inbox/{}/{}", req.recipient_did, req.recipient_device),
-    );
+    let topic = kotoba_kse::topic::Topic(format!(
+        "kotoba/signal/inbox/{}/{}",
+        req.recipient_did, req.recipient_device
+    ));
     let payload_vec = match serde_json::to_vec(&req.signal_message) {
         Ok(v) => v,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("signal_message serialize: {e}") }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("signal_message serialize: {e}") })),
+            )
+                .into_response()
+        }
     };
-    let entry = state.journal.publish(topic, bytes::Bytes::from(payload_vec)).await;
+    let entry = state
+        .journal
+        .publish(topic, bytes::Bytes::from(payload_vec))
+        .await;
 
     Json(serde_json::json!({
         "status": "ok",
         "messageId": entry.cid.to_multibase(),
-    })).into_response()
+    }))
+    .into_response()
 }
 
 // ── NSID invariant tests ──────────────────────────────────────────────────────
@@ -426,20 +515,28 @@ mod tests {
 
     #[test]
     fn bundle_bytes_cap_constant_is_smaller_than_payload_cap() {
-        assert!(MAX_BUNDLE_BYTES < MAX_PAYLOAD_BYTES,
-            "bundle cap should be tighter than general payload cap");
+        assert!(
+            MAX_BUNDLE_BYTES < MAX_PAYLOAD_BYTES,
+            "bundle cap should be tighter than general payload cap"
+        );
     }
 
     // ── additional constant / boundary tests ─────────────────────────────────
 
     #[test]
     fn nsid_register_prekeys_exact_value() {
-        assert_eq!(NSID_SIGNAL_REGISTER_PREKEYS, "ai.gftd.signal.register.prekeys");
+        assert_eq!(
+            NSID_SIGNAL_REGISTER_PREKEYS,
+            "ai.gftd.signal.register.prekeys"
+        );
     }
 
     #[test]
     fn nsid_get_prekey_bundle_exact_value() {
-        assert_eq!(NSID_SIGNAL_GET_PREKEY_BUNDLE, "ai.gftd.signal.get.prekey.bundle");
+        assert_eq!(
+            NSID_SIGNAL_GET_PREKEY_BUNDLE,
+            "ai.gftd.signal.get.prekey.bundle"
+        );
     }
 
     #[test]
@@ -449,12 +546,18 @@ mod tests {
 
     #[test]
     fn nsid_send_group_message_exact_value() {
-        assert_eq!(NSID_SIGNAL_SEND_GROUP_MESSAGE, "ai.gftd.signal.send.group.message");
+        assert_eq!(
+            NSID_SIGNAL_SEND_GROUP_MESSAGE,
+            "ai.gftd.signal.send.group.message"
+        );
     }
 
     #[test]
     fn nsid_distribute_sender_key_exact_value() {
-        assert_eq!(NSID_SIGNAL_DISTRIBUTE_SENDER_KEY, "ai.gftd.signal.distribute.sender.key");
+        assert_eq!(
+            NSID_SIGNAL_DISTRIBUTE_SENDER_KEY,
+            "ai.gftd.signal.distribute.sender.key"
+        );
     }
 
     #[test]

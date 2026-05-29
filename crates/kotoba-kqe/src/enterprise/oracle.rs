@@ -15,21 +15,23 @@
 use anyhow::bail;
 use sqlparser::dialect::GenericDialect;
 
+use super::{
+    sql_base::SchemaBasedSqlCompiler, CompiledEnterpriseQuery, EnterpriseDialect,
+    EnterpriseFeature, PostProcess,
+};
 use crate::datalog::{Atom, BodyLiteral, DatalogProgram, DatalogRule, Term};
 use crate::schema::SchemaMap;
-use super::{
-    CompiledEnterpriseQuery, EnterpriseDialect, EnterpriseFeature, PostProcess,
-    sql_base::SchemaBasedSqlCompiler,
-};
 
 pub struct OracleDialect;
 
 impl EnterpriseDialect for OracleDialect {
-    fn dialect_name(&self) -> &'static str { "oracle" }
+    fn dialect_name(&self) -> &'static str {
+        "oracle"
+    }
 
     fn compile(
         &self,
-        query:  &str,
+        query: &str,
         schema: &SchemaMap,
         output: &str,
     ) -> anyhow::Result<CompiledEnterpriseQuery> {
@@ -59,12 +61,8 @@ impl EnterpriseDialect for OracleDialect {
         let prepped = preprocess_oracle(query);
 
         // ── Standard path via SchemaBasedSqlCompiler ─────────────────────────
-        let (program, base_pp) = SchemaBasedSqlCompiler::compile(
-            &prepped,
-            &GenericDialect {},
-            schema,
-            output,
-        )?;
+        let (program, base_pp) =
+            SchemaBasedSqlCompiler::compile(&prepped, &GenericDialect {}, schema, output)?;
 
         let merged_pp = merge_pp(pp, base_pp);
 
@@ -87,22 +85,28 @@ impl EnterpriseDialect for OracleDialect {
 /// output(E, Ancestor) :- fk_rel(E, Mid), output(Mid, Ancestor).
 /// ```
 fn compile_connect_by(
-    query:  &str,
+    query: &str,
     schema: &SchemaMap,
     output: &str,
 ) -> anyhow::Result<DatalogProgram> {
     let upper = query.to_uppercase();
 
     // Extract the relationship from "CONNECT BY PRIOR pk_alias.pk_col = fk_alias.fk_col"
-    let cb_idx = upper.find("CONNECT BY PRIOR")
+    let cb_idx = upper
+        .find("CONNECT BY PRIOR")
         .ok_or_else(|| anyhow::anyhow!("missing CONNECT BY PRIOR"))?;
     let cb_clause = &query[cb_idx + "CONNECT BY PRIOR".len()..].trim_start();
 
     // Find the = sign
-    let eq_idx = cb_clause.find('=')
+    let eq_idx = cb_clause
+        .find('=')
         .ok_or_else(|| anyhow::anyhow!("CONNECT BY: expected '=' in {cb_clause}"))?;
     let lhs = cb_clause[..eq_idx].trim();
-    let rhs = cb_clause[eq_idx + 1..].split_whitespace().next().unwrap_or("").trim();
+    let rhs = cb_clause[eq_idx + 1..]
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim();
 
     // Parse alias.col for each side
     let (pk_alias, pk_col) = split_alias_col(lhs)?;
@@ -158,10 +162,18 @@ fn extract_rownum(query: &str) -> Option<usize> {
     let rest = query[idx + 6..].trim_start();
 
     if let Some(after) = rest.strip_prefix("<=") {
-        let s: String = after.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+        let s: String = after
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
         s.parse::<usize>().ok()
     } else if let Some(after) = rest.strip_prefix('<') {
-        let s: String = after.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+        let s: String = after
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
         s.parse::<usize>().ok().map(|n| n.saturating_sub(1))
     } else {
         None
@@ -176,8 +188,7 @@ fn preprocess_oracle(sql: &str) -> String {
     let upper = s.to_uppercase();
     if let Some(idx) = upper.find("ROWNUM") {
         // Remove the entire "AND ROWNUM <= N" or "WHERE ROWNUM <= N" fragment
-        let clause_start = s[..idx].rfind(['W', 'A'])
-            .unwrap_or(idx);
+        let clause_start = s[..idx].rfind(['W', 'A']).unwrap_or(idx);
         s.replace_range(clause_start..idx + 20.min(s.len() - idx), "");
     }
     // Strip NVL(x, y) → x
@@ -186,7 +197,9 @@ fn preprocess_oracle(sql: &str) -> String {
             let inner = &s[idx + 4..end];
             let arg0 = inner.split(',').next().unwrap_or("").trim().to_string();
             s.replace_range(idx..end + 1, &arg0);
-        } else { break; }
+        } else {
+            break;
+        }
     }
     s
 }
@@ -198,7 +211,9 @@ fn find_matching_paren(s: &str, open_pos: usize) -> Option<usize> {
             '(' => depth += 1,
             ')' => {
                 depth -= 1;
-                if depth == 0 { return Some(open_pos + i); }
+                if depth == 0 {
+                    return Some(open_pos + i);
+                }
             }
             _ => {}
         }
@@ -216,10 +231,18 @@ fn split_alias_col(expr: &str) -> anyhow::Result<(String, String)> {
 }
 
 fn merge_pp(mut a: PostProcess, b: PostProcess) -> PostProcess {
-    if a.limit.is_none() { a.limit = b.limit; }
-    if a.offset.is_none() { a.offset = b.offset; }
-    if a.percent.is_none() { a.percent = b.percent; }
-    if a.order_by.is_empty() { a.order_by = b.order_by; }
+    if a.limit.is_none() {
+        a.limit = b.limit;
+    }
+    if a.offset.is_none() {
+        a.offset = b.offset;
+    }
+    if a.percent.is_none() {
+        a.percent = b.percent;
+    }
+    if a.order_by.is_empty() {
+        a.order_by = b.order_by;
+    }
     a
 }
 
@@ -229,25 +252,37 @@ fn merge_pp(mut a: PostProcess, b: PostProcess) -> PostProcess {
 mod tests {
     use super::*;
     use crate::schema::{AttrDef, SchemaMap, TableSchema};
-    use crate::{delta::Delta, quad::{Quad, QuadObject}};
+    use crate::{
+        datom::{Datom, Value},
+        delta::Delta,
+    };
     use kotoba_core::cid::KotobaCid;
 
-    fn cid(s: &str) -> KotobaCid { KotobaCid::from_bytes(s.as_bytes()) }
+    fn cid(s: &str) -> KotobaCid {
+        KotobaCid::from_bytes(s.as_bytes())
+    }
     fn fact(pred: &str, s: &str, o: &str) -> Delta {
-        Delta::assert(Quad {
-            graph: cid("g"), subject: cid(s), predicate: pred.to_string(),
-            object: QuadObject::Cid(cid(o)),
-        })
+        Delta::assert_datom(Datom::assert(
+            cid(s),
+            pred.to_string(),
+            Value::Cid(cid(o)),
+            cid("g"),
+        ))
     }
     fn has(d: &[Delta], pred: &str, s: &str, o: &str) -> bool {
-        d.iter().any(|x| x.quad.predicate == pred
-            && x.quad.subject == cid(s)
-            && matches!(&x.quad.object, QuadObject::Cid(c) if *c == cid(o)))
+        d.iter().any(|x| {
+            x.attribute() == pred
+                && x.entity() == &cid(s)
+                && matches!(x.value(), Value::Cid(c) if *c == cid(o))
+        })
     }
 
     #[test]
     fn rownum_extraction() {
-        assert_eq!(extract_rownum("SELECT * FROM t WHERE ROWNUM <= 10"), Some(10));
+        assert_eq!(
+            extract_rownum("SELECT * FROM t WHERE ROWNUM <= 10"),
+            Some(10)
+        );
         assert_eq!(extract_rownum("SELECT * FROM t WHERE ROWNUM < 10"), Some(9));
         assert_eq!(extract_rownum("SELECT * FROM t"), None);
     }
@@ -260,7 +295,8 @@ mod tests {
              CONNECT BY PRIOR e.id = e.manager_id",
             &SchemaMap::new(),
             "ancestor",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(prog.rules.len(), 2);
 
         // Base rule: anchor root → self
@@ -284,15 +320,20 @@ mod tests {
     #[test]
     fn standard_oracle_select() {
         let mut schema = SchemaMap::new();
-        schema.add("emp", TableSchema::new("id")
-            .with_attr(AttrDef::scalar("name", "emp"))
-            .with_attr(AttrDef::scalar("dept", "emp")));
+        schema.add(
+            "emp",
+            TableSchema::new("id")
+                .with_attr(AttrDef::scalar("name", "emp"))
+                .with_attr(AttrDef::scalar("dept", "emp")),
+        );
 
-        let result = OracleDialect.compile(
-            "SELECT e.id, e.name FROM emp e WHERE e.dept = 'HR'",
-            &schema,
-            "hr_emp",
-        ).unwrap();
+        let result = OracleDialect
+            .compile(
+                "SELECT e.id, e.name FROM emp e WHERE e.dept = 'HR'",
+                &schema,
+                "hr_emp",
+            )
+            .unwrap();
         assert_eq!(result.dialect, "oracle");
 
         let input = vec![

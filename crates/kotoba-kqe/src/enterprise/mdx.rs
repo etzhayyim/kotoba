@@ -29,19 +29,19 @@
 
 use anyhow::{anyhow, bail};
 
+use super::{CompiledEnterpriseQuery, EnterpriseDialect, EnterpriseFeature, PostProcess};
 use crate::datalog::{Atom, BodyLiteral, DatalogProgram, DatalogRule, Term};
 use crate::schema::SchemaMap;
-use super::{CompiledEnterpriseQuery, EnterpriseDialect, EnterpriseFeature, PostProcess};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
 /// Parsed MDX query structure.
 #[derive(Debug, Clone)]
 pub struct MdxQuery {
-    pub cube:    String,
+    pub cube: String,
     pub columns: Vec<MdxMemberRef>,
-    pub rows:    Vec<MdxMemberRef>,
-    pub slicer:  Vec<MdxMemberRef>,
+    pub rows: Vec<MdxMemberRef>,
+    pub slicer: Vec<MdxMemberRef>,
 }
 
 /// A single MDX member reference: `[Dimension].[Hierarchy].[Member]`
@@ -49,14 +49,16 @@ pub struct MdxQuery {
 #[derive(Debug, Clone)]
 pub struct MdxMemberRef {
     /// Bracketed path segments, e.g. `["Measures", "Sales Amount"]`
-    pub path:    Vec<String>,
+    pub path: Vec<String>,
     /// True when the last segment is `.Members` (all members)
     pub wildcard: bool,
 }
 
 impl MdxMemberRef {
     /// Dimension name (first segment).
-    pub fn dimension(&self) -> &str { self.path.first().map(|s| s.as_str()).unwrap_or("") }
+    pub fn dimension(&self) -> &str {
+        self.path.first().map(|s| s.as_str()).unwrap_or("")
+    }
 
     /// Predicate name in kotoba space: `"measure/<name>"` or `"dim/<dim>/<member>"`.
     pub fn predicate(&self) -> String {
@@ -79,11 +81,13 @@ impl MdxMemberRef {
 pub struct MdxDialect;
 
 impl EnterpriseDialect for MdxDialect {
-    fn dialect_name(&self) -> &'static str { "mdx" }
+    fn dialect_name(&self) -> &'static str {
+        "mdx"
+    }
 
     fn compile(
         &self,
-        query:  &str,
+        query: &str,
         _schema: &SchemaMap,
         output: &str,
     ) -> anyhow::Result<CompiledEnterpriseQuery> {
@@ -110,9 +114,13 @@ impl EnterpriseDialect for MdxDialect {
 /// - The head is `output(col_cid, row_cid)`.
 pub fn compile_mdx(mdx: &MdxQuery, output: &str) -> anyhow::Result<DatalogProgram> {
     // Require at least one column and one row member
-    let col = mdx.columns.first()
+    let col = mdx
+        .columns
+        .first()
         .ok_or_else(|| anyhow!("MDX: COLUMNS axis must have at least one member"))?;
-    let row = mdx.rows.first()
+    let row = mdx
+        .rows
+        .first()
         .ok_or_else(|| anyhow!("MDX: ROWS axis must have at least one member"))?;
 
     let col_var = Term::Variable("ColV".to_string());
@@ -152,7 +160,10 @@ pub fn compile_mdx(mdx: &MdxQuery, output: &str) -> anyhow::Result<DatalogProgra
     for member in &mdx.slicer {
         body.push(BodyLiteral::Positive(Atom {
             relation: member.predicate(),
-            args: vec![Term::Variable("Ctx".to_string()), Term::Constant(member.cid_key())],
+            args: vec![
+                Term::Variable("Ctx".to_string()),
+                Term::Constant(member.cid_key()),
+            ],
         }));
     }
 
@@ -170,17 +181,22 @@ pub fn compile_mdx(mdx: &MdxQuery, output: &str) -> anyhow::Result<DatalogProgra
 
 /// Parse a MDX query string into an `MdxQuery`.
 pub fn parse(mdx: &str) -> anyhow::Result<MdxQuery> {
-    let mut p = Parser { input: mdx.trim(), pos: 0 };
+    let mut p = Parser {
+        input: mdx.trim(),
+        pos: 0,
+    };
     p.parse_query()
 }
 
 struct Parser<'a> {
     input: &'a str,
-    pos:   usize,
+    pos: usize,
 }
 
 impl<'a> Parser<'a> {
-    fn rest(&self) -> &str { &self.input[self.pos..] }
+    fn rest(&self) -> &str {
+        &self.input[self.pos..]
+    }
 
     fn skip_ws(&mut self) {
         while self.pos < self.input.len()
@@ -191,7 +207,11 @@ impl<'a> Parser<'a> {
     }
 
     fn peek_upper(&self, n: usize) -> String {
-        self.input[self.pos..].chars().take(n).collect::<String>().to_uppercase()
+        self.input[self.pos..]
+            .chars()
+            .take(n)
+            .collect::<String>()
+            .to_uppercase()
     }
 
     fn expect_keyword(&mut self, kw: &str) -> anyhow::Result<()> {
@@ -200,7 +220,11 @@ impl<'a> Parser<'a> {
             self.pos += kw.len();
             Ok(())
         } else {
-            bail!("MDX: expected '{}', got '{}'", kw, &self.rest()[..kw.len().min(self.rest().len())])
+            bail!(
+                "MDX: expected '{}', got '{}'",
+                kw,
+                &self.rest()[..kw.len().min(self.rest().len())]
+            )
         }
     }
 
@@ -236,11 +260,16 @@ impl<'a> Parser<'a> {
                 self.pos += if upper.starts_with("ROWS") { 4 } else { 1 };
                 rows = set;
             } else {
-                bail!("MDX: expected COLUMNS or ROWS axis, got '{}'", &self.rest()[..10.min(self.rest().len())]);
+                bail!(
+                    "MDX: expected COLUMNS or ROWS axis, got '{}'",
+                    &self.rest()[..10.min(self.rest().len())]
+                );
             }
 
             self.skip_ws();
-            if !self.try_keyword(",") { break; }
+            if !self.try_keyword(",") {
+                break;
+            }
         }
 
         self.expect_keyword("FROM")?;
@@ -253,7 +282,12 @@ impl<'a> Parser<'a> {
             slicer = self.parse_slicer()?;
         }
 
-        Ok(MdxQuery { cube, columns, rows, slicer })
+        Ok(MdxQuery {
+            cube,
+            columns,
+            rows,
+            slicer,
+        })
     }
 
     /// Parse `{member, member, …}` or a single member without braces.
@@ -264,12 +298,18 @@ impl<'a> Parser<'a> {
 
         loop {
             self.skip_ws();
-            if self.rest().is_empty() || self.rest().starts_with('}') { break; }
+            if self.rest().is_empty() || self.rest().starts_with('}') {
+                break;
+            }
             // Stop at ON keyword
-            if self.peek_upper(2) == "ON" { break; }
+            if self.peek_upper(2) == "ON" {
+                break;
+            }
             members.push(self.parse_member()?);
             self.skip_ws();
-            if !self.try_keyword(",") { break; }
+            if !self.try_keyword(",") {
+                break;
+            }
         }
 
         if has_brace {
@@ -289,10 +329,14 @@ impl<'a> Parser<'a> {
 
         loop {
             self.skip_ws();
-            if self.rest().is_empty() || self.rest().starts_with(')') { break; }
+            if self.rest().is_empty() || self.rest().starts_with(')') {
+                break;
+            }
             members.push(self.parse_member()?);
             self.skip_ws();
-            if !self.try_keyword(",") { break; }
+            if !self.try_keyword(",") {
+                break;
+            }
         }
 
         if has_paren {
@@ -324,12 +368,17 @@ impl<'a> Parser<'a> {
                 wildcard = true;
                 break;
             }
-            if !self.rest().starts_with('.') { break; }
+            if !self.rest().starts_with('.') {
+                break;
+            }
             self.pos += 1; // consume '.'
         }
 
         if path.is_empty() {
-            bail!("MDX: expected bracketed member at '{}'", &self.rest()[..20.min(self.rest().len())]);
+            bail!(
+                "MDX: expected bracketed member at '{}'",
+                &self.rest()[..20.min(self.rest().len())]
+            );
         }
 
         Ok(MdxMemberRef { path, wildcard })
@@ -339,10 +388,15 @@ impl<'a> Parser<'a> {
     fn parse_bracketed_name(&mut self) -> anyhow::Result<String> {
         self.skip_ws();
         if !self.rest().starts_with('[') {
-            bail!("MDX: expected '[', got '{}'", &self.rest()[..5.min(self.rest().len())]);
+            bail!(
+                "MDX: expected '[', got '{}'",
+                &self.rest()[..5.min(self.rest().len())]
+            );
         }
         self.pos += 1;
-        let close = self.rest().find(']')
+        let close = self
+            .rest()
+            .find(']')
             .ok_or_else(|| anyhow!("MDX: unclosed '['"))?;
         let name = self.rest()[..close].to_string();
         self.pos += close + 1;
@@ -385,7 +439,11 @@ mod tests {
     #[test]
     fn dim_predicate() {
         let m = MdxMemberRef {
-            path: vec!["Date".to_string(), "Calendar Year".to_string(), "2024".to_string()],
+            path: vec![
+                "Date".to_string(),
+                "Calendar Year".to_string(),
+                "2024".to_string(),
+            ],
             wildcard: false,
         };
         assert_eq!(m.predicate(), "dim/Date/Calendar Year/2024");
@@ -423,15 +481,22 @@ mod tests {
 
     #[test]
     fn datalog_evaluation() {
-        use crate::{delta::Delta, quad::{Quad, QuadObject}};
+        use crate::{
+            datom::{Datom, Value},
+            delta::Delta,
+        };
         use kotoba_core::cid::KotobaCid;
 
-        fn cid(s: &str) -> KotobaCid { KotobaCid::from_bytes(s.as_bytes()) }
+        fn cid(s: &str) -> KotobaCid {
+            KotobaCid::from_bytes(s.as_bytes())
+        }
         fn fact(pred: &str, s: &str, o: &str) -> Delta {
-            Delta::assert(Quad {
-                graph: cid("g"), subject: cid(s), predicate: pred.to_string(),
-                object: QuadObject::Cid(cid(o)),
-            })
+            Delta::assert_datom(Datom::assert(
+                cid(s),
+                pred.to_string(),
+                Value::Cid(cid(o)),
+                cid("g"),
+            ))
         }
 
         // Compile a simple MDX: measure on columns, dimension member on rows

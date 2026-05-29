@@ -1,7 +1,7 @@
 use crate::topic::Topic;
+use bytes::Bytes;
 use kotoba_core::cid::KotobaCid;
 use kotoba_core::store::BlockStore;
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -15,20 +15,20 @@ const DEFAULT_LOG_CAP: usize = 65_536;
 /// `prev` links to the previous entry's block CID, forming a Merkle chain.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JournalEntry {
-    pub seq:     u64,
-    pub ts:      u64,   // unix ms
-    pub topic:   String,
+    pub seq: u64,
+    pub ts: u64, // unix ms
+    pub topic: String,
     pub payload: Vec<u8>,
-    pub cid:     KotobaCid,          // blake3 CID of the payload bytes
+    pub cid: KotobaCid, // IPFS-compatible CID of the payload bytes
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prev:    Option<KotobaCid>,  // block CID of the previous entry (Merkle chain)
+    pub prev: Option<KotobaCid>, // block CID of the previous entry (Merkle chain)
 }
 
 /// Cursor — consumer position in a Journal
 pub struct Cursor {
-    pub id:       String,
+    pub id: String,
     pub position: u64,
-    rx:           broadcast::Receiver<JournalEntry>,
+    rx: broadcast::Receiver<JournalEntry>,
 }
 
 impl Cursor {
@@ -42,7 +42,7 @@ pub struct CursorAck;
 /// Persisted head state — written to `{head_path}` as JSON.
 #[derive(Serialize, Deserialize, Default)]
 struct HeadState {
-    seq:      u64,
+    seq: u64,
     head_cid: Option<String>, // multibase of the latest block CID
 }
 
@@ -53,16 +53,16 @@ struct HeadState {
 /// CBOR block and stored in an `Arc<dyn BlockStore>`.  The Merkle chain (prev links)
 /// allows replaying the full history from any block CID.
 pub struct Journal {
-    seq:      Arc<RwLock<u64>>,
-    tx:       broadcast::Sender<JournalEntry>,
-    log:      Arc<RwLock<VecDeque<JournalEntry>>>,
-    log_cap:  usize,
+    seq: Arc<RwLock<u64>>,
+    tx: broadcast::Sender<JournalEntry>,
+    log: Arc<RwLock<VecDeque<JournalEntry>>>,
+    log_cap: usize,
     /// Content-addressed block store for persistent entries (Merkle WAL).
-    store:    Option<Arc<dyn BlockStore + Send + Sync>>,
+    store: Option<Arc<dyn BlockStore + Send + Sync>>,
     /// Path to the JSON head-pointer file; `None` when in-memory only.
     head_path: Option<PathBuf>,
     /// In-memory head: (seq, block_cid_of_latest_entry).
-    head:     Arc<Mutex<(u64, Option<KotobaCid>)>>,
+    head: Arc<Mutex<(u64, Option<KotobaCid>)>>,
 }
 
 impl Journal {
@@ -74,20 +74,20 @@ impl Journal {
     pub fn with_capacity(log_cap: usize) -> Self {
         let (tx, _) = broadcast::channel(4096);
         Self {
-            seq:       Arc::new(RwLock::new(0)),
+            seq: Arc::new(RwLock::new(0)),
             tx,
-            log:       Arc::new(RwLock::new(VecDeque::with_capacity(log_cap.min(4096)))),
+            log: Arc::new(RwLock::new(VecDeque::with_capacity(log_cap.min(4096)))),
             log_cap,
-            store:     None,
+            store: None,
             head_path: None,
-            head:      Arc::new(Mutex::new((0, None))),
+            head: Arc::new(Mutex::new((0, None))),
         }
     }
 
     /// Persistent — entries are stored as CBOR blocks in `store`.
     /// The head pointer is persisted to `head_path` as JSON.
     pub fn with_block_store(
-        store:     Arc<dyn BlockStore + Send + Sync>,
+        store: Arc<dyn BlockStore + Send + Sync>,
         head_path: impl Into<PathBuf>,
     ) -> Self {
         let (tx, _) = broadcast::channel(4096);
@@ -97,13 +97,13 @@ impl Journal {
         let (init_seq, init_cid) = load_head_sync(&head_path);
 
         Self {
-            seq:       Arc::new(RwLock::new(init_seq)),
+            seq: Arc::new(RwLock::new(init_seq)),
             tx,
-            log:       Arc::new(RwLock::new(VecDeque::with_capacity(4096))),
-            log_cap:   DEFAULT_LOG_CAP,
-            store:     Some(store),
+            log: Arc::new(RwLock::new(VecDeque::with_capacity(4096))),
+            log_cap: DEFAULT_LOG_CAP,
+            store: Some(store),
             head_path: Some(head_path),
-            head:      Arc::new(Mutex::new((init_seq, init_cid))),
+            head: Arc::new(Mutex::new((init_seq, init_cid))),
         }
     }
 
@@ -123,8 +123,8 @@ impl Journal {
 
         let entry = JournalEntry {
             seq,
-            ts:      now_ms(),
-            topic:   topic.0,
+            ts: now_ms(),
+            topic: topic.0,
             payload: payload.to_vec(),
             cid,
             prev,
@@ -169,9 +169,9 @@ impl Journal {
 
     pub fn subscribe(&self) -> Cursor {
         Cursor {
-            id:       uuid(),
+            id: uuid(),
             position: 0,
-            rx:       self.tx.subscribe(),
+            rx: self.tx.subscribe(),
         }
     }
 
@@ -182,16 +182,15 @@ impl Journal {
     pub async fn read_since(&self, since: u64) -> Vec<JournalEntry> {
         let log = self.log.read().await;
         let oldest_ring_seq = log.front().map(|e| e.seq);
-        let ring_entries: Vec<JournalEntry> = log.iter()
-            .filter(|e| e.seq >= since)
-            .cloned()
-            .collect();
+        let ring_entries: Vec<JournalEntry> =
+            log.iter().filter(|e| e.seq >= since).cloned().collect();
         drop(log);
 
-        let needs_cold = self.store.is_some() && match oldest_ring_seq {
-            None          => true,
-            Some(oldest)  => since < oldest,
-        };
+        let needs_cold = self.store.is_some()
+            && match oldest_ring_seq {
+                None => true,
+                Some(oldest) => since < oldest,
+            };
 
         if needs_cold {
             if let Some(store) = &self.store {
@@ -213,7 +212,11 @@ impl Journal {
     pub async fn trim_before(&self, before: u64) {
         let mut log = self.log.write().await;
         while let Some(front) = log.front() {
-            if front.seq < before { log.pop_front(); } else { break; }
+            if front.seq < before {
+                log.pop_front();
+            } else {
+                break;
+            }
         }
     }
 
@@ -237,23 +240,29 @@ impl Journal {
 }
 
 impl Default for Journal {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Traverse the Merkle chain backward from `head_cid`, collecting entries
 /// where `since <= entry.seq < until`.  Returns entries in ascending seq order.
 fn traverse_chain(
-    store:    &Arc<dyn BlockStore + Send + Sync>,
+    store: &Arc<dyn BlockStore + Send + Sync>,
     head_cid: &Option<KotobaCid>,
-    since:    u64,
-    until:    u64,
+    since: u64,
+    until: u64,
 ) -> Vec<JournalEntry> {
     let mut result = Vec::new();
     let mut cur = head_cid.clone();
 
     while let Some(cid) = cur {
-        let Ok(Some(bytes)) = store.get(&cid) else { break };
-        let Ok(entry) = ciborium::from_reader::<JournalEntry, _>(&bytes[..]) else { break };
+        let Ok(Some(bytes)) = store.get(&cid) else {
+            break;
+        };
+        let Ok(entry) = ciborium::from_reader::<JournalEntry, _>(&bytes[..]) else {
+            break;
+        };
 
         if entry.seq >= until {
             // Still in the ring-buffer range; follow prev to get older entries
@@ -274,9 +283,16 @@ fn traverse_chain(
 
 /// Load head state from a JSON file synchronously (called at construction).
 fn load_head_sync(path: &PathBuf) -> (u64, Option<KotobaCid>) {
-    let Ok(data) = std::fs::read(path) else { return (0, None) };
-    let Ok(state) = serde_json::from_slice::<HeadState>(&data) else { return (0, None) };
-    let cid = state.head_cid.as_deref().and_then(KotobaCid::from_multibase);
+    let Ok(data) = std::fs::read(path) else {
+        return (0, None);
+    };
+    let Ok(state) = serde_json::from_slice::<HeadState>(&data) else {
+        return (0, None);
+    };
+    let cid = state
+        .head_cid
+        .as_deref()
+        .and_then(KotobaCid::from_multibase);
     (state.seq, cid)
 }
 
@@ -313,7 +329,9 @@ mod tests {
         let journal = Journal::new();
         let topic_str = "kotoba/test/entry";
         let payload = Bytes::from(vec![1u8, 2, 3, 4]);
-        let entry = journal.publish(Topic::new(topic_str), payload.clone()).await;
+        let entry = journal
+            .publish(Topic::new(topic_str), payload.clone())
+            .await;
         assert_eq!(entry.topic, topic_str);
         assert_eq!(entry.payload, payload.to_vec());
     }
@@ -335,11 +353,21 @@ mod tests {
     async fn read_since_returns_only_entries_after_watermark() {
         let journal = Journal::new();
         let t = Topic::new("window/test");
-        journal.publish(t.clone(), Bytes::from_static(b"seq1")).await;
-        journal.publish(t.clone(), Bytes::from_static(b"seq2")).await;
-        let anchor = journal.publish(t.clone(), Bytes::from_static(b"seq3")).await;
-        journal.publish(t.clone(), Bytes::from_static(b"seq4")).await;
-        journal.publish(t.clone(), Bytes::from_static(b"seq5")).await;
+        journal
+            .publish(t.clone(), Bytes::from_static(b"seq1"))
+            .await;
+        journal
+            .publish(t.clone(), Bytes::from_static(b"seq2"))
+            .await;
+        let anchor = journal
+            .publish(t.clone(), Bytes::from_static(b"seq3"))
+            .await;
+        journal
+            .publish(t.clone(), Bytes::from_static(b"seq4"))
+            .await;
+        journal
+            .publish(t.clone(), Bytes::from_static(b"seq5"))
+            .await;
 
         let since = anchor.seq; // 3
         let entries = journal.read_since(since).await;
@@ -381,15 +409,18 @@ mod tests {
     #[tokio::test]
     async fn read_since_falls_back_to_block_store() {
         use kotoba_core::store::BlockStore;
-        use std::sync::{Arc, RwLock as StdRwLock};
         use std::collections::HashMap;
+        use std::sync::{Arc, RwLock as StdRwLock};
 
         // In-memory block store for testing
         #[derive(Default)]
         struct MemStore(StdRwLock<HashMap<[u8; 36], bytes::Bytes>>);
         impl BlockStore for MemStore {
             fn put(&self, cid: &KotobaCid, data: &[u8]) -> anyhow::Result<()> {
-                self.0.write().unwrap().insert(cid.0, bytes::Bytes::copy_from_slice(data));
+                self.0
+                    .write()
+                    .unwrap()
+                    .insert(cid.0, bytes::Bytes::copy_from_slice(data));
                 Ok(())
             }
             fn get(&self, cid: &KotobaCid) -> anyhow::Result<Option<bytes::Bytes>> {
@@ -404,7 +435,9 @@ mod tests {
             }
             fn pin(&self, _: &KotobaCid) {}
             fn unpin(&self, _: &KotobaCid) {}
-            fn is_pinned(&self, _: &KotobaCid) -> bool { false }
+            fn is_pinned(&self, _: &KotobaCid) -> bool {
+                false
+            }
         }
 
         let store = Arc::new(MemStore::default()) as Arc<dyn BlockStore + Send + Sync>;
@@ -415,13 +448,13 @@ mod tests {
         let journal = {
             let (tx, _) = broadcast::channel(4096);
             Journal {
-                seq:       Arc::new(RwLock::new(0)),
+                seq: Arc::new(RwLock::new(0)),
                 tx,
-                log:       Arc::new(RwLock::new(VecDeque::with_capacity(3))),
-                log_cap:   3,
-                store:     Some(store),
+                log: Arc::new(RwLock::new(VecDeque::with_capacity(3))),
+                log_cap: 3,
+                store: Some(store),
                 head_path: Some(head_path),
-                head:      Arc::new(Mutex::new((0, None))),
+                head: Arc::new(Mutex::new((0, None))),
             }
         };
 
@@ -433,7 +466,11 @@ mod tests {
         // Ring now holds seq 3,4,5; seq 1,2 are in block store only
         let all = journal.read_since(1).await;
         let seqs: Vec<u64> = all.iter().map(|e| e.seq).collect();
-        assert_eq!(seqs, vec![1, 2, 3, 4, 5], "block store fallback must fill the gap");
+        assert_eq!(
+            seqs,
+            vec![1, 2, 3, 4, 5],
+            "block store fallback must fill the gap"
+        );
     }
 
     // ── additional gap tests ──────────────────────────────────────────────────
@@ -456,7 +493,9 @@ mod tests {
     #[tokio::test]
     async fn default_creates_functional_journal() {
         let journal = Journal::default();
-        let e = journal.publish(Topic::new("default/test"), Bytes::from_static(b"hi")).await;
+        let e = journal
+            .publish(Topic::new("default/test"), Bytes::from_static(b"hi"))
+            .await;
         assert_eq!(e.seq, 1);
     }
 
@@ -467,7 +506,11 @@ mod tests {
         journal.publish(t.clone(), Bytes::from_static(b"a")).await;
         journal.publish(t.clone(), Bytes::from_static(b"b")).await;
         journal.trim_before(0).await;
-        assert_eq!(journal.read_since(1).await.len(), 2, "trim_before(0) should not remove any entry");
+        assert_eq!(
+            journal.read_since(1).await.len(),
+            2,
+            "trim_before(0) should not remove any entry"
+        );
     }
 
     #[tokio::test]
@@ -476,7 +519,7 @@ mod tests {
         let journal = Journal::new();
         let t = Topic::new("persist/noop");
         journal.publish(t.clone(), Bytes::from_static(b"z")).await;
-        journal.trim_persistent_before(9999).await;  // must not remove in-memory entries
+        journal.trim_persistent_before(9999).await; // must not remove in-memory entries
         assert_eq!(journal.read_since(1).await.len(), 1);
     }
 
@@ -485,7 +528,10 @@ mod tests {
         let journal = Journal::new(); // no head_path → no-op
         journal.write_checkpoint(Bytes::from_static(b"ckpt")).await;
         let result = journal.read_checkpoint().await;
-        assert!(result.is_none(), "read_checkpoint without store must return None");
+        assert!(
+            result.is_none(),
+            "read_checkpoint without store must return None"
+        );
     }
 
     #[tokio::test]
@@ -503,8 +549,12 @@ mod tests {
     async fn merkle_prev_links_form_chain() {
         let journal = Journal::new();
         let t = Topic::new("merkle/chain");
-        let e1 = journal.publish(t.clone(), Bytes::from_static(b"first")).await;
-        let e2 = journal.publish(t.clone(), Bytes::from_static(b"second")).await;
+        let e1 = journal
+            .publish(t.clone(), Bytes::from_static(b"first"))
+            .await;
+        let e2 = journal
+            .publish(t.clone(), Bytes::from_static(b"second"))
+            .await;
         // First entry has no prev; second entry's prev should match something or be None
         // (in-memory journal without block store: prev is always None at entry level, but
         //  the head CID IS tracked in self.head for block-store journals)

@@ -30,9 +30,15 @@ fn main() {
         .args(["rev-parse", "--short=12", "HEAD"])
         .output()
         .ok()
-        .and_then(|o| if o.status.success() {
-            String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
-        } else { None })
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            } else {
+                None
+            }
+        })
         .unwrap_or_else(|| "unknown".to_string());
     emit(&sha);
 }
@@ -48,7 +54,7 @@ fn emit(sha: &str) {
 /// and return the first 12 chars.  Returns `None` when the file is absent.
 fn read_gitrepo_commit() -> Option<String> {
     let path = std::path::PathBuf::from("..").join("..").join(".gitrepo");
-    let raw  = std::fs::read_to_string(&path).ok()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
     for line in raw.lines() {
         let t = line.trim();
         if let Some(rest) = t.strip_prefix("commit = ") {

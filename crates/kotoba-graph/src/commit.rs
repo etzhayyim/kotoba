@@ -8,6 +8,7 @@ use std::collections::HashMap;
 ///
 /// `root` = EAVT (SPO) tree root — kept for backward compatibility.
 /// `index_roots` = the other 3 covering-index roots: "aevt", "avet", "vaet".
+/// `tx_cid` = transaction entity CID, distinct from the named graph CID.
 ///
 /// The `cid` field is NOT included in the CBOR serialization — it is derived as
 /// `blake3(CBOR(rest_of_fields))` and restored on load from the block-store key.
@@ -15,13 +16,15 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Commit {
     #[serde(skip)]
-    pub cid:         KotobaCid,                    // derived; not stored in block bytes
-    pub graph:       KotobaCid,                    // named graph
-    pub root:        KotobaCid,                    // EAVT (SPO) ProllyTree root CID
-    pub prev:        Option<KotobaCid>,            // parent commit (DAG)
-    pub author:      String,                       // DID
-    pub seq:         u64,                          // monotonic (≅ AT Protocol rev)
-    pub ts:          u64,                          // unix seconds
+    pub cid: KotobaCid, // derived; not stored in block bytes
+    pub graph: KotobaCid, // named graph
+    #[serde(default = "KotobaCid::default")]
+    pub tx_cid: KotobaCid, // transaction entity CID (distinct from graph)
+    pub root: KotobaCid,  // EAVT (SPO) ProllyTree root CID
+    pub prev: Option<KotobaCid>, // parent commit (DAG)
+    pub author: String,   // DID
+    pub seq: u64,         // monotonic (≅ AT Protocol rev)
+    pub ts: u64,          // unix seconds
     /// Additional covering-index roots: "aevt" / "avet" / "vaet".
     /// Omitted from CBOR when empty (old-format commits remain CID-stable on read).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -31,11 +34,41 @@ pub struct Commit {
 impl Commit {
     /// Build a new commit, computing its CID from the CBOR of the payload fields.
     pub fn seal(
-        graph:       KotobaCid,
-        root:        KotobaCid,
-        prev:        Option<KotobaCid>,
-        author:      String,
-        seq:         u64,
+        graph: KotobaCid,
+        root: KotobaCid,
+        prev: Option<KotobaCid>,
+        author: String,
+        seq: u64,
+        index_roots: HashMap<String, KotobaCid>,
+    ) -> Self {
+        let tx_cid = Self::derive_tx_cid(&graph, &root, prev.as_ref(), seq);
+        Self::seal_with_tx(graph, tx_cid, root, prev, author, seq, index_roots)
+    }
+
+    pub fn derive_tx_cid(
+        graph: &KotobaCid,
+        root: &KotobaCid,
+        prev: Option<&KotobaCid>,
+        seq: u64,
+    ) -> KotobaCid {
+        let mut seed = b"kotoba-tx:v1\n".to_vec();
+        seed.extend_from_slice(&graph.0);
+        seed.extend_from_slice(&root.0);
+        if let Some(prev) = prev {
+            seed.extend_from_slice(&prev.0);
+        }
+        seed.extend_from_slice(&seq.to_be_bytes());
+        KotobaCid::from_bytes(&seed)
+    }
+
+    /// Build a new commit with an explicit transaction CID.
+    pub fn seal_with_tx(
+        graph: KotobaCid,
+        tx_cid: KotobaCid,
+        root: KotobaCid,
+        prev: Option<KotobaCid>,
+        author: String,
+        seq: u64,
         index_roots: HashMap<String, KotobaCid>,
     ) -> Self {
         let ts = std::time::SystemTime::now()
@@ -45,7 +78,14 @@ impl Commit {
 
         let mut c = Self {
             cid: KotobaCid([0u8; 36]),
-            graph, root, prev, author, seq, ts, index_roots,
+            graph,
+            tx_cid,
+            root,
+            prev,
+            author,
+            seq,
+            ts,
+            index_roots,
         };
 
         // Compute CID from CBOR of payload (cid field is skipped by serde)
@@ -83,8 +123,8 @@ impl Commit {
 
 /// CommitDag — Pregel checkpoint store (≅ LangGraph checkpoint)
 pub struct CommitDag {
-    commits: HashMap<String, Commit>,    // cid → commit
-    heads:   HashMap<String, KotobaCid>, // graph_cid → head commit_cid
+    commits: HashMap<String, Commit>,  // cid → commit
+    heads: HashMap<String, KotobaCid>, // graph_cid → head commit_cid
 }
 
 impl Default for CommitDag {
@@ -95,18 +135,22 @@ impl Default for CommitDag {
 
 impl CommitDag {
     pub fn new() -> Self {
-        Self { commits: HashMap::new(), heads: HashMap::new() }
+        Self {
+            commits: HashMap::new(),
+            heads: HashMap::new(),
+        }
     }
 
     pub fn add(&mut self, commit: Commit) {
         let graph_key = commit.graph.to_multibase();
-        let cid_key   = commit.cid.to_multibase();
+        let cid_key = commit.cid.to_multibase();
         self.heads.insert(graph_key, commit.cid.clone());
         self.commits.insert(cid_key, commit);
     }
 
     pub fn head(&self, graph_cid: &KotobaCid) -> Option<&Commit> {
-        self.heads.get(&graph_cid.to_multibase())
+        self.heads
+            .get(&graph_cid.to_multibase())
             .and_then(|c| self.commits.get(&c.to_multibase()))
     }
 
@@ -118,16 +162,20 @@ impl CommitDag {
     /// Return all head commit CIDs as a map from graph multibase → commit multibase.
     /// Used by `kqe.get-head` in WASM guests.
     pub fn heads_as_map(&self) -> std::collections::HashMap<String, String> {
-        self.heads.iter()
+        self.heads
+            .iter()
             .map(|(graph_mb, commit_cid)| (graph_mb.clone(), commit_cid.to_multibase()))
             .collect()
     }
 
     /// Return all committed graph CIDs (one per distinct named graph).
     pub fn graph_cids(&self) -> Vec<KotobaCid> {
-        self.heads.values()
+        self.heads
+            .values()
             .filter_map(|commit_cid| {
-                self.commits.get(&commit_cid.to_multibase()).map(|c| c.graph.clone())
+                self.commits
+                    .get(&commit_cid.to_multibase())
+                    .map(|c| c.graph.clone())
             })
             .collect()
     }
@@ -144,8 +192,7 @@ impl CommitDag {
         let mut live = std::collections::HashSet::new();
         for commit in self.commits.values() {
             live.insert(commit.cid.clone());
-            let roots = std::iter::once(&commit.root)
-                .chain(commit.index_roots.values());
+            let roots = std::iter::once(&commit.root).chain(commit.index_roots.values());
             for root in roots {
                 for cid in ProllyTree::walk_all_cids(root, store)? {
                     live.insert(cid);
@@ -201,27 +248,67 @@ mod tests {
     #[test]
     fn commit_roundtrip() {
         let store = MemoryBlockStore::new();
-        let graph  = KotobaCid::from_bytes(b"graph");
-        let root   = KotobaCid::from_bytes(b"root");
-        let commit = Commit::seal(graph.clone(), root.clone(), None, "did:test".into(), 1, HashMap::new());
-        let cid    = commit.persist(&store).unwrap();
+        let graph = KotobaCid::from_bytes(b"graph");
+        let root = KotobaCid::from_bytes(b"root");
+        let commit = Commit::seal(
+            graph.clone(),
+            root.clone(),
+            None,
+            "did:test".into(),
+            1,
+            HashMap::new(),
+        );
+        let cid = commit.persist(&store).unwrap();
         let loaded = Commit::load(&cid, &store).unwrap().unwrap();
         assert_eq!(loaded.author, "did:test");
         assert_eq!(loaded.seq, 1);
         assert_eq!(loaded.root, root);
+        assert_ne!(
+            loaded.tx_cid, graph,
+            "tx CID must be distinct from graph CID"
+        );
+    }
+
+    #[test]
+    fn explicit_tx_cid_roundtrip_and_affects_commit_cid() {
+        let store = MemoryBlockStore::new();
+        let graph = KotobaCid::from_bytes(b"graph-explicit-tx");
+        let root = KotobaCid::from_bytes(b"root-explicit-tx");
+        let tx = KotobaCid::from_bytes(b"tx-explicit");
+        let commit = Commit::seal_with_tx(
+            graph.clone(),
+            tx.clone(),
+            root,
+            None,
+            "did:test".into(),
+            3,
+            HashMap::new(),
+        );
+        assert_eq!(commit.tx_cid, tx);
+        assert_ne!(commit.tx_cid, graph);
+        let cid = commit.persist(&store).unwrap();
+        let loaded = Commit::load(&cid, &store).unwrap().unwrap();
+        assert_eq!(loaded.tx_cid, commit.tx_cid);
     }
 
     #[test]
     fn commit_with_index_roots_roundtrip() {
-        let store  = MemoryBlockStore::new();
-        let graph  = KotobaCid::from_bytes(b"graph-idx");
-        let root   = KotobaCid::from_bytes(b"eavt-root");
+        let store = MemoryBlockStore::new();
+        let graph = KotobaCid::from_bytes(b"graph-idx");
+        let root = KotobaCid::from_bytes(b"eavt-root");
         let mut idx = HashMap::new();
         idx.insert("aevt".to_string(), KotobaCid::from_bytes(b"aevt-root"));
         idx.insert("avet".to_string(), KotobaCid::from_bytes(b"avet-root"));
         idx.insert("vaet".to_string(), KotobaCid::from_bytes(b"vaet-root"));
-        let commit = Commit::seal(graph.clone(), root.clone(), None, "did:test".into(), 2, idx.clone());
-        let cid    = commit.persist(&store).unwrap();
+        let commit = Commit::seal(
+            graph.clone(),
+            root.clone(),
+            None,
+            "did:test".into(),
+            2,
+            idx.clone(),
+        );
+        let cid = commit.persist(&store).unwrap();
         let loaded = Commit::load(&cid, &store).unwrap().unwrap();
         assert_eq!(loaded.index_roots.get("aevt"), idx.get("aevt"));
         assert_eq!(loaded.index_roots.len(), 3);
@@ -229,10 +316,17 @@ mod tests {
 
     #[test]
     fn commit_dag_head_roundtrip() {
-        let store  = MemoryBlockStore::new();
-        let graph  = KotobaCid::from_bytes(b"graph1");
-        let root   = KotobaCid::from_bytes(b"root1");
-        let commit = Commit::seal(graph.clone(), root.clone(), None, "did:x".into(), 0, HashMap::new());
+        let store = MemoryBlockStore::new();
+        let graph = KotobaCid::from_bytes(b"graph1");
+        let root = KotobaCid::from_bytes(b"root1");
+        let commit = Commit::seal(
+            graph.clone(),
+            root.clone(),
+            None,
+            "did:x".into(),
+            0,
+            HashMap::new(),
+        );
 
         let mut dag = CommitDag::new();
         dag.add(commit);
@@ -249,7 +343,14 @@ mod tests {
         // Add 3 commits seq 0, 1, 2; the last one becomes HEAD.
         for seq in 0u64..3 {
             let root = KotobaCid::from_bytes(format!("root-{seq}").as_bytes());
-            let c = Commit::seal(graph.clone(), root, None, "did:x".into(), seq, HashMap::new());
+            let c = Commit::seal(
+                graph.clone(),
+                root,
+                None,
+                "did:x".into(),
+                seq,
+                HashMap::new(),
+            );
             dag.add(c);
         }
         assert_eq!(dag.commit_count(), 3);
@@ -267,7 +368,7 @@ mod tests {
     #[test]
     fn prune_non_head_always_keeps_head_even_below_seq_threshold() {
         let graph = KotobaCid::from_bytes(b"g2");
-        let root  = KotobaCid::from_bytes(b"r");
+        let root = KotobaCid::from_bytes(b"r");
         let mut dag = CommitDag::new();
         // Only one commit at seq=0; it is HEAD.
         let c = Commit::seal(graph.clone(), root, None, "did:x".into(), 0, HashMap::new());
@@ -275,7 +376,10 @@ mod tests {
 
         // Prune with before_seq=100 (higher than HEAD seq); HEAD must still survive.
         let pruned = dag.prune_non_head(100);
-        assert_eq!(pruned, 0, "HEAD must not be pruned regardless of seq threshold");
+        assert_eq!(
+            pruned, 0,
+            "HEAD must not be pruned regardless of seq threshold"
+        );
         assert_eq!(dag.commit_count(), 1);
     }
 
@@ -285,7 +389,14 @@ mod tests {
         let mut dag = CommitDag::new();
         for seq in 0u64..5 {
             let root = KotobaCid::from_bytes(format!("r{seq}").as_bytes());
-            let c = Commit::seal(graph.clone(), root, None, "did:x".into(), seq, HashMap::new());
+            let c = Commit::seal(
+                graph.clone(),
+                root,
+                None,
+                "did:x".into(),
+                seq,
+                HashMap::new(),
+            );
             dag.add(c);
         }
         // Prune commits with seq < 3; seq 3 is recent non-HEAD, seq 4 is HEAD.
@@ -301,7 +412,10 @@ mod tests {
         let store = MemoryBlockStore::new();
         let missing = KotobaCid::from_bytes(b"does-not-exist");
         let result = Commit::load(&missing, &store).unwrap();
-        assert!(result.is_none(), "loading an absent CID should return Ok(None)");
+        assert!(
+            result.is_none(),
+            "loading an absent CID should return Ok(None)"
+        );
     }
 
     #[test]
@@ -309,9 +423,23 @@ mod tests {
         let graph = KotobaCid::from_bytes(b"g-get");
         let mut dag = CommitDag::new();
 
-        let c0 = Commit::seal(graph.clone(), KotobaCid::from_bytes(b"root0"), None, "did:x".into(), 0, HashMap::new());
+        let c0 = Commit::seal(
+            graph.clone(),
+            KotobaCid::from_bytes(b"root0"),
+            None,
+            "did:x".into(),
+            0,
+            HashMap::new(),
+        );
         let cid0 = c0.cid.clone();
-        let c1 = Commit::seal(graph.clone(), KotobaCid::from_bytes(b"root1"), None, "did:x".into(), 1, HashMap::new());
+        let c1 = Commit::seal(
+            graph.clone(),
+            KotobaCid::from_bytes(b"root1"),
+            None,
+            "did:x".into(),
+            1,
+            HashMap::new(),
+        );
         dag.add(c0);
         dag.add(c1);
 
@@ -327,8 +455,22 @@ mod tests {
         let g2 = KotobaCid::from_bytes(b"graph-b");
         let mut dag = CommitDag::new();
 
-        dag.add(Commit::seal(g1.clone(), KotobaCid::from_bytes(b"r1"), None, "did:a".into(), 0, HashMap::new()));
-        dag.add(Commit::seal(g2.clone(), KotobaCid::from_bytes(b"r2"), None, "did:b".into(), 0, HashMap::new()));
+        dag.add(Commit::seal(
+            g1.clone(),
+            KotobaCid::from_bytes(b"r1"),
+            None,
+            "did:a".into(),
+            0,
+            HashMap::new(),
+        ));
+        dag.add(Commit::seal(
+            g2.clone(),
+            KotobaCid::from_bytes(b"r2"),
+            None,
+            "did:b".into(),
+            0,
+            HashMap::new(),
+        ));
 
         let map = dag.heads_as_map();
         assert_eq!(map.len(), 2, "heads_as_map should have one entry per graph");

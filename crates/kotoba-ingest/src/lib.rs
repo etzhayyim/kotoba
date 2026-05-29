@@ -1,3 +1,4 @@
+#[cfg(feature = "cc-parquet")]
 pub mod cc;
 pub mod embed_client;
 pub mod gmail;
@@ -5,13 +6,13 @@ pub mod ingest;
 pub mod ivf;
 
 pub use gmail::GmailClient;
-pub use ingest::{EmailIngestor, graph_cid_for};
+pub use ingest::{graph_cid_for, EmailIngestor};
 
+use kotoba_crypto::AgentCrypto;
+use kotoba_graph::QuadStore;
+use kotoba_kse::Vault;
 use std::sync::Arc;
 use std::time::Duration;
-use kotoba_kse::Vault;
-use kotoba_graph::QuadStore;
-use kotoba_crypto::AgentCrypto;
 
 /// Long-running polling loop.  Call from a `tokio::spawn`.
 ///
@@ -21,19 +22,19 @@ use kotoba_crypto::AgentCrypto;
 ///   KOTOBA_GMAIL_POLL_INTERVAL_SECS (default: 60)
 ///   KOTOBA_GMAIL_HISTORY_ID         (optional seed; otherwise fetched from profile)
 pub async fn gmail_poll_loop(
-    crypto:    Arc<dyn AgentCrypto>,
-    vault:     Arc<Vault>,
+    crypto: Arc<dyn AgentCrypto>,
+    vault: Arc<Vault>,
     quad_store: Arc<QuadStore>,
 ) {
-    let owner_did = std::env::var("KOTOBA_GMAIL_OWNER_DID")
-        .unwrap_or_else(|_| "did:plc:unknown".to_string());
+    let owner_did =
+        std::env::var("KOTOBA_GMAIL_OWNER_DID").unwrap_or_else(|_| "did:plc:unknown".to_string());
     let interval_secs: u64 = std::env::var("KOTOBA_GMAIL_POLL_INTERVAL_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(60);
 
     let mut client = match GmailClient::from_env() {
-        Ok(c)  => c,
+        Ok(c) => c,
         Err(e) => {
             tracing::error!(err = %e, "gmail_poll_loop: missing credentials, aborting");
             return;
@@ -53,7 +54,11 @@ pub async fn gmail_poll_loop(
         Some(id) => id,
         None => match client.profile_history_id().await {
             Ok(id) => {
-                tracing::info!(history_id = id, owner_did, "Gmail poll: using profile historyId");
+                tracing::info!(
+                    history_id = id,
+                    owner_did,
+                    "Gmail poll: using profile historyId"
+                );
                 id
             }
             Err(e) => {
@@ -63,14 +68,14 @@ pub async fn gmail_poll_loop(
         },
     };
 
-    let ingestor = EmailIngestor::new(
-        crypto,
-        vault,
-        quad_store,
-        owner_did.clone(),
-    );
+    let ingestor = EmailIngestor::new(crypto, vault, quad_store, owner_did.clone());
 
-    tracing::info!(owner_did, interval_secs, history_id, "Gmail poll loop started");
+    tracing::info!(
+        owner_did,
+        interval_secs,
+        history_id,
+        "Gmail poll loop started"
+    );
 
     let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
     loop {
@@ -83,7 +88,7 @@ pub async fn gmail_poll_loop(
         }
 
         let (stubs, new_id) = match client.list_history(history_id).await {
-            Ok(r)  => r,
+            Ok(r) => r,
             Err(e) => {
                 tracing::warn!(err = %e, "Gmail list_history failed");
                 continue;

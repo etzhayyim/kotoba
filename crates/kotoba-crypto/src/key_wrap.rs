@@ -1,9 +1,12 @@
+use crate::aead::CryptoError;
 /// AEAD-based key wrapping.
 /// Wraps a key (or arbitrary secret bytes) under a wrapping key using AES-256-GCM.
 /// `aad` = additional authenticated data (e.g. DID or device label).
-use aes_gcm::{Aes256Gcm, KeyInit, aead::{Aead, AeadCore, OsRng}};
+use aes_gcm::{
+    aead::{Aead, AeadCore, OsRng},
+    Aes256Gcm, KeyInit,
+};
 use zeroize::Zeroizing;
-use crate::aead::CryptoError;
 
 /// Wrap `plaintext_key` under `wrapping_key` with optional `aad`.
 /// Returns `nonce || wrapped_bytes` (sealed with AES-256-GCM, aad as AAD).
@@ -15,8 +18,13 @@ pub fn wrap_key(
     use aes_gcm::aead::Payload;
     let cipher = Aes256Gcm::new_from_slice(wrapping_key).map_err(|_| CryptoError::SealFailed)?;
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-    let payload = Payload { msg: plaintext_key, aad };
-    let ct = cipher.encrypt(&nonce, payload).map_err(|_| CryptoError::SealFailed)?;
+    let payload = Payload {
+        msg: plaintext_key,
+        aad,
+    };
+    let ct = cipher
+        .encrypt(&nonce, payload)
+        .map_err(|_| CryptoError::SealFailed)?;
     let mut out = Vec::with_capacity(12 + ct.len());
     out.extend_from_slice(&nonce);
     out.extend_from_slice(&ct);
@@ -36,10 +44,17 @@ pub fn unwrap_key(
         return Err(CryptoError::TooShort(12));
     }
     let cipher = Aes256Gcm::new_from_slice(wrapping_key).map_err(|_| CryptoError::OpenFailed)?;
-    let nonce_arr: [u8; 12] = data[..12].try_into().map_err(|_| CryptoError::TooShort(12))?;
+    let nonce_arr: [u8; 12] = data[..12]
+        .try_into()
+        .map_err(|_| CryptoError::TooShort(12))?;
     let nonce = aes_gcm::Nonce::from(nonce_arr);
-    let payload = Payload { msg: &data[12..], aad };
-    let pt = cipher.decrypt(&nonce, payload).map_err(|_| CryptoError::OpenFailed)?;
+    let payload = Payload {
+        msg: &data[12..],
+        aad,
+    };
+    let pt = cipher
+        .decrypt(&nonce, payload)
+        .map_err(|_| CryptoError::OpenFailed)?;
     Ok(Zeroizing::new(pt))
 }
 

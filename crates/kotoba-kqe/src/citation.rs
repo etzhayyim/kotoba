@@ -1,16 +1,17 @@
-//! CitationLedger — tracks how often each Datom (Quad) is referenced
+//! CitationLedger — tracks how often each Datom is referenced
 //! during Datalog evaluation and computes royalty distributions in mKOTO.
 //!
 //! Usage:
 //! ```ignore
 //! let mut ledger = CitationLedger::new();
-//! ledger.cite(&quad_key);          // called by the Datalog engine for each join hit
+//! ledger.cite(&datom_key);         // called by the Datalog engine for each join hit
 //! let epoch_royalties = ledger.flush_epoch(total_pool_mkoto);
 //! ```
 
-use std::collections::HashMap;
+use crate::datom::{Datom, Value};
+use crate::quad::LegacyQuad as Quad;
 use kotoba_core::cid::KotobaCid;
-use crate::quad::{Quad, QuadObject};
+use std::collections::HashMap;
 
 /// Micro-KOTO token unit (1 KOTO = 1_000_000 mKOTO)
 pub type Mkoto = u64;
@@ -19,19 +20,28 @@ pub type Mkoto = u64;
 pub const MKOTO_PER_KOTO: Mkoto = 1_000_000;
 
 /// Opaque key that uniquely identifies a Datom for citation tracking.
-/// Derived from the Quad's (graph, subject, predicate) triple.
+/// Derived from the exact Datom `(E, A, V, T, Added)` tuple.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DatomKey(pub [u8; 36]);
 
 impl DatomKey {
-    /// Derive a DatomKey from a Quad's graph + subject CIDs and predicate string.
-    pub fn from_quad(quad: &Quad) -> Self {
-        let mut buf = Vec::with_capacity(72 + quad.predicate.len());
-        buf.extend_from_slice(&quad.graph.0);
-        buf.extend_from_slice(&quad.subject.0);
-        buf.extend_from_slice(quad.predicate.as_bytes());
+    /// Derive a DatomKey from the exact Datom `(E, A, V, T, Added)` tuple.
+    pub fn from_datom(datom: &Datom) -> Self {
+        let mut buf = Vec::with_capacity(96 + datom.a.len());
+        buf.extend_from_slice(&datom.e.0);
+        buf.extend_from_slice(datom.a.as_bytes());
+        buf.push(0xff);
+        buf.extend_from_slice(&serde_json::to_vec(&datom.v).unwrap_or_default());
+        buf.push(0xff);
+        buf.extend_from_slice(&datom.tx.0);
+        buf.push(u8::from(datom.op));
         let cid = KotobaCid::from_bytes(&buf);
         DatomKey(cid.0)
+    }
+
+    /// Derive a DatomKey from a legacy Quad boundary.
+    pub fn from_quad(quad: &Quad) -> Self {
+        Self::from_datom(&Datom::from_legacy_quad(quad.clone(), true))
     }
 
     /// Derive a DatomKey directly from a CID (e.g., for object references).
@@ -56,7 +66,7 @@ pub struct RoyaltyEntry {
 ///
 /// An "epoch" is a bounded evaluation window (e.g., one Datalog query batch
 /// or a fixed wall-clock interval). Call `flush_epoch()` to reset and emit
-/// the ledger quads for that epoch.
+/// the ledger datoms for that epoch.
 pub struct CitationLedger {
     /// Accumulated citation counts for the current epoch.
     counts: HashMap<DatomKey, u64>,
@@ -74,15 +84,20 @@ impl CitationLedger {
     }
 
     /// Record one citation of a Datom identified by `key`.
-    /// Called by the Datalog engine each time a quad is used in a join.
+    /// Called by the Datalog engine each time a datom is used in a join.
     pub fn cite(&mut self, key: &DatomKey) {
         *self.counts.entry(key.clone()).or_insert(0) += 1;
     }
 
-    /// Record one citation from a Quad (derives the DatomKey automatically).
-    pub fn cite_quad(&mut self, quad: &Quad) {
-        let key = DatomKey::from_quad(quad);
+    /// Record one citation from a Datom (derives the DatomKey automatically).
+    pub fn cite_datom(&mut self, datom: &Datom) {
+        let key = DatomKey::from_datom(datom);
         self.cite(&key);
+    }
+
+    /// Record one citation from a legacy Quad boundary.
+    pub fn cite_quad(&mut self, quad: &Quad) {
+        self.cite_datom(&Datom::from_legacy_quad(quad.clone(), true));
     }
 
     /// Total citation count accumulated so far in this epoch.
@@ -149,42 +164,49 @@ impl CitationLedger {
         self.epoch
     }
 
-    /// Emit ledger Quads for the given royalty entries into a named audit graph.
+    /// Emit ledger Datoms for the given royalty entries into a named audit transaction.
     ///
-    /// Each entry produces two quads:
-    /// - `(ledger_graph, datom_cid, "citation/count", Integer(count))`
-    /// - `(ledger_graph, datom_cid, "citation/royalty_mkoto", Integer(royalty))`
+    /// Each entry produces two datoms:
+    /// - `(datom_cid, "citation/count", Integer(count), ledger_tx, true)`
+    /// - `(datom_cid, "citation/royalty_mkoto", Integer(royalty), ledger_tx, true)`
     ///
-    /// The `ledger_graph` CID is derived from the epoch number so it is stable
+    /// The `ledger_tx` CID is derived from the epoch number so it is stable
     /// and reproducible.
-    pub fn royalty_quads(entries: &[RoyaltyEntry], epoch: u64) -> Vec<Quad> {
-        // Stable graph CID for this epoch's ledger.
-        let graph_seed = format!("kotoba/citation/ledger/epoch/{epoch}");
-        let graph_cid = KotobaCid::from_bytes(graph_seed.as_bytes());
+    pub fn royalty_datoms(entries: &[RoyaltyEntry], epoch: u64) -> Vec<Datom> {
+        let tx_seed = format!("kotoba/citation/ledger/epoch/{epoch}");
+        let tx_cid = KotobaCid::from_bytes(tx_seed.as_bytes());
 
-        let mut quads = Vec::with_capacity(entries.len() * 2);
+        let mut datoms = Vec::with_capacity(entries.len() * 2);
 
         for entry in entries {
             let subject_cid = KotobaCid::from_bytes(&entry.datom_key.0);
-            let count_i64   = i64::try_from(entry.citation_count).unwrap_or(i64::MAX);
+            let count_i64 = i64::try_from(entry.citation_count).unwrap_or(i64::MAX);
             let royalty_i64 = i64::try_from(entry.royalty_mkoto).unwrap_or(i64::MAX);
 
-            quads.push(Quad {
-                graph: graph_cid.clone(),
-                subject: subject_cid.clone(),
-                predicate: "citation/count".to_string(),
-                object: QuadObject::Integer(count_i64),
-            });
+            datoms.push(Datom::assert(
+                subject_cid.clone(),
+                "citation/count".to_string(),
+                Value::Integer(count_i64),
+                tx_cid.clone(),
+            ));
 
-            quads.push(Quad {
-                graph: graph_cid.clone(),
-                subject: subject_cid,
-                predicate: "citation/royalty_mkoto".to_string(),
-                object: QuadObject::Integer(royalty_i64),
-            });
+            datoms.push(Datom::assert(
+                subject_cid,
+                "citation/royalty_mkoto".to_string(),
+                Value::Integer(royalty_i64),
+                tx_cid.clone(),
+            ));
         }
 
-        quads
+        datoms
+    }
+
+    /// Emit ledger Quads for legacy callers.
+    pub fn royalty_quads(entries: &[RoyaltyEntry], epoch: u64) -> Vec<Quad> {
+        Self::royalty_datoms(entries, epoch)
+            .into_iter()
+            .map(Datom::into_legacy_quad)
+            .collect()
     }
 }
 
@@ -197,16 +219,25 @@ impl Default for CitationLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::quad::{LegacyQuad as Quad, LegacyQuadObject as QuadObject};
     use kotoba_core::cid::KotobaCid;
-    use crate::quad::{Quad, QuadObject};
 
     fn make_quad(seed: &str) -> Quad {
         Quad {
-            graph:     KotobaCid::from_bytes(b"test-graph"),
-            subject:   KotobaCid::from_bytes(seed.as_bytes()),
+            graph: KotobaCid::from_bytes(b"test-graph"),
+            subject: KotobaCid::from_bytes(seed.as_bytes()),
             predicate: "test/predicate".to_string(),
-            object:    QuadObject::Text(seed.to_string()),
+            object: QuadObject::Text(seed.to_string()),
         }
+    }
+
+    fn make_datom(seed: &str) -> Datom {
+        Datom::assert(
+            KotobaCid::from_bytes(seed.as_bytes()),
+            "test/predicate".to_string(),
+            Value::Text(seed.to_string()),
+            KotobaCid::from_bytes(b"test-tx"),
+        )
     }
 
     #[test]
@@ -241,22 +272,27 @@ mod tests {
     #[test]
     fn citation_weight_normalized() {
         let mut ledger = CitationLedger::new();
-        let q = make_quad("single");
-        ledger.cite_quad(&q);
-        let key = DatomKey::from_quad(&q);
+        let datom = make_datom("single");
+        ledger.cite_datom(&datom);
+        let key = DatomKey::from_datom(&datom);
         let w = ledger.citation_weight(&key);
-        assert!((w - 1.0).abs() < 1e-9, "sole citation should have weight 1.0");
+        assert!(
+            (w - 1.0).abs() < 1e-9,
+            "sole citation should have weight 1.0"
+        );
     }
 
     #[test]
     fn royalty_quads_count() {
         let mut ledger = CitationLedger::new();
-        ledger.cite_quad(&make_quad("a"));
-        ledger.cite_quad(&make_quad("b"));
+        ledger.cite_datom(&make_datom("a"));
+        ledger.cite_datom(&make_datom("b"));
         let epoch = ledger.epoch();
         let entries = ledger.flush_epoch(2_000_000);
+        let datoms = CitationLedger::royalty_datoms(&entries, epoch);
         let quads = CitationLedger::royalty_quads(&entries, epoch);
-        // 2 entries × 2 quads each
+        // 2 entries × 2 facts each.
+        assert_eq!(datoms.len(), 4);
         assert_eq!(quads.len(), 4);
     }
 
@@ -266,8 +302,12 @@ mod tests {
         // The sum of all royalties must always be ≤ total_pool_mkoto.
         let mut ledger = CitationLedger::new();
         // 7 citations across 3 datoms — creates uneven fractional splits.
-        for i in 0..4 { ledger.cite_quad(&make_quad(&format!("a{i}"))); }
-        for i in 0..2 { ledger.cite_quad(&make_quad(&format!("b{i}"))); }
+        for i in 0..4 {
+            ledger.cite_quad(&make_quad(&format!("a{i}")));
+        }
+        for i in 0..2 {
+            ledger.cite_quad(&make_quad(&format!("b{i}")));
+        }
         ledger.cite_quad(&make_quad("c0"));
 
         let pool = 1_000_000_u64;
@@ -306,7 +346,8 @@ mod tests {
         for e in &entries {
             assert!(
                 e.royalty_mkoto >= 499_999 && e.royalty_mkoto <= 500_001,
-                "equal split expected ~500_000, got {}", e.royalty_mkoto
+                "equal split expected ~500_000, got {}",
+                e.royalty_mkoto
             );
         }
     }
@@ -316,7 +357,11 @@ mod tests {
         let mut ledger = CitationLedger::new();
         ledger.cite_quad(&make_quad("e1"));
         ledger.flush_epoch(1_000_000);
-        assert_eq!(ledger.total_citations(), 0, "citations should reset after flush");
+        assert_eq!(
+            ledger.total_citations(),
+            0,
+            "citations should reset after flush"
+        );
         assert_eq!(ledger.epoch(), 1);
 
         ledger.cite_quad(&make_quad("e2"));
@@ -329,11 +374,31 @@ mod tests {
     // ── DatomKey pure-function tests ──────────────────────────────────────────
 
     #[test]
+    fn datom_key_from_datom_uses_exact_five_tuple() {
+        let base = make_datom("entity-x");
+        let mut changed_value = base.clone();
+        changed_value.v = Value::Text("other-value".to_string());
+        let mut changed_tx = base.clone();
+        changed_tx.tx = KotobaCid::from_bytes(b"other-tx");
+        let mut changed_op = base.clone();
+        changed_op.op = false;
+
+        let base_key = DatomKey::from_datom(&base);
+        assert_eq!(base_key, DatomKey::from_datom(&base));
+        assert_ne!(base_key, DatomKey::from_datom(&changed_value));
+        assert_ne!(base_key, DatomKey::from_datom(&changed_tx));
+        assert_ne!(base_key, DatomKey::from_datom(&changed_op));
+    }
+
+    #[test]
     fn datom_key_from_quad_is_deterministic() {
         let q = make_quad("entity-x");
         let k1 = DatomKey::from_quad(&q);
         let k2 = DatomKey::from_quad(&q);
-        assert_eq!(k1, k2, "DatomKey::from_quad must be deterministic for equal inputs");
+        assert_eq!(
+            k1, k2,
+            "DatomKey::from_quad must be deterministic for equal inputs"
+        );
     }
 
     #[test]
@@ -344,7 +409,10 @@ mod tests {
         q2.predicate = "other/predicate".to_string();
         let k1 = DatomKey::from_quad(&q1);
         let k2 = DatomKey::from_quad(&q2);
-        assert_ne!(k1, k2, "different predicate must produce different DatomKey");
+        assert_ne!(
+            k1, k2,
+            "different predicate must produce different DatomKey"
+        );
 
         // And also differs by subject
         q1.subject = KotobaCid::from_bytes(b"sub-a");
@@ -359,7 +427,10 @@ mod tests {
     fn datom_key_from_cid_preserves_bytes() {
         let cid = KotobaCid::from_bytes(b"some-block");
         let key = DatomKey::from_cid(&cid);
-        assert_eq!(key.0, cid.0, "DatomKey::from_cid must preserve the CID bytes exactly");
+        assert_eq!(
+            key.0, cid.0,
+            "DatomKey::from_cid must preserve the CID bytes exactly"
+        );
     }
 
     // ── citation_weight edge cases ────────────────────────────────────────────
@@ -377,7 +448,11 @@ mod tests {
     fn citation_weight_empty_ledger_returns_zero() {
         let ledger = CitationLedger::new();
         let key = DatomKey::from_quad(&make_quad("any"));
-        assert_eq!(ledger.citation_weight(&key), 0.0, "empty ledger total=0 → weight 0.0");
+        assert_eq!(
+            ledger.citation_weight(&key),
+            0.0,
+            "empty ledger total=0 → weight 0.0"
+        );
     }
 
     // ── Default ↔ new equivalence ─────────────────────────────────────────────
@@ -395,27 +470,38 @@ mod tests {
 
     #[test]
     fn royalty_quads_empty_entries_returns_empty_vec() {
+        let datoms = CitationLedger::royalty_datoms(&[], 0);
         let quads = CitationLedger::royalty_quads(&[], 0);
-        assert!(quads.is_empty(), "royalty_quads([]) must return an empty vec");
+        assert!(
+            datoms.is_empty(),
+            "royalty_datoms([]) must return an empty vec"
+        );
+        assert!(
+            quads.is_empty(),
+            "royalty_quads([]) must return an empty vec"
+        );
     }
 
     #[test]
     fn royalty_quads_graph_cid_stable_per_epoch() {
-        // The graph CID for a given epoch must be identical across two calls
+        // The transaction CID for a given epoch must be identical across two calls.
         let entry = {
-            let q = make_quad("e");
+            let datom = make_datom("e");
             let mut ledger = CitationLedger::new();
-            ledger.cite_quad(&q);
+            ledger.cite_datom(&datom);
             let epoch = ledger.epoch();
             let entries = ledger.flush_epoch(1_000_000);
             (entries, epoch)
         };
         let (entries, epoch) = entry;
-        let quads1 = CitationLedger::royalty_quads(&entries, epoch);
-        let quads2 = CitationLedger::royalty_quads(&entries, epoch);
-        // All graph CIDs should be identical
-        for (q1, q2) in quads1.iter().zip(quads2.iter()) {
-            assert_eq!(q1.graph, q2.graph, "graph CID must be stable for the same epoch");
+        let datoms1 = CitationLedger::royalty_datoms(&entries, epoch);
+        let datoms2 = CitationLedger::royalty_datoms(&entries, epoch);
+        // All tx CIDs should be identical.
+        for (d1, d2) in datoms1.iter().zip(datoms2.iter()) {
+            assert_eq!(
+                d1.tx, d2.tx,
+                "transaction CID must be stable for the same epoch"
+            );
         }
     }
 
@@ -425,9 +511,14 @@ mod tests {
     fn royalty_quads_u64_to_i64_cast_is_safe_for_realistic_values() {
         // Realistic max: 5000 KOTO × 1_000_000 mKOTO/KOTO = 5_000_000_000
         let realistic_pool: Mkoto = 5_000 * MKOTO_PER_KOTO;
-        assert!(realistic_pool <= i64::MAX as u64,
-            "realistic royalty pool must fit in i64");
-        assert_eq!(i64::try_from(realistic_pool).unwrap(), realistic_pool as i64);
+        assert!(
+            realistic_pool <= i64::MAX as u64,
+            "realistic royalty pool must fit in i64"
+        );
+        assert_eq!(
+            i64::try_from(realistic_pool).unwrap(),
+            realistic_pool as i64
+        );
     }
 
     #[test]
@@ -442,15 +533,27 @@ mod tests {
     #[test]
     fn royalty_quads_produces_integer_objects_for_count_and_royalty() {
         let mut ledger = CitationLedger::new();
-        let q = make_quad("subject-a");
-        ledger.cite_quad(&q);
-        ledger.cite_quad(&q);
+        let datom = make_datom("subject-a");
+        ledger.cite_datom(&datom);
+        ledger.cite_datom(&datom);
         let entries = ledger.flush_epoch(1_000_000);
+        let datoms = CitationLedger::royalty_datoms(&entries, 1);
+        assert_eq!(datoms.len(), 2);
+        assert!(datoms
+            .iter()
+            .all(|d| matches!(d.v, Value::Integer(n) if n >= 0)));
+
         let quads = CitationLedger::royalty_quads(&entries, 1);
         // Expect 2 quads per entry: citation/count and citation/royalty_mkoto
         assert_eq!(quads.len(), 2);
-        let count_quad   = quads.iter().find(|q| q.predicate == "citation/count").unwrap();
-        let royalty_quad = quads.iter().find(|q| q.predicate == "citation/royalty_mkoto").unwrap();
+        let count_quad = quads
+            .iter()
+            .find(|q| q.predicate == "citation/count")
+            .unwrap();
+        let royalty_quad = quads
+            .iter()
+            .find(|q| q.predicate == "citation/royalty_mkoto")
+            .unwrap();
         match count_quad.object {
             QuadObject::Integer(n) => assert!(n > 0, "citation count must be positive"),
             ref other => panic!("expected Integer for count, got {other:?}"),

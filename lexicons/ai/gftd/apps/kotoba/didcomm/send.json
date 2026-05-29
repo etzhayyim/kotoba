@@ -1,0 +1,27 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.didcomm.send",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Store a DIDComm v2 message envelope as Kotoba Datoms.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["graph", "message"],
+          "properties": {
+            "graph": { "type": "string" },
+            "message": { "type": "unknown" },
+            "cacao_b64": { "type": "string" },
+            "auth_presentation": { "type": "unknown" }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": { "type": "unknown" }
+      }
+    }
+  }
+}

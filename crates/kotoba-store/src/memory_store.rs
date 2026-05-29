@@ -11,7 +11,9 @@ pub struct MemoryBlockStore {
 }
 
 impl MemoryBlockStore {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn block_count(&self) -> usize {
         self.blocks.len()
@@ -58,7 +60,9 @@ impl BlockStore for MemoryBlockStore {
 mod tests {
     use super::*;
 
-    fn cid(tag: &[u8]) -> KotobaCid { KotobaCid::from_bytes(tag) }
+    fn cid(tag: &[u8]) -> KotobaCid {
+        KotobaCid::from_bytes(tag)
+    }
 
     #[test]
     fn put_and_get_roundtrip() {
@@ -146,7 +150,10 @@ mod tests {
         let c = cid(b"shared");
         store1.put(&c, b"value").unwrap();
         assert!(store2.has(&c), "clone shares inner Arc");
-        assert_eq!(store2.get(&c).unwrap().as_deref(), Some(b"value".as_slice()));
+        assert_eq!(
+            store2.get(&c).unwrap().as_deref(),
+            Some(b"value".as_slice())
+        );
     }
 
     #[test]

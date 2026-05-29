@@ -1,0 +1,31 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.datomic.q",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Datomic Datalog query against a Kotoba distributed Datom graph.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["graph", "query_edn"],
+          "properties": {
+            "graph": { "type": "string" },
+            "query_edn": { "type": "string" },
+            "inputs_edn": { "type": "array", "items": { "type": "string" } },
+            "as_of": { "type": "string" },
+            "since": { "type": "string" },
+            "history": { "type": "boolean" },
+            "cacao_b64": { "type": "string" },
+            "presentation": { "type": "unknown" }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": { "type": "unknown" }
+      }
+    }
+  }
+}

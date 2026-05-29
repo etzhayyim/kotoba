@@ -15,20 +15,21 @@
 
 use sqlparser::dialect::SnowflakeDialect as SqlparserSnowflake;
 
-use crate::schema::SchemaMap;
 use super::{
-    CompiledEnterpriseQuery, EnterpriseDialect, EnterpriseFeature,
-    sql_base::SchemaBasedSqlCompiler,
+    sql_base::SchemaBasedSqlCompiler, CompiledEnterpriseQuery, EnterpriseDialect, EnterpriseFeature,
 };
+use crate::schema::SchemaMap;
 
 pub struct SnowflakeDialect;
 
 impl EnterpriseDialect for SnowflakeDialect {
-    fn dialect_name(&self) -> &'static str { "snowflake" }
+    fn dialect_name(&self) -> &'static str {
+        "snowflake"
+    }
 
     fn compile(
         &self,
-        query:  &str,
+        query: &str,
         schema: &SchemaMap,
         output: &str,
     ) -> anyhow::Result<CompiledEnterpriseQuery> {
@@ -40,9 +41,14 @@ impl EnterpriseDialect for SnowflakeDialect {
         let mut features = Vec::new();
 
         // Strip single-line comments before keyword detection to avoid false positives
-        let stripped_upper: String = upper.lines()
+        let stripped_upper: String = upper
+            .lines()
             .map(|line| {
-                if let Some(idx) = line.find("--") { &line[..idx] } else { line }
+                if let Some(idx) = line.find("--") {
+                    &line[..idx]
+                } else {
+                    line
+                }
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -59,12 +65,8 @@ impl EnterpriseDialect for SnowflakeDialect {
 
         let prepped = preprocess_snowflake(query);
 
-        let (program, pp) = SchemaBasedSqlCompiler::compile(
-            &prepped,
-            &SqlparserSnowflake {},
-            schema,
-            output,
-        )?;
+        let (program, pp) =
+            SchemaBasedSqlCompiler::compile(&prepped, &SqlparserSnowflake {}, schema, output)?;
 
         Ok(CompiledEnterpriseQuery {
             program,
@@ -97,7 +99,9 @@ fn preprocess_snowflake(sql: &str) -> String {
         if let Some(end) = find_paren(&s, idx + 10) {
             let inner = s[idx + 11..end].to_string();
             s.replace_range(idx..end + 1, &inner);
-        } else { break; }
+        } else {
+            break;
+        }
     }
 
     // FLATTEN(INPUT => col) → col (simplified: just keep the referenced column)
@@ -105,9 +109,16 @@ fn preprocess_snowflake(sql: &str) -> String {
         if let Some(end) = find_paren(&s, idx + 7) {
             let clause = s[idx + 8..end].to_string();
             // Extract col from "INPUT => col" or just "col"
-            let col = clause.split("=>").last().unwrap_or(&clause).trim().to_string();
+            let col = clause
+                .split("=>")
+                .last()
+                .unwrap_or(&clause)
+                .trim()
+                .to_string();
             s.replace_range(idx..end + 1, &col);
-        } else { break; }
+        } else {
+            break;
+        }
     }
 
     s
@@ -118,7 +129,12 @@ fn find_paren(s: &str, open: usize) -> Option<usize> {
     for (i, c) in s[open..].char_indices() {
         match c {
             '(' => depth += 1,
-            ')' => { depth -= 1; if depth == 0 { return Some(open + i); } }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + i);
+                }
+            }
             _ => {}
         }
     }
@@ -131,48 +147,66 @@ fn find_paren(s: &str, open: usize) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::schema::{AttrDef, SchemaMap, TableSchema};
-    use crate::{delta::Delta, quad::{Quad, QuadObject}};
+    use crate::{
+        datom::{Datom, Value},
+        delta::Delta,
+    };
     use kotoba_core::cid::KotobaCid;
 
-    fn cid(s: &str) -> KotobaCid { KotobaCid::from_bytes(s.as_bytes()) }
+    fn cid(s: &str) -> KotobaCid {
+        KotobaCid::from_bytes(s.as_bytes())
+    }
     fn fact(pred: &str, s: &str, o: &str) -> Delta {
-        Delta::assert(Quad {
-            graph: cid("g"), subject: cid(s), predicate: pred.to_string(),
-            object: QuadObject::Cid(cid(o)),
-        })
+        Delta::assert_datom(Datom::assert(
+            cid(s),
+            pred.to_string(),
+            Value::Cid(cid(o)),
+            cid("g"),
+        ))
     }
     fn has(d: &[Delta], pred: &str, s: &str, o: &str) -> bool {
-        d.iter().any(|x| x.quad.predicate == pred
-            && x.quad.subject == cid(s)
-            && matches!(&x.quad.object, QuadObject::Cid(c) if *c == cid(o)))
+        d.iter().any(|x| {
+            x.attribute() == pred
+                && x.entity() == &cid(s)
+                && matches!(x.value(), Value::Cid(c) if *c == cid(o))
+        })
     }
 
     #[test]
     fn copy_into_rejected() {
         let schema = SchemaMap::new();
         match SnowflakeDialect.compile("COPY INTO my_table FROM @stage", &schema, "out") {
-            Err(e) => assert!(e.to_string().contains("kotoba-ingest"), "unexpected error: {e}"),
-            Ok(_)  => panic!("expected error for COPY INTO"),
+            Err(e) => assert!(
+                e.to_string().contains("kotoba-ingest"),
+                "unexpected error: {e}"
+            ),
+            Ok(_) => panic!("expected error for COPY INTO"),
         }
     }
 
     #[test]
     fn standard_snowflake_select() {
         let mut schema = SchemaMap::new();
-        schema.add("events", TableSchema::new("id")
-            .with_attr(AttrDef::scalar("event_type", "events"))
-            .with_attr(AttrDef::scalar("user_id", "events")));
+        schema.add(
+            "events",
+            TableSchema::new("id")
+                .with_attr(AttrDef::scalar("event_type", "events"))
+                .with_attr(AttrDef::scalar("user_id", "events")),
+        );
 
-        let result = SnowflakeDialect.compile(
-            "SELECT e.id, e.event_type FROM events e WHERE e.user_id = 'u1'",
-            &schema, "user_events",
-        ).unwrap();
+        let result = SnowflakeDialect
+            .compile(
+                "SELECT e.id, e.event_type FROM events e WHERE e.user_id = 'u1'",
+                &schema,
+                "user_events",
+            )
+            .unwrap();
 
         let input = vec![
             fact("events/event_type", "e1", "click"),
-            fact("events/user_id",    "e1", "u1"),
+            fact("events/user_id", "e1", "u1"),
             fact("events/event_type", "e2", "view"),
-            fact("events/user_id",    "e2", "u2"),
+            fact("events/user_id", "e2", "u2"),
         ];
         let derived = result.program.evaluate_delta(&input);
         assert!(has(&derived, "user_events", "e1", "click"));
@@ -184,7 +218,8 @@ mod tests {
         let schema = SchemaMap::new();
         let result = SnowflakeDialect.compile(
             "SELECT t.s, t.o FROM t WHERE t.s = 'x' -- FLATTEN here",
-            &schema, "out",
+            &schema,
+            "out",
         );
         // FLATTEN in comment is not detected as a feature (no real FLATTEN call)
         if let Ok(r) = result {

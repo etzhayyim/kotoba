@@ -12,20 +12,21 @@
 
 use sqlparser::dialect::MsSqlDialect;
 
-use crate::schema::SchemaMap;
 use super::{
-    CompiledEnterpriseQuery, EnterpriseDialect, EnterpriseFeature,
-    sql_base::SchemaBasedSqlCompiler,
+    sql_base::SchemaBasedSqlCompiler, CompiledEnterpriseQuery, EnterpriseDialect, EnterpriseFeature,
 };
+use crate::schema::SchemaMap;
 
 pub struct TSqlDialect;
 
 impl EnterpriseDialect for TSqlDialect {
-    fn dialect_name(&self) -> &'static str { "tsql" }
+    fn dialect_name(&self) -> &'static str {
+        "tsql"
+    }
 
     fn compile(
         &self,
-        query:  &str,
+        query: &str,
         schema: &SchemaMap,
         output: &str,
     ) -> anyhow::Result<CompiledEnterpriseQuery> {
@@ -44,12 +45,8 @@ impl EnterpriseDialect for TSqlDialect {
 
         let prepped = preprocess_tsql(query);
 
-        let (program, pp) = SchemaBasedSqlCompiler::compile(
-            &prepped,
-            &MsSqlDialect {},
-            schema,
-            output,
-        )?;
+        let (program, pp) =
+            SchemaBasedSqlCompiler::compile(&prepped, &MsSqlDialect {}, schema, output)?;
 
         Ok(CompiledEnterpriseQuery {
             program,
@@ -70,7 +67,9 @@ fn preprocess_tsql(sql: &str) -> String {
     while let Some(idx) = s.to_uppercase().find(" WITH (") {
         if let Some(close) = s[idx + 6..].find(')') {
             s.replace_range(idx..idx + 7 + close, "");
-        } else { break; }
+        } else {
+            break;
+        }
     }
 
     // Rewrite CROSS APPLY → INNER JOIN (structural approximation)
@@ -88,38 +87,49 @@ fn preprocess_tsql(sql: &str) -> String {
 mod tests {
     use super::*;
     use crate::schema::{AttrDef, SchemaMap, TableSchema};
-    use crate::{delta::Delta, quad::{Quad, QuadObject}};
+    use crate::{
+        datom::{Datom, Value},
+        delta::Delta,
+    };
     use kotoba_core::cid::KotobaCid;
 
-    fn cid(s: &str) -> KotobaCid { KotobaCid::from_bytes(s.as_bytes()) }
+    fn cid(s: &str) -> KotobaCid {
+        KotobaCid::from_bytes(s.as_bytes())
+    }
     fn fact(pred: &str, s: &str, o: &str) -> Delta {
-        Delta::assert(Quad {
-            graph: cid("g"), subject: cid(s), predicate: pred.to_string(),
-            object: QuadObject::Cid(cid(o)),
-        })
+        Delta::assert_datom(Datom::assert(
+            cid(s),
+            pred.to_string(),
+            Value::Cid(cid(o)),
+            cid("g"),
+        ))
     }
     fn has(d: &[Delta], pred: &str, s: &str, o: &str) -> bool {
-        d.iter().any(|x| x.quad.predicate == pred
-            && x.quad.subject == cid(s)
-            && matches!(&x.quad.object, QuadObject::Cid(c) if *c == cid(o)))
+        d.iter().any(|x| {
+            x.attribute() == pred
+                && x.entity() == &cid(s)
+                && matches!(x.value(), Value::Cid(c) if *c == cid(o))
+        })
     }
 
     fn sample_schema() -> SchemaMap {
         let mut m = SchemaMap::new();
-        m.add("products", TableSchema::new("id")
-            .with_attr(AttrDef::scalar("name", "products"))
-            .with_attr(AttrDef::numeric("price", "products"))
-            .with_attr(AttrDef::scalar("category", "products")));
+        m.add(
+            "products",
+            TableSchema::new("id")
+                .with_attr(AttrDef::scalar("name", "products"))
+                .with_attr(AttrDef::numeric("price", "products"))
+                .with_attr(AttrDef::scalar("category", "products")),
+        );
         m
     }
 
     #[test]
     fn top_n_in_post_process() {
         let schema = sample_schema();
-        let result = TSqlDialect.compile(
-            "SELECT TOP 5 p.id, p.name FROM products p",
-            &schema, "top5",
-        ).unwrap();
+        let result = TSqlDialect
+            .compile("SELECT TOP 5 p.id, p.name FROM products p", &schema, "top5")
+            .unwrap();
         assert_eq!(result.post_process.limit, Some(5));
     }
 
@@ -127,25 +137,31 @@ mod tests {
     fn nolock_hint_stripped() {
         let schema = sample_schema();
         // Should compile without error even with NOLOCK hint
-        let result = TSqlDialect.compile(
-            "SELECT p.id, p.name FROM products p WITH (NOLOCK)",
-            &schema, "out",
-        ).unwrap();
+        let result = TSqlDialect
+            .compile(
+                "SELECT p.id, p.name FROM products p WITH (NOLOCK)",
+                &schema,
+                "out",
+            )
+            .unwrap();
         assert_eq!(result.dialect, "tsql");
     }
 
     #[test]
     fn where_filter() {
         let schema = sample_schema();
-        let result = TSqlDialect.compile(
-            "SELECT p.id, p.name FROM products p WHERE p.category = 'electronics'",
-            &schema, "elec",
-        ).unwrap();
+        let result = TSqlDialect
+            .compile(
+                "SELECT p.id, p.name FROM products p WHERE p.category = 'electronics'",
+                &schema,
+                "elec",
+            )
+            .unwrap();
 
         let input = vec![
-            fact("products/name",     "p1", "Laptop"),
+            fact("products/name", "p1", "Laptop"),
             fact("products/category", "p1", "electronics"),
-            fact("products/name",     "p2", "Chair"),
+            fact("products/name", "p2", "Chair"),
             fact("products/category", "p2", "furniture"),
         ];
         let derived = result.program.evaluate_delta(&input);
@@ -158,7 +174,8 @@ mod tests {
         let schema = sample_schema();
         let result = TSqlDialect.compile(
             "SELECT p.id, p.name FROM products p -- PIVOT detected",
-            &schema, "out",
+            &schema,
+            "out",
         );
         // Note: bare PIVOT keyword in comment is not detected (only in body)
         assert!(result.is_ok());

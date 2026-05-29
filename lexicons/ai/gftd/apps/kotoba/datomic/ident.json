@@ -1,0 +1,29 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.datomic.ident",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Return the :db/ident keyword for a Kotoba distributed Datom entity.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["graph", "entity"],
+          "properties": {
+            "graph": { "type": "string" },
+            "entity": { "type": "string" },
+            "as_of": { "type": "string" },
+            "since": { "type": "string" },
+            "cacao_b64": { "type": "string" },
+            "presentation": { "type": "unknown" }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": { "type": "unknown" }
+      }
+    }
+  }
+}

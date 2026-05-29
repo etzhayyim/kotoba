@@ -5,28 +5,25 @@ use crate::cid::KotobaCid;
 pub enum ForeignCallType {
     /// LLM text inference → Vultr A16 pool via AgentGateway MCP
     LlmInfer {
-        model_cid:   KotobaCid,
+        model_cid: KotobaCid,
         adapter_cid: Option<KotobaCid>,
         session_cid: Option<KotobaCid>,
-        max_tokens:  u32,
+        max_tokens: u32,
     },
     /// Compute embedding → vector<f32> QuadObject
-    Embed {
-        model_cid: KotobaCid,
-        text:      String,
-    },
+    Embed { model_cid: KotobaCid, text: String },
     /// Load FP8 weight tensor from Vault
     WeightLoad {
         blob_cid: KotobaCid,
-        shape:    Vec<u32>,
+        shape: Vec<u32>,
     },
 }
 
 #[derive(Debug, Clone)]
 pub struct ForeignCall {
-    pub call_id:   u64,
+    pub call_id: u64,
     pub call_type: ForeignCallType,
-    pub ucan_cid:  KotobaCid, // CACAO authorization
+    pub ucan_cid: KotobaCid, // CACAO authorization
 }
 
 /// ForeignBridge — delegates CALL_FOREIGN to AgentGateway MCP via JSON-RPC 2.0.
@@ -40,22 +37,30 @@ pub struct ForeignCall {
 ///   WeightLoad → tool `kotoba_weight_get`
 pub struct ForeignBridge {
     pub gateway_url: String,
-    client:          reqwest::Client,
+    #[cfg(feature = "foreign-http")]
+    client: reqwest::Client,
 }
 
 impl ForeignBridge {
     pub fn new(gateway_url: impl Into<String>) -> Self {
         Self {
             gateway_url: gateway_url.into(),
-            client:      reqwest::Client::new(),
+            #[cfg(feature = "foreign-http")]
+            client: reqwest::Client::new(),
         }
     }
 
+    #[cfg(feature = "foreign-http")]
     pub async fn call(&self, call: ForeignCall) -> Result<Vec<u8>, ForeignError> {
         let ucan = call.ucan_cid.to_multibase();
 
         let (tool, arguments) = match call.call_type {
-            ForeignCallType::LlmInfer { model_cid, adapter_cid: _, session_cid: _, max_tokens } => {
+            ForeignCallType::LlmInfer {
+                model_cid,
+                adapter_cid: _,
+                session_cid: _,
+                max_tokens,
+            } => {
                 let args = serde_json::json!({
                     "model_cid":      model_cid.to_multibase(),
                     "max_new_tokens": max_tokens,
@@ -91,7 +96,8 @@ impl ForeignBridge {
         });
 
         let url = format!("{}/mcp", self.gateway_url.trim_end_matches('/'));
-        let resp = self.client
+        let resp = self
+            .client
             .post(&url)
             .header("Authorization", format!("Bearer {ucan}"))
             .header("Content-Type", "application/json")
@@ -106,7 +112,8 @@ impl ForeignBridge {
             return Err(ForeignError::Gateway(format!("HTTP {status}: {text}")));
         }
 
-        let rpc: serde_json::Value = resp.json()
+        let rpc: serde_json::Value = resp
+            .json()
             .await
             .map_err(|e| ForeignError::Gateway(e.to_string()))?;
 
@@ -116,10 +123,14 @@ impl ForeignBridge {
 
         // Result bytes: serialize the result JSON as UTF-8
         let result = rpc.get("result").unwrap_or(&serde_json::Value::Null);
-        let bytes = serde_json::to_vec(result)
-            .map_err(|e| ForeignError::Gateway(e.to_string()))?;
+        let bytes = serde_json::to_vec(result).map_err(|e| ForeignError::Gateway(e.to_string()))?;
 
         Ok(bytes)
+    }
+
+    #[cfg(not(feature = "foreign-http"))]
+    pub async fn call(&self, _call: ForeignCall) -> Result<Vec<u8>, ForeignError> {
+        Err(ForeignError::NotImplemented)
     }
 }
 
@@ -152,12 +163,12 @@ mod tests {
     #[test]
     fn foreign_call_type_llm_infer_fields() {
         let call = ForeignCall {
-            call_id:   1,
+            call_id: 1,
             call_type: ForeignCallType::LlmInfer {
-                model_cid:   dummy_cid(b"model"),
+                model_cid: dummy_cid(b"model"),
                 adapter_cid: None,
                 session_cid: None,
-                max_tokens:  256,
+                max_tokens: 256,
             },
             ucan_cid: dummy_cid(b"ucan"),
         };
@@ -167,10 +178,10 @@ mod tests {
     #[test]
     fn foreign_call_type_embed_fields() {
         let call = ForeignCall {
-            call_id:   2,
+            call_id: 2,
             call_type: ForeignCallType::Embed {
                 model_cid: dummy_cid(b"embed-model"),
-                text:      "hello world".into(),
+                text: "hello world".into(),
             },
             ucan_cid: dummy_cid(b"ucan"),
         };
@@ -184,10 +195,10 @@ mod tests {
     #[test]
     fn foreign_call_type_weight_load_fields() {
         let call = ForeignCall {
-            call_id:   3,
+            call_id: 3,
             call_type: ForeignCallType::WeightLoad {
                 blob_cid: dummy_cid(b"blob"),
-                shape:    vec![4096, 4096],
+                shape: vec![4096, 4096],
             },
             ucan_cid: dummy_cid(b"ucan"),
         };
@@ -202,8 +213,12 @@ mod tests {
     fn foreign_error_display() {
         let e = ForeignError::Gateway("timeout".into());
         assert!(e.to_string().contains("timeout"));
-        assert!(ForeignError::NotImplemented.to_string().contains("not implemented"));
-        assert!(ForeignError::Unauthorized.to_string().contains("unauthorized"));
+        assert!(ForeignError::NotImplemented
+            .to_string()
+            .contains("not implemented"));
+        assert!(ForeignError::Unauthorized
+            .to_string()
+            .contains("unauthorized"));
     }
 
     #[test]
@@ -216,10 +231,10 @@ mod tests {
     #[test]
     fn foreign_call_weight_load_shape_clone() {
         let call = ForeignCall {
-            call_id:   10,
+            call_id: 10,
             call_type: ForeignCallType::WeightLoad {
                 blob_cid: dummy_cid(b"weight"),
-                shape:    vec![1024, 512],
+                shape: vec![1024, 512],
             },
             ucan_cid: dummy_cid(b"ucan2"),
         };
@@ -234,16 +249,22 @@ mod tests {
     #[test]
     fn foreign_call_llm_infer_with_optional_cids() {
         let call = ForeignCall {
-            call_id:   5,
+            call_id: 5,
             call_type: ForeignCallType::LlmInfer {
-                model_cid:   dummy_cid(b"model"),
+                model_cid: dummy_cid(b"model"),
                 adapter_cid: Some(dummy_cid(b"adapter")),
                 session_cid: Some(dummy_cid(b"session")),
-                max_tokens:  512,
+                max_tokens: 512,
             },
             ucan_cid: dummy_cid(b"ucan3"),
         };
-        if let ForeignCallType::LlmInfer { max_tokens, adapter_cid, session_cid, .. } = call.call_type {
+        if let ForeignCallType::LlmInfer {
+            max_tokens,
+            adapter_cid,
+            session_cid,
+            ..
+        } = call.call_type
+        {
             assert_eq!(max_tokens, 512);
             assert!(adapter_cid.is_some());
             assert!(session_cid.is_some());
@@ -288,7 +309,7 @@ mod tests {
             call_id: 99,
             call_type: ForeignCallType::Embed {
                 model_cid: dummy_cid(b"m"),
-                text:      "".to_string(),
+                text: "".to_string(),
             },
             ucan_cid: dummy_cid(b"u"),
         };
@@ -305,7 +326,7 @@ mod tests {
             call_id: 7,
             call_type: ForeignCallType::WeightLoad {
                 blob_cid: dummy_cid(b"weight_empty"),
-                shape:    vec![],
+                shape: vec![],
             },
             ucan_cid: dummy_cid(b"u2"),
         };
@@ -321,10 +342,10 @@ mod tests {
         let call = ForeignCall {
             call_id: 0,
             call_type: ForeignCallType::LlmInfer {
-                model_cid:   dummy_cid(b"m"),
+                model_cid: dummy_cid(b"m"),
                 adapter_cid: None,
                 session_cid: None,
-                max_tokens:  1,
+                max_tokens: 1,
             },
             ucan_cid: dummy_cid(b"u"),
         };

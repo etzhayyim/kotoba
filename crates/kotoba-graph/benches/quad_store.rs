@@ -1,3 +1,12 @@
+use anyhow::Result;
+use bytes::Bytes;
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use kotoba_auth::delegation::DelegationChain;
+use kotoba_core::{cid::KotobaCid, prolly::ProllyTree, store::BlockStore};
+use kotoba_graph::quad_store::QuadStore;
+use kotoba_kqe::quad::{LegacyQuad as Quad, LegacyQuadObject as QuadObject};
+use kotoba_kse::journal::Journal;
+use kotoba_store::MemoryBlockStore;
 /// QuadStore insert + query benchmarks.
 ///
 /// ## Scope
@@ -27,38 +36,38 @@
 /// Run:
 ///   cargo bench -p kotoba-graph --bench quad_store
 use std::{sync::Arc, time::Duration};
-use anyhow::Result;
-use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use kotoba_auth::delegation::DelegationChain;
-use kotoba_core::{cid::KotobaCid, prolly::ProllyTree, store::BlockStore};
-use kotoba_graph::quad_store::QuadStore;
-use kotoba_kqe::quad::{Quad, QuadObject};
-use kotoba_kse::journal::Journal;
-use kotoba_store::MemoryBlockStore;
 
 fn make_cid(n: u64) -> KotobaCid {
     KotobaCid::from_bytes(&n.to_le_bytes())
 }
 
 fn make_quads(n: u64) -> Vec<Quad> {
-    (0..n).flat_map(|i| {
-        let g = make_cid(1);
-        let s = make_cid(i % (n / 2 + 1));
-        [
-            Quad { graph: g.clone(), subject: s.clone(),
-                   predicate: "name".to_string(),
-                   object: QuadObject::Text("Alice".to_string()) },
-            Quad { graph: g, subject: s,
-                   predicate: "knows".to_string(),
-                   object: QuadObject::Cid(make_cid((i + 1) % (n / 2 + 1))) },
-        ]
-    }).collect()
+    (0..n)
+        .flat_map(|i| {
+            let g = make_cid(1);
+            let s = make_cid(i % (n / 2 + 1));
+            [
+                Quad {
+                    graph: g.clone(),
+                    subject: s.clone(),
+                    predicate: "name".to_string(),
+                    object: QuadObject::Text("Alice".to_string()),
+                },
+                Quad {
+                    graph: g,
+                    subject: s,
+                    predicate: "knows".to_string(),
+                    object: QuadObject::Cid(make_cid((i + 1) % (n / 2 + 1))),
+                },
+            ]
+        })
+        .collect()
 }
 
 fn make_store() -> QuadStore {
-    let journal     = Arc::new(Journal::new());
-    let block_store = Arc::new(MemoryBlockStore::new()) as Arc<dyn kotoba_core::store::BlockStore + Send + Sync>;
+    let journal = Arc::new(Journal::new());
+    let block_store =
+        Arc::new(MemoryBlockStore::new()) as Arc<dyn kotoba_core::store::BlockStore + Send + Sync>;
     QuadStore::new(journal, block_store)
 }
 
@@ -161,7 +170,7 @@ fn bench_insert_batch_authed(c: &mut Criterion) {
         .unwrap();
 
     let graph_mb = make_cid(1).to_multibase();
-    let chain = DelegationChain::new_for_test(&graph_mb, "quad:write");
+    let chain = DelegationChain::new_for_test(&graph_mb, "datom:write");
 
     let mut group = c.benchmark_group("quad_store/insert_batch_authed");
     for n in [1_000u64, 10_000, 100_000] {
@@ -172,7 +181,7 @@ fn bench_insert_batch_authed(c: &mut Criterion) {
                 let qs = make_store();
                 // Auth gate: verify capability + graph scope + expiry (no crypto).
                 // Real Ed25519 ≈ +0.1 ms per batch call.
-                chain.verify_skip_sig(&graph_mb, "quad:write").unwrap();
+                chain.verify_skip_sig(&graph_mb, "datom:write").unwrap();
                 qs.assert_batch_silent(quads.clone()).await;
                 qs
             });
@@ -203,19 +212,16 @@ fn bench_query_hot(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("quad_store/query_hot");
     group.bench_function("get_entity_quads_eavt", |b| {
-        b.to_async(&rt).iter(|| async {
-            qs.get_entity_quads(Some(&graph), &subject).await
-        });
+        b.to_async(&rt)
+            .iter(|| async { qs.get_entity_quads(Some(&graph), &subject).await });
     });
     group.bench_function("lookup_by_predicate_object_avet", |b| {
-        b.to_async(&rt).iter(|| async {
-            qs.lookup_subject_by_po(Some(&graph), "name", "Alice").await
-        });
+        b.to_async(&rt)
+            .iter(|| async { qs.lookup_subject_by_po(Some(&graph), "name", "Alice").await });
     });
     group.bench_function("quads_by_predicate_prefix_avet", |b| {
-        b.to_async(&rt).iter(|| async {
-            qs.quads_by_predicate_prefix(Some(&graph), "name").await
-        });
+        b.to_async(&rt)
+            .iter(|| async { qs.quads_by_predicate_prefix(Some(&graph), "name").await });
     });
     group.finish();
 }
@@ -224,16 +230,36 @@ fn bench_query_hot(c: &mut Criterion) {
 
 /// Wraps MemoryBlockStore with a fixed sleep per get/put to simulate network RTT.
 struct SimulatedLatencyBlockStore {
-    inner:   MemoryBlockStore,
+    inner: MemoryBlockStore,
     get_rtt: Duration,
     put_rtt: Duration,
 }
 impl SimulatedLatencyBlockStore {
-    fn kubo_lan()       -> Self { Self { inner: MemoryBlockStore::new(), get_rtt: ms(1),  put_rtt: ms(2)  } }
-    fn kubo_wan()       -> Self { Self { inner: MemoryBlockStore::new(), get_rtt: ms(80), put_rtt: ms(100) } }
-    fn s3_same_az()     -> Self { Self { inner: MemoryBlockStore::new(), get_rtt: ms(2),  put_rtt: ms(10) } }
+    fn kubo_lan() -> Self {
+        Self {
+            inner: MemoryBlockStore::new(),
+            get_rtt: ms(1),
+            put_rtt: ms(2),
+        }
+    }
+    fn kubo_wan() -> Self {
+        Self {
+            inner: MemoryBlockStore::new(),
+            get_rtt: ms(80),
+            put_rtt: ms(100),
+        }
+    }
+    fn s3_same_az() -> Self {
+        Self {
+            inner: MemoryBlockStore::new(),
+            get_rtt: ms(2),
+            put_rtt: ms(10),
+        }
+    }
 }
-fn ms(n: u64) -> Duration { Duration::from_millis(n) }
+fn ms(n: u64) -> Duration {
+    Duration::from_millis(n)
+}
 
 impl BlockStore for SimulatedLatencyBlockStore {
     fn put(&self, cid: &KotobaCid, data: &[u8]) -> Result<()> {
@@ -244,11 +270,21 @@ impl BlockStore for SimulatedLatencyBlockStore {
         std::thread::sleep(self.get_rtt);
         self.inner.get(cid)
     }
-    fn has(&self, cid: &KotobaCid) -> bool { self.inner.has(cid) }
-    fn delete(&self, cid: &KotobaCid) -> Result<()> { self.inner.delete(cid) }
-    fn pin(&self, cid: &KotobaCid) { self.inner.pin(cid) }
-    fn unpin(&self, cid: &KotobaCid) { self.inner.unpin(cid) }
-    fn is_pinned(&self, cid: &KotobaCid) -> bool { self.inner.is_pinned(cid) }
+    fn has(&self, cid: &KotobaCid) -> bool {
+        self.inner.has(cid)
+    }
+    fn delete(&self, cid: &KotobaCid) -> Result<()> {
+        self.inner.delete(cid)
+    }
+    fn pin(&self, cid: &KotobaCid) {
+        self.inner.pin(cid)
+    }
+    fn unpin(&self, cid: &KotobaCid) {
+        self.inner.unpin(cid)
+    }
+    fn is_pinned(&self, cid: &KotobaCid) -> bool {
+        self.inner.is_pinned(cid)
+    }
 }
 
 /// Build a small ProllyTree (1K entries) with a simulated-latency store, then
@@ -263,8 +299,8 @@ fn bench_query_cold_prolly(c: &mut Criterion) {
     let lookup_key = 500u64.to_le_bytes().to_vec();
 
     let scenarios: &[(&str, fn() -> SimulatedLatencyBlockStore)] = &[
-        ("kubo_lan_1ms_get",   SimulatedLatencyBlockStore::kubo_lan),
-        ("kubo_wan_80ms_get",  SimulatedLatencyBlockStore::kubo_wan),
+        ("kubo_lan_1ms_get", SimulatedLatencyBlockStore::kubo_lan),
+        ("kubo_wan_80ms_get", SimulatedLatencyBlockStore::kubo_wan),
         ("s3_same_az_2ms_get", SimulatedLatencyBlockStore::s3_same_az),
     ];
 
@@ -299,17 +335,25 @@ async fn make_committed_qs_latency(
     let store = Arc::new(inner) as Arc<dyn BlockStore + Send + Sync>;
     let qs = QuadStore::new(Arc::new(Journal::new()), store);
     let graph = make_cid(1);
-    let quads: Vec<Quad> = (0..n_entities).flat_map(|i| {
-        let s = make_cid(i + 100);
-        [
-            Quad { graph: graph.clone(), subject: s.clone(),
-                   predicate: "name".to_string(),
-                   object: QuadObject::Text(format!("entity-{i}")) },
-            Quad { graph: graph.clone(), subject: s.clone(),
-                   predicate: "knows".to_string(),
-                   object: QuadObject::Cid(make_cid((i + 1) % n_entities + 100)) },
-        ]
-    }).collect();
+    let quads: Vec<Quad> = (0..n_entities)
+        .flat_map(|i| {
+            let s = make_cid(i + 100);
+            [
+                Quad {
+                    graph: graph.clone(),
+                    subject: s.clone(),
+                    predicate: "name".to_string(),
+                    object: QuadObject::Text(format!("entity-{i}")),
+                },
+                Quad {
+                    graph: graph.clone(),
+                    subject: s.clone(),
+                    predicate: "knows".to_string(),
+                    object: QuadObject::Cid(make_cid((i + 1) % n_entities + 100)),
+                },
+            ]
+        })
+        .collect();
     qs.assert_batch_silent(quads).await;
     let graph_cid = qs.commit("did:bench", graph.clone(), 1).await.unwrap();
     qs.reset_arrangement(&graph_cid).await;
@@ -328,15 +372,17 @@ fn bench_cold_eavt(c: &mut Criterion) {
     group.sample_size(10);
 
     for (name, get_rtt, put_rtt) in [
-        ("kubo_lan_1ms",   ms(1),  ms(2)),
-        ("kubo_wan_80ms",  ms(80), ms(100)),
-        ("s3_same_az_2ms", ms(2),  ms(10)),
+        ("kubo_lan_1ms", ms(1), ms(2)),
+        ("kubo_wan_80ms", ms(80), ms(100)),
+        ("s3_same_az_2ms", ms(2), ms(10)),
     ] {
-        let (qs, graph_cid, subject) = rt.block_on(
-            make_committed_qs_latency(get_rtt, put_rtt, 1_000));
+        let (qs, graph_cid, subject) =
+            rt.block_on(make_committed_qs_latency(get_rtt, put_rtt, 1_000));
         group.bench_function(name, |b| {
             b.to_async(&rt).iter(|| async {
-                qs.get_entity_quads_cold(&graph_cid, &subject).await.unwrap()
+                qs.get_entity_quads_cold(&graph_cid, &subject)
+                    .await
+                    .unwrap()
             });
         });
     }
@@ -354,15 +400,16 @@ fn bench_cold_aevt(c: &mut Criterion) {
     group.sample_size(10);
 
     for (name, get_rtt, put_rtt) in [
-        ("kubo_lan_1ms",   ms(1),  ms(2)),
-        ("kubo_wan_80ms",  ms(80), ms(100)),
-        ("s3_same_az_2ms", ms(2),  ms(10)),
+        ("kubo_lan_1ms", ms(1), ms(2)),
+        ("kubo_wan_80ms", ms(80), ms(100)),
+        ("s3_same_az_2ms", ms(2), ms(10)),
     ] {
-        let (qs, graph_cid, _) = rt.block_on(
-            make_committed_qs_latency(get_rtt, put_rtt, 1_000));
+        let (qs, graph_cid, _) = rt.block_on(make_committed_qs_latency(get_rtt, put_rtt, 1_000));
         group.bench_function(name, |b| {
             b.to_async(&rt).iter(|| async {
-                qs.quads_by_predicate_prefix_cold(&graph_cid, "name").await.unwrap()
+                qs.quads_by_predicate_prefix_cold(&graph_cid, "name")
+                    .await
+                    .unwrap()
             });
         });
     }
@@ -380,15 +427,16 @@ fn bench_cold_avet(c: &mut Criterion) {
     group.sample_size(10);
 
     for (name, get_rtt, put_rtt) in [
-        ("kubo_lan_1ms",   ms(1),  ms(2)),
-        ("kubo_wan_80ms",  ms(80), ms(100)),
-        ("s3_same_az_2ms", ms(2),  ms(10)),
+        ("kubo_lan_1ms", ms(1), ms(2)),
+        ("kubo_wan_80ms", ms(80), ms(100)),
+        ("s3_same_az_2ms", ms(2), ms(10)),
     ] {
-        let (qs, graph_cid, _) = rt.block_on(
-            make_committed_qs_latency(get_rtt, put_rtt, 1_000));
+        let (qs, graph_cid, _) = rt.block_on(make_committed_qs_latency(get_rtt, put_rtt, 1_000));
         group.bench_function(name, |b| {
             b.to_async(&rt).iter(|| async {
-                qs.lookup_subject_by_po_cold(&graph_cid, "name", "entity-100").await.unwrap()
+                qs.lookup_subject_by_po_cold(&graph_cid, "name", "entity-100")
+                    .await
+                    .unwrap()
             });
         });
     }
@@ -406,17 +454,18 @@ fn bench_cold_vaet(c: &mut Criterion) {
     group.sample_size(10);
 
     for (name, get_rtt, put_rtt) in [
-        ("kubo_lan_1ms",   ms(1),  ms(2)),
-        ("kubo_wan_80ms",  ms(80), ms(100)),
-        ("s3_same_az_2ms", ms(2),  ms(10)),
+        ("kubo_lan_1ms", ms(1), ms(2)),
+        ("kubo_wan_80ms", ms(80), ms(100)),
+        ("s3_same_az_2ms", ms(2), ms(10)),
     ] {
         // entity-100 is referenced by entity-99 via "knows"
         let object_cid = make_cid(100 + 500);
-        let (qs, graph_cid, _) = rt.block_on(
-            make_committed_qs_latency(get_rtt, put_rtt, 1_000));
+        let (qs, graph_cid, _) = rt.block_on(make_committed_qs_latency(get_rtt, put_rtt, 1_000));
         group.bench_function(name, |b| {
             b.to_async(&rt).iter(|| async {
-                qs.reverse_lookup_cold(&graph_cid, &object_cid).await.unwrap()
+                qs.reverse_lookup_cold(&graph_cid, &object_cid)
+                    .await
+                    .unwrap()
             });
         });
     }
@@ -434,15 +483,13 @@ fn bench_cold_multi_hop(c: &mut Criterion) {
     group.sample_size(10);
 
     for (name, get_rtt, put_rtt) in [
-        ("kubo_lan_1ms",   ms(1),  ms(2)),
-        ("s3_same_az_2ms", ms(2),  ms(10)),
+        ("kubo_lan_1ms", ms(1), ms(2)),
+        ("s3_same_az_2ms", ms(2), ms(10)),
     ] {
-        let (qs, graph_cid, start) = rt.block_on(
-            make_committed_qs_latency(get_rtt, put_rtt, 200));
+        let (qs, graph_cid, start) = rt.block_on(make_committed_qs_latency(get_rtt, put_rtt, 200));
         group.bench_function(name, |b| {
-            b.to_async(&rt).iter(|| async {
-                qs.multi_hop_cold(&graph_cid, &start, 2).await.unwrap()
-            });
+            b.to_async(&rt)
+                .iter(|| async { qs.multi_hop_cold(&graph_cid, &start, 2).await.unwrap() });
         });
     }
     group.finish();

@@ -1,0 +1,32 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.datomic.indexRange",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Return Datomic index-range(attr, start, end) datoms from a Kotoba distributed Datom graph.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["graph", "attr_edn"],
+          "properties": {
+            "graph": { "type": "string" },
+            "attr_edn": { "type": "string" },
+            "start_edn": { "type": "string" },
+            "end_edn": { "type": "string" },
+            "as_of": { "type": "string" },
+            "since": { "type": "string" },
+            "cacao_b64": { "type": "string" },
+            "presentation": { "type": "unknown" },
+            "limit": { "type": "integer", "minimum": 0 }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": { "type": "unknown" }
+      }
+    }
+  }
+}

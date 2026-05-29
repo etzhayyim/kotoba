@@ -35,24 +35,32 @@ pub enum AttrKind {
 
 #[derive(Debug, Clone)]
 pub struct AttrDef {
-    pub col:       String,
+    pub col: String,
     pub predicate: String,
-    pub kind:      AttrKind,
+    pub kind: AttrKind,
 }
 
 impl AttrDef {
     fn make(col: &str, table: &str, kind: AttrKind) -> Self {
         Self {
-            col:       col.to_string(),
+            col: col.to_string(),
             predicate: format!("{table}/{col}"),
             kind,
         }
     }
 
-    pub fn entity(col: &str, table: &str)   -> Self { Self::make(col, table, AttrKind::Entity) }
-    pub fn scalar(col: &str, table: &str)   -> Self { Self::make(col, table, AttrKind::Scalar) }
-    pub fn numeric(col: &str, table: &str)  -> Self { Self::make(col, table, AttrKind::Numeric) }
-    pub fn temporal(col: &str, table: &str) -> Self { Self::make(col, table, AttrKind::Temporal) }
+    pub fn entity(col: &str, table: &str) -> Self {
+        Self::make(col, table, AttrKind::Entity)
+    }
+    pub fn scalar(col: &str, table: &str) -> Self {
+        Self::make(col, table, AttrKind::Scalar)
+    }
+    pub fn numeric(col: &str, table: &str) -> Self {
+        Self::make(col, table, AttrKind::Numeric)
+    }
+    pub fn temporal(col: &str, table: &str) -> Self {
+        Self::make(col, table, AttrKind::Temporal)
+    }
 
     /// Override the default `"{table}/{col}"` predicate name.
     pub fn with_predicate(mut self, predicate: &str) -> Self {
@@ -73,7 +81,10 @@ pub struct TableSchema {
 
 impl TableSchema {
     pub fn new(entity_col: &str) -> Self {
-        Self { entity_col: entity_col.to_string(), attrs: Vec::new() }
+        Self {
+            entity_col: entity_col.to_string(),
+            attrs: Vec::new(),
+        }
     }
 
     pub fn with_attr(mut self, attr: AttrDef) -> Self {
@@ -98,7 +109,9 @@ pub struct SchemaMap {
 }
 
 impl SchemaMap {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn add(&mut self, name: &str, schema: TableSchema) -> &mut Self {
         self.tables.insert(name.to_string(), schema);
@@ -115,8 +128,7 @@ impl SchemaMap {
         match self.tables.get(table) {
             Some(s) => std::borrow::Cow::Borrowed(s),
             None => std::borrow::Cow::Owned(
-                TableSchema::new("s")
-                    .with_attr(AttrDef::scalar("o", table)),
+                TableSchema::new("s").with_attr(AttrDef::scalar("o", table)),
             ),
         }
     }
@@ -140,7 +152,8 @@ mod tests {
     #[test]
     fn roundtrip_registered() {
         let mut m = SchemaMap::new();
-        m.add("orders",
+        m.add(
+            "orders",
             TableSchema::new("id")
                 .with_attr(AttrDef::entity("customer_id", "orders"))
                 .with_attr(AttrDef::numeric("amount", "orders"))
@@ -208,8 +221,7 @@ mod tests {
 
     #[test]
     fn attr_returns_none_for_missing_col() {
-        let schema = TableSchema::new("id")
-            .with_attr(AttrDef::numeric("amount", "orders"));
+        let schema = TableSchema::new("id").with_attr(AttrDef::numeric("amount", "orders"));
         assert!(schema.attr("nonexistent_col").is_none());
     }
 

@@ -1,3 +1,6 @@
+use crate::shelf::{Shelf, BUCKET_PRE_KEYS};
+use bytes::Bytes;
+use kotoba_auth::delegation::{DelegationChain, DelegationError};
 /// PRE key registry — maps (owner_did, accessor_did) to a wrapped re-encryption key.
 ///
 /// The re-key itself is AES-GCM wrapped with the owner's local `enc_key` before
@@ -26,14 +29,11 @@
 ///   5. On access: `get_rekey_authed()` verifies CACAO, unwraps, returns `re_key`.
 ///   6. Requester uses `re_key` + `ct_key` to recover `data_key`, then decrypts datum.
 use kotoba_core::{cid::KotobaCid, store::BlockStore};
-use kotoba_auth::delegation::{DelegationChain, DelegationError};
-use kotoba_crypto::key_wrap::{wrap_key, unwrap_key};
-use crate::shelf::{Shelf, BUCKET_PRE_KEYS};
+use kotoba_crypto::key_wrap::{unwrap_key, wrap_key};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use bytes::Bytes;
-use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use zeroize::Zeroizing;
 
@@ -46,9 +46,9 @@ const SHELF_INDEX_KEY: &str = "index";
 /// CBOR-serialisable record stored as evidence in a RekeyRevoked Warrant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RekeyRevocationRecord {
-    pub owner_did:    String,
+    pub owner_did: String,
     pub accessor_did: String,
-    pub revoked_at:   u64,   // Unix timestamp ms
+    pub revoked_at: u64, // Unix timestamp ms
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -80,23 +80,20 @@ impl PreKeyRegistry {
     pub fn new(store: Arc<dyn BlockStore + Send + Sync>) -> Self {
         Self {
             store,
-            index:   Arc::new(RwLock::new(HashMap::new())),
+            index: Arc::new(RwLock::new(HashMap::new())),
             revoked: Arc::new(RwLock::new(HashSet::new())),
-            shelf:   None,
+            shelf: None,
         }
     }
 
     /// Persistent — grant index is loaded from `shelf` on construction and saved
     /// after every `grant()` / `revoke()`.
-    pub async fn with_shelf(
-        store: Arc<dyn BlockStore + Send + Sync>,
-        shelf: Arc<Shelf>,
-    ) -> Self {
+    pub async fn with_shelf(store: Arc<dyn BlockStore + Send + Sync>, shelf: Arc<Shelf>) -> Self {
         let mut reg = Self {
             store,
-            index:   Arc::new(RwLock::new(HashMap::new())),
+            index: Arc::new(RwLock::new(HashMap::new())),
             revoked: Arc::new(RwLock::new(HashSet::new())),
-            shelf:   Some(shelf),
+            shelf: Some(shelf),
         };
         reg.load_index().await;
         reg.load_revoked().await;
@@ -117,13 +114,19 @@ impl PreKeyRegistry {
         let aad = Self::aad(owner_did, accessor_did);
         let wrapped = wrap_key(owner_enc_key, re_key, aad.as_bytes())?;
         let cid = KotobaCid::from_bytes(&wrapped);
-        self.store.put(&cid, &wrapped)
+        self.store
+            .put(&cid, &wrapped)
             .map_err(|e| PreKeyError::Store(e.to_string()))?;
         {
             let mut idx = self.index.write().await;
-            idx.insert((owner_did.to_string(), accessor_did.to_string()), cid.clone());
+            idx.insert(
+                (owner_did.to_string(), accessor_did.to_string()),
+                cid.clone(),
+            );
             // Also clear any prior revocation for this pair (re-grant is allowed).
-            self.revoked.write().await
+            self.revoked
+                .write()
+                .await
                 .remove(&(owner_did.to_string(), accessor_did.to_string()));
         }
         self.persist_index().await;
@@ -132,7 +135,7 @@ impl PreKeyRegistry {
 
     /// Verify CACAO then return the raw re-key for the (owner, accessor) pair.
     ///
-    /// `chain` must grant `"quad:read"` on `owner_did` to `accessor_did`.
+    /// `chain` must grant `"datom:read"` on `owner_did` to `accessor_did`.
     /// Returns `Zeroizing<Vec<u8>>` so the key material is wiped on drop.
     pub async fn get_rekey_authed(
         &self,
@@ -144,19 +147,23 @@ impl PreKeyRegistry {
         // verify() returns the issuer DID extracted from the verified CACAO.
         // We must check it matches accessor_did — otherwise a valid CACAO from
         // a different accessor could be used to look up an unrelated re-key.
-        let issuer_did = chain.verify(owner_did, "quad:read")?;
+        let issuer_did = chain.verify(owner_did, "datom:read")?;
         if issuer_did != accessor_did {
             return Err(PreKeyError::Access(DelegationError::RootMismatch));
         }
         // Check revocation set (fast path before touching BlockStore).
-        if self.revoked.read().await
+        if self
+            .revoked
+            .read()
+            .await
             .contains(&(owner_did.to_string(), accessor_did.to_string()))
         {
             return Err(PreKeyError::Access(DelegationError::CapabilityDenied(
                 format!("re-key for ({owner_did}, {accessor_did}) has been revoked"),
             )));
         }
-        self.unwrap_rekey(owner_did, accessor_did, owner_enc_key).await
+        self.unwrap_rekey(owner_did, accessor_did, owner_enc_key)
+            .await
     }
 
     /// Revoke access immediately — deletes re-key from index, BlockStore, and Shelf.
@@ -183,14 +190,15 @@ impl PreKeyRegistry {
             .as_millis() as u64;
 
         let record = RekeyRevocationRecord {
-            owner_did:    owner_did.to_string(),
+            owner_did: owner_did.to_string(),
             accessor_did: accessor_did.to_string(),
-            revoked_at:   ts,
+            revoked_at: ts,
         };
-        let evidence_bytes = serde_json::to_vec(&record)
-            .map_err(|e| PreKeyError::Serde(e.to_string()))?;
+        let evidence_bytes =
+            serde_json::to_vec(&record).map_err(|e| PreKeyError::Serde(e.to_string()))?;
         let evidence_cid = KotobaCid::from_bytes(&evidence_bytes);
-        self.store.put(&evidence_cid, &evidence_bytes)
+        self.store
+            .put(&evidence_cid, &evidence_bytes)
             .map_err(|e| PreKeyError::Store(e.to_string()))?;
         Ok(evidence_cid)
     }
@@ -200,14 +208,16 @@ impl PreKeyRegistry {
     /// Loads the `RekeyRevocationRecord` from the BlockStore by `evidence_cid`,
     /// then applies local revocation.  No-ops if already revoked or record missing.
     pub async fn apply_revocation_warrant(&self, evidence_cid: &KotobaCid) {
-        let Some(bytes) = self.store.get(evidence_cid)
-            .ok()
-            .flatten() else { return; };
+        let Some(bytes) = self.store.get(evidence_cid).ok().flatten() else {
+            return;
+        };
 
-        let Ok(record) = serde_json::from_slice::<RekeyRevocationRecord>(&bytes)
-            else { return; };
+        let Ok(record) = serde_json::from_slice::<RekeyRevocationRecord>(&bytes) else {
+            return;
+        };
 
-        self.revoke_inner(&record.owner_did, &record.accessor_did).await;
+        self.revoke_inner(&record.owner_did, &record.accessor_did)
+            .await;
         tracing::info!(
             owner_did = %record.owner_did,
             accessor_did = %record.accessor_did,
@@ -217,7 +227,10 @@ impl PreKeyRegistry {
 
     /// All accessors currently holding a re-key for `owner_did`.
     pub async fn list_accessors(&self, owner_did: &str) -> Vec<String> {
-        self.index.read().await.keys()
+        self.index
+            .read()
+            .await
+            .keys()
             .filter(|(o, _)| o == owner_did)
             .map(|(_, a)| a.clone())
             .collect()
@@ -245,12 +258,19 @@ impl PreKeyRegistry {
         accessor_did: &str,
         owner_enc_key: &[u8; 32],
     ) -> Result<Zeroizing<Vec<u8>>, PreKeyError> {
-        let cid = self.index.read().await
+        let cid = self
+            .index
+            .read()
+            .await
             .get(&(owner_did.to_string(), accessor_did.to_string()))
             .cloned()
-            .ok_or_else(|| PreKeyError::NotFound(owner_did.to_string(), accessor_did.to_string()))?;
+            .ok_or_else(|| {
+                PreKeyError::NotFound(owner_did.to_string(), accessor_did.to_string())
+            })?;
 
-        let wrapped = self.store.get(&cid)
+        let wrapped = self
+            .store
+            .get(&cid)
             .map_err(|e| PreKeyError::Store(e.to_string()))?
             .ok_or_else(|| PreKeyError::Store("re-key block missing from store".into()))?;
 
@@ -263,55 +283,97 @@ impl PreKeyRegistry {
     /// Format: `[[owner_did, accessor_did, cid_multibase], ...]`
     /// Using an array of triples avoids splitting on `:` inside DID strings.
     async fn persist_index(&self) {
-        let Some(shelf) = &self.shelf else { return; };
-        let entries: Vec<[String; 3]> = self.index.read().await
+        let Some(shelf) = &self.shelf else {
+            return;
+        };
+        let entries: Vec<[String; 3]> = self
+            .index
+            .read()
+            .await
             .iter()
             .map(|((o, a), cid)| [o.clone(), a.clone(), cid.to_multibase()])
             .collect();
-        let Ok(json) = serde_json::to_vec(&entries) else { return; };
-        shelf.put(BUCKET_PRE_KEYS, SHELF_INDEX_KEY.to_string(), Bytes::from(json)).await;
+        let Ok(json) = serde_json::to_vec(&entries) else {
+            return;
+        };
+        shelf
+            .put(
+                BUCKET_PRE_KEYS,
+                SHELF_INDEX_KEY.to_string(),
+                Bytes::from(json),
+            )
+            .await;
     }
 
     /// Load the grant index from Shelf on construction.
     ///
     /// Expects format `[[owner_did, accessor_did, cid_multibase], ...]`.
     async fn load_index(&mut self) {
-        let Some(shelf) = &self.shelf else { return; };
-        let Some(bytes) = shelf.get(BUCKET_PRE_KEYS, SHELF_INDEX_KEY).await else { return; };
-        let Ok(entries) = serde_json::from_slice::<Vec<[String; 3]>>(&bytes) else { return; };
+        let Some(shelf) = &self.shelf else {
+            return;
+        };
+        let Some(bytes) = shelf.get(BUCKET_PRE_KEYS, SHELF_INDEX_KEY).await else {
+            return;
+        };
+        let Ok(entries) = serde_json::from_slice::<Vec<[String; 3]>>(&bytes) else {
+            return;
+        };
         let mut idx = self.index.write().await;
         for [owner, accessor, cid_mb] in entries {
-            let Some(cid) = KotobaCid::from_multibase(&cid_mb) else { continue; };
+            let Some(cid) = KotobaCid::from_multibase(&cid_mb) else {
+                continue;
+            };
             idx.insert((owner, accessor), cid);
         }
-        tracing::info!(grants = idx.len(), "PreKeyRegistry: index loaded from shelf");
+        tracing::info!(
+            grants = idx.len(),
+            "PreKeyRegistry: index loaded from shelf"
+        );
     }
 
     /// Load the revocation set from Shelf on construction.
     ///
     /// Expects format `[[owner_did, accessor_did], ...]`.
     async fn load_revoked(&mut self) {
-        let Some(shelf) = &self.shelf else { return; };
-        let Some(bytes) = shelf.get(BUCKET_PRE_KEYS, "_revoked").await else { return; };
-        let Ok(list) = serde_json::from_slice::<Vec<[String; 2]>>(&bytes) else { return; };
+        let Some(shelf) = &self.shelf else {
+            return;
+        };
+        let Some(bytes) = shelf.get(BUCKET_PRE_KEYS, "_revoked").await else {
+            return;
+        };
+        let Ok(list) = serde_json::from_slice::<Vec<[String; 2]>>(&bytes) else {
+            return;
+        };
         let mut rev = self.revoked.write().await;
         for [owner, accessor] in list {
             rev.insert((owner, accessor));
         }
-        tracing::info!(revoked = rev.len(), "PreKeyRegistry: revocation set loaded from shelf");
+        tracing::info!(
+            revoked = rev.len(),
+            "PreKeyRegistry: revocation set loaded from shelf"
+        );
     }
 
     /// Persist the full revocation set (called after every revoke).
     ///
     /// Format: `[[owner_did, accessor_did], ...]`
     async fn persist_revoked_set(&self) {
-        let Some(shelf) = &self.shelf else { return; };
-        let list: Vec<[String; 2]> = self.revoked.read().await
+        let Some(shelf) = &self.shelf else {
+            return;
+        };
+        let list: Vec<[String; 2]> = self
+            .revoked
+            .read()
+            .await
             .iter()
             .map(|(o, a)| [o.clone(), a.clone()])
             .collect();
-        let Ok(json) = serde_json::to_vec(&list) else { return; };
-        shelf.put(BUCKET_PRE_KEYS, "_revoked".to_string(), Bytes::from(json)).await;
+        let Ok(json) = serde_json::to_vec(&list) else {
+            return;
+        };
+        shelf
+            .put(BUCKET_PRE_KEYS, "_revoked".to_string(), Bytes::from(json))
+            .await;
     }
 }
 
@@ -334,12 +396,17 @@ mod tests {
     async fn grant_and_retrieve_roundtrip() {
         let reg = PreKeyRegistry::new(store());
         let enc_key = rand_key();
-        let re_key  = rand_key();
+        let re_key = rand_key();
 
-        reg.grant("did:owner", "did:accessor", &re_key, &enc_key).await.unwrap();
+        reg.grant("did:owner", "did:accessor", &re_key, &enc_key)
+            .await
+            .unwrap();
 
         // Test storage layer directly.
-        let recovered = reg.unwrap_rekey("did:owner", "did:accessor", &enc_key).await.unwrap();
+        let recovered = reg
+            .unwrap_rekey("did:owner", "did:accessor", &enc_key)
+            .await
+            .unwrap();
         assert_eq!(recovered.as_slice(), re_key);
     }
 
@@ -347,7 +414,9 @@ mod tests {
     async fn revoke_removes_entry() {
         let reg = PreKeyRegistry::new(store());
         let enc_key = rand_key();
-        reg.grant("did:owner", "did:bob", &rand_key(), &enc_key).await.unwrap();
+        reg.grant("did:owner", "did:bob", &rand_key(), &enc_key)
+            .await
+            .unwrap();
         reg.revoke("did:owner", "did:bob").await;
         let result = reg.unwrap_rekey("did:owner", "did:bob", &enc_key).await;
         assert!(matches!(result, Err(PreKeyError::NotFound(_, _))));
@@ -357,8 +426,12 @@ mod tests {
     async fn list_accessors_after_grant() {
         let reg = PreKeyRegistry::new(store());
         let enc_key = rand_key();
-        reg.grant("did:alice", "did:bob",   &rand_key(), &enc_key).await.unwrap();
-        reg.grant("did:alice", "did:carol", &rand_key(), &enc_key).await.unwrap();
+        reg.grant("did:alice", "did:bob", &rand_key(), &enc_key)
+            .await
+            .unwrap();
+        reg.grant("did:alice", "did:carol", &rand_key(), &enc_key)
+            .await
+            .unwrap();
         let mut list = reg.list_accessors("did:alice").await;
         list.sort();
         assert_eq!(list, vec!["did:bob", "did:carol"]);
@@ -369,18 +442,22 @@ mod tests {
         let s = store();
         let shelf = Arc::new(Shelf::new());
         let enc_key = rand_key();
-        let re_key  = rand_key();
+        let re_key = rand_key();
 
         // Simulate first run: grant and persist.
         {
             let reg = PreKeyRegistry::with_shelf(Arc::clone(&s), Arc::clone(&shelf)).await;
-            reg.grant("did:alice", "did:bob", &re_key, &enc_key).await.unwrap();
+            reg.grant("did:alice", "did:bob", &re_key, &enc_key)
+                .await
+                .unwrap();
         }
 
         // Simulate restart: load from shelf.
         {
             let reg = PreKeyRegistry::with_shelf(Arc::clone(&s), Arc::clone(&shelf)).await;
-            let recovered = reg.unwrap_rekey("did:alice", "did:bob", &enc_key).await
+            let recovered = reg
+                .unwrap_rekey("did:alice", "did:bob", &enc_key)
+                .await
                 .expect("grant must survive restart");
             assert_eq!(recovered.as_slice(), re_key);
         }
@@ -392,12 +469,20 @@ mod tests {
         // We test via unwrap_rekey absence + revoked set directly.
         let reg = PreKeyRegistry::new(store());
         let enc_key = rand_key();
-        reg.grant("did:owner", "did:eve", &rand_key(), &enc_key).await.unwrap();
+        reg.grant("did:owner", "did:eve", &rand_key(), &enc_key)
+            .await
+            .unwrap();
         reg.revoke("did:owner", "did:eve").await;
         // After revoke, index entry is gone → NotFound.
-        assert!(reg.unwrap_rekey("did:owner", "did:eve", &enc_key).await.is_err());
+        assert!(reg
+            .unwrap_rekey("did:owner", "did:eve", &enc_key)
+            .await
+            .is_err());
         // revoked set should contain the pair.
-        assert!(reg.revoked.read().await
+        assert!(reg
+            .revoked
+            .read()
+            .await
             .contains(&("did:owner".to_string(), "did:eve".to_string())));
     }
 
@@ -406,14 +491,19 @@ mod tests {
         let s = store();
         let reg = PreKeyRegistry::new(Arc::clone(&s));
         let enc_key = rand_key();
-        reg.grant("did:alice", "did:bob", &rand_key(), &enc_key).await.unwrap();
+        reg.grant("did:alice", "did:bob", &rand_key(), &enc_key)
+            .await
+            .unwrap();
 
-        let evidence_cid = reg.revoke_emit_warrant("did:alice", "did:bob").await.unwrap();
+        let evidence_cid = reg
+            .revoke_emit_warrant("did:alice", "did:bob")
+            .await
+            .unwrap();
 
         // Evidence block must be retrievable from BlockStore.
         let raw = s.get(&evidence_cid).unwrap().unwrap();
         let rec: RekeyRevocationRecord = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(rec.owner_did,    "did:alice");
+        assert_eq!(rec.owner_did, "did:alice");
         assert_eq!(rec.accessor_did, "did:bob");
     }
 
@@ -421,20 +511,32 @@ mod tests {
     async fn apply_revocation_warrant_revokes_locally() {
         let s = store();
         let enc_key = rand_key();
-        let re_key  = rand_key();
+        let re_key = rand_key();
 
         // Node A: holds the grant and emits a warrant.
         let node_a = PreKeyRegistry::new(Arc::clone(&s));
-        node_a.grant("did:alice", "did:bob", &re_key, &enc_key).await.unwrap();
-        let evidence_cid = node_a.revoke_emit_warrant("did:alice", "did:bob").await.unwrap();
+        node_a
+            .grant("did:alice", "did:bob", &re_key, &enc_key)
+            .await
+            .unwrap();
+        let evidence_cid = node_a
+            .revoke_emit_warrant("did:alice", "did:bob")
+            .await
+            .unwrap();
 
         // Node B: receives the warrant — applies it locally.
         let node_b = PreKeyRegistry::new(Arc::clone(&s));
-        node_b.grant("did:alice", "did:bob", &re_key, &enc_key).await.unwrap();
+        node_b
+            .grant("did:alice", "did:bob", &re_key, &enc_key)
+            .await
+            .unwrap();
         node_b.apply_revocation_warrant(&evidence_cid).await;
 
         // Node B should now have the pair revoked.
-        assert!(node_b.revoked.read().await
+        assert!(node_b
+            .revoked
+            .read()
+            .await
             .contains(&("did:alice".to_string(), "did:bob".to_string())));
     }
 
@@ -445,10 +547,10 @@ mod tests {
     /// to `get_rekey_authed()` to retrieve an unrelated re-key entry.
     #[tokio::test]
     async fn issuer_mismatch_rejected_by_get_rekey_authed() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
         use ed25519_dalek::{Signer, SigningKey};
-        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-        use kotoba_auth::{Cacao, CacaoHeader, CacaoPayload, CacaoSig, DelegationChain};
         use kotoba_auth::ed25519_pubkey_to_did_key;
+        use kotoba_auth::{Cacao, CacaoHeader, CacaoPayload, CacaoSig, DelegationChain};
 
         // accessor-A: has a valid grant and provides a valid signed CACAO.
         let sk_a = SigningKey::from_bytes(&[11u8; 32]);
@@ -458,29 +560,38 @@ mod tests {
         let accessor_b_did = "did:key:zAttackerWantsThis";
 
         let owner_did = "did:key:zOwner";
-        let enc_key   = rand_key();
-        let re_key_b  = rand_key();
+        let enc_key = rand_key();
+        let re_key_b = rand_key();
 
         let reg = PreKeyRegistry::new(store());
-        reg.grant(owner_did, &accessor_a_did, &rand_key(), &enc_key).await.unwrap();
-        reg.grant(owner_did, accessor_b_did, &re_key_b, &enc_key).await.unwrap();
+        reg.grant(owner_did, &accessor_a_did, &rand_key(), &enc_key)
+            .await
+            .unwrap();
+        reg.grant(owner_did, accessor_b_did, &re_key_b, &enc_key)
+            .await
+            .unwrap();
 
         // Build a valid CACAO signed by accessor-A.
         let payload = CacaoPayload {
-            iss:       accessor_a_did.clone(),
-            aud:       "kotoba://test".into(),
+            iss: accessor_a_did.clone(),
+            aud: "kotoba://test".into(),
             issued_at: "2026-05-26T00:00:00Z".into(),
-            expiry:    None,
-            nonce:     "issuer-mismatch-nonce".into(),
-            domain:    "kotoba.test".into(),
+            expiry: None,
+            nonce: "issuer-mismatch-nonce".into(),
+            domain: "kotoba.test".into(),
             statement: None,
-            version:   "1".into(),
+            version: "1".into(),
             resources: vec![],
         };
         let mut cacao = Cacao {
-            h: CacaoHeader { t: "caip122".into() },
+            h: CacaoHeader {
+                t: "caip122".into(),
+            },
             p: payload,
-            s: CacaoSig { t: "EdDSA".into(), s: String::new() },
+            s: CacaoSig {
+                t: "EdDSA".into(),
+                s: String::new(),
+            },
         };
         let sig = sk_a.sign(cacao.siwe_message().as_bytes());
         cacao.s.s = URL_SAFE_NO_PAD.encode(sig.to_bytes());
@@ -509,8 +620,10 @@ mod tests {
     fn pre_key_error_not_found_display() {
         let e = PreKeyError::NotFound("did:owner".to_string(), "did:acc".to_string());
         let s = e.to_string();
-        assert!(s.contains("did:owner") && s.contains("did:acc"),
-            "NotFound display must include both DIDs, got: {s}");
+        assert!(
+            s.contains("did:owner") && s.contains("did:acc"),
+            "NotFound display must include both DIDs, got: {s}"
+        );
     }
 
     #[test]
@@ -523,28 +636,34 @@ mod tests {
     fn pre_key_error_serde_display() {
         let e = PreKeyError::Serde("bad json".to_string());
         let s = e.to_string();
-        assert!(s.contains("bad json") || s.contains("serialization"), "got: {s}");
+        assert!(
+            s.contains("bad json") || s.contains("serialization"),
+            "got: {s}"
+        );
     }
 
     #[test]
     fn rekey_revocation_record_serde_roundtrip() {
         let rec = RekeyRevocationRecord {
-            owner_did:    "did:key:zOwner".to_string(),
+            owner_did: "did:key:zOwner".to_string(),
             accessor_did: "did:key:zAcc".to_string(),
-            revoked_at:   1_700_000_000_000,
+            revoked_at: 1_700_000_000_000,
         };
         let json = serde_json::to_string(&rec).unwrap();
         let back: RekeyRevocationRecord = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.owner_did,    rec.owner_did);
+        assert_eq!(back.owner_did, rec.owner_did);
         assert_eq!(back.accessor_did, rec.accessor_did);
-        assert_eq!(back.revoked_at,   rec.revoked_at);
+        assert_eq!(back.revoked_at, rec.revoked_at);
     }
 
     #[tokio::test]
     async fn list_accessors_empty_for_unknown_owner() {
         let reg = PreKeyRegistry::new(store());
         let list = reg.list_accessors("did:unknown").await;
-        assert!(list.is_empty(), "unknown owner must return empty accessor list");
+        assert!(
+            list.is_empty(),
+            "unknown owner must return empty accessor list"
+        );
     }
 
     #[tokio::test]
@@ -552,10 +671,15 @@ mod tests {
         // Revoking an already-revoked pair must not panic.
         let reg = PreKeyRegistry::new(store());
         let enc_key = rand_key();
-        reg.grant("did:alice", "did:bob", &rand_key(), &enc_key).await.unwrap();
+        reg.grant("did:alice", "did:bob", &rand_key(), &enc_key)
+            .await
+            .unwrap();
         reg.revoke("did:alice", "did:bob").await;
         reg.revoke("did:alice", "did:bob").await; // second revoke — must not panic
-        assert!(reg.revoked.read().await
+        assert!(reg
+            .revoked
+            .read()
+            .await
             .contains(&("did:alice".to_string(), "did:bob".to_string())));
     }
 }

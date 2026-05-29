@@ -11,13 +11,12 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use kotoba_core::cid::KotobaCid;
-use kotoba_kse::vault::Vault;
 use kotoba_kqe::delta::Delta;
+use kotoba_kse::vault::Vault;
 
 use crate::gpu_common::{
-    dequantize_fp8_e4m3, quantize_f32_to_fp8_e4m3,
-    cpu_matmul, f32_slice_to_bytes, bytes_to_f32_slice,
-    MATMUL_WGSL,
+    bytes_to_f32_slice, cpu_matmul, dequantize_fp8_e4m3, f32_slice_to_bytes,
+    quantize_f32_to_fp8_e4m3, MATMUL_WGSL,
 };
 use crate::train::{AdamMoments, GradientRef, OptimizerStep, TrainBatch};
 use crate::weight::{WeightKind, WeightRef};
@@ -114,16 +113,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// AdamW hyperparameters.
 #[derive(Debug, Clone)]
 pub struct AdamConfig {
-    pub lr:           f32,
-    pub beta1:        f32,
-    pub beta2:        f32,
-    pub eps:          f32,
+    pub lr: f32,
+    pub beta1: f32,
+    pub beta2: f32,
+    pub eps: f32,
     pub weight_decay: f32,
 }
 
 impl Default for AdamConfig {
     fn default() -> Self {
-        Self { lr: 1e-4, beta1: 0.9, beta2: 0.999, eps: 1e-8, weight_decay: 0.01 }
+        Self {
+            lr: 1e-4,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            weight_decay: 0.01,
+        }
     }
 }
 
@@ -131,55 +136,67 @@ impl Default for AdamConfig {
 #[derive(Debug)]
 pub struct TrainStepResult {
     /// Atomic Delta pairs for each updated weight: [retract_old, assert_new]
-    pub weight_deltas:  Vec<[Delta; 2]>,
+    pub weight_deltas: Vec<[Delta; 2]>,
     /// Moment retract/assert quads for each weight: [retract_m1, retract_m2, assert_m1, assert_m2]
-    pub moment_deltas:  Vec<[Delta; 4]>,
+    pub moment_deltas: Vec<[Delta; 4]>,
     /// Gradient retract deltas (apply after weight_deltas to clean up ephemeral grads)
-    pub grad_retracts:  Vec<Delta>,
+    pub grad_retracts: Vec<Delta>,
 }
 
 /// WebGPU-backed fine-tuner for embedding + LM head (2-layer scope).
 pub struct WebGpuTrainer {
-    pub vault:  Arc<Vault>,
+    pub vault: Arc<Vault>,
     pub config: AdamConfig,
-    pub step:   u64,
+    pub step: u64,
 }
 
 impl WebGpuTrainer {
     pub fn new(vault: Arc<Vault>, config: AdamConfig) -> Self {
-        Self { vault, config, step: 0 }
+        Self {
+            vault,
+            config,
+            step: 0,
+        }
     }
 
     /// Execute one fine-tuning step (CPU emulation of WGSL logic; no wgpu device needed).
     pub async fn train_step(
         &mut self,
-        model_cid:    KotobaCid,
-        graph_cid:    KotobaCid,
-        embed_ref:    &WeightRef,
-        lmhead_ref:   &WeightRef,
-        embed_m:      Option<&AdamMoments>,
-        lmhead_m:     Option<&AdamMoments>,
-        batch:        &TrainBatch,
-        vocab_size:   u32,
-        hidden_dim:   u32,
+        model_cid: KotobaCid,
+        graph_cid: KotobaCid,
+        embed_ref: &WeightRef,
+        lmhead_ref: &WeightRef,
+        embed_m: Option<&AdamMoments>,
+        lmhead_m: Option<&AdamMoments>,
+        batch: &TrainBatch,
+        vocab_size: u32,
+        hidden_dim: u32,
     ) -> anyhow::Result<TrainStepResult> {
         self.step += 1;
         let t = self.step as f32;
 
-        let embed_bytes  = self.vault.get(&embed_ref.blob_cid).await
+        let embed_bytes = self
+            .vault
+            .get(&embed_ref.blob_cid)
+            .await
             .ok_or_else(|| anyhow::anyhow!("embed weight not found in Vault"))?;
-        let lmhead_bytes = self.vault.get(&lmhead_ref.blob_cid).await
+        let lmhead_bytes = self
+            .vault
+            .get(&lmhead_ref.blob_cid)
+            .await
             .ok_or_else(|| anyhow::anyhow!("lmhead weight not found in Vault"))?;
 
-        let mut embed_f32  = dequantize_fp8_e4m3(&embed_bytes);
+        let mut embed_f32 = dequantize_fp8_e4m3(&embed_bytes);
         let mut lmhead_f32 = dequantize_fp8_e4m3(&lmhead_bytes);
 
         let seq_len = batch.input_tokens.len();
-        let v       = vocab_size as usize;
-        let h       = hidden_dim as usize;
+        let v = vocab_size as usize;
+        let h = hidden_dim as usize;
 
-        let (mut embed_m1, mut embed_m2)   = load_or_init_moments(&self.vault, embed_m,  embed_f32.len()).await;
-        let (mut lmhead_m1, mut lmhead_m2) = load_or_init_moments(&self.vault, lmhead_m, lmhead_f32.len()).await;
+        let (mut embed_m1, mut embed_m2) =
+            load_or_init_moments(&self.vault, embed_m, embed_f32.len()).await;
+        let (mut lmhead_m1, mut lmhead_m2) =
+            load_or_init_moments(&self.vault, lmhead_m, lmhead_f32.len()).await;
 
         // Forward: embed lookup
         let mut hidden = vec![0.0f32; seq_len * h];
@@ -194,7 +211,13 @@ impl WebGpuTrainer {
 
         // CE loss gradient
         let mut logit_grad = vec![0.0f32; seq_len * v];
-        cpu_ce_loss_grad(&logits, &batch.target_tokens, &mut logit_grad, batch.quality, v);
+        cpu_ce_loss_grad(
+            &logits,
+            &batch.target_tokens,
+            &mut logit_grad,
+            batch.quality,
+            v,
+        );
 
         // Backward: LM head gradient
         let mut grad_lmhead = vec![0.0f32; h * v];
@@ -204,81 +227,115 @@ impl WebGpuTrainer {
         let mut grad_embed = vec![0.0f32; v * h];
         {
             let mut lmhead_t = vec![0.0f32; v * h];
-            for i in 0..h { for j in 0..v { lmhead_t[j * h + i] = lmhead_f32[i * v + j]; } }
+            for i in 0..h {
+                for j in 0..v {
+                    lmhead_t[j * h + i] = lmhead_f32[i * v + j];
+                }
+            }
             let mut delta_hidden = vec![0.0f32; seq_len * h];
             cpu_matmul(&logit_grad, &lmhead_t, &mut delta_hidden, seq_len, v, h);
             for (ti, &tok) in batch.input_tokens.iter().enumerate() {
                 let row = (tok as usize).min(v - 1);
-                for j in 0..h { grad_embed[row * h + j] += delta_hidden[ti * h + j]; }
+                for j in 0..h {
+                    grad_embed[row * h + j] += delta_hidden[ti * h + j];
+                }
             }
         }
 
         // AdamW update
         let cfg = &self.config;
-        adamw_step(&mut embed_f32,  &grad_embed,  &mut embed_m1,  &mut embed_m2,  cfg, t);
-        adamw_step(&mut lmhead_f32, &grad_lmhead, &mut lmhead_m1, &mut lmhead_m2, cfg, t);
+        adamw_step(
+            &mut embed_f32,
+            &grad_embed,
+            &mut embed_m1,
+            &mut embed_m2,
+            cfg,
+            t,
+        );
+        adamw_step(
+            &mut lmhead_f32,
+            &grad_lmhead,
+            &mut lmhead_m1,
+            &mut lmhead_m2,
+            cfg,
+            t,
+        );
 
         // Quantize → Vault
-        let new_embed_bytes  = Bytes::from(quantize_f32_to_fp8_e4m3(&embed_f32));
+        let new_embed_bytes = Bytes::from(quantize_f32_to_fp8_e4m3(&embed_f32));
         let new_lmhead_bytes = Bytes::from(quantize_f32_to_fp8_e4m3(&lmhead_f32));
-        let new_embed_blob   = self.vault.put(new_embed_bytes).await;
-        let new_lmhead_blob  = self.vault.put(new_lmhead_bytes).await;
+        let new_embed_blob = self.vault.put(new_embed_bytes).await;
+        let new_lmhead_blob = self.vault.put(new_lmhead_bytes).await;
 
-        let new_em1_blob = self.vault.put(Bytes::from(f32_slice_to_bytes(&embed_m1))).await;
-        let new_em2_blob = self.vault.put(Bytes::from(f32_slice_to_bytes(&embed_m2))).await;
-        let new_lm1_blob = self.vault.put(Bytes::from(f32_slice_to_bytes(&lmhead_m1))).await;
-        let new_lm2_blob = self.vault.put(Bytes::from(f32_slice_to_bytes(&lmhead_m2))).await;
+        let new_em1_blob = self
+            .vault
+            .put(Bytes::from(f32_slice_to_bytes(&embed_m1)))
+            .await;
+        let new_em2_blob = self
+            .vault
+            .put(Bytes::from(f32_slice_to_bytes(&embed_m2)))
+            .await;
+        let new_lm1_blob = self
+            .vault
+            .put(Bytes::from(f32_slice_to_bytes(&lmhead_m1)))
+            .await;
+        let new_lm2_blob = self
+            .vault
+            .put(Bytes::from(f32_slice_to_bytes(&lmhead_m2)))
+            .await;
 
         // Build Delta payloads
         let embed_step = OptimizerStep {
-            model_cid:      model_cid.clone(),
-            kind:           WeightKind::Embed,
+            model_cid: model_cid.clone(),
+            kind: WeightKind::Embed,
             old_weight_cid: embed_ref.blob_cid.clone(),
             new_weight_cid: new_embed_blob.cid.clone(),
-            shape:          embed_ref.shape.clone(),
-            step:           self.step,
+            shape: embed_ref.shape.clone(),
+            step: self.step,
         };
         let lmhead_step = OptimizerStep {
-            model_cid:      model_cid.clone(),
-            kind:           WeightKind::LmHead,
+            model_cid: model_cid.clone(),
+            kind: WeightKind::LmHead,
             old_weight_cid: lmhead_ref.blob_cid.clone(),
             new_weight_cid: new_lmhead_blob.cid.clone(),
-            shape:          lmhead_ref.shape.clone(),
-            step:           self.step,
+            shape: lmhead_ref.shape.clone(),
+            step: self.step,
         };
 
         let embed_grad_ref = GradientRef {
             model_cid: model_cid.clone(),
-            kind:      WeightKind::Embed,
-            step:      self.step,
-            blob_cid:  new_embed_blob.cid.clone(),
-            shape:     embed_ref.shape.clone(),
+            kind: WeightKind::Embed,
+            step: self.step,
+            blob_cid: new_embed_blob.cid.clone(),
+            shape: embed_ref.shape.clone(),
         };
         let lmhead_grad_ref = GradientRef {
             model_cid: model_cid.clone(),
-            kind:      WeightKind::LmHead,
-            step:      self.step,
-            blob_cid:  new_lmhead_blob.cid.clone(),
-            shape:     lmhead_ref.shape.clone(),
+            kind: WeightKind::LmHead,
+            step: self.step,
+            blob_cid: new_lmhead_blob.cid.clone(),
+            shape: lmhead_ref.shape.clone(),
         };
 
         let new_embed_moments = AdamMoments {
             model_cid: model_cid.clone(),
-            kind:      WeightKind::Embed,
-            m1_cid:    new_em1_blob.cid,
-            m2_cid:    new_em2_blob.cid,
-            shape:     embed_ref.shape.clone(),
+            kind: WeightKind::Embed,
+            m1_cid: new_em1_blob.cid,
+            m2_cid: new_em2_blob.cid,
+            shape: embed_ref.shape.clone(),
         };
         let new_lmhead_moments = AdamMoments {
             model_cid: model_cid.clone(),
-            kind:      WeightKind::LmHead,
-            m1_cid:    new_lm1_blob.cid,
-            m2_cid:    new_lm2_blob.cid,
-            shape:     lmhead_ref.shape.clone(),
+            kind: WeightKind::LmHead,
+            m1_cid: new_lm1_blob.cid,
+            m2_cid: new_lm2_blob.cid,
+            shape: lmhead_ref.shape.clone(),
         };
 
-        let embed_moment_deltas  = moment_swap_deltas(embed_m,  &new_embed_moments,  graph_cid.clone());
-        let lmhead_moment_deltas = moment_swap_deltas(lmhead_m, &new_lmhead_moments, graph_cid.clone());
+        let embed_moment_deltas =
+            moment_swap_deltas(embed_m, &new_embed_moments, graph_cid.clone());
+        let lmhead_moment_deltas =
+            moment_swap_deltas(lmhead_m, &new_lmhead_moments, graph_cid.clone());
 
         Ok(TrainStepResult {
             weight_deltas: vec![
@@ -300,7 +357,9 @@ fn cpu_matmul_at(a: &[f32], delta: &[f32], g: &mut [f32], m: usize, n: usize, k:
     for row in 0..n {
         for col in 0..k {
             let mut acc = 0.0f32;
-            for i in 0..m { acc += a[i * n + row] * delta[i * k + col]; }
+            for i in 0..m {
+                acc += a[i * n + row] * delta[i * k + col];
+            }
             g[row * k + col] = acc;
         }
     }
@@ -308,9 +367,9 @@ fn cpu_matmul_at(a: &[f32], delta: &[f32], g: &mut [f32], m: usize, n: usize, k:
 
 fn cpu_ce_loss_grad(logits: &[f32], labels: &[u32], grad: &mut [f32], quality: f32, vocab: usize) {
     let seq_len = labels.len();
-    let scale   = quality / seq_len as f32;
+    let scale = quality / seq_len as f32;
     for t in 0..seq_len {
-        let base  = t * vocab;
+        let base = t * vocab;
         let slice = &logits[base..base + vocab];
         let max_v = slice.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let sum_e: f32 = slice.iter().map(|&x| (x - max_v).exp()).sum();
@@ -337,7 +396,11 @@ fn adamw_step(w: &mut [f32], g: &[f32], m1: &mut [f32], m2: &mut [f32], cfg: &Ad
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-async fn load_or_init_moments(vault: &Vault, moments: Option<&AdamMoments>, n: usize) -> (Vec<f32>, Vec<f32>) {
+async fn load_or_init_moments(
+    vault: &Vault,
+    moments: Option<&AdamMoments>,
+    n: usize,
+) -> (Vec<f32>, Vec<f32>) {
     if let Some(m) = moments {
         let m1_bytes = vault.get(&m.m1_cid).await;
         let m2_bytes = vault.get(&m.m2_cid).await;
@@ -348,23 +411,32 @@ async fn load_or_init_moments(vault: &Vault, moments: Option<&AdamMoments>, n: u
     (vec![0.0f32; n], vec![0.0f32; n])
 }
 
-fn moment_swap_deltas(old: Option<&AdamMoments>, new_m: &AdamMoments, graph_cid: KotobaCid) -> [Delta; 4] {
+fn moment_swap_deltas(
+    old: Option<&AdamMoments>,
+    new_m: &AdamMoments,
+    graph_cid: KotobaCid,
+) -> [Delta; 4] {
     let retracts: [Delta; 2] = if let Some(old_m) = old {
         old_m.to_retract_deltas(graph_cid.clone())
     } else {
         new_m.to_retract_deltas(graph_cid.clone())
     };
     let asserts = new_m.to_assert_deltas(graph_cid);
-    [retracts[0].clone(), retracts[1].clone(), asserts[0].clone(), asserts[1].clone()]
+    [
+        retracts[0].clone(),
+        retracts[1].clone(),
+        asserts[0].clone(),
+        asserts[1].clone(),
+    ]
 }
 
 /// Returns all WGSL source strings for training pipeline.
 pub fn wgsl_shaders() -> [(&'static str, &'static str); 4] {
     [
-        ("matmul",    MATMUL_WGSL),
+        ("matmul", MATMUL_WGSL),
         ("matmul_at", MATMUL_AT_WGSL),
-        ("ce_loss",   CE_LOSS_WGSL),
-        ("adamw",     ADAMW_WGSL),
+        ("ce_loss", CE_LOSS_WGSL),
+        ("adamw", ADAMW_WGSL),
     ]
 }
 
@@ -374,10 +446,10 @@ mod tests {
 
     #[test]
     fn ce_loss_grad_sums_to_zero_for_uniform_logits() {
-        let vocab   = 4usize;
+        let vocab = 4usize;
         let seq_len = 2usize;
-        let logits  = vec![0.0f32; seq_len * vocab];
-        let labels  = vec![0u32, 1u32];
+        let logits = vec![0.0f32; seq_len * vocab];
+        let labels = vec![0u32, 1u32];
         let mut grad = vec![0.0f32; seq_len * vocab];
         cpu_ce_loss_grad(&logits, &labels, &mut grad, 1.0, vocab);
         for t in 0..seq_len {
@@ -388,11 +460,11 @@ mod tests {
 
     #[test]
     fn adamw_step_decreases_weight() {
-        let mut w  = vec![1.0f32];
-        let g      = vec![1.0f32];
+        let mut w = vec![1.0f32];
+        let g = vec![1.0f32];
         let mut m1 = vec![0.0f32];
         let mut m2 = vec![0.0f32];
-        let cfg    = AdamConfig::default();
+        let cfg = AdamConfig::default();
         adamw_step(&mut w, &g, &mut m1, &mut m2, &cfg, 1.0);
         assert!(w[0] < 1.0, "weight should decrease: {}", w[0]);
     }
@@ -400,7 +472,7 @@ mod tests {
     #[test]
     fn matmul_at_transpose() {
         // A^T × delta: A=[1,2;3,4] (2×2), delta=[1,0;0,1] (identity) → A^T=[1,3;2,4]
-        let a     = vec![1.0f32, 2.0, 3.0, 4.0]; // 2×2
+        let a = vec![1.0f32, 2.0, 3.0, 4.0]; // 2×2
         let delta = vec![1.0f32, 0.0, 0.0, 1.0]; // 2×2 identity
         let mut g = vec![0.0f32; 4];
         cpu_matmul_at(&a, &delta, &mut g, 2, 2, 2);
@@ -410,17 +482,17 @@ mod tests {
     #[test]
     fn adam_config_default_fields() {
         let cfg = AdamConfig::default();
-        assert!((cfg.lr           - 1e-4).abs() < 1e-10);
-        assert!((cfg.beta1        - 0.9 ).abs() < 1e-10);
-        assert!((cfg.beta2        - 0.999).abs() < 1e-10);
-        assert!((cfg.eps          - 1e-8).abs() < 1e-15);
+        assert!((cfg.lr - 1e-4).abs() < 1e-10);
+        assert!((cfg.beta1 - 0.9).abs() < 1e-10);
+        assert!((cfg.beta2 - 0.999).abs() < 1e-10);
+        assert!((cfg.eps - 1e-8).abs() < 1e-15);
         assert!((cfg.weight_decay - 0.01).abs() < 1e-10);
     }
 
     #[test]
     fn adam_config_clone_is_equal() {
-        let cfg   = AdamConfig::default();
-        let cfg2  = cfg.clone();
+        let cfg = AdamConfig::default();
+        let cfg2 = cfg.clone();
         // No PartialEq on AdamConfig — compare fields manually
         assert!((cfg.lr - cfg2.lr).abs() < 1e-15);
         assert!((cfg.beta1 - cfg2.beta1).abs() < 1e-15);
@@ -430,7 +502,7 @@ mod tests {
     #[test]
     fn adam_config_debug_contains_lr() {
         let cfg = AdamConfig::default();
-        let s   = format!("{:?}", cfg);
+        let s = format!("{:?}", cfg);
         assert!(s.contains("lr"), "Debug output must mention 'lr': {s}");
     }
 
@@ -450,8 +522,14 @@ mod tests {
     #[test]
     fn wgsl_shaders_source_non_empty() {
         for (name, src) in wgsl_shaders() {
-            assert!(!src.is_empty(), "shader '{name}' must have non-empty WGSL source");
-            assert!(src.contains("@compute"), "shader '{name}' must contain @compute");
+            assert!(
+                !src.is_empty(),
+                "shader '{name}' must have non-empty WGSL source"
+            );
+            assert!(
+                src.contains("@compute"),
+                "shader '{name}' must contain @compute"
+            );
         }
     }
 
@@ -459,25 +537,41 @@ mod tests {
     fn ce_loss_grad_correct_label_gets_negative_gradient() {
         // For a single token with one-hot label=0, the gradient at position 0
         // should be (softmax_0 - 1) * scale < 0.
-        let vocab   = 3usize;
-        let logits  = vec![2.0f32, 0.0, 0.0]; // label 0 has highest logit
-        let labels  = vec![0u32];
+        let vocab = 3usize;
+        let logits = vec![2.0f32, 0.0, 0.0]; // label 0 has highest logit
+        let labels = vec![0u32];
         let mut grad = vec![0.0f32; vocab];
         cpu_ce_loss_grad(&logits, &labels, &mut grad, 1.0, vocab);
-        assert!(grad[0] < 0.0, "gradient at correct label should be negative: {}", grad[0]);
-        assert!(grad[1] > 0.0, "gradient at incorrect label should be positive: {}", grad[1]);
+        assert!(
+            grad[0] < 0.0,
+            "gradient at correct label should be negative: {}",
+            grad[0]
+        );
+        assert!(
+            grad[1] > 0.0,
+            "gradient at incorrect label should be positive: {}",
+            grad[1]
+        );
     }
 
     #[test]
     fn adamw_zero_gradient_applies_weight_decay_only() {
-        let mut w  = vec![1.0f32];
-        let g      = vec![0.0f32]; // zero gradient
+        let mut w = vec![1.0f32];
+        let g = vec![0.0f32]; // zero gradient
         let mut m1 = vec![0.0f32];
         let mut m2 = vec![0.0f32];
-        let cfg    = AdamConfig::default();
+        let cfg = AdamConfig::default();
         adamw_step(&mut w, &g, &mut m1, &mut m2, &cfg, 1.0);
         // With zero gradient, weight decay only: w ≈ w*(1 - lr*wd) = 1*(1 - 1e-4*0.01) ≈ 0.999999
-        assert!(w[0] < 1.0, "weight decay must reduce weight even with zero gradient: {}", w[0]);
-        assert!(w[0] > 0.999, "weight decay alone should not reduce too much: {}", w[0]);
+        assert!(
+            w[0] < 1.0,
+            "weight decay must reduce weight even with zero gradient: {}",
+            w[0]
+        );
+        assert!(
+            w[0] > 0.999,
+            "weight decay alone should not reduce too much: {}",
+            w[0]
+        );
     }
 }

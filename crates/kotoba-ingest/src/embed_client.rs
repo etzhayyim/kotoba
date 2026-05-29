@@ -27,10 +27,7 @@ type EmbedFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<Vec<f32>>>> + Send
 /// Implementations return a boxed future so the trait can be used as
 /// `dyn EmbedClient` without the `async_trait` crate.
 pub trait EmbedClient: Send + Sync {
-    fn embed_batch<'a>(
-        &'a self,
-        texts: &'a [&'a str],
-    ) -> EmbedFuture<'a>;
+    fn embed_batch<'a>(&'a self, texts: &'a [&'a str]) -> EmbedFuture<'a>;
 
     fn dim(&self) -> usize;
     fn model_id(&self) -> &str;
@@ -44,30 +41,35 @@ pub trait EmbedClient: Send + Sync {
 /// falls back to Ollama `/api/embeddings` on non-2xx.
 #[derive(Debug, Clone)]
 pub struct HttpEmbedClient {
-    base_url:   String,
-    model:      String,
-    dim:        usize,
+    base_url: String,
+    model: String,
+    dim: usize,
     batch_size: usize,
-    http:       reqwest::Client,
+    http: reqwest::Client,
 }
 
 impl HttpEmbedClient {
     /// Construct from explicit parameters.
-    pub fn new(base_url: impl Into<String>, model: impl Into<String>, dim: usize, batch_size: usize) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+        dim: usize,
+        batch_size: usize,
+    ) -> Self {
         Self {
-            base_url:   base_url.into(),
-            model:      model.into(),
+            base_url: base_url.into(),
+            model: model.into(),
             dim,
             batch_size,
-            http:       reqwest::Client::new(),
+            http: reqwest::Client::new(),
         }
     }
 
     /// Construct from environment variables (with defaults).
     pub fn from_env() -> Result<Self> {
-        let base_url   = std::env::var("KOTOBA_EMBED_URL")
+        let base_url = std::env::var("KOTOBA_EMBED_URL")
             .unwrap_or_else(|_| "http://localhost:11434".to_string());
-        let model      = std::env::var("KOTOBA_EMBED_MODEL")
+        let model = std::env::var("KOTOBA_EMBED_MODEL")
             .unwrap_or_else(|_| "nomic-embed-text:v1.5".to_string());
         let dim: usize = std::env::var("KOTOBA_EMBED_DIM")
             .ok()
@@ -83,7 +85,7 @@ impl HttpEmbedClient {
     /// Try OpenAI-compat batch endpoint.  Returns `None` on non-2xx so caller
     /// can fall back.
     async fn try_openai(&self, texts: &[&str]) -> Option<Vec<Vec<f32>>> {
-        let url  = format!("{}/v1/embeddings", self.base_url.trim_end_matches('/'));
+        let url = format!("{}/v1/embeddings", self.base_url.trim_end_matches('/'));
         let body = json!({ "model": self.model, "input": texts });
         let resp = self.http.post(&url).json(&body).send().await.ok()?;
         if !resp.status().is_success() {
@@ -98,12 +100,16 @@ impl HttpEmbedClient {
                 emb.iter().map(|x| x.as_f64().map(|f| f as f32)).collect()
             })
             .collect();
-        if vecs.len() == texts.len() { Some(vecs) } else { None }
+        if vecs.len() == texts.len() {
+            Some(vecs)
+        } else {
+            None
+        }
     }
 
     /// Ollama single-text endpoint (`/api/embeddings`).
     async fn ollama_single(&self, text: &str) -> Result<Vec<f32>> {
-        let url  = format!("{}/api/embeddings", self.base_url.trim_end_matches('/'));
+        let url = format!("{}/api/embeddings", self.base_url.trim_end_matches('/'));
         let body = json!({ "model": self.model, "prompt": text });
         let resp = self.http.post(&url).json(&body).send().await?;
         let v: serde_json::Value = resp.json().await?;
@@ -112,16 +118,17 @@ impl HttpEmbedClient {
             .and_then(|e| e.as_array())
             .ok_or_else(|| anyhow::anyhow!("Ollama: missing 'embedding' field in response"))?;
         emb.iter()
-            .map(|x| x.as_f64().map(|f| f as f32).ok_or_else(|| anyhow::anyhow!("non-float in embedding")))
+            .map(|x| {
+                x.as_f64()
+                    .map(|f| f as f32)
+                    .ok_or_else(|| anyhow::anyhow!("non-float in embedding"))
+            })
             .collect()
     }
 }
 
 impl EmbedClient for HttpEmbedClient {
-    fn embed_batch<'a>(
-        &'a self,
-        texts: &'a [&'a str],
-    ) -> EmbedFuture<'a> {
+    fn embed_batch<'a>(&'a self, texts: &'a [&'a str]) -> EmbedFuture<'a> {
         Box::pin(async move {
             let mut all: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
 
@@ -142,8 +149,12 @@ impl EmbedClient for HttpEmbedClient {
         })
     }
 
-    fn dim(&self) -> usize { self.dim }
-    fn model_id(&self) -> &str { &self.model }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn model_id(&self) -> &str {
+        &self.model
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -158,10 +169,12 @@ pub struct Blake3EmbedClient {
 }
 
 impl Blake3EmbedClient {
-    pub fn new(dim: usize) -> Self { Self { dim } }
+    pub fn new(dim: usize) -> Self {
+        Self { dim }
+    }
 
     fn pseudo_vector(&self, text: &str) -> Vec<f32> {
-        let hash       = blake3::hash(text.as_bytes());
+        let hash = blake3::hash(text.as_bytes());
         let hash_bytes = hash.as_bytes();
         (0..self.dim)
             .map(|i| (hash_bytes[i % 32] as f32 / 127.5) - 1.0)
@@ -170,17 +183,16 @@ impl Blake3EmbedClient {
 }
 
 impl EmbedClient for Blake3EmbedClient {
-    fn embed_batch<'a>(
-        &'a self,
-        texts: &'a [&'a str],
-    ) -> EmbedFuture<'a> {
-        Box::pin(async move {
-            Ok(texts.iter().map(|t| self.pseudo_vector(t)).collect())
-        })
+    fn embed_batch<'a>(&'a self, texts: &'a [&'a str]) -> EmbedFuture<'a> {
+        Box::pin(async move { Ok(texts.iter().map(|t| self.pseudo_vector(t)).collect()) })
     }
 
-    fn dim(&self) -> usize { self.dim }
-    fn model_id(&self) -> &str { "blake3-pseudo" }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn model_id(&self) -> &str {
+        "blake3-pseudo"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -218,12 +230,14 @@ mod tests {
     #[tokio::test]
     async fn blake3_batch_multiple() {
         let client = Blake3EmbedClient::new(32);
-        let texts  = ["one", "two", "three"];
+        let texts = ["one", "two", "three"];
         let results = client.embed_batch(&texts).await.unwrap();
         assert_eq!(results.len(), 3);
         for v in &results {
             assert_eq!(v.len(), 32);
-            for &x in v { assert!(x >= -1.0 && x <= 1.0); }
+            for &x in v {
+                assert!(x >= -1.0 && x <= 1.0);
+            }
         }
     }
 

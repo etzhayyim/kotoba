@@ -1,19 +1,22 @@
-use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use kotoba_core::cid::KotobaCid;
 use kotoba_core::store::BlockStore;
+use std::sync::{Arc, Mutex};
 
 /// Wraps any BlockStore, passing through all operations while recording every
 /// `put` call.  Used by `QuadStore::commit()` to collect ProllyTree blocks for
 /// CAR bundle assembly without duplicating the write path.
 pub struct CapturingBlockStore {
-    inner:    Arc<dyn BlockStore + Send + Sync>,
+    inner: Arc<dyn BlockStore + Send + Sync>,
     captured: Mutex<Vec<(KotobaCid, Vec<u8>)>>,
 }
 
 impl CapturingBlockStore {
     pub fn new(inner: Arc<dyn BlockStore + Send + Sync>) -> Self {
-        Self { inner, captured: Mutex::new(Vec::new()) }
+        Self {
+            inner,
+            captured: Mutex::new(Vec::new()),
+        }
     }
 
     /// Drain and return all captured (cid, data) pairs, leaving the buffer empty.
@@ -33,7 +36,10 @@ impl CapturingBlockStore {
 impl BlockStore for CapturingBlockStore {
     fn put(&self, cid: &KotobaCid, data: &[u8]) -> anyhow::Result<()> {
         self.inner.put(cid, data)?;
-        self.captured.lock().unwrap().push((cid.clone(), data.to_vec()));
+        self.captured
+            .lock()
+            .unwrap()
+            .push((cid.clone(), data.to_vec()));
         Ok(())
     }
 
@@ -49,9 +55,15 @@ impl BlockStore for CapturingBlockStore {
         self.inner.delete(cid)
     }
 
-    fn pin(&self, cid: &KotobaCid)   { self.inner.pin(cid) }
-    fn unpin(&self, cid: &KotobaCid) { self.inner.unpin(cid) }
-    fn is_pinned(&self, cid: &KotobaCid) -> bool { self.inner.is_pinned(cid) }
+    fn pin(&self, cid: &KotobaCid) {
+        self.inner.pin(cid)
+    }
+    fn unpin(&self, cid: &KotobaCid) {
+        self.inner.unpin(cid)
+    }
+    fn is_pinned(&self, cid: &KotobaCid) -> bool {
+        self.inner.is_pinned(cid)
+    }
 }
 
 #[cfg(test)]
@@ -59,14 +71,16 @@ mod tests {
     use super::*;
     use crate::MemoryBlockStore;
 
-    fn make_cid(tag: &[u8]) -> KotobaCid { KotobaCid::from_bytes(tag) }
+    fn make_cid(tag: &[u8]) -> KotobaCid {
+        KotobaCid::from_bytes(tag)
+    }
 
     #[test]
     fn put_is_captured_and_forwarded() {
         let inner = Arc::new(MemoryBlockStore::default());
-        let cs    = CapturingBlockStore::new(Arc::clone(&inner) as _);
+        let cs = CapturingBlockStore::new(Arc::clone(&inner) as _);
 
-        let cid  = make_cid(b"block-a");
+        let cid = make_cid(b"block-a");
         let data = b"hello";
         cs.put(&cid, data).unwrap();
 
@@ -80,7 +94,7 @@ mod tests {
     #[test]
     fn drain_returns_and_clears_captured() {
         let inner = Arc::new(MemoryBlockStore::default());
-        let cs    = CapturingBlockStore::new(Arc::clone(&inner) as _);
+        let cs = CapturingBlockStore::new(Arc::clone(&inner) as _);
 
         let c1 = make_cid(b"block-1");
         let c2 = make_cid(b"block-2");
@@ -98,7 +112,7 @@ mod tests {
     #[test]
     fn get_and_has_delegate_to_inner() {
         let inner = Arc::new(MemoryBlockStore::default());
-        let cid   = make_cid(b"get-test");
+        let cid = make_cid(b"get-test");
         inner.put(&cid, b"value").unwrap();
 
         let cs = CapturingBlockStore::new(Arc::clone(&inner) as _);
@@ -111,8 +125,8 @@ mod tests {
     #[test]
     fn delete_delegates_to_inner() {
         let inner = Arc::new(MemoryBlockStore::default());
-        let cid   = make_cid(b"del-test");
-        let cs    = CapturingBlockStore::new(Arc::clone(&inner) as _);
+        let cid = make_cid(b"del-test");
+        let cs = CapturingBlockStore::new(Arc::clone(&inner) as _);
 
         cs.put(&cid, b"will-be-deleted").unwrap();
         cs.delete(&cid).unwrap();
@@ -122,9 +136,9 @@ mod tests {
     #[test]
     fn captured_data_matches_written_data() {
         let inner = Arc::new(MemoryBlockStore::default());
-        let cs    = CapturingBlockStore::new(Arc::clone(&inner) as _);
+        let cs = CapturingBlockStore::new(Arc::clone(&inner) as _);
 
-        let cid  = make_cid(b"data-check");
+        let cid = make_cid(b"data-check");
         let data = b"exact payload bytes";
         cs.put(&cid, data).unwrap();
 
@@ -136,7 +150,7 @@ mod tests {
     #[test]
     fn captured_cid_matches_written_cid() {
         let inner = Arc::new(MemoryBlockStore::default());
-        let cs    = CapturingBlockStore::new(Arc::clone(&inner) as _);
+        let cs = CapturingBlockStore::new(Arc::clone(&inner) as _);
 
         let cid = make_cid(b"cid-match");
         cs.put(&cid, b"content").unwrap();
@@ -148,12 +162,12 @@ mod tests {
     #[test]
     fn double_drain_second_drain_is_empty() {
         let inner = Arc::new(MemoryBlockStore::default());
-        let cs    = CapturingBlockStore::new(Arc::clone(&inner) as _);
+        let cs = CapturingBlockStore::new(Arc::clone(&inner) as _);
 
         cs.put(&make_cid(b"a"), b"a").unwrap();
         cs.put(&make_cid(b"b"), b"b").unwrap();
 
-        let first  = cs.drain();
+        let first = cs.drain();
         let second = cs.drain();
         assert_eq!(first.len(), 2);
         assert!(second.is_empty(), "second drain must be empty");
@@ -163,7 +177,7 @@ mod tests {
     #[test]
     fn new_store_is_empty() {
         let inner = Arc::new(MemoryBlockStore::default());
-        let cs    = CapturingBlockStore::new(Arc::clone(&inner) as _);
+        let cs = CapturingBlockStore::new(Arc::clone(&inner) as _);
         assert!(cs.is_empty());
         assert_eq!(cs.len(), 0);
     }
@@ -171,8 +185,8 @@ mod tests {
     #[test]
     fn pin_delegates_to_inner() {
         let inner = Arc::new(MemoryBlockStore::default());
-        let cid   = make_cid(b"pin-test");
-        let cs    = CapturingBlockStore::new(Arc::clone(&inner) as _);
+        let cid = make_cid(b"pin-test");
+        let cs = CapturingBlockStore::new(Arc::clone(&inner) as _);
 
         cs.put(&cid, b"pinned").unwrap();
         cs.pin(&cid);
@@ -184,7 +198,7 @@ mod tests {
     #[test]
     fn multiple_puts_accumulate_in_order() {
         let inner = Arc::new(MemoryBlockStore::default());
-        let cs    = CapturingBlockStore::new(Arc::clone(&inner) as _);
+        let cs = CapturingBlockStore::new(Arc::clone(&inner) as _);
 
         for i in 0u8..5 {
             let cid = make_cid(&[i; 4]);

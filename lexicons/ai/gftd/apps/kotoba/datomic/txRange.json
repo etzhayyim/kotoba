@@ -1,0 +1,29 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.datomic.txRange",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Return the distributed Datomic transaction log for a Kotoba graph. The start transaction is inclusive and the end transaction is exclusive.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["graph"],
+          "properties": {
+            "graph": { "type": "string" },
+            "start": { "type": "string" },
+            "end": { "type": "string" },
+            "cacao_b64": { "type": "string" },
+            "presentation": { "type": "unknown" },
+            "limit": { "type": "integer", "minimum": 0 }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": { "type": "unknown" }
+      }
+    }
+  }
+}

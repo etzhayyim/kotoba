@@ -1,20 +1,22 @@
-use crate::quad::{Quad, QuadObject};
-use crate::delta::{Delta, Multiplicity};
+use crate::datom::{Datom, DatomArrangement, DatomIndex, DatomIndexComponent, Value};
+use crate::delta::Delta;
+use crate::quad::{LegacyQuad as Quad, LegacyQuadObject as QuadObject};
 use kotoba_core::cid::KotobaCid;
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{BTreeMap, HashMap};
 
-/// Arrangement — 4 covering Datomic-equivalent indexes for KOTOBA (G, S, P, O).
+/// Arrangement — hot current-state Datom indexes for KOTOBA.
 ///
-/// | Datomic | Name | Key order               | Primary use                       |
-/// |---------|------|-------------------------|-----------------------------------|
-/// | EAVT    | SPO  | S → P → [O]             | Entity lookup (all attrs of S)    |
-/// | AEVT    | PSO  | P → S → [O]             | Attribute scan (all S with attr P)|
-/// | AVET    | POS  | P → object_key → [S]    | Value lookup (find S by P + O)    |
-/// | VAET    | OCP  | O_cid → P → [S]         | Reverse ref (who points to O_cid?)|
+/// | Datomic | Key order            | Primary use                         |
+/// |---------|----------------------|-------------------------------------|
+/// | EAVT    | E → A → [V]          | Entity lookup (all attrs of E)      |
+/// | AEVT    | A → E → [V]          | Attribute scan (all E with attr A)  |
+/// | AVET    | A → value_key → [E]  | Value lookup (find E by A + V)      |
+/// | VAET    | V_cid → A → [E]      | Reverse ref (who points to V_cid?)  |
 ///
-/// VAET (OCP) only indexes `QuadObject::Cid` values — mirroring Datomic's ref-only VAET.
+/// VAET only indexes `Value::Cid` values — mirroring Datomic's ref-only VAET.
 #[derive(Debug, Default, Clone)]
 pub struct Arrangement {
+    datom_index: DatomArrangement,
     /// EAVT ≅ SPO: subject → predicate → [object]
     spo: HashMap<KotobaCid, BTreeMap<String, Vec<QuadObject>>>,
     /// AEVT ≅ PSO: predicate → subject → [object]  (BTreeMap for attribute range scan)
@@ -27,172 +29,198 @@ pub struct Arrangement {
 }
 
 impl Arrangement {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Apply Delta batch (Pregel Phase 2 Reducer).
     pub fn apply(&mut self, deltas: &[Delta]) {
         for delta in deltas {
-            match delta.mult {
-                Multiplicity::Assert  => self.insert(&delta.quad),
-                Multiplicity::Retract => self.remove(&delta.quad),
+            match delta.datom.op {
+                true => self.insert_datom(&delta.datom),
+                false => self.remove_datom(&delta.datom),
             }
         }
     }
 
     pub fn insert(&mut self, quad: &Quad) {
-        // EAVT (SPO): S → P → [O]
+        self.insert_datom(&Datom::from_legacy_quad(quad.clone(), true));
+    }
+
+    pub fn insert_datom(&mut self, datom: &Datom) {
+        if !datom.op {
+            self.remove_datom(datom);
+            return;
+        }
+        self.datom_index.insert(datom.clone());
+        self.insert_value(&datom.e, &datom.a, &datom.v);
+    }
+
+    fn insert_value(&mut self, entity: &KotobaCid, attr: &str, value: &Value) {
+        let legacy_object: QuadObject = value.clone().into();
+
         self.spo
-            .entry(quad.subject.clone())
+            .entry(entity.clone())
             .or_default()
-            .entry(quad.predicate.clone())
+            .entry(attr.to_string())
             .or_default()
-            .push(quad.object.clone());
+            .push(legacy_object.clone());
 
-        // AEVT (PSO): P → S → [O]
         self.pso
-            .entry(quad.predicate.clone())
+            .entry(attr.to_string())
             .or_default()
-            .entry(quad.subject.clone())
+            .entry(entity.clone())
             .or_default()
-            .push(quad.object.clone());
+            .push(legacy_object.clone());
 
-        // AVET (POS): P → object_key → [S]
-        let okey = object_key(&quad.object);
         self.pos
-            .entry(quad.predicate.clone())
+            .entry(attr.to_string())
             .or_default()
-            .entry(okey)
+            .entry(value_key(value))
             .or_default()
-            .push(quad.subject.clone());
+            .push(entity.clone());
 
-        // VAET (OCP): O_cid → P → [S]  — ref-type only
-        if let QuadObject::Cid(ref cid) = quad.object {
+        if let Value::Cid(cid) = value {
             self.ocp
                 .entry(cid.clone())
                 .or_default()
-                .entry(quad.predicate.clone())
+                .entry(attr.to_string())
                 .or_default()
-                .push(quad.subject.clone());
+                .push(entity.clone());
         }
 
         self.count += 1;
     }
 
     pub fn remove(&mut self, quad: &Quad) {
-        let okey = object_key(&quad.object);
+        self.remove_datom(&Datom::from_legacy_quad(quad.clone(), false));
+    }
 
-        // EAVT (SPO)
-        if let Some(pmap) = self.spo.get_mut(&quad.subject) {
-            if let Some(objs) = pmap.get_mut(&quad.predicate) {
+    pub fn remove_datom(&mut self, datom: &Datom) {
+        let mut retraction = datom.clone();
+        retraction.op = false;
+        self.datom_index.insert(retraction);
+        self.remove_value(&datom.e, &datom.a, &datom.v);
+    }
+
+    fn remove_value(&mut self, entity: &KotobaCid, attr: &str, value: &Value) {
+        let legacy_object: QuadObject = value.clone().into();
+        let okey = value_key(value);
+
+        if let Some(pmap) = self.spo.get_mut(entity) {
+            if let Some(objs) = pmap.get_mut(attr) {
                 let before = objs.len();
-                objs.retain(|o| o != &quad.object);
+                objs.retain(|o| o != &legacy_object);
                 self.count = self.count.saturating_sub(before - objs.len());
             }
         }
 
-        // AEVT (PSO)
-        if let Some(smap) = self.pso.get_mut(&quad.predicate) {
-            if let Some(objs) = smap.get_mut(&quad.subject) {
-                objs.retain(|o| o != &quad.object);
+        if let Some(smap) = self.pso.get_mut(attr) {
+            if let Some(objs) = smap.get_mut(entity) {
+                objs.retain(|o| o != &legacy_object);
             }
         }
 
-        // AVET (POS)
-        if let Some(omap) = self.pos.get_mut(&quad.predicate) {
+        if let Some(omap) = self.pos.get_mut(attr) {
             if let Some(subs) = omap.get_mut(&okey) {
-                subs.retain(|s| s != &quad.subject);
+                subs.retain(|s| s != entity);
             }
         }
 
-        // VAET (OCP) — ref-type only
-        if let QuadObject::Cid(ref cid) = quad.object {
+        if let Value::Cid(cid) = value {
             if let Some(pmap) = self.ocp.get_mut(cid) {
-                if let Some(subs) = pmap.get_mut(&quad.predicate) {
-                    subs.retain(|s| s != &quad.subject);
+                if let Some(subs) = pmap.get_mut(attr) {
+                    subs.retain(|s| s != entity);
                 }
             }
         }
     }
 
-    // ── EAVT (SPO) queries ────────────────────────────────────────────────────
+    // ── EAVT queries ─────────────────────────────────────────────────────────
 
-    /// All objects for (subject, predicate) — EAVT index.
-    pub fn get_objects(&self, subject: &KotobaCid, predicate: &str) -> Vec<&QuadObject> {
+    /// All Datomic values for (entity, attribute) — EAVT index.
+    pub fn get_values(&self, entity: &KotobaCid, attr: &str) -> Vec<Value> {
         self.spo
-            .get(subject)
-            .and_then(|p| p.get(predicate))
-            .map(|v| v.iter().collect())
+            .get(entity)
+            .and_then(|p| p.get(attr))
+            .map(|values| values.iter().cloned().map(Value::from).collect())
             .unwrap_or_default()
     }
 
-    /// All quads for a specific subject (SPO row scan) — EAVT index.
-    pub fn get_subject_quads(&self, graph: &KotobaCid, subject: &KotobaCid) -> Vec<Quad> {
+    pub fn get_subject_datoms(&self, tx: &KotobaCid, subject: &KotobaCid) -> Vec<Datom> {
         let mut out = vec![];
         if let Some(pmap) = self.spo.get(subject) {
-            for (predicate, objects) in pmap {
+            for (attr, objects) in pmap {
                 for object in objects {
-                    out.push(Quad {
-                        graph:     graph.clone(),
-                        subject:   subject.clone(),
-                        predicate: predicate.clone(),
-                        object:    object.clone(),
-                    });
+                    out.push(Datom::assert(
+                        subject.clone(),
+                        attr.clone(),
+                        Value::from(object.clone()),
+                        tx.clone(),
+                    ));
                 }
             }
         }
         out
     }
 
-    // ── AEVT (PSO) queries ────────────────────────────────────────────────────
+    // ── AEVT queries ─────────────────────────────────────────────────────────
 
-    /// All subjects that have `predicate` — AEVT index (attribute scan).
-    pub fn get_subjects_by_predicate(&self, predicate: &str) -> Vec<KotobaCid> {
+    /// All entities that have `attr` — AEVT index (attribute scan).
+    pub fn get_entities_by_attribute(&self, attr: &str) -> Vec<KotobaCid> {
         self.pso
-            .get(predicate)
+            .get(attr)
             .map(|smap| smap.keys().cloned().collect())
             .unwrap_or_default()
     }
 
-    /// All (subject, [object]) pairs for `predicate` — AEVT index.
-    pub fn get_by_predicate(&self, predicate: &str) -> Vec<(KotobaCid, Vec<QuadObject>)> {
+    /// All (entity, [value]) pairs for `attr` — AEVT index.
+    pub fn get_by_attribute(&self, attr: &str) -> Vec<(KotobaCid, Vec<Value>)> {
         self.pso
-            .get(predicate)
-            .map(|smap| smap.iter().map(|(s, o)| (s.clone(), o.clone())).collect())
+            .get(attr)
+            .map(|emap| {
+                emap.iter()
+                    .map(|(entity, values)| {
+                        (
+                            entity.clone(),
+                            values.iter().cloned().map(Value::from).collect(),
+                        )
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
-    // ── AVET (POS) queries ────────────────────────────────────────────────────
+    // ── AVET queries ─────────────────────────────────────────────────────────
 
-    /// Subjects that have (predicate, object_key) — AVET index.
+    /// Entities that have (attr, value_key) — AVET index.
     /// `object_key` matches Text values directly and CID multibase strings.
-    pub fn get_subjects_by_predicate_object(
-        &self,
-        predicate: &str,
-        object_key: &str,
-    ) -> Vec<KotobaCid> {
+    pub fn get_entities_by_attribute_value(&self, attr: &str, object_key: &str) -> Vec<KotobaCid> {
         self.pos
-            .get(predicate)
+            .get(attr)
             .and_then(|omap| omap.get(object_key))
             .cloned()
             .unwrap_or_default()
     }
 
-    /// Quads whose predicate starts with `prefix` — AVET index (BTree range scan on POS).
-    pub fn quads_with_predicate_prefix(&self, graph: &KotobaCid, prefix: &str) -> Vec<Quad> {
+    /// Datoms whose attribute starts with `prefix` — AVET index.
+    pub fn datoms_with_attribute_prefix(&self, tx: &KotobaCid, prefix: &str) -> Vec<Datom> {
         let mut out = vec![];
-        for (predicate, omap) in self.pos.range(prefix.to_string()..) {
-            if !predicate.starts_with(prefix) { break; }
+        for (attr, omap) in self.pos.range(prefix.to_string()..) {
+            if !attr.starts_with(prefix) {
+                break;
+            }
             for subjects in omap.values() {
-                for subject in subjects {
-                    if let Some(pmap) = self.spo.get(subject) {
-                        if let Some(objects) = pmap.get(predicate) {
-                            for object in objects {
-                                out.push(Quad {
-                                    graph:     graph.clone(),
-                                    subject:   subject.clone(),
-                                    predicate: predicate.clone(),
-                                    object:    object.clone(),
-                                });
+                for entity in subjects {
+                    if let Some(pmap) = self.spo.get(entity) {
+                        if let Some(values) = pmap.get(attr) {
+                            for value in values {
+                                out.push(Datom::assert(
+                                    entity.clone(),
+                                    attr.clone(),
+                                    Value::from(value.clone()),
+                                    tx.clone(),
+                                ));
                             }
                         }
                     }
@@ -202,11 +230,13 @@ impl Arrangement {
         out
     }
 
-    /// Count quads whose predicate starts with `prefix` — AVET index.
-    pub fn count_by_predicate_prefix(&self, prefix: &str) -> usize {
+    /// Count datoms whose attribute starts with `prefix` — AVET index.
+    pub fn count_by_attribute_prefix(&self, prefix: &str) -> usize {
         let mut n = 0usize;
         for (predicate, omap) in self.pos.range(prefix.to_string()..) {
-            if !predicate.starts_with(prefix) { break; }
+            if !predicate.starts_with(prefix) {
+                break;
+            }
             n += omap.values().map(|v| v.len()).sum::<usize>();
         }
         n
@@ -237,11 +267,16 @@ impl Arrangement {
 
     // ── Bulk / snapshot ───────────────────────────────────────────────────────
 
-    pub fn len(&self) -> usize { self.count }
-    pub fn is_empty(&self) -> bool { self.count == 0 }
+    pub fn len(&self) -> usize {
+        self.count
+    }
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
 
     /// Drop all index data and reset to empty. Used after a batch commit to reclaim RAM.
     pub fn clear(&mut self) {
+        self.datom_index.clear();
         self.spo.clear();
         self.pso.clear();
         self.pos.clear();
@@ -251,7 +286,30 @@ impl Arrangement {
 
     /// Snapshot all quads as Assert Deltas (seed for Datalog evaluation).
     pub fn to_deltas(&self, graph: &KotobaCid) -> Vec<Delta> {
-        self.quads(graph).into_iter().map(Delta::assert).collect()
+        self.datoms(graph)
+            .into_iter()
+            .map(Delta::assert_datom)
+            .collect()
+    }
+
+    pub fn to_datom_deltas(&self, tx: &KotobaCid) -> Vec<Delta> {
+        self.datoms(tx).into_iter().map(Delta::from_datom).collect()
+    }
+
+    pub fn datom_history(&self) -> Vec<Datom> {
+        self.datom_index.history()
+    }
+
+    pub fn current_datoms(&self) -> Vec<Datom> {
+        self.datom_index.current()
+    }
+
+    pub fn scan_datom_prefix(
+        &self,
+        index: DatomIndex,
+        components: &[DatomIndexComponent],
+    ) -> Result<Vec<Datom>, String> {
+        self.datom_index.scan_prefix(index, components)
     }
 
     /// Reconstruct all Quads from the SPO index, attaching the given graph CID.
@@ -261,11 +319,28 @@ impl Arrangement {
             for (predicate, objects) in pmap {
                 for object in objects {
                     out.push(Quad {
-                        graph:     graph.clone(),
-                        subject:   subject.clone(),
+                        graph: graph.clone(),
+                        subject: subject.clone(),
                         predicate: predicate.clone(),
-                        object:    object.clone(),
+                        object: object.clone(),
                     });
+                }
+            }
+        }
+        out
+    }
+
+    pub fn datoms(&self, tx: &KotobaCid) -> Vec<Datom> {
+        let mut out = Vec::with_capacity(self.count);
+        for (entity, pmap) in &self.spo {
+            for (attr, objects) in pmap {
+                for object in objects {
+                    out.push(Datom::assert(
+                        entity.clone(),
+                        attr.clone(),
+                        Value::from(object.clone()),
+                        tx.clone(),
+                    ));
                 }
             }
         }
@@ -274,7 +349,7 @@ impl Arrangement {
 
     /// All (predicate, subject) pairs sorted by predicate — AEVT scan.
     /// Returns an iterator-friendly vec for building AEVT ProllyTree entries.
-    pub fn aevt_entries(&self) -> Vec<(String, KotobaCid, Vec<QuadObject>)> {
+    pub fn aevt_value_entries(&self) -> Vec<(String, KotobaCid, Vec<QuadObject>)> {
         let mut out = vec![];
         for (pred, smap) in &self.pso {
             for (subj, objs) in smap {
@@ -285,7 +360,7 @@ impl Arrangement {
     }
 
     /// All (predicate, object_key, subjects) sorted by predicate — AVET scan.
-    pub fn avet_entries(&self) -> Vec<(String, String, Vec<KotobaCid>)> {
+    pub fn avet_entity_entries(&self) -> Vec<(String, String, Vec<KotobaCid>)> {
         let mut out = vec![];
         for (pred, omap) in &self.pos {
             for (okey, subs) in omap {
@@ -296,7 +371,7 @@ impl Arrangement {
     }
 
     /// All (object_cid, predicate, subjects) — VAET scan.
-    pub fn vaet_entries(&self) -> Vec<(KotobaCid, String, Vec<KotobaCid>)> {
+    pub fn vaet_entity_entries(&self) -> Vec<(KotobaCid, String, Vec<KotobaCid>)> {
         let mut out = vec![];
         for (ocid, pmap) in &self.ocp {
             for (pred, subs) in pmap {
@@ -307,14 +382,13 @@ impl Arrangement {
     }
 }
 
-fn object_key(obj: &QuadObject) -> String {
-    match obj {
-        QuadObject::Cid(c)              => c.to_multibase(),
-        QuadObject::Text(s)             => s.clone(),
-        QuadObject::Integer(n)          => n.to_string(),
-        // Encrypted objects are not indexed by value in AVET; ct_cid used for identity only.
-        QuadObject::Encrypted { ct_cid, .. } => format!("enc:{}", ct_cid.to_multibase()),
-        _                               => "?".to_string(),
+fn value_key(value: &Value) -> String {
+    match value {
+        Value::Cid(c) => c.to_multibase(),
+        Value::Text(s) => s.clone(),
+        Value::Integer(n) => n.to_string(),
+        Value::Encrypted { ct_cid, .. } => format!("enc:{}", ct_cid.to_multibase()),
+        _ => "?".to_string(),
     }
 }
 
@@ -323,23 +397,25 @@ mod tests {
     use super::*;
     use kotoba_core::cid::KotobaCid;
 
-    fn cid(s: &str) -> KotobaCid { KotobaCid::from_bytes(s.as_bytes()) }
+    fn cid(s: &str) -> KotobaCid {
+        KotobaCid::from_bytes(s.as_bytes())
+    }
 
     fn quad(s: &str, p: &str, o: &str) -> Quad {
         Quad {
-            graph:     cid("g"),
-            subject:   cid(s),
+            graph: cid("g"),
+            subject: cid(s),
             predicate: p.to_string(),
-            object:    QuadObject::Text(o.to_string()),
+            object: QuadObject::Text(o.to_string()),
         }
     }
 
     fn ref_quad(s: &str, p: &str, o: &str) -> Quad {
         Quad {
-            graph:     cid("g"),
-            subject:   cid(s),
+            graph: cid("g"),
+            subject: cid(s),
             predicate: p.to_string(),
-            object:    QuadObject::Cid(cid(o)),
+            object: QuadObject::Cid(cid(o)),
         }
     }
 
@@ -350,14 +426,14 @@ mod tests {
         arr.insert(&ref_quad("alice", "knows", "bob"));
 
         // EAVT (SPO)
-        assert_eq!(arr.get_objects(&cid("alice"), "name").len(), 1);
+        assert_eq!(arr.get_values(&cid("alice"), "name").len(), 1);
 
         // AEVT (PSO): who has "name"?
-        let subs = arr.get_subjects_by_predicate("name");
+        let subs = arr.get_entities_by_attribute("name");
         assert!(subs.contains(&cid("alice")));
 
         // AVET (POS): who has name="Alice"?
-        let subs = arr.get_subjects_by_predicate_object("name", "Alice");
+        let subs = arr.get_entities_by_attribute_value("name", "Alice");
         assert!(subs.contains(&cid("alice")));
 
         // VAET (OCP): who references bob?
@@ -385,8 +461,10 @@ mod tests {
         arr.remove(&q);
         assert_eq!(arr.len(), 0);
         assert!(arr.get_referencing_subjects(&cid("bob")).is_empty());
-        assert!(arr.get_subjects_by_predicate("knows").iter()
-            .all(|s| arr.get_objects(s, "knows").is_empty()));
+        assert!(arr
+            .get_entities_by_attribute("knows")
+            .iter()
+            .all(|s| arr.get_values(s, "knows").is_empty()));
     }
 
     #[test]
@@ -397,7 +475,7 @@ mod tests {
         arr.insert(&quad("alice", "other/attr", "e3"));
 
         let g = cid("g");
-        let quads = arr.quads_with_predicate_prefix(&g, "weight/");
+        let quads = arr.datoms_with_attribute_prefix(&g, "weight/");
         assert_eq!(quads.len(), 2);
     }
 
@@ -423,14 +501,91 @@ mod tests {
         let q1 = quad("alice", "name", "Alice");
         let q2 = quad("bob", "name", "Bob");
         let deltas = vec![
-            Delta::assert(q1.clone()),
-            Delta::assert(q2.clone()),
-            Delta::retract(q1.clone()),
+            Delta::assert_datom(Datom::from_legacy_quad(q1.clone(), true)),
+            Delta::assert_datom(Datom::from_legacy_quad(q2.clone(), true)),
+            Delta::retract_datom(Datom::from_legacy_quad(q1.clone(), false)),
         ];
         arr.apply(&deltas);
         assert_eq!(arr.len(), 1);
-        assert!(arr.get_objects(&cid("alice"), "name").is_empty());
-        assert_eq!(arr.get_objects(&cid("bob"), "name").len(), 1);
+        assert!(arr.get_values(&cid("alice"), "name").is_empty());
+        assert_eq!(arr.get_values(&cid("bob"), "name").len(), 1);
+    }
+
+    #[test]
+    fn datom_insert_remove_and_snapshot_match_current_indexes() {
+        let mut arr = Arrangement::new();
+        let tx = cid("tx");
+        let datom = Datom::assert(
+            cid("alice"),
+            "knows".to_string(),
+            Value::Cid(cid("bob")),
+            tx.clone(),
+        );
+
+        arr.insert_datom(&datom);
+        assert_eq!(arr.len(), 1);
+        assert_eq!(
+            arr.get_subject_datoms(&tx, &cid("alice")),
+            vec![datom.clone()]
+        );
+        assert_eq!(arr.datoms(&tx), vec![datom.clone()]);
+        assert_eq!(
+            arr.datoms_with_attribute_prefix(&tx, "kno"),
+            vec![datom.clone()]
+        );
+        assert_eq!(
+            arr.get_values(&cid("alice"), "knows"),
+            vec![Value::Cid(cid("bob"))]
+        );
+        assert_eq!(arr.to_datom_deltas(&tx)[0].datom, datom);
+        assert_eq!(
+            arr.get_referencing_subjects_by_predicate(&cid("bob"), "knows"),
+            vec![cid("alice")]
+        );
+
+        arr.remove_datom(&Datom::retract(
+            cid("alice"),
+            "knows".to_string(),
+            Value::Cid(cid("bob")),
+            tx,
+        ));
+        assert!(arr.is_empty());
+        assert!(arr.get_referencing_subjects(&cid("bob")).is_empty());
+    }
+
+    #[test]
+    fn arrangement_keeps_datom_five_index_history_for_legacy_quad_boundaries() {
+        let mut arr = Arrangement::new();
+        let alice_name = quad("alice", "name", "Alice");
+        let alice_friend = ref_quad("alice", "knows", "bob");
+
+        arr.insert(&alice_name);
+        arr.insert(&alice_friend);
+        arr.remove(&alice_name);
+
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr.datom_history().len(), 3);
+        assert_eq!(arr.current_datoms().len(), 1);
+
+        let eavt = arr
+            .scan_datom_prefix(
+                DatomIndex::Eavt,
+                &[DatomIndexComponent::Entity(cid("alice"))],
+            )
+            .unwrap();
+        assert_eq!(eavt.len(), 3);
+
+        let vaet = arr
+            .scan_datom_prefix(
+                DatomIndex::Vaet,
+                &[
+                    DatomIndexComponent::Value(Value::Cid(cid("bob"))),
+                    DatomIndexComponent::Attribute("knows".to_string()),
+                ],
+            )
+            .unwrap();
+        assert_eq!(vaet.len(), 1);
+        assert_eq!(vaet[0].e, cid("alice"));
     }
 
     #[test]
@@ -444,8 +599,8 @@ mod tests {
         arr.clear();
         assert_eq!(arr.len(), 0);
         assert!(arr.is_empty());
-        assert!(arr.get_objects(&cid("alice"), "name").is_empty());
-        assert!(arr.get_subjects_by_predicate("name").is_empty());
+        assert!(arr.get_values(&cid("alice"), "name").is_empty());
+        assert!(arr.get_entities_by_attribute("name").is_empty());
         assert!(arr.get_referencing_subjects(&cid("bob")).is_empty());
     }
 
@@ -461,7 +616,7 @@ mod tests {
 
         let deltas = arr.to_deltas(&g);
         assert_eq!(deltas.len(), 2);
-        assert!(deltas.iter().all(|d| d.mult == Multiplicity::Assert));
+        assert!(deltas.iter().all(|d| d.datom.op == true));
     }
 
     #[test]
@@ -471,9 +626,16 @@ mod tests {
         arr.insert(&quad("bob", "name", "Bob"));
         arr.insert(&quad("alice", "age", "30"));
 
-        let entries = arr.aevt_entries();
+        let entries = arr.aevt_value_entries();
         // 3 (pred, subj) pairs: (name, alice), (name, bob), (age, alice)
         assert_eq!(entries.len(), 3);
+
+        let mut name_values = arr.get_by_attribute("name");
+        name_values.sort_by_key(|(entity, _)| entity.to_multibase());
+        assert_eq!(name_values.len(), 2);
+        assert!(name_values
+            .iter()
+            .all(|(_, values)| matches!(values.first(), Some(Value::Text(_)))));
     }
 
     #[test]
@@ -482,7 +644,7 @@ mod tests {
         arr.insert(&quad("alice", "name", "Alice"));
         arr.insert(&quad("bob", "name", "Bob"));
 
-        let entries = arr.avet_entries();
+        let entries = arr.avet_entity_entries();
         assert_eq!(entries.len(), 2); // (name, Alice, [alice]), (name, Bob, [bob])
     }
 
@@ -493,7 +655,7 @@ mod tests {
         arr.insert(&ref_quad("alice", "knows", "bob")); // Cid — VAET
         arr.insert(&ref_quad("carol", "knows", "bob")); // second ref to same cid
 
-        let entries = arr.vaet_entries();
+        let entries = arr.vaet_entity_entries();
         // (bob_cid, "knows", [alice, carol])
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, cid("bob"));
@@ -508,9 +670,9 @@ mod tests {
         arr.insert(&quad("alice", "rel/colleague", "Carol"));
         arr.insert(&quad("alice", "meta/created", "2024"));
 
-        assert_eq!(arr.count_by_predicate_prefix("rel/"), 2);
-        assert_eq!(arr.count_by_predicate_prefix("meta/"), 1);
-        assert_eq!(arr.count_by_predicate_prefix("nonexistent/"), 0);
+        assert_eq!(arr.count_by_attribute_prefix("rel/"), 2);
+        assert_eq!(arr.count_by_attribute_prefix("meta/"), 1);
+        assert_eq!(arr.count_by_attribute_prefix("nonexistent/"), 0);
     }
 
     #[test]
@@ -525,19 +687,19 @@ mod tests {
     }
 
     #[test]
-    fn get_subject_quads_returns_all_predicates_for_subject() {
+    fn get_subject_datoms_returns_all_attributes_for_entity() {
         let mut arr = Arrangement::new();
         arr.insert(&quad("alice", "name", "Alice"));
         arr.insert(&quad("alice", "age", "30"));
         arr.insert(&quad("bob", "name", "Bob"));
 
-        let g = cid("g");
-        let alice_quads = arr.get_subject_quads(&g, &cid("alice"));
-        assert_eq!(alice_quads.len(), 2);
-        assert!(alice_quads.iter().all(|q| q.subject == cid("alice")));
+        let tx = cid("tx");
+        let alice_datoms = arr.get_subject_datoms(&tx, &cid("alice"));
+        assert_eq!(alice_datoms.len(), 2);
+        assert!(alice_datoms.iter().all(|d| d.e == cid("alice")));
 
-        let bob_quads = arr.get_subject_quads(&g, &cid("bob"));
-        assert_eq!(bob_quads.len(), 1);
+        let bob_datoms = arr.get_subject_datoms(&tx, &cid("bob"));
+        assert_eq!(bob_datoms.len(), 1);
     }
 
     #[test]
@@ -547,10 +709,10 @@ mod tests {
         arr.insert(&quad("carol", "knows", "Dave"));
         arr.insert(&quad("alice", "likes", "music"));
 
-        let pairs = arr.get_by_predicate("knows");
+        let pairs = arr.get_by_attribute("knows");
         assert_eq!(pairs.len(), 2);
 
-        let empty = arr.get_by_predicate("nonexistent");
+        let empty = arr.get_by_attribute("nonexistent");
         assert!(empty.is_empty());
     }
 
@@ -560,8 +722,8 @@ mod tests {
         assert_eq!(arr.len(), 0);
         assert!(arr.is_empty());
         assert!(arr.quads(&cid("g")).is_empty());
-        assert!(arr.aevt_entries().is_empty());
-        assert!(arr.avet_entries().is_empty());
-        assert!(arr.vaet_entries().is_empty());
+        assert!(arr.aevt_value_entries().is_empty());
+        assert!(arr.avet_entity_entries().is_empty());
+        assert!(arr.vaet_entity_entries().is_empty());
     }
 }

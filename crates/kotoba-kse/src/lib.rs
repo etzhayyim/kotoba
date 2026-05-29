@@ -1,23 +1,25 @@
+pub mod agent_identity;
 pub mod chunker;
-pub mod topic;
 pub mod journal;
+pub mod keychain;
+pub mod pre_key_registry;
+pub mod secure_vault;
 pub mod shelf;
-pub mod vault;
+pub mod sovereign_key;
 pub mod store;
 pub mod sync_window;
-pub mod secure_vault;
-pub mod agent_identity;
-pub mod keychain;
-pub mod sovereign_key;
-pub mod pre_key_registry;
+pub mod topic;
+pub mod vault;
 
-pub use topic::{Topic, TopicPattern};
-pub use journal::{Journal, JournalEntry, Cursor, CursorAck};
+pub use agent_identity::AgentIdentity;
+pub use journal::{Cursor, CursorAck, Journal, JournalEntry};
+pub use pre_key_registry::{
+    PreKeyError, PreKeyRegistry, RekeyRevocationRecord, RULE_REKEY_REVOKED,
+};
+pub use secure_vault::SecureVault;
 pub use shelf::{Shelf, ShelfBucket};
-pub use vault::{Vault, BlobRef};
+pub use sovereign_key::SovereignCrypto;
 pub use store::KseStore;
 pub use sync_window::SyncWindow;
-pub use secure_vault::SecureVault;
-pub use agent_identity::AgentIdentity;
-pub use sovereign_key::SovereignCrypto;
-pub use pre_key_registry::{PreKeyRegistry, PreKeyError, RekeyRevocationRecord, RULE_REKEY_REVOKED};
+pub use topic::{Topic, TopicPattern};
+pub use vault::{BlobRef, Vault};

@@ -6,8 +6,12 @@ license.workspace = true
 description = "Kotoba XRPC / MCP server endpoints"
 
 [features]
-default = ["kotoba-llm/http-inference"]
+default = ["http-inference"]
+http-inference = ["kotoba-llm/http-inference"]
 local-inference = ["kotoba-llm/local-inference"]
+wasm-runtime = ["dep:kotoba-runtime", "dep:kotoba-vm"]
+p2p = ["dep:kotoba-net", "wasm-runtime"]
+cc-parquet = ["kotoba-ingest/cc-parquet"]
 
 [[bin]]
 name = "kotoba-server"
@@ -16,6 +20,11 @@ path = "src/main.rs"
 [dependencies]
 kotoba-ingest.workspace  = true
 kotoba-core.workspace    = true
+kotoba-edn               = { path = "../kotoba-edn" }
+kotoba-datomic           = { path = "../kotoba-datomic" }
+kotoba-ipfs              = { path = "../kotoba-ipfs" }
+kotoba-vc                = { path = "../kotoba-vc" }
+kotoba-didcomm           = { path = "../kotoba-didcomm" }
 kotoba-crypto.workspace  = true
 kotoba-signal.workspace  = true
 kotoba-store             = { path = "../kotoba-store" }
@@ -24,10 +33,10 @@ kotoba-kqe.workspace     = true
 kotoba-dht               = { path = "../kotoba-dht" }
 kotoba-auth              = { path = "../kotoba-auth" }
 kotoba-graph             = { path = "../kotoba-graph" }
-kotoba-vm                = { path = "../kotoba-vm" }
+kotoba-vm                = { path = "../kotoba-vm", optional = true }
 kotoba-llm               = { path = "../kotoba-llm" }
-kotoba-runtime           = { path = "../kotoba-runtime" }
-kotoba-net               = { path = "../kotoba-net" }
+kotoba-runtime           = { path = "../kotoba-runtime", optional = true }
+kotoba-net               = { path = "../kotoba-net", optional = true }
 dashmap.workspace        = true
 tokio.workspace          = true
 serde.workspace          = true
@@ -40,12 +49,14 @@ axum.workspace           = true
 tower-http.workspace     = true
 base64                   = "0.22"
 hex                      = "0.4"
-reqwest.workspace        = true
+multibase.workspace      = true
+reqwest                  = { workspace = true, features = ["blocking"] }
 blake3.workspace         = true
 bytes.workspace          = true
 object_store.workspace   = true
 ciborium.workspace       = true
 x25519-dalek.workspace   = true
+ed25519-dalek.workspace  = true
 subtle                   = "2"
 
 [dev-dependencies]
@@ -54,7 +65,6 @@ kotoba-core.workspace     = true
 kotoba-kqe.workspace      = true
 kotoba-graph              = { path = "../kotoba-graph" }
 kotoba-auth               = { path = "../kotoba-auth" }
-ed25519-dalek.workspace   = true
 multibase.workspace       = true
 zeroize.workspace         = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

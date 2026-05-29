@@ -1,16 +1,16 @@
-pub mod cid;
-pub mod frame;
-pub mod prolly;
-pub mod foreign;
-pub mod store;
 pub mod async_store;
-pub mod policy;
+pub mod cid;
+pub mod foreign;
+pub mod frame;
 pub mod named_graph;
+pub mod policy;
+pub mod prolly;
+pub mod store;
 
-pub use cid::{KotobaCid, CidError};
-pub use frame::{Frame, FrameType, FrameFlags};
-pub use prolly::{ProllyTree, ProllyNode};
-pub use foreign::{ForeignBridge, ForeignCall, ForeignCallType, ForeignError};
 pub use async_store::AsyncBlockStore;
+pub use cid::{CidError, KotobaCid};
+pub use foreign::{ForeignBridge, ForeignCall, ForeignCallType, ForeignError};
+pub use frame::{Frame, FrameFlags, FrameType};
+pub use named_graph::{classify as classify_graph_visibility, GraphVisibility, NamedGraph};
 pub use policy::DataPolicy;
-pub use named_graph::{NamedGraph, GraphVisibility, classify as classify_graph_visibility};
+pub use prolly::{ProllyNode, ProllyTree};

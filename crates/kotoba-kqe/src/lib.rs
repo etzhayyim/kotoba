@@ -1,25 +1,30 @@
-pub mod quad;
-pub mod delta;
 pub mod arrangement;
-pub mod datalog;
-pub mod mv;
-pub mod sql;
-pub mod cypher;
 pub mod citation;
-pub mod schema;
+pub mod cypher;
+pub mod datalog;
+pub mod datom;
+pub mod delta;
 pub mod enterprise;
+pub mod mv;
+pub mod quad;
+pub mod schema;
+pub mod sql;
 
-pub use quad::{Quad, QuadObject};
-pub use delta::{Delta, Multiplicity};
 pub use arrangement::Arrangement;
-pub use datalog::{DatalogProgram, DatalogRule};
-pub use mv::MaterializedView;
-pub use sql::{SqlMvCompiler, CompiledSqlMv};
-pub use cypher::{CypherCompiler, CompiledCypherMv};
 pub use citation::{CitationLedger, DatomKey};
-pub use schema::{SchemaMap, TableSchema, AttrDef, AttrKind};
-pub use enterprise::{
-    EnterpriseDialect, CompiledEnterpriseQuery, EnterpriseFeature, PostProcess,
-    OracleDialect, TSqlDialect, HanaDialect, Db2Dialect, TeradataDialect,
-    SnowflakeDialect, BigQueryDialect, PrestoDialect, MdxDialect, HiveQlDialect,
+pub use cypher::{CompiledCypherMv, CypherCompiler};
+pub use datalog::{DatalogProgram, DatalogRule};
+pub use datom::{
+    Datom, DatomArrangement, DatomIndex, DatomIndexComponent, TensorDtype as DatomTensorDtype,
+    Value,
 };
+pub use delta::Delta;
+pub use enterprise::{
+    BigQueryDialect, CompiledEnterpriseQuery, Db2Dialect, EnterpriseDialect, EnterpriseFeature,
+    HanaDialect, HiveQlDialect, MdxDialect, OracleDialect, PostProcess, PrestoDialect,
+    SnowflakeDialect, TSqlDialect, TeradataDialect,
+};
+pub use mv::MaterializedView;
+pub use quad::{LegacyQuad, LegacyQuadObject};
+pub use schema::{AttrDef, AttrKind, SchemaMap, TableSchema};
+pub use sql::{CompiledSqlMv, SqlMvCompiler};

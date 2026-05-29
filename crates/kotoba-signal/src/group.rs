@@ -1,3 +1,6 @@
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
 /// Sender Keys — group messaging (Signal specification).
 ///
 /// Each group member distributes a SenderKeyState (chain_key + signing_key).
@@ -6,14 +9,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Verifier, Signature};
-use rand::rngs::OsRng;
-use serde::{Deserialize, Serialize};
 use zeroize::ZeroizeOnDrop;
 
-use kotoba_crypto::hkdf::ratchet_chain;
-use kotoba_crypto::aead::{seal, open};
 use crate::SignalError;
+use kotoba_crypto::aead::{open, seal};
+use kotoba_crypto::hkdf::ratchet_chain;
 
 /// Signal spec §5.2: reject messages that skip more than this many chain steps.
 /// Prevents an attacker from forcing O(N) ratchet work and unbounded `skipped_keys` growth.
@@ -22,24 +22,24 @@ const MAX_SKIPPED_KEYS: usize = 1_000;
 /// Per-member sender key state (private).
 #[derive(ZeroizeOnDrop)]
 pub struct SenderKeyState {
-    pub group_id:     String,
-    pub member_did:   String,
-    pub chain_id:     u32,   // increments on each ratchet epoch
-    pub chain_key:    [u8; 32],
-    pub chain_iter:   u32,
-    pub signing:      SigningKey,
+    pub group_id: String,
+    pub member_did: String,
+    pub chain_id: u32, // increments on each ratchet epoch
+    pub chain_key: [u8; 32],
+    pub chain_iter: u32,
+    pub signing: SigningKey,
 }
 
 /// Public distribution record shared with group members.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SenderKeyDistribution {
-    pub group_id:        String,
-    pub sender_did:      String,
-    pub chain_id:        u32,
-    pub chain_iter:      u32,
+    pub group_id: String,
+    pub sender_did: String,
+    pub chain_id: u32,
+    pub chain_iter: u32,
     /// Current sender chain key (public representation: the chain_key itself, ONLY shared
     /// to group members already trusted — encrypted 1:1 per member via Double Ratchet).
-    pub chain_key:       Vec<u8>,
+    pub chain_key: Vec<u8>,
     /// Ed25519 verifying key (32 bytes).
     pub signing_key_pub: Vec<u8>,
 }
@@ -47,28 +47,28 @@ pub struct SenderKeyDistribution {
 /// An encrypted group message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SenderKeyMessage {
-    pub group_id:    String,
-    pub sender_did:  String,
-    pub chain_id:    u32,
-    pub n:           u32,
+    pub group_id: String,
+    pub sender_did: String,
+    pub chain_id: u32,
+    pub n: u32,
     /// AES-256-GCM ciphertext (nonce || ct).
-    pub ciphertext:  Vec<u8>,
+    pub ciphertext: Vec<u8>,
     /// Ed25519 signature over `chain_id || n || ciphertext`.
-    pub signature:   Vec<u8>,
+    pub signature: Vec<u8>,
 }
 
 impl SenderKeyState {
     pub fn generate(group_id: impl Into<String>, member_did: impl Into<String>) -> Self {
-        let signing   = SigningKey::generate(&mut OsRng);
+        let signing = SigningKey::generate(&mut OsRng);
         let chain_key = {
             let mut k = [0u8; 32];
             rand::RngCore::fill_bytes(&mut OsRng, &mut k);
             k
         };
         Self {
-            group_id:   group_id.into(),
+            group_id: group_id.into(),
             member_did: member_did.into(),
-            chain_id:   0,
+            chain_id: 0,
             chain_key,
             chain_iter: 0,
             signing,
@@ -78,11 +78,11 @@ impl SenderKeyState {
     /// Produce the public distribution record (to be encrypted 1:1 to each group member).
     pub fn distribution(&self) -> SenderKeyDistribution {
         SenderKeyDistribution {
-            group_id:        self.group_id.clone(),
-            sender_did:      self.member_did.clone(),
-            chain_id:        self.chain_id,
-            chain_iter:      self.chain_iter,
-            chain_key:       self.chain_key.to_vec(),
+            group_id: self.group_id.clone(),
+            sender_did: self.member_did.clone(),
+            chain_id: self.chain_id,
+            chain_iter: self.chain_iter,
+            chain_key: self.chain_key.to_vec(),
             signing_key_pub: self.signing.verifying_key().to_bytes().to_vec(),
         }
     }
@@ -104,9 +104,9 @@ impl SenderKeyState {
         let signature = self.signing.sign(&sig_data).to_bytes().to_vec();
 
         Ok(SenderKeyMessage {
-            group_id:   self.group_id.clone(),
+            group_id: self.group_id.clone(),
             sender_did: self.member_did.clone(),
-            chain_id:   self.chain_id,
+            chain_id: self.chain_id,
             n,
             ciphertext,
             signature,
@@ -116,14 +116,14 @@ impl SenderKeyState {
 
 /// Per-member decryption state derived from a received SenderKeyDistribution.
 pub struct GroupSession {
-    pub group_id:        String,
-    pub sender_did:      String,
-    pub chain_id:        u32,
-    pub chain_key:       [u8; 32],
-    pub chain_iter:      u32,
+    pub group_id: String,
+    pub sender_did: String,
+    pub chain_id: u32,
+    pub chain_key: [u8; 32],
+    pub chain_iter: u32,
     pub signing_key_pub: VerifyingKey,
     /// Cached message keys for out-of-order delivery.
-    skipped_keys: HashMap<(u32, u32), [u8; 32]>,  // (chain_id, n) → mk
+    skipped_keys: HashMap<(u32, u32), [u8; 32]>, // (chain_id, n) → mk
 }
 
 impl GroupSession {
@@ -142,11 +142,11 @@ impl GroupSession {
         let signing_key_pub =
             VerifyingKey::from_bytes(&vk_bytes).map_err(|_| SignalError::BadSignature)?;
         Ok(Self {
-            group_id:        dist.group_id.clone(),
-            sender_did:      dist.sender_did.clone(),
-            chain_id:        dist.chain_id,
+            group_id: dist.group_id.clone(),
+            sender_did: dist.sender_did.clone(),
+            chain_id: dist.chain_id,
             chain_key,
-            chain_iter:      dist.chain_iter,
+            chain_iter: dist.chain_iter,
             signing_key_pub,
             skipped_keys: HashMap::new(),
         })
@@ -185,7 +185,8 @@ impl GroupSession {
         while self.chain_iter < msg.n {
             let (new_ck, mk) = ratchet_chain(&self.chain_key);
             self.chain_key = new_ck;
-            self.skipped_keys.insert((self.chain_id, self.chain_iter), mk);
+            self.skipped_keys
+                .insert((self.chain_id, self.chain_iter), mk);
             self.chain_iter += 1;
         }
 
@@ -202,11 +203,13 @@ impl GroupSession {
 
 #[derive(Default, Clone)]
 pub struct InMemorySenderKeyStore {
-    states:   Arc<RwLock<HashMap<String, SenderKeyDistribution>>>,
+    states: Arc<RwLock<HashMap<String, SenderKeyDistribution>>>,
 }
 
 impl InMemorySenderKeyStore {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub async fn store(&self, dist: SenderKeyDistribution) {
         let k = format!("{}:{}", dist.group_id, dist.sender_did);
@@ -230,7 +233,7 @@ mod tests {
         let mut receiver = GroupSession::from_distribution(&dist).unwrap();
 
         let msg = sender.encrypt(b"hello group").unwrap();
-        let pt  = receiver.decrypt(&msg).unwrap();
+        let pt = receiver.decrypt(&msg).unwrap();
         assert_eq!(pt, b"hello group");
     }
 
@@ -242,7 +245,7 @@ mod tests {
 
         for i in 0u8..5 {
             let msg = sender.encrypt(&[i]).unwrap();
-            let pt  = receiver.decrypt(&msg).unwrap();
+            let pt = receiver.decrypt(&msg).unwrap();
             assert_eq!(pt, &[i]);
         }
     }
@@ -331,7 +334,10 @@ mod tests {
 
     #[test]
     fn in_memory_store_store_and_load() {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(async {
             let store = InMemorySenderKeyStore::new();
             let sender = SenderKeyState::generate("grp-store", "did:plc:bob");
@@ -348,7 +354,10 @@ mod tests {
 
     #[test]
     fn in_memory_store_missing_key_returns_none() {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(async {
             let store = InMemorySenderKeyStore::new();
             let result = store.load("nonexistent-group", "did:plc:nobody").await;
@@ -358,8 +367,14 @@ mod tests {
 
     #[test]
     fn max_skipped_keys_constant_is_positive_and_bounded() {
-        assert!(MAX_SKIPPED_KEYS >= 100,  "limit must allow normal out-of-order delivery");
-        assert!(MAX_SKIPPED_KEYS <= 5_000, "limit must cap memory to a sane ceiling");
+        assert!(
+            MAX_SKIPPED_KEYS >= 100,
+            "limit must allow normal out-of-order delivery"
+        );
+        assert!(
+            MAX_SKIPPED_KEYS <= 5_000,
+            "limit must cap memory to a sane ceiling"
+        );
     }
 
     #[test]
@@ -377,7 +392,8 @@ mod tests {
         let result = receiver.decrypt(&msg);
         assert!(
             matches!(result, Err(crate::SignalError::TooManySkippedKeys)),
-            "expected TooManySkippedKeys, got {:?}", result
+            "expected TooManySkippedKeys, got {:?}",
+            result
         );
     }
 
@@ -396,7 +412,11 @@ mod tests {
         let final_msg = sender.encrypt(b"at boundary").unwrap();
         // Receiver processes only the last one — skips MAX_SKIPPED_KEYS - 1 keys
         let result = receiver.decrypt(&final_msg);
-        assert!(result.is_ok(), "gap at limit must be accepted, got {:?}", result);
+        assert!(
+            result.is_ok(),
+            "gap at limit must be accepted, got {:?}",
+            result
+        );
         assert_eq!(result.unwrap(), b"at boundary");
     }
 

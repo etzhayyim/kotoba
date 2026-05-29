@@ -1,0 +1,28 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.attest.claim",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Issue a Kotoba attestation as a W3C Verifiable Credential projected to Datoms.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["entity_did", "claim_type", "attester_did", "stake_mkoto"],
+          "properties": {
+            "entity_did": { "type": "string" },
+            "claim_type": { "type": "string" },
+            "attester_did": { "type": "string" },
+            "stake_mkoto": { "type": "integer", "minimum": 0 },
+            "evidence": { "type": "string" }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": { "type": "unknown" }
+      }
+    }
+  }
+}

@@ -1,3 +1,6 @@
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use kotoba_core::cid::KotobaCid;
+use kotoba_store::{extract_block, parse_index, CarBlockIndex, CarBundleWriter};
 /// CAR bundle flush benchmarks.
 ///
 /// Measures three things:
@@ -21,17 +24,16 @@
 ///   B2 same-AZ    : PUT ~15 ms,  GET ~3 ms
 ///   kubo LAN      : PUT ~2 ms,   GET ~1 ms
 use std::time::Duration;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use kotoba_core::cid::KotobaCid;
-use kotoba_store::{CarBundleWriter, CarBlockIndex, parse_index, extract_block};
 
-fn fake_cid(n: u64) -> KotobaCid { KotobaCid::from_bytes(&n.to_le_bytes()) }
+fn fake_cid(n: u64) -> KotobaCid {
+    KotobaCid::from_bytes(&n.to_le_bytes())
+}
 
 /// Generate `count` fake blocks of `block_size` bytes each.
 fn gen_blocks(count: usize, block_size: usize) -> Vec<(KotobaCid, Vec<u8>)> {
     (0..count as u64)
         .map(|i| {
-            let cid  = fake_cid(i + 1);
+            let cid = fake_cid(i + 1);
             let data = vec![(i & 0xff) as u8; block_size];
             (cid, data)
         })
@@ -47,9 +49,9 @@ fn bench_serialize(c: &mut Criterion) {
     //   medium : 4K blocks × 4 KB  = 16 MB (400K quads, single ProllyTree)
     //   commit : 16K blocks × 4 KB = 64 MB (1M quads, 4 trees)
     let scenarios: &[(&str, usize, usize)] = &[
-        ("1K×1KB",   1_000,  1_024),
-        ("4K×4KB",   4_000,  4_096),
-        ("16K×4KB", 16_000,  4_096),
+        ("1K×1KB", 1_000, 1_024),
+        ("4K×4KB", 4_000, 4_096),
+        ("16K×4KB", 16_000, 4_096),
     ];
 
     let mut group = c.benchmark_group("car/serialize");
@@ -61,10 +63,12 @@ fn bench_serialize(c: &mut Criterion) {
             &(*n_blocks, *block_size),
             |b, &(n, sz)| {
                 let blocks = gen_blocks(n, sz);
-                let root   = fake_cid(0);
+                let root = fake_cid(0);
                 b.iter(|| {
                     let mut w = CarBundleWriter::new(root.clone());
-                    for (cid, data) in &blocks { w.append(cid, data); }
+                    for (cid, data) in &blocks {
+                        w.append(cid, data);
+                    }
                     let (car, _idx) = w.finish();
                     car.len() // prevent optimization
                 });
@@ -84,7 +88,9 @@ fn simulate_car_flush(
     put_latency: Duration,
 ) -> (usize, Duration) {
     let mut w = CarBundleWriter::new(root.clone());
-    for (cid, data) in blocks { w.append(cid, data); }
+    for (cid, data) in blocks {
+        w.append(cid, data);
+    }
     let (car, _) = w.finish();
     let car_size = car.len();
 
@@ -114,10 +120,25 @@ fn bench_flush_comparison(c: &mut Criterion) {
 
     let scenarios: &[(&str, usize, u64, &str)] = &[
         // (label, n_blocks, put_µs, network)
-        ("400blk_s3",   400,  10, "S3 same-AZ 10ms/PUT → 4s serial → 10ms CAR"),
-        ("16K blk_s3",  16_000,  10, "S3 same-AZ: 160s serial → 10ms CAR"),
-        ("400blk_kubo",  400,   2, "kubo LAN 2ms/PUT → 0.8s serial → 2ms CAR"),
-        ("16K blk_kubo", 16_000,   2, "kubo LAN: 32s serial → 2ms CAR"),
+        (
+            "400blk_s3",
+            400,
+            10,
+            "S3 same-AZ 10ms/PUT → 4s serial → 10ms CAR",
+        ),
+        (
+            "16K blk_s3",
+            16_000,
+            10,
+            "S3 same-AZ: 160s serial → 10ms CAR",
+        ),
+        (
+            "400blk_kubo",
+            400,
+            2,
+            "kubo LAN 2ms/PUT → 0.8s serial → 2ms CAR",
+        ),
+        ("16K blk_kubo", 16_000, 2, "kubo LAN: 32s serial → 2ms CAR"),
     ];
 
     let mut group = c.benchmark_group("car/flush_simulated");
@@ -126,13 +147,11 @@ fn bench_flush_comparison(c: &mut Criterion) {
 
     for (label, n_blocks, put_µs, _desc) in scenarios {
         let put_latency = Duration::from_micros(*put_µs);
-        let blocks      = gen_blocks(*n_blocks, 512); // smaller blocks for bench speed
-        let root        = fake_cid(0);
+        let blocks = gen_blocks(*n_blocks, 512); // smaller blocks for bench speed
+        let root = fake_cid(0);
 
         group.bench_function(format!("car_single_put/{label}"), |b| {
-            b.iter(|| {
-                simulate_car_flush(&blocks, &root, put_latency)
-            });
+            b.iter(|| simulate_car_flush(&blocks, &root, put_latency));
         });
     }
 
@@ -156,12 +175,14 @@ fn bench_flush_comparison(c: &mut Criterion) {
 fn bench_range_get(c: &mut Criterion) {
     let n_blocks = 4_000usize; // single ProllyTree, 400K quads
     let block_sz = 4_096usize;
-    let blocks   = gen_blocks(n_blocks, block_sz);
-    let root     = fake_cid(0);
+    let blocks = gen_blocks(n_blocks, block_sz);
+    let root = fake_cid(0);
 
     // Build CAR once
     let mut w = CarBundleWriter::new(root);
-    for (cid, data) in &blocks { w.append(cid, data); }
+    for (cid, data) in &blocks {
+        w.append(cid, data);
+    }
     let (car_bytes, idx_entries) = w.finish();
 
     // Populate CarBlockIndex
@@ -212,13 +233,15 @@ fn bench_index_insert(c: &mut Criterion) {
 
     for n in [1_000usize, 16_000] {
         let blocks = gen_blocks(n, 64);
-        let root   = fake_cid(0);
+        let root = fake_cid(0);
 
         group.throughput(Throughput::Elements(n as u64));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let mut w = CarBundleWriter::new(root.clone());
-                for (cid, data) in &blocks { w.append(cid, data); }
+                for (cid, data) in &blocks {
+                    w.append(cid, data);
+                }
                 let (_, idx) = w.finish();
 
                 let mut index = CarBlockIndex::new();

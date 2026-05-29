@@ -5,26 +5,31 @@
 //!   ai.gftd.apps.kotoba.email.read   — decrypt and return one email (GET)
 //!   ai.gftd.apps.kotoba.email.ingest — manually ingest a raw message (POST)
 
-pub const NSID_EMAIL_LIST:   &str = "ai.gftd.apps.kotoba.email.list";
-pub const NSID_EMAIL_READ:   &str = "ai.gftd.apps.kotoba.email.read";
+pub const NSID_EMAIL_LIST: &str = "ai.gftd.apps.kotoba.email.list";
+pub const NSID_EMAIL_READ: &str = "ai.gftd.apps.kotoba.email.read";
 pub const NSID_EMAIL_INGEST: &str = "ai.gftd.apps.kotoba.email.ingest";
 
-use std::sync::Arc;
-use axum::{Json, extract::{Query, State}, http::{HeaderMap, StatusCode}, response::IntoResponse};
+use axum::{
+    extract::{Query, State},
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 use kotoba_core::cid::KotobaCid;
-use kotoba_kqe::quad::QuadObject;
 use kotoba_ingest::{graph_cid_for, EmailIngestor};
+use kotoba_kqe::Value as KqeValue;
 
 use crate::server::KotobaState;
 
-const MAX_OWNER_DID_LEN:  usize = 512;
-const MAX_EMAIL_CID_LEN:  usize = 256;
+const MAX_OWNER_DID_LEN: usize = 512;
+const MAX_EMAIL_CID_LEN: usize = 256;
 // 25 MiB raw ≈ 33 MiB base64 (Gmail attachment limit)
-const MAX_RAW_B64_LEN:    usize = 34 * 1024 * 1024;
-const MAX_THREAD_ID_LEN:  usize = 256; // mirrors EmailIngestor::ingest_raw validation
+const MAX_RAW_B64_LEN: usize = 34 * 1024 * 1024;
+const MAX_THREAD_ID_LEN: usize = 256; // mirrors EmailIngestor::ingest_raw validation
 
 fn require_email_auth(
     headers: &HeaderMap,
@@ -37,23 +42,33 @@ fn require_email_auth(
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or_else(|| {
             tracing::warn!("email auth: missing Bearer token");
-            (StatusCode::UNAUTHORIZED, "Authorization: Bearer <token> required".to_string())
+            (
+                StatusCode::UNAUTHORIZED,
+                "Authorization: Bearer <token> required".to_string(),
+            )
         })?;
     if crate::graph_auth::jwt_exp_elapsed(token) {
         tracing::warn!("email auth: expired JWT");
-        return Err((StatusCode::UNAUTHORIZED, "Bearer token has expired".to_string()));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Bearer token has expired".to_string(),
+        ));
     }
-    let sub = crate::graph_auth::jwt_sub(token)
-        .ok_or_else(|| {
-            tracing::warn!("email auth: JWT missing sub claim");
-            (StatusCode::UNAUTHORIZED, "Bearer token missing sub claim".to_string())
-        })?;
+    let sub = crate::graph_auth::jwt_sub(token).ok_or_else(|| {
+        tracing::warn!("email auth: JWT missing sub claim");
+        (
+            StatusCode::UNAUTHORIZED,
+            "Bearer token missing sub claim".to_string(),
+        )
+    })?;
     if sub == owner_did || sub == operator_did {
         Ok(())
     } else {
         tracing::warn!(sub = %sub, owner_did = %owner_did, "email auth: sub mismatch");
-        Err((StatusCode::UNAUTHORIZED,
-            format!("Bearer sub does not match owner_did {owner_did:?}")))
+        Err((
+            StatusCode::UNAUTHORIZED,
+            format!("Bearer sub does not match owner_did {owner_did:?}"),
+        ))
     }
 }
 
@@ -62,8 +77,8 @@ fn require_email_auth(
 #[derive(Deserialize)]
 pub struct EmailListQuery {
     pub owner_did: String,
-    pub limit:     Option<usize>,
-    pub offset:    Option<usize>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 pub async fn email_list(
@@ -82,11 +97,15 @@ pub async fn email_list(
 
     // All email subjects come from the PSO index on "email/date"
     let mut entries: Vec<(String, String)> = arrangement
-        .get_by_predicate("email/date")
+        .get_by_attribute("email/date")
         .into_iter()
-        .filter_map(|(subject_cid, objs)| {
-            let date = objs.first().and_then(|o| {
-                if let QuadObject::Text(t) = o { Some(t.clone()) } else { None }
+        .filter_map(|(subject_cid, values)| {
+            let date = values.first().and_then(|value| {
+                if let KqeValue::Text(t) = value {
+                    Some(t.clone())
+                } else {
+                    None
+                }
             })?;
             Some((subject_cid.to_multibase(), date))
         })
@@ -97,18 +116,30 @@ pub async fn email_list(
 
     let total = entries.len();
     let offset = q.offset.unwrap_or(0);
-    let limit  = q.limit.unwrap_or(50).min(200);
+    let limit = q.limit.unwrap_or(50).min(200);
 
-    let page: Vec<Value> = entries.into_iter().skip(offset).take(limit).map(|(cid_mb, date)| {
-        let message_id = KotobaCid::from_multibase(&cid_mb).map(|cid| {
-            arrangement.get_objects(&cid, "email/message_id")
-                .into_iter().find_map(|o| if let QuadObject::Text(t) = o { Some(t.clone()) } else { None })
-                .unwrap_or_default()
-        }).unwrap_or_default();
-        json!({ "cid": cid_mb, "date": date, "message_id": message_id })
-    }).collect();
+    let page: Vec<Value> = entries
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|(cid_mb, date)| {
+            let message_id = KotobaCid::from_multibase(&cid_mb)
+                .map(|cid| {
+                    arrangement
+                        .get_values(&cid, "email/message_id")
+                        .into_iter()
+                        .find_map(text_value)
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            json!({ "cid": cid_mb, "date": date, "message_id": message_id })
+        })
+        .collect();
 
-    Ok(Json(json!({ "emails": page, "total": total, "offset": offset, "limit": limit })).into_response())
+    Ok(
+        Json(json!({ "emails": page, "total": total, "offset": offset, "limit": limit }))
+            .into_response(),
+    )
 }
 
 // ── email.read ────────────────────────────────────────────────────────────────
@@ -124,12 +155,17 @@ pub async fn email_read(
     headers: HeaderMap,
     Query(q): Query<EmailReadQuery>,
 ) -> impl IntoResponse {
-    if let Err((code, msg)) = crate::graph_auth::validate_did(&q.owner_did, "owner_did", MAX_OWNER_DID_LEN) {
+    if let Err((code, msg)) =
+        crate::graph_auth::validate_did(&q.owner_did, "owner_did", MAX_OWNER_DID_LEN)
+    {
         return (code, Json(json!({ "error": msg }))).into_response();
     }
     if q.email_cid.is_empty() || q.email_cid.len() > MAX_EMAIL_CID_LEN {
-        return (StatusCode::BAD_REQUEST,
-            Json(json!({ "error": format!("email_cid must be 1–{MAX_EMAIL_CID_LEN} bytes") }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("email_cid must be 1–{MAX_EMAIL_CID_LEN} bytes") })),
+        )
+            .into_response();
     }
     if let Err((code, msg)) = require_email_auth(&headers, &q.owner_did, &state.operator_did) {
         return (code, Json(json!({ "error": msg }))).into_response();
@@ -137,14 +173,24 @@ pub async fn email_read(
 
     let crypto = match &state.crypto {
         Some(c) => Arc::clone(c),
-        None => return (StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "error": "crypto not initialised" }))).into_response(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "crypto not initialised" })),
+            )
+                .into_response()
+        }
     };
 
     let graph_cid = graph_cid_for(&q.owner_did);
     let arrangement = match state.quad_store.arrangement(&graph_cid).await {
-        None => return (StatusCode::NOT_FOUND,
-            Json(json!({ "error": "no emails found for owner_did" }))).into_response(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "no emails found for owner_did" })),
+            )
+                .into_response()
+        }
         Some(a) => a,
     };
 
@@ -153,27 +199,47 @@ pub async fn email_read(
     // Fetch body_cid → Vault decrypt via AgentCrypto
     let body_text = {
         let blob_cid_str = arrangement
-            .get_objects(&email_cid, "email/body_cid")
+            .get_values(&email_cid, "email/body_cid")
             .into_iter()
-            .find_map(|o| if let QuadObject::Text(t) = o { Some(t.clone()) } else { None });
+            .find_map(text_value);
 
         match blob_cid_str {
-            None => return (StatusCode::NOT_FOUND,
-                Json(json!({ "error": "email body_cid not found" }))).into_response(),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "email body_cid not found" })),
+                )
+                    .into_response()
+            }
             Some(cid_str) => {
                 let blob_cid = match KotobaCid::from_multibase(&cid_str) {
                     Some(c) => c,
-                    None => return (StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": "invalid body_cid multibase" }))).into_response(),
+                    None => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({ "error": "invalid body_cid multibase" })),
+                        )
+                            .into_response()
+                    }
                 };
                 let enc_bytes = match state.vault.get(&blob_cid).await {
                     Some(b) => b,
-                    None => return (StatusCode::NOT_FOUND,
-                        Json(json!({ "error": "body blob not found in vault" }))).into_response(),
+                    None => {
+                        return (
+                            StatusCode::NOT_FOUND,
+                            Json(json!({ "error": "body blob not found in vault" })),
+                        )
+                            .into_response()
+                    }
                 };
                 match crypto.decrypt_blob(&enc_bytes).await {
-                    Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": format!("decrypt body: {e}") }))).into_response(),
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({ "error": format!("decrypt body: {e}") })),
+                        )
+                            .into_response()
+                    }
                     Ok(pt) => String::from_utf8_lossy(&pt).into_owned(),
                 }
             }
@@ -181,14 +247,26 @@ pub async fn email_read(
     };
 
     // Decrypt PII fields using AgentCrypto::open_field
-    let from = open_field_safe(&*crypto, b"email/from",
-        &get_text_field(&arrangement, &email_cid, "email/from")).await;
-    let to   = open_field_safe(&*crypto, b"email/to",
-        &get_text_field(&arrangement, &email_cid, "email/to")).await;
-    let subj = open_field_safe(&*crypto, b"email/subject",
-        &get_text_field(&arrangement, &email_cid, "email/subject")).await;
+    let from = open_field_safe(
+        &*crypto,
+        b"email/from",
+        &get_text_field(&arrangement, &email_cid, "email/from"),
+    )
+    .await;
+    let to = open_field_safe(
+        &*crypto,
+        b"email/to",
+        &get_text_field(&arrangement, &email_cid, "email/to"),
+    )
+    .await;
+    let subj = open_field_safe(
+        &*crypto,
+        b"email/subject",
+        &get_text_field(&arrangement, &email_cid, "email/subject"),
+    )
+    .await;
     let date = get_text_field(&arrangement, &email_cid, "email/date");
-    let thread_id  = get_text_field(&arrangement, &email_cid, "email/thread_id");
+    let thread_id = get_text_field(&arrangement, &email_cid, "email/thread_id");
     let message_id = get_text_field(&arrangement, &email_cid, "email/message_id");
 
     Json(json!({
@@ -200,7 +278,8 @@ pub async fn email_read(
         "date":       date,
         "thread_id":  thread_id,
         "body":       body_text,
-    })).into_response()
+    }))
+    .into_response()
 }
 
 // ── email.ingest (manual POST) ────────────────────────────────────────────────
@@ -208,14 +287,14 @@ pub async fn email_read(
 #[derive(Deserialize)]
 pub struct EmailIngestBody {
     /// Base64-encoded raw RFC 2822 message
-    pub raw_b64:   String,
+    pub raw_b64: String,
     pub thread_id: Option<String>,
     pub owner_did: String,
 }
 
 #[derive(Serialize)]
 pub struct EmailIngestResponse {
-    pub status:    &'static str,
+    pub status: &'static str,
     pub email_cid: String,
 }
 
@@ -224,21 +303,32 @@ pub async fn email_ingest(
     headers: HeaderMap,
     Json(body): Json<EmailIngestBody>,
 ) -> impl IntoResponse {
-    if let Err((code, msg)) = crate::graph_auth::validate_did(&body.owner_did, "owner_did", MAX_OWNER_DID_LEN) {
+    if let Err((code, msg)) =
+        crate::graph_auth::validate_did(&body.owner_did, "owner_did", MAX_OWNER_DID_LEN)
+    {
         return (code, Json(json!({ "error": msg }))).into_response();
     }
     if body.raw_b64.is_empty() {
-        return (StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "raw_b64 must not be empty" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "raw_b64 must not be empty" })),
+        )
+            .into_response();
     }
     if body.raw_b64.len() > MAX_RAW_B64_LEN {
-        return (StatusCode::PAYLOAD_TOO_LARGE,
-            Json(json!({ "error": format!("raw_b64 exceeds {MAX_RAW_B64_LEN} bytes") }))).into_response();
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": format!("raw_b64 exceeds {MAX_RAW_B64_LEN} bytes") })),
+        )
+            .into_response();
     }
     let thread_id = body.thread_id.as_deref().unwrap_or("");
     if thread_id.len() > MAX_THREAD_ID_LEN {
-        return (StatusCode::BAD_REQUEST,
-            Json(json!({ "error": format!("thread_id exceeds {MAX_THREAD_ID_LEN} bytes") }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("thread_id exceeds {MAX_THREAD_ID_LEN} bytes") })),
+        )
+            .into_response();
     }
     if let Err((code, msg)) = require_email_auth(&headers, &body.owner_did, &state.operator_did) {
         return (code, Json(json!({ "error": msg }))).into_response();
@@ -246,15 +336,25 @@ pub async fn email_ingest(
 
     let crypto = match &state.crypto {
         Some(c) => Arc::clone(c),
-        None => return (StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "error": "crypto not initialised" }))).into_response(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "crypto not initialised" })),
+            )
+                .into_response()
+        }
     };
 
-    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     let raw = match B64.decode(&body.raw_b64) {
-        Ok(b)  => b,
-        Err(e) => return (StatusCode::BAD_REQUEST,
-            Json(json!({ "error": format!("base64 decode: {e}") }))).into_response(),
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("base64 decode: {e}") })),
+            )
+                .into_response()
+        }
     };
 
     // Reject oversized decoded payloads before passing to the ingestor.
@@ -262,10 +362,13 @@ pub async fn email_ingest(
     // EmailIngestor::MAX_EMAIL_BYTES (25 MiB). Return 413 here rather
     // than letting the ingestor return an anyhow error that becomes 500.
     if raw.len() > EmailIngestor::MAX_EMAIL_BYTES {
-        return (StatusCode::PAYLOAD_TOO_LARGE,
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
             Json(json!({ "error": format!(
                 "decoded email exceeds {} bytes", EmailIngestor::MAX_EMAIL_BYTES
-            ) }))).into_response();
+            ) })),
+        )
+            .into_response();
     }
 
     let ingestor = EmailIngestor::new(
@@ -279,9 +382,13 @@ pub async fn email_ingest(
         Ok(cid) => Json(json!({
             "status": "ok",
             "email_cid": cid.to_multibase(),
-        })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": format!("{e}") }))).into_response(),
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("{e}") })),
+        )
+            .into_response(),
     }
 }
 
@@ -292,10 +399,18 @@ fn get_text_field(
     subject: &KotobaCid,
     predicate: &str,
 ) -> String {
-    arr.get_objects(subject, predicate)
+    arr.get_values(subject, predicate)
         .into_iter()
-        .find_map(|o| if let QuadObject::Text(t) = o { Some(t.clone()) } else { None })
+        .find_map(text_value)
         .unwrap_or_default()
+}
+
+fn text_value(value: KqeValue) -> Option<String> {
+    if let KqeValue::Text(t) = value {
+        Some(t)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -347,8 +462,10 @@ mod tests {
 
     #[test]
     fn email_cid_len_cap_smaller_than_did_len_cap() {
-        assert!(MAX_EMAIL_CID_LEN < MAX_OWNER_DID_LEN,
-            "email CID length cap should be tighter than DID length cap");
+        assert!(
+            MAX_EMAIL_CID_LEN < MAX_OWNER_DID_LEN,
+            "email CID length cap should be tighter than DID length cap"
+        );
     }
 
     #[test]
@@ -367,8 +484,10 @@ mod tests {
         // EmailIngestor::ingest_raw so that the XRPC handler catches oversized
         // thread_id with 400 before the ingestor would return an anyhow error.
         // ingest_raw rejects thread_id.len() > 256 (matches EmailIngestor internal limit)
-        assert_eq!(MAX_THREAD_ID_LEN, 256,
-            "XRPC handler limit must match ingestor limit");
+        assert_eq!(
+            MAX_THREAD_ID_LEN, 256,
+            "XRPC handler limit must match ingestor limit"
+        );
         // Also ensure the constant is used (not dead code)
         let _ = MAX_THREAD_ID_LEN;
     }
@@ -376,8 +495,11 @@ mod tests {
     #[test]
     fn max_email_bytes_is_25_mib() {
         use kotoba_ingest::EmailIngestor;
-        assert_eq!(EmailIngestor::MAX_EMAIL_BYTES, 25 * 1024 * 1024,
-            "EmailIngestor::MAX_EMAIL_BYTES must be 25 MiB");
+        assert_eq!(
+            EmailIngestor::MAX_EMAIL_BYTES,
+            25 * 1024 * 1024,
+            "EmailIngestor::MAX_EMAIL_BYTES must be 25 MiB"
+        );
     }
 
     #[test]
@@ -460,15 +582,19 @@ mod tests {
 /// Open a `signal:v1:` envelope using AgentCrypto; returns ciphertext on failure
 /// (same fallback as the old decrypt_text_field).
 async fn open_field_safe(
-    crypto:   &dyn kotoba_crypto::AgentCrypto,
-    scope:    &[u8],
+    crypto: &dyn kotoba_crypto::AgentCrypto,
+    scope: &[u8],
     envelope: &str,
 ) -> String {
-    if envelope.is_empty() { return envelope.to_string(); }
+    if envelope.is_empty() {
+        return envelope.to_string();
+    }
     if !envelope.starts_with("signal:v1:") {
         // Plain-text legacy value — return as-is
         return envelope.to_string();
     }
-    crypto.open_field(scope, envelope).await
+    crypto
+        .open_field(scope, envelope)
+        .await
         .unwrap_or_else(|_| envelope.to_string()) // return ciphertext if decrypt fails
 }

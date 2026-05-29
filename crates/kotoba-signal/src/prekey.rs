@@ -1,24 +1,24 @@
-use x25519_dalek::{StaticSecret, PublicKey as X25519Public};
+use crate::identity::IdentityKeyPair;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use x25519_dalek::{PublicKey as X25519Public, StaticSecret};
 use zeroize::ZeroizeOnDrop;
-use crate::identity::IdentityKeyPair;
 
-pub type PreKeyId      = u32;
+pub type PreKeyId = u32;
 pub type SignedPreKeyId = u32;
 
 /// Ephemeral one-time pre-key (OPK).
 #[derive(ZeroizeOnDrop)]
 pub struct PreKey {
-    pub id:      PreKeyId,
+    pub id: PreKeyId,
     pub private: StaticSecret,
 }
 
 /// Signed semi-static pre-key (SPK).
 #[derive(ZeroizeOnDrop)]
 pub struct SignedPreKey {
-    pub id:        SignedPreKeyId,
-    pub private:   StaticSecret,
+    pub id: SignedPreKeyId,
+    pub private: StaticSecret,
     /// Ed25519 signature over the public SPK bytes.
     pub signature: Vec<u8>,
 }
@@ -28,29 +28,34 @@ pub struct SignedPreKey {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreKeyBundle {
     /// DID of the bundle owner.
-    pub did:               String,
-    pub device_id:         String,
+    pub did: String,
+    pub device_id: String,
     /// Identity key (serialised `IdentityKey`).
-    pub identity_key:      crate::identity::IdentityKey,
+    pub identity_key: crate::identity::IdentityKey,
     /// Signed pre-key public bytes (32 bytes).
-    pub signed_prekey:     Vec<u8>,
-    pub signed_prekey_id:  SignedPreKeyId,
+    pub signed_prekey: Vec<u8>,
+    pub signed_prekey_id: SignedPreKeyId,
     /// Ed25519 signature of `signed_prekey` by `identity_key.signing`.
     pub signed_prekey_sig: Vec<u8>,
     /// Optional one-time pre-key public bytes.
-    pub one_time_prekey:     Option<Vec<u8>>,
-    pub one_time_prekey_id:  Option<PreKeyId>,
+    pub one_time_prekey: Option<Vec<u8>>,
+    pub one_time_prekey_id: Option<PreKeyId>,
 }
 
 impl PreKey {
     pub fn generate(id: PreKeyId) -> Self {
-        Self { id, private: StaticSecret::random_from_rng(OsRng) }
+        Self {
+            id,
+            private: StaticSecret::random_from_rng(OsRng),
+        }
     }
     pub fn public_bytes(&self) -> [u8; 32] {
         X25519Public::from(&self.private).to_bytes()
     }
     pub fn dh(&self, remote: &[u8; 32]) -> [u8; 32] {
-        self.private.diffie_hellman(&X25519Public::from(*remote)).to_bytes()
+        self.private
+            .diffie_hellman(&X25519Public::from(*remote))
+            .to_bytes()
     }
 }
 
@@ -59,13 +64,19 @@ impl SignedPreKey {
         let private = StaticSecret::random_from_rng(OsRng);
         let pub_bytes = X25519Public::from(&private).to_bytes();
         let signature = identity_kp.sign(&pub_bytes);
-        Self { id, private, signature }
+        Self {
+            id,
+            private,
+            signature,
+        }
     }
     pub fn public_bytes(&self) -> [u8; 32] {
         X25519Public::from(&self.private).to_bytes()
     }
     pub fn dh(&self, remote: &[u8; 32]) -> [u8; 32] {
-        self.private.diffie_hellman(&X25519Public::from(*remote)).to_bytes()
+        self.private
+            .diffie_hellman(&X25519Public::from(*remote))
+            .to_bytes()
     }
 }
 
@@ -138,14 +149,14 @@ mod tests {
     fn prekey_bundle_fields_round_trip() {
         let ik = IdentityKeyPair::generate();
         let bundle = PreKeyBundle {
-            did:               "did:test:abc".to_string(),
-            device_id:         "device-1".to_string(),
-            identity_key:      ik.public_key(),
-            signed_prekey:     vec![1u8; 32],
-            signed_prekey_id:  5,
+            did: "did:test:abc".to_string(),
+            device_id: "device-1".to_string(),
+            identity_key: ik.public_key(),
+            signed_prekey: vec![1u8; 32],
+            signed_prekey_id: 5,
             signed_prekey_sig: vec![0u8; 64],
-            one_time_prekey:     None,
-            one_time_prekey_id:  None,
+            one_time_prekey: None,
+            one_time_prekey_id: None,
         };
         assert_eq!(bundle.did, "did:test:abc");
         assert_eq!(bundle.signed_prekey_id, 5);

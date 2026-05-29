@@ -4,17 +4,17 @@
 //   AT DID      → KotobaCid::from_bytes(did.as_bytes())
 //   AT collection NSID → KotobaCid::from_bytes(nsid.as_bytes())
 //   AT URI      → Quad(graph=collection_cid, subject=did_cid, pred=rkey, object=record_cid_or_text)
-//   AT CID str  → KotobaCid (parse multibase, validate CIDv1 dag-cbor blake3)
+//   AT CID str  → KotobaCid (parse multibase, validate CIDv1 dag-cbor sha2-256)
 //   Jetstream commit event → (Topic("jetstream/<collection>"), Quad)
 //   Jetstream identity event → (Topic("jetstream/identity"), Quad(pred="handle", object=Text(handle)))
 
 use kotoba_core::cid::KotobaCid;
-use kotoba_kqe::quad::{Quad, QuadObject};
+use kotoba_kqe::quad::{LegacyQuad as Quad, LegacyQuadObject as QuadObject};
 use kotoba_kse::topic::Topic;
 
 // ── KotobaCid helpers ─────────────────────────────────────────────────────────
 
-/// Hash a DID string with blake3 → KotobaCid (stable, content-addressed entity id).
+/// Hash a DID string with sha2-256 → KotobaCid (stable, content-addressed entity id).
 pub fn did_to_cid(did: &str) -> KotobaCid {
     KotobaCid::from_bytes(did.as_bytes())
 }
@@ -26,7 +26,7 @@ pub fn collection_to_cid(collection: &str) -> KotobaCid {
 
 /// Parse an AT Protocol CID multibase string → KotobaCid.
 ///
-/// Accepts both kotoba-internal blake3 CIDs and real Bluesky sha2-256 CIDs:
+/// Accepts real AT/IPFS sha2-256 CIDs:
 /// - `b` prefix → base32lower (RFC 4648 no-pad)
 /// - `z` prefix → base58btc
 pub fn at_cid_str_to_kotoba(s: &str) -> Option<KotobaCid> {
@@ -57,26 +57,32 @@ pub fn at_cid_str_to_kotoba(s: &str) -> Option<KotobaCid> {
 
 /// Validate raw CID bytes for AT Protocol CIDv1 dag-cbor.
 ///
-/// Accepts both sha2-256 (0x12, real Bluesky CIDs) and blake3 (0x1e, kotoba-internal).
+/// Accepts sha2-256 (0x12, real Bluesky/IPFS CIDs).
 fn validate_at_cid_bytes(bytes: &[u8]) -> Option<KotobaCid> {
     if bytes.len() != 36 {
-        tracing::warn!("at_cid_str_to_kotoba: expected 36 bytes, got {}", bytes.len());
+        tracing::warn!(
+            "at_cid_str_to_kotoba: expected 36 bytes, got {}",
+            bytes.len()
+        );
         return None;
     }
     if bytes[0] != 1 || bytes[1] != KotobaCid::CODEC_DAG_CBOR {
         tracing::warn!(
             "at_cid_str_to_kotoba: expected CIDv1 dag-cbor, got {:02x} {:02x}",
-            bytes[0], bytes[1]
+            bytes[0],
+            bytes[1]
         );
         return None;
     }
-    // Multihash: [2]=code [3]=len; accept sha2-256 (0x12) or blake3 (0x1e), digest 32 bytes
+    // Multihash: [2]=code [3]=len; accept sha2-256 (0x12), digest 32 bytes.
     let mh_code = bytes[2];
-    let mh_len  = bytes[3];
-    let valid = (mh_code == 0x12 || mh_code == KotobaCid::MH_BLAKE3) && mh_len == 32;
+    let mh_len = bytes[3];
+    let valid = mh_code == KotobaCid::MH_SHA2_256 && mh_len == 32;
     if !valid {
         tracing::warn!(
-            "at_cid_str_to_kotoba: unsupported multihash {:02x} len={}", mh_code, mh_len
+            "at_cid_str_to_kotoba: unsupported multihash {:02x} len={}",
+            mh_code,
+            mh_len
         );
         return None;
     }
@@ -110,7 +116,11 @@ impl AtUri {
         if authority.is_empty() {
             return None;
         }
-        Some(Self { authority, collection, rkey })
+        Some(Self {
+            authority,
+            collection,
+            rkey,
+        })
     }
 
     /// Convert to EAVT Quad.
@@ -121,12 +131,12 @@ impl AtUri {
     /// - `object`  = `QuadObject::Cid(record_cid)` if provided, else `QuadObject::Text("at://{self}")`
     pub fn to_quad(&self, record_cid: Option<KotobaCid>) -> Quad {
         Quad {
-            graph:     collection_to_cid(&self.collection),
-            subject:   did_to_cid(&self.authority),
+            graph: collection_to_cid(&self.collection),
+            subject: did_to_cid(&self.authority),
             predicate: self.rkey.clone(),
-            object:    match record_cid {
+            object: match record_cid {
                 Some(cid) => QuadObject::Cid(cid),
-                None      => QuadObject::Text(format!("at://{self}")),
+                None => QuadObject::Text(format!("at://{self}")),
             },
         }
     }
@@ -137,7 +147,11 @@ impl std::fmt::Display for AtUri {
         if self.rkey.is_empty() {
             write!(f, "at://{}/{}", self.authority, self.collection)
         } else {
-            write!(f, "at://{}/{}/{}", self.authority, self.collection, self.rkey)
+            write!(
+                f,
+                "at://{}/{}/{}",
+                self.authority, self.collection, self.rkey
+            )
         }
     }
 }
@@ -146,34 +160,34 @@ impl std::fmt::Display for AtUri {
 
 #[derive(Debug, serde::Deserialize)]
 pub struct JetstreamEvent {
-    pub did:      String,
-    pub time_us:  u64,
-    pub kind:     String,
-    pub commit:   Option<JetstreamCommit>,
+    pub did: String,
+    pub time_us: u64,
+    pub kind: String,
+    pub commit: Option<JetstreamCommit>,
     pub identity: Option<JetstreamIdentity>,
-    pub account:  Option<JetstreamAccount>,
+    pub account: Option<JetstreamAccount>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 pub struct JetstreamCommit {
-    pub rev:        String,
-    pub operation:  String,  // "create" | "update" | "delete"
+    pub rev: String,
+    pub operation: String, // "create" | "update" | "delete"
     pub collection: String,
-    pub rkey:       String,
-    pub cid:        Option<String>,           // AT CID string (None for delete)
-    pub record:     Option<serde_json::Value>,
+    pub rkey: String,
+    pub cid: Option<String>, // AT CID string (None for delete)
+    pub record: Option<serde_json::Value>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 pub struct JetstreamIdentity {
-    pub did:    String,
+    pub did: String,
     pub handle: Option<String>,
-    pub seq:    Option<u64>,
+    pub seq: Option<u64>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 pub struct JetstreamAccount {
-    pub did:    String,
+    pub did: String,
     pub active: bool,
     pub status: Option<String>,
 }
@@ -192,7 +206,7 @@ pub fn jetstream_event_to_quad(json: &[u8]) -> Option<(Topic, Quad)> {
         "commit" => {
             let commit = event.commit.as_ref()?;
             let topic = jetstream_subject_to_topic(&commit.collection);
-            let graph   = collection_to_cid(&commit.collection);
+            let graph = collection_to_cid(&commit.collection);
             let subject = did_to_cid(&event.did);
             let object = match &commit.cid {
                 Some(cid_str) => {
@@ -212,28 +226,28 @@ pub fn jetstream_event_to_quad(json: &[u8]) -> Option<(Topic, Quad)> {
 
         "identity" => {
             let identity = event.identity.as_ref()?;
-            let topic   = Topic("jetstream/identity".to_string());
-            let graph   = collection_to_cid("com.atproto.identity");
+            let topic = Topic("jetstream/identity".to_string());
+            let graph = collection_to_cid("com.atproto.identity");
             let subject = did_to_cid(&event.did);
             let quad = Quad {
                 graph,
                 subject,
                 predicate: "handle".to_string(),
-                object:    QuadObject::Text(identity.handle.clone().unwrap_or_default()),
+                object: QuadObject::Text(identity.handle.clone().unwrap_or_default()),
             };
             Some((topic, quad))
         }
 
         "account" => {
             let account = event.account.as_ref()?;
-            let topic   = Topic("jetstream/account".to_string());
-            let graph   = collection_to_cid("com.atproto.account");
+            let topic = Topic("jetstream/account".to_string());
+            let graph = collection_to_cid("com.atproto.account");
             let subject = did_to_cid(&event.did);
             let quad = Quad {
                 graph,
                 subject,
                 predicate: "active".to_string(),
-                object:    QuadObject::Bool(account.active),
+                object: QuadObject::Bool(account.active),
             };
             Some((topic, quad))
         }
@@ -333,9 +347,9 @@ mod tests {
     #[test]
     fn at_uri_display_with_rkey() {
         let uri = AtUri {
-            authority:  "did:plc:abc".to_string(),
+            authority: "did:plc:abc".to_string(),
             collection: "app.bsky.feed.post".to_string(),
-            rkey:       "3xyz".to_string(),
+            rkey: "3xyz".to_string(),
         };
         assert_eq!(uri.to_string(), "at://did:plc:abc/app.bsky.feed.post/3xyz");
     }
@@ -343,9 +357,9 @@ mod tests {
     #[test]
     fn at_uri_display_without_rkey() {
         let uri = AtUri {
-            authority:  "did:plc:abc".to_string(),
+            authority: "did:plc:abc".to_string(),
             collection: "app.bsky.feed.post".to_string(),
-            rkey:       String::new(),
+            rkey: String::new(),
         };
         assert_eq!(uri.to_string(), "at://did:plc:abc/app.bsky.feed.post");
     }
@@ -359,28 +373,29 @@ mod tests {
     fn at_cid_z_prefix_sha2_256_roundtrip() {
         // Build a synthetic CIDv1 dag-cbor sha2-256 (36 bytes) and encode as base58btc (z prefix)
         let mut cid_bytes = [0u8; 36];
-        cid_bytes[0] = 1;                      // CIDv1
+        cid_bytes[0] = 1; // CIDv1
         cid_bytes[1] = KotobaCid::CODEC_DAG_CBOR; // dag-cbor 0x71
-        cid_bytes[2] = 0x12;                   // sha2-256 multihash code
-        cid_bytes[3] = 32;                     // 32-byte digest
-        // fill digest with deterministic bytes
-        for i in 0..32 { cid_bytes[4 + i] = (i as u8).wrapping_mul(7); }
+        cid_bytes[2] = 0x12; // sha2-256 multihash code
+        cid_bytes[3] = 32; // 32-byte digest
+                           // fill digest with deterministic bytes
+        for i in 0..32 {
+            cid_bytes[4 + i] = (i as u8).wrapping_mul(7);
+        }
 
         let encoded = multibase::encode(multibase::Base::Base58Btc, &cid_bytes);
         assert!(encoded.starts_with('z'));
 
-        let parsed = at_cid_str_to_kotoba(&encoded)
-            .expect("z-prefix sha2-256 CID should parse");
+        let parsed = at_cid_str_to_kotoba(&encoded).expect("z-prefix sha2-256 CID should parse");
         assert_eq!(parsed.0, cid_bytes);
     }
 
     #[test]
-    fn at_cid_z_prefix_blake3_roundtrip() {
-        // KotobaCid blake3 encoded as base58btc
-        let cid = KotobaCid::from_bytes(b"test-blake3");
+    fn at_cid_z_prefix_kotoba_sha2_roundtrip() {
+        // KotobaCid sha2-256 encoded as base58btc
+        let cid = KotobaCid::from_bytes(b"test-sha2");
         let encoded = multibase::encode(multibase::Base::Base58Btc, &cid.0);
         assert!(encoded.starts_with('z'));
-        let parsed = at_cid_str_to_kotoba(&encoded).expect("z-prefix blake3 CID should parse");
+        let parsed = at_cid_str_to_kotoba(&encoded).expect("z-prefix sha2-256 CID should parse");
         assert_eq!(parsed, cid);
     }
 
@@ -409,7 +424,10 @@ mod tests {
     fn at_cid_wrong_length_base32_returns_none() {
         // Encode fewer than 36 bytes with 'b' prefix — should fail length check
         let short = [1u8; 10];
-        let encoded = format!("b{}", data_encoding::BASE32_NOPAD.encode(&short).to_lowercase());
+        let encoded = format!(
+            "b{}",
+            data_encoding::BASE32_NOPAD.encode(&short).to_lowercase()
+        );
         assert!(at_cid_str_to_kotoba(&encoded).is_none());
     }
 
@@ -417,9 +435,9 @@ mod tests {
     fn at_cid_wrong_codec_returns_none() {
         // bytes[1] = 0x55 (raw) instead of 0x71 (dag-cbor)
         let mut cid_bytes = [0u8; 36];
-        cid_bytes[0] = 1;     // CIDv1
-        cid_bytes[1] = 0x55;  // NOT dag-cbor
-        cid_bytes[2] = KotobaCid::MH_BLAKE3;
+        cid_bytes[0] = 1; // CIDv1
+        cid_bytes[1] = 0x55; // NOT dag-cbor
+        cid_bytes[2] = KotobaCid::MH_SHA2_256;
         cid_bytes[3] = 32;
         let encoded = multibase::encode(multibase::Base::Base58Btc, &cid_bytes);
         assert!(at_cid_str_to_kotoba(&encoded).is_none());
@@ -427,11 +445,11 @@ mod tests {
 
     #[test]
     fn at_cid_wrong_multihash_returns_none() {
-        // bytes[2] = 0x13 — neither sha2-256 (0x12) nor blake3 (0x1e)
+        // bytes[2] = 0x13 — not sha2-256 (0x12)
         let mut cid_bytes = [0u8; 36];
         cid_bytes[0] = 1;
         cid_bytes[1] = KotobaCid::CODEC_DAG_CBOR;
-        cid_bytes[2] = 0x13;  // unsupported multihash
+        cid_bytes[2] = 0x13; // unsupported multihash
         cid_bytes[3] = 32;
         let encoded = multibase::encode(multibase::Base::Base58Btc, &cid_bytes);
         assert!(at_cid_str_to_kotoba(&encoded).is_none());
@@ -493,9 +511,9 @@ mod tests {
     #[test]
     fn at_uri_to_quad_with_record_cid() {
         let uri = AtUri {
-            authority:  "did:plc:abc".to_string(),
+            authority: "did:plc:abc".to_string(),
             collection: "app.bsky.feed.post".to_string(),
-            rkey:       "3xyz".to_string(),
+            rkey: "3xyz".to_string(),
         };
         let record_cid = KotobaCid::from_bytes(b"some-record");
         let quad = uri.to_quad(Some(record_cid.clone()));

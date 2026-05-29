@@ -18,15 +18,24 @@ pub trait BlockStore: Send + Sync {
     }
 
     /// Protect this CID from eviction by BudgetedBlockStore. Default no-op.
-    fn pin(&self, cid: &KotobaCid) { let _ = cid; }
+    fn pin(&self, cid: &KotobaCid) {
+        let _ = cid;
+    }
 
     /// Allow this CID to be evicted again. Default no-op.
-    fn unpin(&self, cid: &KotobaCid) { let _ = cid; }
+    fn unpin(&self, cid: &KotobaCid) {
+        let _ = cid;
+    }
 
     /// Returns true if this CID is currently pinned.
-    fn is_pinned(&self, cid: &KotobaCid) -> bool { let _ = cid; false }
+    fn is_pinned(&self, cid: &KotobaCid) -> bool {
+        let _ = cid;
+        false
+    }
 
     /// Enumerate all CIDs stored in this store.  Default returns empty vec for
     /// stores that don't support listing (S3, kubo).  Used by `QuadStore::gc_dead_blocks`.
-    fn all_cids(&self) -> Vec<KotobaCid> { vec![] }
+    fn all_cids(&self) -> Vec<KotobaCid> {
+        vec![]
+    }
 }

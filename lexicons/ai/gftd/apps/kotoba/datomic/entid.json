@@ -1,0 +1,29 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.datomic.entid",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Resolve a Datomic ident, lookup-ref, CID string, or entity value to a Kotoba entity CID.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["graph", "ident_edn"],
+          "properties": {
+            "graph": { "type": "string" },
+            "ident_edn": { "type": "string" },
+            "as_of": { "type": "string" },
+            "since": { "type": "string" },
+            "cacao_b64": { "type": "string" },
+            "presentation": { "type": "unknown" }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": { "type": "unknown" }
+      }
+    }
+  }
+}

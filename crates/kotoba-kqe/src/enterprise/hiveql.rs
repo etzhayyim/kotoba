@@ -15,20 +15,21 @@
 
 use sqlparser::dialect::HiveDialect as SqlparserHive;
 
-use crate::schema::SchemaMap;
 use super::{
-    CompiledEnterpriseQuery, EnterpriseDialect, EnterpriseFeature,
-    sql_base::SchemaBasedSqlCompiler,
+    sql_base::SchemaBasedSqlCompiler, CompiledEnterpriseQuery, EnterpriseDialect, EnterpriseFeature,
 };
+use crate::schema::SchemaMap;
 
 pub struct HiveQlDialect;
 
 impl EnterpriseDialect for HiveQlDialect {
-    fn dialect_name(&self) -> &'static str { "hiveql" }
+    fn dialect_name(&self) -> &'static str {
+        "hiveql"
+    }
 
     fn compile(
         &self,
-        query:  &str,
+        query: &str,
         schema: &SchemaMap,
         output: &str,
     ) -> anyhow::Result<CompiledEnterpriseQuery> {
@@ -44,15 +45,15 @@ impl EnterpriseDialect for HiveQlDialect {
 
         let (prepped, extra) = preprocess_hiveql(query);
 
-        let (program, mut pp) = SchemaBasedSqlCompiler::compile(
-            &prepped,
-            &SqlparserHive {},
-            schema,
-            output,
-        )?;
+        let (program, mut pp) =
+            SchemaBasedSqlCompiler::compile(&prepped, &SqlparserHive {}, schema, output)?;
 
-        if pp.sample_n.is_none() { pp.sample_n = extra.sample_n; }
-        if pp.order_by.is_empty() { pp.order_by = extra.order_by; }
+        if pp.sample_n.is_none() {
+            pp.sample_n = extra.sample_n;
+        }
+        if pp.order_by.is_empty() {
+            pp.order_by = extra.order_by;
+        }
 
         Ok(CompiledEnterpriseQuery {
             program,
@@ -73,14 +74,21 @@ struct HiveExtra {
 
 fn preprocess_hiveql(sql: &str) -> (String, HiveExtra) {
     let mut s = sql.to_string();
-    let mut extra = HiveExtra { sample_n: None, order_by: Vec::new() };
+    let mut extra = HiveExtra {
+        sample_n: None,
+        order_by: Vec::new(),
+    };
 
     // TABLESAMPLE(BUCKET N OUT OF M) → extract N and strip
     let upper = s.to_uppercase();
     if let Some(idx) = upper.find("TABLESAMPLE(BUCKET ") {
         if let Some(end) = s[idx..].find(')') {
             let clause = &s[idx + 19..idx + end]; // after "TABLESAMPLE(BUCKET "
-            if let Some(n) = clause.split_whitespace().next().and_then(|n| n.parse::<usize>().ok()) {
+            if let Some(n) = clause
+                .split_whitespace()
+                .next()
+                .and_then(|n| n.parse::<usize>().ok())
+            {
                 extra.sample_n = Some(n);
             }
             s.replace_range(idx..idx + end + 1, "");
@@ -97,7 +105,9 @@ fn preprocess_hiveql(sql: &str) -> (String, HiveExtra) {
     // DISTRIBUTE BY col → strip
     let upper = s.to_uppercase();
     if let Some(idx) = upper.find(" DISTRIBUTE BY ") {
-        let end = s[idx..].find('\n').map(|i| idx + i)
+        let end = s[idx..]
+            .find('\n')
+            .map(|i| idx + i)
             .or_else(|| s[idx..].find(" SORT BY ").map(|i| idx + i))
             .or_else(|| s[idx..].find(" CLUSTER BY ").map(|i| idx + i))
             .unwrap_or(s.len());
@@ -108,9 +118,14 @@ fn preprocess_hiveql(sql: &str) -> (String, HiveExtra) {
     let upper = s.to_uppercase();
     if let Some(idx) = upper.find(" SORT BY ") {
         let rest = s[idx + 9..].trim_start();
-        let col = rest.split(|c: char| c.is_whitespace() || c == ',')
-            .next().unwrap_or("").to_string();
-        if !col.is_empty() { extra.order_by.push(col); }
+        let col = rest
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if !col.is_empty() {
+            extra.order_by.push(col);
+        }
         let end = s[idx..].find('\n').map(|i| idx + i).unwrap_or(s.len());
         s.replace_range(idx..end, "");
     }
@@ -119,9 +134,14 @@ fn preprocess_hiveql(sql: &str) -> (String, HiveExtra) {
     let upper = s.to_uppercase();
     if let Some(idx) = upper.find(" CLUSTER BY ") {
         let rest = s[idx + 12..].trim_start();
-        let col = rest.split(|c: char| c.is_whitespace() || c == ',')
-            .next().unwrap_or("").to_string();
-        if !col.is_empty() { extra.order_by.push(col); }
+        let col = rest
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if !col.is_empty() {
+            extra.order_by.push(col);
+        }
         let end = s[idx..].find('\n').map(|i| idx + i).unwrap_or(s.len());
         s.replace_range(idx..end, "");
     }
@@ -135,38 +155,53 @@ fn preprocess_hiveql(sql: &str) -> (String, HiveExtra) {
 mod tests {
     use super::*;
     use crate::schema::{AttrDef, SchemaMap, TableSchema};
-    use crate::{delta::Delta, quad::{Quad, QuadObject}};
+    use crate::{
+        datom::{Datom, Value},
+        delta::Delta,
+    };
     use kotoba_core::cid::KotobaCid;
 
-    fn cid(s: &str) -> KotobaCid { KotobaCid::from_bytes(s.as_bytes()) }
+    fn cid(s: &str) -> KotobaCid {
+        KotobaCid::from_bytes(s.as_bytes())
+    }
     fn fact(pred: &str, s: &str, o: &str) -> Delta {
-        Delta::assert(Quad {
-            graph: cid("g"), subject: cid(s), predicate: pred.to_string(),
-            object: QuadObject::Cid(cid(o)),
-        })
+        Delta::assert_datom(Datom::assert(
+            cid(s),
+            pred.to_string(),
+            Value::Cid(cid(o)),
+            cid("g"),
+        ))
     }
     fn has(d: &[Delta], pred: &str, s: &str, o: &str) -> bool {
-        d.iter().any(|x| x.quad.predicate == pred
-            && x.quad.subject == cid(s)
-            && matches!(&x.quad.object, QuadObject::Cid(c) if *c == cid(o)))
+        d.iter().any(|x| {
+            x.attribute() == pred
+                && x.entity() == &cid(s)
+                && matches!(x.value(), Value::Cid(c) if *c == cid(o))
+        })
     }
 
     #[test]
     fn hive_standard_select() {
         let mut schema = SchemaMap::new();
-        schema.add("pageviews", TableSchema::new("id")
-            .with_attr(AttrDef::scalar("page", "pageviews"))
-            .with_attr(AttrDef::scalar("country", "pageviews")));
+        schema.add(
+            "pageviews",
+            TableSchema::new("id")
+                .with_attr(AttrDef::scalar("page", "pageviews"))
+                .with_attr(AttrDef::scalar("country", "pageviews")),
+        );
 
-        let result = HiveQlDialect.compile(
-            "SELECT p.id, p.page FROM pageviews p WHERE p.country = 'JP'",
-            &schema, "jp_views",
-        ).unwrap();
+        let result = HiveQlDialect
+            .compile(
+                "SELECT p.id, p.page FROM pageviews p WHERE p.country = 'JP'",
+                &schema,
+                "jp_views",
+            )
+            .unwrap();
 
         let input = vec![
-            fact("pageviews/page",    "pv1", "/home"),
+            fact("pageviews/page", "pv1", "/home"),
             fact("pageviews/country", "pv1", "JP"),
-            fact("pageviews/page",    "pv2", "/about"),
+            fact("pageviews/page", "pv2", "/about"),
             fact("pageviews/country", "pv2", "US"),
         ];
         let derived = result.program.evaluate_delta(&input);
@@ -177,26 +212,36 @@ mod tests {
     #[test]
     fn bucket_sample_extracted() {
         let mut schema = SchemaMap::new();
-        schema.add("logs", TableSchema::new("id")
-            .with_attr(AttrDef::scalar("level", "logs")));
+        schema.add(
+            "logs",
+            TableSchema::new("id").with_attr(AttrDef::scalar("level", "logs")),
+        );
 
-        let result = HiveQlDialect.compile(
-            "SELECT l.id, l.level FROM logs l TABLESAMPLE(BUCKET 3 OUT OF 10)",
-            &schema, "sample",
-        ).unwrap();
+        let result = HiveQlDialect
+            .compile(
+                "SELECT l.id, l.level FROM logs l TABLESAMPLE(BUCKET 3 OUT OF 10)",
+                &schema,
+                "sample",
+            )
+            .unwrap();
         assert_eq!(result.post_process.sample_n, Some(3));
     }
 
     #[test]
     fn lateral_view_feature_detected() {
         let mut schema = SchemaMap::new();
-        schema.add("t", TableSchema::new("s")
-            .with_attr(AttrDef::scalar("o", "t")));
+        schema.add(
+            "t",
+            TableSchema::new("s").with_attr(AttrDef::scalar("o", "t")),
+        );
 
-        let result = HiveQlDialect.compile(
-            "SELECT t.s, t.o FROM t\nLATERAL VIEW EXPLODE(tags) tmp AS tag",
-            &schema, "out",
-        ).unwrap();
+        let result = HiveQlDialect
+            .compile(
+                "SELECT t.s, t.o FROM t\nLATERAL VIEW EXPLODE(tags) tmp AS tag",
+                &schema,
+                "out",
+            )
+            .unwrap();
         assert!(result.features.contains(&EnterpriseFeature::SemiStructured));
     }
 }

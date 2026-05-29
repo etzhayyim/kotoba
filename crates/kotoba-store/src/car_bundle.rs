@@ -1,3 +1,6 @@
+use anyhow::{bail, Result};
+use bytes::Bytes;
+use kotoba_core::cid::KotobaCid;
 /// CAR (Content Addressable aRchive) bundle — Hummock-style SST analogue.
 ///
 /// Packs all ProllyTree blocks from a single commit into one flat file so they can
@@ -28,15 +31,12 @@
 ///
 /// The in-memory [`CarBlockIndex`] maps `KotobaCid → (car_key, data_offset, data_len)`.
 use std::collections::HashMap;
-use bytes::Bytes;
-use anyhow::{bail, Result};
-use kotoba_core::cid::KotobaCid;
 
 /// `(cid, absolute_byte_offset, data_length)` triple returned by `parse_index`.
 type IndexEntry = (KotobaCid, u64, u32);
 
-const MAGIC: &[u8; 4]  = b"KCAR";
-const VERSION: u32      = 1;
+const MAGIC: &[u8; 4] = b"KCAR";
+const VERSION: u32 = 1;
 const HEADER_LEN: usize = 72;
 const INDEX_ENTRY: usize = 48; // 36 (cid) + 8 (offset) + 4 (len)
 
@@ -51,9 +51,9 @@ const INDEX_ENTRY: usize = 48; // 36 (cid) + 8 (offset) + 4 (len)
 /// let (car_bytes, index) = w.finish();
 /// ```
 pub struct CarBundleWriter {
-    root_cid:    KotobaCid,
-    blocks_buf:  Vec<u8>,                          // raw block bytes, concatenated
-    offsets:     Vec<(KotobaCid, u64, u32)>,       // (cid, data_offset, data_len)
+    root_cid: KotobaCid,
+    blocks_buf: Vec<u8>,                 // raw block bytes, concatenated
+    offsets: Vec<(KotobaCid, u64, u32)>, // (cid, data_offset, data_len)
 }
 
 impl CarBundleWriter {
@@ -61,7 +61,7 @@ impl CarBundleWriter {
         Self {
             root_cid,
             blocks_buf: Vec::new(),
-            offsets:    Vec::new(),
+            offsets: Vec::new(),
         }
     }
 
@@ -69,31 +69,36 @@ impl CarBundleWriter {
     pub fn append(&mut self, cid: &KotobaCid, data: &[u8]) -> u64 {
         let data_offset = self.blocks_buf.len() as u64;
         self.blocks_buf.extend_from_slice(data);
-        self.offsets.push((cid.clone(), data_offset, data.len() as u32));
+        self.offsets
+            .push((cid.clone(), data_offset, data.len() as u32));
         data_offset
     }
 
-    pub fn block_count(&self) -> usize { self.offsets.len() }
-    pub fn blocks_bytes(&self) -> usize { self.blocks_buf.len() }
+    pub fn block_count(&self) -> usize {
+        self.offsets.len()
+    }
+    pub fn blocks_bytes(&self) -> usize {
+        self.blocks_buf.len()
+    }
 
     /// Serialize to a flat CAR byte buffer and return the per-block index.
     /// The returned index offsets are relative to the start of the CAR file
     /// (i.e. `HEADER_LEN + data_offset`).
     pub fn finish(self) -> (Vec<u8>, Vec<(KotobaCid, u64, u32)>) {
-        let block_count   = self.offsets.len() as u64;
-        let blocks_size   = self.blocks_buf.len();
-        let index_offset  = HEADER_LEN + blocks_size;
-        let total_size    = index_offset + self.offsets.len() * INDEX_ENTRY;
+        let block_count = self.offsets.len() as u64;
+        let blocks_size = self.blocks_buf.len();
+        let index_offset = HEADER_LEN + blocks_size;
+        let total_size = index_offset + self.offsets.len() * INDEX_ENTRY;
 
         let mut buf = Vec::with_capacity(total_size);
 
         // ── Header ──────────────────────────────────────────────────────────
-        buf.extend_from_slice(MAGIC);                              // [0..4]
-        buf.extend_from_slice(&VERSION.to_le_bytes());             // [4..8]
-        buf.extend_from_slice(&block_count.to_le_bytes());         // [8..16]
+        buf.extend_from_slice(MAGIC); // [0..4]
+        buf.extend_from_slice(&VERSION.to_le_bytes()); // [4..8]
+        buf.extend_from_slice(&block_count.to_le_bytes()); // [8..16]
         buf.extend_from_slice(&(index_offset as u64).to_le_bytes()); // [16..24]
-        buf.extend_from_slice(&self.root_cid.0);                   // [24..60]
-        buf.extend_from_slice(&[0u8; 12]);                         // [60..72] reserved
+        buf.extend_from_slice(&self.root_cid.0); // [24..60]
+        buf.extend_from_slice(&[0u8; 12]); // [60..72] reserved
 
         debug_assert_eq!(buf.len(), HEADER_LEN);
 
@@ -106,9 +111,9 @@ impl CarBundleWriter {
         let mut abs_offsets = Vec::with_capacity(self.offsets.len());
         for (cid, rel_off, len) in &self.offsets {
             let abs_off = header_and_blocks + rel_off;
-            buf.extend_from_slice(&cid.0);                         // 36 bytes
-            buf.extend_from_slice(&abs_off.to_le_bytes());         // 8 bytes
-            buf.extend_from_slice(&len.to_le_bytes());             // 4 bytes
+            buf.extend_from_slice(&cid.0); // 36 bytes
+            buf.extend_from_slice(&abs_off.to_le_bytes()); // 8 bytes
+            buf.extend_from_slice(&len.to_le_bytes()); // 4 bytes
             abs_offsets.push((cid.clone(), abs_off, *len));
         }
 
@@ -132,7 +137,7 @@ pub fn parse_index(car: &[u8]) -> Result<(KotobaCid, Vec<IndexEntry>)> {
     if version != 1 {
         bail!("unsupported car version {version}");
     }
-    let block_count  = u64::from_le_bytes(car[8..16].try_into().unwrap()) as usize;
+    let block_count = u64::from_le_bytes(car[8..16].try_into().unwrap()) as usize;
     let index_offset = u64::from_le_bytes(car[16..24].try_into().unwrap()) as usize;
 
     let mut root = [0u8; 36];
@@ -148,8 +153,8 @@ pub fn parse_index(car: &[u8]) -> Result<(KotobaCid, Vec<IndexEntry>)> {
     for _ in 0..block_count {
         let mut cid_bytes = [0u8; 36];
         cid_bytes.copy_from_slice(&car[pos..pos + 36]);
-        let abs_off = u64::from_le_bytes(car[pos+36..pos+44].try_into().unwrap());
-        let data_len = u32::from_le_bytes(car[pos+44..pos+48].try_into().unwrap());
+        let abs_off = u64::from_le_bytes(car[pos + 36..pos + 44].try_into().unwrap());
+        let data_len = u32::from_le_bytes(car[pos + 44..pos + 48].try_into().unwrap());
         entries.push((KotobaCid(cid_bytes), abs_off, data_len));
         pos += INDEX_ENTRY;
     }
@@ -160,9 +165,12 @@ pub fn parse_index(car: &[u8]) -> Result<(KotobaCid, Vec<IndexEntry>)> {
 /// Extract a single block from a CAR byte buffer using a pre-parsed index entry.
 pub fn extract_block(car: &[u8], abs_offset: u64, data_len: u32) -> Result<Bytes> {
     let start = abs_offset as usize;
-    let end   = start + data_len as usize;
+    let end = start + data_len as usize;
     if end > car.len() {
-        bail!("block out of range: car {} bytes, want [{start}..{end}]", car.len());
+        bail!(
+            "block out of range: car {} bytes, want [{start}..{end}]",
+            car.len()
+        );
     }
     Ok(Bytes::copy_from_slice(&car[start..end]))
 }
@@ -177,16 +185,15 @@ pub struct CarBlockIndex {
 }
 
 impl CarBlockIndex {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Insert all entries from a freshly written CAR file.
-    pub fn insert_car(
-        &mut self,
-        car_key: &str,
-        index: &[(KotobaCid, u64, u32)],
-    ) {
+    pub fn insert_car(&mut self, car_key: &str, index: &[(KotobaCid, u64, u32)]) {
         for (cid, off, len) in index {
-            self.entries.insert(cid.clone(), (car_key.to_string(), *off, *len));
+            self.entries
+                .insert(cid.clone(), (car_key.to_string(), *off, *len));
         }
     }
 
@@ -195,8 +202,12 @@ impl CarBlockIndex {
         self.entries.get(cid).map(|(k, o, l)| (k.as_str(), *o, *l))
     }
 
-    pub fn len(&self)     -> usize { self.entries.len() }
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -205,7 +216,9 @@ impl CarBlockIndex {
 mod tests {
     use super::*;
 
-    fn fake_cid(n: u64) -> KotobaCid { KotobaCid::from_bytes(&n.to_le_bytes()) }
+    fn fake_cid(n: u64) -> KotobaCid {
+        KotobaCid::from_bytes(&n.to_le_bytes())
+    }
     fn fake_data(n: u64, size: usize) -> Vec<u8> {
         (0..size).map(|i| ((n + i as u64) & 0xff) as u8).collect()
     }
@@ -237,7 +250,9 @@ mod tests {
     fn block_index_insert_and_lookup() {
         let root = fake_cid(0);
         let mut w = CarBundleWriter::new(root);
-        for i in 0u64..10 { w.append(&fake_cid(i), &fake_data(i, 64)); }
+        for i in 0u64..10 {
+            w.append(&fake_cid(i), &fake_data(i, 64));
+        }
         let (_, idx) = w.finish();
 
         let mut index = CarBlockIndex::new();
@@ -363,13 +378,17 @@ mod tests {
 
         // First CAR: 3 blocks
         let mut w1 = CarBundleWriter::new(fake_cid(0));
-        for i in 0u64..3 { w1.append(&fake_cid(i), &fake_data(i, 32)); }
+        for i in 0u64..3 {
+            w1.append(&fake_cid(i), &fake_data(i, 32));
+        }
         let (_, idx1) = w1.finish();
         index.insert_car("car-A", &idx1);
 
         // Second CAR: 2 blocks (different CIDs)
         let mut w2 = CarBundleWriter::new(fake_cid(10));
-        for i in 10u64..12 { w2.append(&fake_cid(i), &fake_data(i, 16)); }
+        for i in 10u64..12 {
+            w2.append(&fake_cid(i), &fake_data(i, 16));
+        }
         let (_, idx2) = w2.finish();
         index.insert_car("car-B", &idx2);
 

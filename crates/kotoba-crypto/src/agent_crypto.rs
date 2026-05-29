@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use zeroize::Zeroizing;
 
 use crate::{
-    aead::{seal, open, CryptoError},
-    envelope::{encode_envelope, decode_envelope},
+    aead::{open, seal, CryptoError},
+    envelope::{decode_envelope, encode_envelope},
     hkdf::derive_key_with_salt,
 };
 
@@ -31,7 +31,11 @@ pub trait AgentCrypto: Send + Sync + 'static {
     async fn encrypt(&self, scope: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CryptoError>;
 
     /// Decrypt bytes produced by `encrypt`.
-    async fn decrypt(&self, scope: &[u8], ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptoError>;
+    async fn decrypt(
+        &self,
+        scope: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, CryptoError>;
 
     /// Encrypt a UTF-8 text field and return a `signal:v1:<base64>` envelope.
     async fn seal_field(&self, scope: &[u8], text: &str) -> Result<String, CryptoError> {
@@ -77,11 +81,7 @@ impl VaultKeyedCrypto {
     }
 
     fn scope_key(&self, scope: &[u8]) -> [u8; 32] {
-        derive_key_with_salt(
-            self.vault_key.as_ref(),
-            scope,
-            b"kotoba/scope-key/v1",
-        )
+        derive_key_with_salt(self.vault_key.as_ref(), scope, b"kotoba/scope-key/v1")
     }
 }
 
@@ -92,7 +92,11 @@ impl AgentCrypto for VaultKeyedCrypto {
         seal(&sk, plaintext)
     }
 
-    async fn decrypt(&self, scope: &[u8], ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    async fn decrypt(
+        &self,
+        scope: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
         let sk = self.scope_key(scope);
         open(&sk, ciphertext)
     }
@@ -156,7 +160,7 @@ mod tests {
 
     #[tokio::test]
     async fn encrypt_empty_plaintext_roundtrip() {
-        let c  = test_crypto();
+        let c = test_crypto();
         let ct = c.encrypt(b"scope", b"").await.unwrap();
         let pt = c.decrypt(b"scope", &ct).await.unwrap();
         assert!(pt.is_empty(), "empty plaintext must round-trip");
@@ -164,14 +168,17 @@ mod tests {
 
     #[tokio::test]
     async fn seal_field_starts_with_signal_prefix() {
-        let c   = test_crypto();
+        let c = test_crypto();
         let env = c.seal_field(b"any-scope", "test value").await.unwrap();
-        assert!(env.starts_with("signal:v1:"), "envelope must start with signal:v1:");
+        assert!(
+            env.starts_with("signal:v1:"),
+            "envelope must start with signal:v1:"
+        );
     }
 
     #[tokio::test]
     async fn open_field_wrong_scope_returns_error() {
-        let c   = test_crypto();
+        let c = test_crypto();
         let env = c.seal_field(b"scope-correct", "hello").await.unwrap();
         let result = c.open_field(b"scope-wrong", &env).await;
         assert!(result.is_err(), "wrong scope must fail to open field");
@@ -179,7 +186,7 @@ mod tests {
 
     #[tokio::test]
     async fn same_plaintext_different_scope_different_blob_ciphertext() {
-        let c  = test_crypto();
+        let c = test_crypto();
         let ct1 = c.encrypt_blob(b"same data").await.unwrap();
         let ct2 = c.encrypt_blob(b"same data").await.unwrap();
         // Nonces are random → ciphertexts differ even with same scope (b"blob")
@@ -188,10 +195,10 @@ mod tests {
 
     #[tokio::test]
     async fn scope_key_derivation_produces_different_keys_per_scope() {
-        let c  = test_crypto();
+        let c = test_crypto();
         let msg = b"payload";
         let ct_a = c.encrypt(b"alpha", msg).await.unwrap();
-        let ct_b = c.encrypt(b"beta",  msg).await.unwrap();
+        let ct_b = c.encrypt(b"beta", msg).await.unwrap();
         // Ciphertexts differ because scope keys differ (plus random nonces)
         assert_ne!(ct_a, ct_b);
     }

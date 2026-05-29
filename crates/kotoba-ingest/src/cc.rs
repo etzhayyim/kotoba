@@ -15,7 +15,8 @@ use std::{path::Path, sync::Arc};
 use anyhow::{Context, Result};
 use kotoba_core::cid::KotobaCid;
 use kotoba_graph::quad_store::QuadStore;
-use kotoba_kqe::quad::{Quad, QuadObject};
+use kotoba_kqe::datom::{Datom, Value};
+use kotoba_kqe::quad::{LegacyQuad as Quad, LegacyQuadObject as QuadObject};
 use tracing::{debug, info};
 
 use crate::embed_client::EmbedClient;
@@ -49,29 +50,45 @@ fn subject_from_chunk(page_rkey: &str, chunk_index: i64) -> KotobaCid {
 
 fn text_quad(graph: &KotobaCid, subject: &KotobaCid, predicate: &str, value: &str) -> Quad {
     Quad {
-        graph:     graph.clone(),
-        subject:   subject.clone(),
+        graph: graph.clone(),
+        subject: subject.clone(),
         predicate: predicate.to_string(),
-        object:    QuadObject::Text(value.to_string()),
+        object: QuadObject::Text(value.to_string()),
     }
 }
 
 fn int_quad(graph: &KotobaCid, subject: &KotobaCid, predicate: &str, value: i64) -> Quad {
     Quad {
-        graph:     graph.clone(),
-        subject:   subject.clone(),
+        graph: graph.clone(),
+        subject: subject.clone(),
         predicate: predicate.to_string(),
-        object:    QuadObject::Integer(value),
+        object: QuadObject::Integer(value),
     }
 }
 
 fn cid_quad(graph: &KotobaCid, subject: &KotobaCid, predicate: &str, target: &KotobaCid) -> Quad {
     Quad {
-        graph:     graph.clone(),
-        subject:   subject.clone(),
+        graph: graph.clone(),
+        subject: subject.clone(),
         predicate: predicate.to_string(),
-        object:    QuadObject::Cid(target.clone()),
+        object: QuadObject::Cid(target.clone()),
     }
+}
+
+fn datom_assert(
+    graph: &KotobaCid,
+    subject: &KotobaCid,
+    predicate: impl Into<String>,
+    value: Value,
+) -> Datom {
+    Datom::assert(subject.clone(), predicate.into(), value, graph.clone())
+}
+
+fn quads_to_datoms(quads: Vec<Quad>) -> Vec<Datom> {
+    quads
+        .into_iter()
+        .map(|quad| Datom::from_legacy_quad(quad, true))
+        .collect()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -82,7 +99,7 @@ fn cid_quad(graph: &KotobaCid, subject: &KotobaCid, predicate: &str, target: &Ko
 /// Page quads into the `cc:2026-12:pages` named graph.
 pub struct CcPageIngestor {
     pub quad_store: Arc<QuadStore>,
-    pub graph_cid:  KotobaCid,
+    pub graph_cid: KotobaCid,
     /// Quads accumulated before each QuadStore commit.
     pub batch_size: usize,
 }
@@ -91,7 +108,7 @@ impl CcPageIngestor {
     pub fn new(quad_store: Arc<QuadStore>) -> Self {
         Self {
             quad_store,
-            graph_cid:  cc_pages_graph(),
+            graph_cid: cc_pages_graph(),
             batch_size: 50_000,
         }
     }
@@ -159,7 +176,12 @@ impl CcPageIngestor {
     }
 
     async fn flush_commit(&self, pending: &mut Vec<Quad>, seq: u64) -> Result<()> {
-        self.quad_store.assert_batch_silent(std::mem::take(pending)).await;
+        self.quad_store
+            .assert_datom_batch_silent(
+                self.graph_cid.clone(),
+                quads_to_datoms(std::mem::take(pending)),
+            )
+            .await;
         self.quad_store
             .commit("did:web:kotoba.gftd.ai", self.graph_cid.clone(), seq)
             .await?;
@@ -173,10 +195,10 @@ impl CcPageIngestor {
         use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
         use std::fs::File;
 
-        let file    = File::open(path)?;
+        let file = File::open(path)?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        let reader  = builder.build()?;
-        let graph   = &self.graph_cid;
+        let reader = builder.build()?;
+        let graph = &self.graph_cid;
         let mut out: Vec<Quad> = Vec::new();
 
         for batch_result in reader {
@@ -187,37 +209,47 @@ impl CcPageIngestor {
             // Column helpers — gracefully handle missing columns
             macro_rules! col_str {
                 ($name:expr) => {
-                    batch.schema().index_of($name).ok().and_then(|i| {
-                        batch.column(i).as_any().downcast_ref::<StringArray>()
-                    })
+                    batch
+                        .schema()
+                        .index_of($name)
+                        .ok()
+                        .and_then(|i| batch.column(i).as_any().downcast_ref::<StringArray>())
                 };
             }
             macro_rules! col_i64 {
                 ($name:expr) => {
-                    batch.schema().index_of($name).ok().and_then(|i| {
-                        batch.column(i).as_any().downcast_ref::<Int64Array>()
-                    })
+                    batch
+                        .schema()
+                        .index_of($name)
+                        .ok()
+                        .and_then(|i| batch.column(i).as_any().downcast_ref::<Int64Array>())
                 };
             }
 
-            let vertex_id_col  = col_str!("vertex_id");
-            let url_col        = col_str!("url");
-            let domain_col     = col_str!("domain");
-            let title_col      = col_str!("title");
-            let desc_col       = col_str!("description");
-            let lang_col       = col_str!("language");
-            let crawl_col      = col_str!("crawl");
+            let vertex_id_col = col_str!("vertex_id");
+            let url_col = col_str!("url");
+            let domain_col = col_str!("domain");
+            let title_col = col_str!("title");
+            let desc_col = col_str!("description");
+            let lang_col = col_str!("language");
+            let crawl_col = col_str!("crawl");
             let crawled_at_col = col_str!("crawled_at");
-            let hash_col       = col_str!("content_hash");
-            let owner_did_col  = col_str!("owner_did");
-            let status_col     = col_str!("status_code");
-            let outlink_col    = col_i64!("outlink_count");
+            let hash_col = col_str!("content_hash");
+            let owner_did_col = col_str!("owner_did");
+            let status_col = col_str!("status_code");
+            let outlink_col = col_i64!("outlink_count");
 
             let _ = ncols; // suppress unused warning
 
             for row in 0..nrows {
                 let vid = vertex_id_col
-                    .and_then(|c| if c.is_null(row) { None } else { Some(c.value(row)) })
+                    .and_then(|c| {
+                        if c.is_null(row) {
+                            None
+                        } else {
+                            Some(c.value(row))
+                        }
+                    })
                     .unwrap_or("");
                 if vid.is_empty() {
                     continue;
@@ -237,16 +269,16 @@ impl CcPageIngestor {
                     };
                 }
 
-                push_str!(url_col,        "cc/url");
-                push_str!(domain_col,     "cc/domain");
-                push_str!(title_col,      "cc/title");
-                push_str!(desc_col,       "cc/description");
-                push_str!(lang_col,       "cc/lang");
-                push_str!(crawl_col,      "cc/crawl");
+                push_str!(url_col, "cc/url");
+                push_str!(domain_col, "cc/domain");
+                push_str!(title_col, "cc/title");
+                push_str!(desc_col, "cc/description");
+                push_str!(lang_col, "cc/lang");
+                push_str!(crawl_col, "cc/crawl");
                 push_str!(crawled_at_col, "cc/crawled_at");
-                push_str!(hash_col,       "cc/content_hash");
-                push_str!(owner_did_col,  "cc/owner_did");
-                push_str!(status_col,     "cc/status");
+                push_str!(hash_col, "cc/content_hash");
+                push_str!(owner_did_col, "cc/owner_did");
+                push_str!(status_col, "cc/status");
 
                 if let Some(col) = outlink_col {
                     if !col.is_null(row) {
@@ -270,31 +302,34 @@ impl CcPageIngestor {
 ///   2. Embedding quads (`cc/embed/{model_id}`) via EmbedClient
 ///   3. IVF centroid quads + cluster assignment (`cc/ivf/*`)
 pub struct CcChunkIngestor {
-    pub quad_store:   Arc<QuadStore>,
+    pub quad_store: Arc<QuadStore>,
     pub embed_client: Arc<dyn EmbedClient>,
-    pub graph_cid:    KotobaCid,
-    pub batch_size:   usize,
-    pub k_centroids:  usize,
+    pub graph_cid: KotobaCid,
+    pub batch_size: usize,
+    pub k_centroids: usize,
     pub ivf_max_iter: usize,
 }
 
 impl CcChunkIngestor {
-    pub fn new(
-        quad_store:   Arc<QuadStore>,
-        embed_client: Arc<dyn EmbedClient>,
-    ) -> Self {
+    pub fn new(quad_store: Arc<QuadStore>, embed_client: Arc<dyn EmbedClient>) -> Self {
         Self {
             quad_store,
             embed_client,
-            graph_cid:   cc_chunks_graph(),
-            batch_size:  50_000,
+            graph_cid: cc_chunks_graph(),
+            batch_size: 50_000,
             k_centroids: 140,
             ivf_max_iter: 20,
         }
     }
 
-    pub fn with_k(mut self, k: usize) -> Self { self.k_centroids = k; self }
-    pub fn with_batch(mut self, n: usize) -> Self { self.batch_size = n; self }
+    pub fn with_k(mut self, k: usize) -> Self {
+        self.k_centroids = k;
+        self
+    }
+    pub fn with_batch(mut self, n: usize) -> Self {
+        self.batch_size = n;
+        self
+    }
 
     /// Ingest all `*_wet_chunks.parquet` files in `parquet_dir`.
     /// Returns (chunks_ingested, embeddings_computed).
@@ -339,14 +374,14 @@ impl CcChunkIngestor {
             return Ok((0, 0));
         }
 
-        let model_id  = self.embed_client.model_id().to_string();
-        let graph     = &self.graph_cid;
-        let n         = rows.len();
+        let model_id = self.embed_client.model_id().to_string();
+        let graph = &self.graph_cid;
+        let n = rows.len();
 
         // ── Step 1: write chunk metadata quads ───────────────────────────────
         let mut chunk_quads: Vec<Quad> = Vec::with_capacity(n * 8);
         for row in &rows {
-            let subj     = subject_from_chunk(&row.page_rkey, row.chunk_index);
+            let subj = subject_from_chunk(&row.page_rkey, row.chunk_index);
             let page_cid = subject_from_vertex(&row.page_rkey);
 
             chunk_quads.push(cid_quad(graph, &subj, "cc/chunk/page", &page_cid));
@@ -367,7 +402,9 @@ impl CcChunkIngestor {
             }
         }
 
-        self.quad_store.assert_batch_silent(chunk_quads).await;
+        self.quad_store
+            .assert_datom_batch_silent(graph.clone(), quads_to_datoms(chunk_quads))
+            .await;
 
         // ── Step 2: embed text chunks ─────────────────────────────────────────
         const EMBED_BATCH: usize = 64;
@@ -377,40 +414,37 @@ impl CcChunkIngestor {
 
         for chunk_texts in texts.chunks(EMBED_BATCH) {
             let vecs = self.embed_client.embed_batch(chunk_texts).await?;
-            let base  = embed_count as usize;
+            let base = embed_count as usize;
             for (i, vec) in vecs.into_iter().enumerate() {
-                let row  = &rows[base + i];
+                let row = &rows[base + i];
                 let subj = subject_from_chunk(&row.page_rkey, row.chunk_index);
                 let pred = format!("cc/embed/{}", model_id);
 
                 // dim ≤ 1024: inline VectorF32, else TensorCid
-                let object = if vec.len() <= 1024 {
-                    QuadObject::VectorF32(vec.clone())
+                let value = if vec.len() <= 1024 {
+                    Value::VectorF32(vec.clone())
                 } else {
                     let raw: Vec<u8> = vec.iter().flat_map(|f| f.to_le_bytes()).collect();
                     let tcid = KotobaCid::from_bytes(&raw);
-                    QuadObject::TensorCid {
-                        cid:   tcid,
+                    Value::TensorCid {
+                        cid: tcid,
                         shape: vec![vec.len() as u32],
-                        dtype: kotoba_kqe::quad::TensorDtype::F32,
+                        dtype: kotoba_kqe::datom::TensorDtype::F32,
                     }
                 };
 
                 // Pre-compute L2 norm for fast cosine
                 let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
 
-                self.quad_store.assert(Quad {
-                    graph:     graph.clone(),
-                    subject:   subj.clone(),
-                    predicate: pred,
-                    object,
-                }).await;
-                self.quad_store.assert(Quad {
-                    graph:     graph.clone(),
-                    subject:   subj.clone(),
-                    predicate: "cc/embed_norm".to_string(),
-                    object:    QuadObject::Float(norm as f64),
-                }).await;
+                self.quad_store
+                    .assert_datom(graph.clone(), datom_assert(graph, &subj, pred, value))
+                    .await;
+                self.quad_store
+                    .assert_datom(
+                        graph.clone(),
+                        datom_assert(graph, &subj, "cc/embed_norm", Value::Float(norm as f64)),
+                    )
+                    .await;
 
                 all_embeddings.push((subj, vec));
                 embed_count += 1;
@@ -422,7 +456,12 @@ impl CcChunkIngestor {
         if k > 0 {
             let t0 = std::time::Instant::now();
             let ivf = IvfIndex::build(&all_embeddings, k, &model_id, self.ivf_max_iter);
-            info!(k, n, elapsed_ms = t0.elapsed().as_millis(), "IVF build done");
+            info!(
+                k,
+                n,
+                elapsed_ms = t0.elapsed().as_millis(),
+                "IVF build done"
+            );
 
             // Write cluster assignments
             let mut assign_quads: Vec<Quad> = Vec::with_capacity(n);
@@ -432,11 +471,15 @@ impl CcChunkIngestor {
                 member_counts[centroid_id] += 1;
                 assign_quads.push(int_quad(graph, subj, "cc/ivf/cluster", centroid_id as i64));
             }
-            self.quad_store.assert_batch_silent(assign_quads).await;
+            self.quad_store
+                .assert_datom_batch_silent(graph.clone(), quads_to_datoms(assign_quads))
+                .await;
 
             // Write centroid quads
             let centroid_quads = ivf.to_quads(graph, &member_counts);
-            self.quad_store.assert_batch_silent(centroid_quads).await;
+            self.quad_store
+                .assert_datom_batch_silent(graph.clone(), quads_to_datoms(centroid_quads))
+                .await;
         }
 
         // ── Step 4: final commit ──────────────────────────────────────────────
@@ -463,9 +506,9 @@ impl CcChunkIngestor {
         use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
         use std::fs::File;
 
-        let file    = File::open(path)?;
+        let file = File::open(path)?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        let reader  = builder.build()?;
+        let reader = builder.build()?;
         let mut out: Vec<ChunkRow> = Vec::new();
 
         for batch_result in reader {
@@ -474,63 +517,130 @@ impl CcChunkIngestor {
 
             macro_rules! col_str {
                 ($name:expr) => {
-                    batch.schema().index_of($name).ok().and_then(|i| {
-                        batch.column(i).as_any().downcast_ref::<StringArray>()
-                    })
+                    batch
+                        .schema()
+                        .index_of($name)
+                        .ok()
+                        .and_then(|i| batch.column(i).as_any().downcast_ref::<StringArray>())
                 };
             }
             macro_rules! col_i64 {
                 ($name:expr) => {
-                    batch.schema().index_of($name).ok().and_then(|i| {
-                        batch.column(i).as_any().downcast_ref::<Int64Array>()
-                    })
+                    batch
+                        .schema()
+                        .index_of($name)
+                        .ok()
+                        .and_then(|i| batch.column(i).as_any().downcast_ref::<Int64Array>())
                 };
             }
 
-            let page_rkey_col    = col_str!("page_rkey");
-            let url_col          = col_str!("url");
-            let domain_col       = col_str!("domain");
-            let markdown_col     = col_str!("markdown");
-            let language_col     = col_str!("language");
-            let chunk_index_col  = col_i64!("chunk_index");
+            let page_rkey_col = col_str!("page_rkey");
+            let url_col = col_str!("url");
+            let domain_col = col_str!("domain");
+            let markdown_col = col_str!("markdown");
+            let language_col = col_str!("language");
+            let chunk_index_col = col_i64!("chunk_index");
             let total_chunks_col = col_i64!("total_chunks");
-            let token_count_col  = col_i64!("token_count");
+            let token_count_col = col_i64!("token_count");
 
             // Pre-existing embeddings (if any) — list<float>
-            let embedding_col = batch.schema().index_of("embedding").ok().and_then(|i| {
-                batch.column(i).as_any().downcast_ref::<ListArray>()
-            });
+            let embedding_col = batch
+                .schema()
+                .index_of("embedding")
+                .ok()
+                .and_then(|i| batch.column(i).as_any().downcast_ref::<ListArray>());
 
             for row in 0..nrows {
                 let page_rkey = page_rkey_col
-                    .and_then(|c| if c.is_null(row) { None } else { Some(c.value(row).to_string()) })
+                    .and_then(|c| {
+                        if c.is_null(row) {
+                            None
+                        } else {
+                            Some(c.value(row).to_string())
+                        }
+                    })
                     .unwrap_or_default();
                 if page_rkey.is_empty() {
                     continue;
                 }
 
                 // If embedding is already present in parquet, use it (skip HTTP embed)
-                let precomputed_embedding: Option<Vec<f32>> =
-                    embedding_col.and_then(|col| {
-                        if col.is_null(row) {
-                            return None;
-                        }
-                        let list_val = col.value(row);
-                        list_val
-                            .as_any()
-                            .downcast_ref::<Float32Array>()
-                            .map(|arr| (0..arr.len()).map(|i| arr.value(i)).collect())
-                    });
+                let precomputed_embedding: Option<Vec<f32>> = embedding_col.and_then(|col| {
+                    if col.is_null(row) {
+                        return None;
+                    }
+                    let list_val = col.value(row);
+                    list_val
+                        .as_any()
+                        .downcast_ref::<Float32Array>()
+                        .map(|arr| (0..arr.len()).map(|i| arr.value(i)).collect())
+                });
 
                 out.push(ChunkRow {
                     page_rkey,
-                    url:           url_col.and_then(|c| if c.is_null(row) { None } else { Some(c.value(row).to_string()) }).unwrap_or_default(),
-                    domain:        domain_col.and_then(|c| if c.is_null(row) { None } else { Some(c.value(row).to_string()) }).unwrap_or_default(),
-                    markdown:      markdown_col.and_then(|c| if c.is_null(row) { None } else { Some(c.value(row).to_string()) }).unwrap_or_default(),
-                    language:      language_col.and_then(|c| if c.is_null(row) { None } else { Some(c.value(row).to_string()) }).unwrap_or_default(),
-                    chunk_index:   chunk_index_col.and_then(|c| if c.is_null(row) { None } else { Some(c.value(row)) }).unwrap_or(0),
-                    total_chunks:  total_chunks_col.and_then(|c| if c.is_null(row) { None } else { Some(c.value(row)) }).unwrap_or(1),
-                    token_count:   token_count_col.and_then(|c| if c.is_null(row) { None } else { Some(c.value(row)) }).unwrap_or(0),
+                    url: url_col
+                        .and_then(|c| {
+                            if c.is_null(row) {
+                                None
+                            } else {
+                                Some(c.value(row).to_string())
+                            }
+                        })
+                        .unwrap_or_default(),
+                    domain: domain_col
+                        .and_then(|c| {
+                            if c.is_null(row) {
+                                None
+                            } else {
+                                Some(c.value(row).to_string())
+                            }
+                        })
+                        .unwrap_or_default(),
+                    markdown: markdown_col
+                        .and_then(|c| {
+                            if c.is_null(row) {
+                                None
+                            } else {
+                                Some(c.value(row).to_string())
+                            }
+                        })
+                        .unwrap_or_default(),
+                    language: language_col
+                        .and_then(|c| {
+                            if c.is_null(row) {
+                                None
+                            } else {
+                                Some(c.value(row).to_string())
+                            }
+                        })
+                        .unwrap_or_default(),
+                    chunk_index: chunk_index_col
+                        .and_then(|c| {
+                            if c.is_null(row) {
+                                None
+                            } else {
+                                Some(c.value(row))
+                            }
+                        })
+                        .unwrap_or(0),
+                    total_chunks: total_chunks_col
+                        .and_then(|c| {
+                            if c.is_null(row) {
+                                None
+                            } else {
+                                Some(c.value(row))
+                            }
+                        })
+                        .unwrap_or(1),
+                    token_count: token_count_col
+                        .and_then(|c| {
+                            if c.is_null(row) {
+                                None
+                            } else {
+                                Some(c.value(row))
+                            }
+                        })
+                        .unwrap_or(0),
                     precomputed_embedding,
                 });
             }
@@ -544,16 +654,16 @@ impl CcChunkIngestor {
 // ── Internal row types ────────────────────────────────────────────────────────
 
 struct ChunkRow {
-    page_rkey:              String,
-    url:                    String,
-    domain:                 String,
-    markdown:               String,
-    language:               String,
-    chunk_index:            i64,
-    total_chunks:           i64,
-    token_count:            i64,
+    page_rkey: String,
+    url: String,
+    domain: String,
+    markdown: String,
+    language: String,
+    chunk_index: i64,
+    total_chunks: i64,
+    token_count: i64,
     #[allow(dead_code)]
-    precomputed_embedding:  Option<Vec<f32>>,
+    precomputed_embedding: Option<Vec<f32>>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -562,12 +672,12 @@ struct ChunkRow {
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct IngestStatus {
-    pub pages_files:     u64,
-    pub pages_quads:     u64,
-    pub chunks_total:    u64,
+    pub pages_files: u64,
+    pub pages_quads: u64,
+    pub chunks_total: u64,
     pub chunks_embedded: u64,
-    pub ivf_k:           usize,
-    pub ivf_built:       bool,
+    pub ivf_k: usize,
+    pub ivf_built: bool,
     pub pages_graph_cid: String,
     pub chunks_graph_cid: String,
 }
@@ -575,7 +685,7 @@ pub struct IngestStatus {
 impl IngestStatus {
     pub fn new() -> Self {
         Self {
-            pages_graph_cid:  cc_pages_graph().to_multibase(),
+            pages_graph_cid: cc_pages_graph().to_multibase(),
             chunks_graph_cid: cc_chunks_graph().to_multibase(),
             ..Default::default()
         }
@@ -594,7 +704,7 @@ mod tests {
     use std::sync::Arc;
 
     fn make_store() -> Arc<QuadStore> {
-        let journal     = Arc::new(Journal::new());
+        let journal = Arc::new(Journal::new());
         let block_store = Arc::new(MemoryBlockStore::new())
             as Arc<dyn kotoba_core::store::BlockStore + Send + Sync>;
         Arc::new(QuadStore::new(journal, block_store))
@@ -602,11 +712,11 @@ mod tests {
 
     #[test]
     fn named_graph_cids_are_distinct() {
-        let pages  = cc_pages_graph();
+        let pages = cc_pages_graph();
         let chunks = cc_chunks_graph();
-        let links  = cc_links_graph();
-        assert_ne!(pages,  chunks);
-        assert_ne!(pages,  links);
+        let links = cc_links_graph();
+        assert_ne!(pages, chunks);
+        assert_ne!(pages, links);
         assert_ne!(chunks, links);
     }
 
@@ -621,7 +731,7 @@ mod tests {
 
     #[tokio::test]
     async fn page_ingestor_constructs() {
-        let qs  = make_store();
+        let qs = make_store();
         let ing = CcPageIngestor::new(qs).with_batch(1000);
         assert_eq!(ing.batch_size, 1000);
         assert_eq!(ing.graph_cid, cc_pages_graph());
@@ -630,9 +740,9 @@ mod tests {
     #[tokio::test]
     async fn chunk_ingestor_constructs_with_blake3() {
         use crate::embed_client::Blake3EmbedClient;
-        let qs    = make_store();
+        let qs = make_store();
         let embed = Arc::new(Blake3EmbedClient::new(128));
-        let ing   = CcChunkIngestor::new(qs, embed).with_k(10);
+        let ing = CcChunkIngestor::new(qs, embed).with_k(10);
         assert_eq!(ing.k_centroids, 10);
         assert_eq!(ing.graph_cid, cc_chunks_graph());
     }
@@ -640,20 +750,28 @@ mod tests {
     #[test]
     fn ingest_status_new_has_graph_cids() {
         let status = IngestStatus::new();
-        assert!(!status.pages_graph_cid.is_empty(),  "pages_graph_cid must be set");
-        assert!(!status.chunks_graph_cid.is_empty(), "chunks_graph_cid must be set");
-        assert_ne!(status.pages_graph_cid, status.chunks_graph_cid,
-            "pages and chunks graph CIDs must differ");
+        assert!(
+            !status.pages_graph_cid.is_empty(),
+            "pages_graph_cid must be set"
+        );
+        assert!(
+            !status.chunks_graph_cid.is_empty(),
+            "chunks_graph_cid must be set"
+        );
+        assert_ne!(
+            status.pages_graph_cid, status.chunks_graph_cid,
+            "pages and chunks graph CIDs must differ"
+        );
     }
 
     #[test]
     fn ingest_status_default_counters_are_zero() {
         let status = IngestStatus::default();
-        assert_eq!(status.pages_files,     0);
-        assert_eq!(status.pages_quads,     0);
-        assert_eq!(status.chunks_total,    0);
+        assert_eq!(status.pages_files, 0);
+        assert_eq!(status.pages_quads, 0);
+        assert_eq!(status.chunks_total, 0);
         assert_eq!(status.chunks_embedded, 0);
-        assert_eq!(status.ivf_k,           0);
+        assert_eq!(status.ivf_k, 0);
         assert!(!status.ivf_built);
     }
 
@@ -661,7 +779,7 @@ mod tests {
     fn ingest_status_clone_equals_original() {
         let s1 = IngestStatus::new();
         let s2 = s1.clone();
-        assert_eq!(s1.pages_graph_cid,  s2.pages_graph_cid);
+        assert_eq!(s1.pages_graph_cid, s2.pages_graph_cid);
         assert_eq!(s1.chunks_graph_cid, s2.chunks_graph_cid);
     }
 
@@ -682,10 +800,10 @@ mod tests {
     #[test]
     fn text_quad_predicate_and_object() {
         let graph = cc_pages_graph();
-        let subj  = subject_from_vertex("page-xyz");
-        let q     = text_quad(&graph, &subj, "cc/url", "https://example.com");
+        let subj = subject_from_vertex("page-xyz");
+        let q = text_quad(&graph, &subj, "cc/url", "https://example.com");
         assert_eq!(q.predicate, "cc/url");
-        assert_eq!(q.graph,   graph);
+        assert_eq!(q.graph, graph);
         assert_eq!(q.subject, subj);
         match q.object {
             QuadObject::Text(v) => assert_eq!(v, "https://example.com"),
@@ -696,8 +814,8 @@ mod tests {
     #[test]
     fn int_quad_predicate_and_object() {
         let graph = cc_pages_graph();
-        let subj  = subject_from_vertex("page-xyz");
-        let q     = int_quad(&graph, &subj, "cc/outlink_count", 42);
+        let subj = subject_from_vertex("page-xyz");
+        let q = int_quad(&graph, &subj, "cc/outlink_count", 42);
         assert_eq!(q.predicate, "cc/outlink_count");
         match q.object {
             QuadObject::Integer(v) => assert_eq!(v, 42),
@@ -707,10 +825,10 @@ mod tests {
 
     #[test]
     fn cid_quad_predicate_and_object() {
-        let graph   = cc_chunks_graph();
-        let subj    = subject_from_chunk("page-rkey", 0);
-        let target  = subject_from_vertex("page-rkey");
-        let q       = cid_quad(&graph, &subj, "cc/chunk/page", &target);
+        let graph = cc_chunks_graph();
+        let subj = subject_from_chunk("page-rkey", 0);
+        let target = subject_from_vertex("page-rkey");
+        let q = cid_quad(&graph, &subj, "cc/chunk/page", &target);
         assert_eq!(q.predicate, "cc/chunk/page");
         match q.object {
             QuadObject::Cid(c) => assert_eq!(c, target),
@@ -720,7 +838,7 @@ mod tests {
 
     #[test]
     fn page_ingestor_with_batch_updates_size() {
-        let qs  = make_store();
+        let qs = make_store();
         let ing = CcPageIngestor::new(qs).with_batch(99);
         assert_eq!(ing.batch_size, 99);
     }
@@ -728,9 +846,9 @@ mod tests {
     #[tokio::test]
     async fn chunk_ingestor_with_batch_updates_size() {
         use crate::embed_client::Blake3EmbedClient;
-        let qs    = make_store();
+        let qs = make_store();
         let embed = Arc::new(Blake3EmbedClient::new(64));
-        let ing   = CcChunkIngestor::new(qs, embed).with_batch(200);
+        let ing = CcChunkIngestor::new(qs, embed).with_batch(200);
         assert_eq!(ing.batch_size, 200);
     }
 }

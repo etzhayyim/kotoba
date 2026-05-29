@@ -7,14 +7,17 @@ use std::sync::Arc;
 /// In production: wraps an `AmazonS3` (B2 S3-compat) instance.
 /// In dev/test: wraps `LocalFileSystem`.
 pub struct KseStore {
-    inner:  Arc<dyn object_store::ObjectStore>,
+    inner: Arc<dyn object_store::ObjectStore>,
     prefix: String,
 }
 
 impl KseStore {
     /// Construct from any ObjectStore implementation.
     pub fn new(store: Arc<dyn object_store::ObjectStore>, prefix: impl Into<String>) -> Self {
-        Self { inner: store, prefix: prefix.into() }
+        Self {
+            inner: store,
+            prefix: prefix.into(),
+        }
     }
 
     fn path(&self, key: &str) -> Path {
@@ -85,7 +88,10 @@ mod tests {
         let dir = tmp_dir("kse");
         let fs = Arc::new(LocalFileSystem::new_with_prefix(&dir).unwrap());
         let store = KseStore::new(fs, "test/");
-        store.put("hello", Bytes::from_static(b"world")).await.unwrap();
+        store
+            .put("hello", Bytes::from_static(b"world"))
+            .await
+            .unwrap();
         let got = store.get("hello").await.unwrap();
         assert_eq!(got.as_ref(), b"world");
     }
@@ -116,14 +122,26 @@ mod tests {
         let dir = tmp_dir("kse-list-keys");
         let fs = Arc::new(LocalFileSystem::new_with_prefix(&dir).unwrap());
         let store = KseStore::new(fs, "j/");
-        store.put("seq/0001", Bytes::from_static(b"a")).await.unwrap();
-        store.put("seq/0002", Bytes::from_static(b"b")).await.unwrap();
-        store.put("other/x",  Bytes::from_static(b"c")).await.unwrap();
+        store
+            .put("seq/0001", Bytes::from_static(b"a"))
+            .await
+            .unwrap();
+        store
+            .put("seq/0002", Bytes::from_static(b"b"))
+            .await
+            .unwrap();
+        store
+            .put("other/x", Bytes::from_static(b"c"))
+            .await
+            .unwrap();
 
         let mut keys = store.list_prefix("seq/").await;
         keys.sort();
-        assert_eq!(keys, vec!["seq/0001", "seq/0002"],
-            "list_prefix must return only keys under seq/, relative to store prefix");
+        assert_eq!(
+            keys,
+            vec!["seq/0001", "seq/0002"],
+            "list_prefix must return only keys under seq/, relative to store prefix"
+        );
     }
 
     #[tokio::test]
@@ -132,7 +150,10 @@ mod tests {
         let fs = Arc::new(LocalFileSystem::new_with_prefix(&dir).unwrap());
         let store = KseStore::new(fs, "bin/");
         let data: Vec<u8> = (0u8..=255).collect();
-        store.put("blob", Bytes::copy_from_slice(&data)).await.unwrap();
+        store
+            .put("blob", Bytes::copy_from_slice(&data))
+            .await
+            .unwrap();
         let got = store.get("blob").await.unwrap();
         assert_eq!(got.as_ref(), data.as_slice());
     }
@@ -163,7 +184,10 @@ mod tests {
         let fs = Arc::new(LocalFileSystem::new_with_prefix(&dir).unwrap());
         let store = KseStore::new(fs, "pfx/");
         let result = store.delete_key("phantom").await;
-        assert!(result.is_err(), "deleting nonexistent key should return Err");
+        assert!(
+            result.is_err(),
+            "deleting nonexistent key should return Err"
+        );
     }
 
     #[tokio::test]
@@ -186,10 +210,16 @@ mod tests {
         let store_a = KseStore::new(Arc::clone(&fs), "ns-a/");
         let store_b = KseStore::new(Arc::clone(&fs), "ns-b/");
 
-        store_a.put("key", Bytes::from_static(b"data-a")).await.unwrap();
+        store_a
+            .put("key", Bytes::from_static(b"data-a"))
+            .await
+            .unwrap();
 
         // store_b with the same key should not see store_a's data
-        assert!(!store_b.exists("key").await, "store_b must not see store_a's key");
+        assert!(
+            !store_b.exists("key").await,
+            "store_b must not see store_a's key"
+        );
     }
 
     #[tokio::test]
@@ -198,7 +228,10 @@ mod tests {
         let fs = Arc::new(LocalFileSystem::new_with_prefix(&dir).unwrap());
         let store = KseStore::new(fs, "root/");
         for i in 0..5u8 {
-            store.put(&format!("items/{i:03}"), Bytes::from(vec![i])).await.unwrap();
+            store
+                .put(&format!("items/{i:03}"), Bytes::from(vec![i]))
+                .await
+                .unwrap();
         }
         let mut keys = store.list_prefix("items/").await;
         keys.sort();
@@ -212,9 +245,15 @@ mod tests {
         let dir = tmp_dir("kse-exists-after-del");
         let fs = Arc::new(LocalFileSystem::new_with_prefix(&dir).unwrap());
         let store = KseStore::new(fs, "x/");
-        store.put("the-key", Bytes::from_static(b"value")).await.unwrap();
+        store
+            .put("the-key", Bytes::from_static(b"value"))
+            .await
+            .unwrap();
         assert!(store.exists("the-key").await);
         store.delete_key("the-key").await.unwrap();
-        assert!(!store.exists("the-key").await, "key must not exist after deletion");
+        assert!(
+            !store.exists("the-key").await,
+            "key must not exist after deletion"
+        );
     }
 }

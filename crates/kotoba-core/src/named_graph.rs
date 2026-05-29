@@ -11,16 +11,16 @@ pub enum GraphVisibility {
 }
 
 pub struct NamedGraph {
-    pub name:       String,
-    pub cid:        KotobaCid,
+    pub name: String,
+    pub cid: KotobaCid,
     pub visibility: GraphVisibility,
 }
 
 impl NamedGraph {
     pub fn new(name: &str, visibility: GraphVisibility) -> Self {
         Self {
-            name:       name.to_string(),
-            cid:        KotobaCid::from_bytes(name.as_bytes()),
+            name: name.to_string(),
+            cid: KotobaCid::from_bytes(name.as_bytes()),
             visibility,
         }
     }
@@ -35,7 +35,12 @@ impl NamedGraph {
 
     pub fn private_for(did: &str) -> Self {
         let name = format!("kotoba://graph/private/{did}");
-        Self::new(&name, GraphVisibility::Private { owner_did: did.to_string() })
+        Self::new(
+            &name,
+            GraphVisibility::Private {
+                owner_did: did.to_string(),
+            },
+        )
     }
 }
 
@@ -48,7 +53,9 @@ pub fn classify(name: &str) -> GraphVisibility {
     } else if name == GRAPH_AUTHED_NAME {
         GraphVisibility::Authenticated
     } else if let Some(did) = name.strip_prefix("kotoba://graph/private/") {
-        GraphVisibility::Private { owner_did: did.to_string() }
+        GraphVisibility::Private {
+            owner_did: did.to_string(),
+        }
     } else {
         // Unknown graphs default to Authenticated
         GraphVisibility::Authenticated
@@ -69,7 +76,7 @@ mod tests {
 
     #[test]
     fn authed_graph_cid_differs_from_public() {
-        let pub_g  = NamedGraph::public();
+        let pub_g = NamedGraph::public();
         let auth_g = NamedGraph::authenticated();
         assert_ne!(pub_g.cid, auth_g.cid);
     }
@@ -98,21 +105,32 @@ mod tests {
         let name = format!("kotoba://graph/private/{did}");
         assert_eq!(
             classify(&name),
-            GraphVisibility::Private { owner_did: did.to_string() }
+            GraphVisibility::Private {
+                owner_did: did.to_string()
+            }
         );
     }
 
     #[test]
     fn classify_unknown_defaults_to_authenticated() {
-        assert_eq!(classify("kotoba://graph/unknown-custom"), GraphVisibility::Authenticated);
-        assert_eq!(classify("some-arbitrary-string"), GraphVisibility::Authenticated);
+        assert_eq!(
+            classify("kotoba://graph/unknown-custom"),
+            GraphVisibility::Authenticated
+        );
+        assert_eq!(
+            classify("some-arbitrary-string"),
+            GraphVisibility::Authenticated
+        );
     }
 
     #[test]
     fn private_graphs_for_different_dids_have_different_cids() {
         let g1 = NamedGraph::private_for("did:key:zA");
         let g2 = NamedGraph::private_for("did:key:zB");
-        assert_ne!(g1.cid, g2.cid, "different DIDs should produce different CIDs");
+        assert_ne!(
+            g1.cid, g2.cid,
+            "different DIDs should produce different CIDs"
+        );
     }
 
     #[test]
@@ -129,14 +147,25 @@ mod tests {
     #[test]
     fn graph_visibility_equality() {
         assert_eq!(GraphVisibility::Public, GraphVisibility::Public);
-        assert_eq!(GraphVisibility::Authenticated, GraphVisibility::Authenticated);
         assert_eq!(
-            GraphVisibility::Private { owner_did: "did:key:zX".to_string() },
-            GraphVisibility::Private { owner_did: "did:key:zX".to_string() }
+            GraphVisibility::Authenticated,
+            GraphVisibility::Authenticated
+        );
+        assert_eq!(
+            GraphVisibility::Private {
+                owner_did: "did:key:zX".to_string()
+            },
+            GraphVisibility::Private {
+                owner_did: "did:key:zX".to_string()
+            }
         );
         assert_ne!(
-            GraphVisibility::Private { owner_did: "did:key:zA".to_string() },
-            GraphVisibility::Private { owner_did: "did:key:zB".to_string() }
+            GraphVisibility::Private {
+                owner_did: "did:key:zA".to_string()
+            },
+            GraphVisibility::Private {
+                owner_did: "did:key:zB".to_string()
+            }
         );
     }
 

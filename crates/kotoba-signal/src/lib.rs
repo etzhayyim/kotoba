@@ -3,25 +3,25 @@
 //!
 //! Wire format `signal:v1:{base64url}` is preserved for compatibility.
 
+pub mod group;
 pub mod identity;
+pub mod message;
 pub mod prekey;
-pub mod x3dh;
 pub mod ratchet;
 pub mod session;
-pub mod group;
 pub mod store;
-pub mod message;
+pub mod x3dh;
 
-pub use identity::{IdentityKey, IdentityKeyPair, DeviceId};
-pub use prekey::{PreKey, SignedPreKey, PreKeyBundle, PreKeyId, SignedPreKeyId};
-pub use x3dh::{x3dh_init_sender, x3dh_init_receiver, X3dhOutput};
-pub use ratchet::{RatchetState, RatchetMessage};
-pub use session::{Session, SessionStore, InMemorySessionStore};
-pub use group::{SenderKeyState, SenderKeyMessage, GroupSession, InMemorySenderKeyStore};
-pub use store::{SignalStore, InMemorySignalStore};
-pub use message::{SignalMessage, MessageType, ThreadMessage, Reaction};
+pub use group::{GroupSession, InMemorySenderKeyStore, SenderKeyMessage, SenderKeyState};
+pub use identity::{DeviceId, IdentityKey, IdentityKeyPair};
+pub use message::{MessageType, Reaction, SignalMessage, ThreadMessage};
+pub use prekey::{PreKey, PreKeyBundle, PreKeyId, SignedPreKey, SignedPreKeyId};
+pub use ratchet::{RatchetMessage, RatchetState};
+pub use session::{InMemorySessionStore, Session, SessionStore};
+pub use store::{InMemorySignalStore, SignalStore};
+pub use x3dh::{x3dh_init_receiver, x3dh_init_sender, X3dhOutput};
 
-pub use kotoba_crypto::envelope::{SIGNAL_VAL_PREFIX, encrypt_field, decrypt_field};
+pub use kotoba_crypto::envelope::{decrypt_field, encrypt_field, SIGNAL_VAL_PREFIX};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SignalError {
@@ -97,7 +97,10 @@ mod tests {
     #[test]
     fn too_many_skipped_keys_display() {
         let e = SignalError::TooManySkippedKeys;
-        assert_eq!(e.to_string(), "too many skipped message keys (gap exceeds limit)");
+        assert_eq!(
+            e.to_string(),
+            "too many skipped message keys (gap exceeds limit)"
+        );
     }
 
     #[test]
@@ -124,7 +127,10 @@ mod tests {
         use kotoba_crypto::aead::CryptoError;
         let inner = CryptoError::OpenFailed;
         let e = SignalError::from(inner);
-        assert!(e.to_string().starts_with("crypto:"), "SignalError::Crypto must prefix with 'crypto:'");
+        assert!(
+            e.to_string().starts_with("crypto:"),
+            "SignalError::Crypto must prefix with 'crypto:'"
+        );
     }
 
     #[test]

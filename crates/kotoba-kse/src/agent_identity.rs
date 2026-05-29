@@ -32,12 +32,17 @@ impl AgentIdentity {
     pub fn generate_ephemeral() -> Self {
         use rand_core::OsRng;
         let signing_key = SigningKey::generate(&mut OsRng);
-        let dh_secret   = StaticSecret::random_from_rng(OsRng);
-        let vk_bytes    = VerifyingKey::from(&signing_key).to_bytes();
+        let dh_secret = StaticSecret::random_from_rng(OsRng);
+        let vk_bytes = VerifyingKey::from(&signing_key).to_bytes();
         // Ephemeral DID uses hex-encoded verifying key bytes (dev only).
-        let did         = format!("did:key:z{}", hex::encode(vk_bytes));
+        let did = format!("did:key:z{}", hex::encode(vk_bytes));
 
-        Self { signing_key, dh_secret, did, ephemeral: true }
+        Self {
+            signing_key,
+            dh_secret,
+            did,
+            ephemeral: true,
+        }
     }
 
     /// Try device-local secret storage first (macOS Keychain or
@@ -59,9 +64,9 @@ impl AgentIdentity {
             .unwrap_or(true);
         if allow_keychain {
             if let Some(stored) = crate::keychain::read_identity() {
-                if let Some(id) = Self::from_hex_triple(
-                    &stored.ed25519_hex, &stored.x25519_hex, &stored.did,
-                ) {
+                if let Some(id) =
+                    Self::from_hex_triple(&stored.ed25519_hex, &stored.x25519_hex, &stored.did)
+                {
                     tracing::info!(did = %id.did, source = "keychain",
                         "AgentIdentity loaded from device-local store");
                     return id;
@@ -70,8 +75,8 @@ impl AgentIdentity {
         }
 
         // 2. Env vars
-        let ed_hex  = std::env::var("KOTOBA_AGENT_ED25519_HEX").ok();
-        let dh_hex  = std::env::var("KOTOBA_AGENT_X25519_HEX").ok();
+        let ed_hex = std::env::var("KOTOBA_AGENT_ED25519_HEX").ok();
+        let dh_hex = std::env::var("KOTOBA_AGENT_X25519_HEX").ok();
         let did_env = std::env::var("KOTOBA_AGENT_DID").ok();
 
         match (ed_hex, dh_hex, did_env) {
@@ -79,7 +84,9 @@ impl AgentIdentity {
                 let ed_bytes = match hex::decode(ed.trim()) {
                     Ok(b) if b.len() == 32 => b,
                     _ => {
-                        tracing::warn!("KOTOBA_AGENT_ED25519_HEX invalid — falling back to ephemeral");
+                        tracing::warn!(
+                            "KOTOBA_AGENT_ED25519_HEX invalid — falling back to ephemeral"
+                        );
                         return Self::generate_ephemeral();
                     }
                 };
@@ -90,7 +97,9 @@ impl AgentIdentity {
                         arr
                     }
                     _ => {
-                        tracing::warn!("KOTOBA_AGENT_X25519_HEX invalid — falling back to ephemeral");
+                        tracing::warn!(
+                            "KOTOBA_AGENT_X25519_HEX invalid — falling back to ephemeral"
+                        );
                         return Self::generate_ephemeral();
                     }
                 };
@@ -101,10 +110,15 @@ impl AgentIdentity {
                     arr
                 };
                 let signing_key = SigningKey::from_bytes(&seed);
-                let dh_secret   = StaticSecret::from(dh_bytes);
+                let dh_secret = StaticSecret::from(dh_bytes);
 
                 tracing::info!(did = %did, "AgentIdentity loaded from env");
-                Self { signing_key, dh_secret, did, ephemeral: false }
+                Self {
+                    signing_key,
+                    dh_secret,
+                    did,
+                    ephemeral: false,
+                }
             }
             _ => {
                 tracing::info!("KOTOBA_AGENT_* env not set — running ephemeral identity");
@@ -117,16 +131,22 @@ impl AgentIdentity {
     /// Returns `None` if the bytes are malformed.
     fn from_hex_triple(ed_hex: &str, dh_hex: &str, did: &str) -> Option<Self> {
         let ed_bytes = hex::decode(ed_hex.trim()).ok()?;
-        if ed_bytes.len() != 32 { return None; }
+        if ed_bytes.len() != 32 {
+            return None;
+        }
         let dh_bytes = hex::decode(dh_hex.trim()).ok()?;
-        if dh_bytes.len() != 32 { return None; }
-        let mut seed = [0u8; 32]; seed.copy_from_slice(&ed_bytes);
-        let mut dh   = [0u8; 32]; dh.copy_from_slice(&dh_bytes);
+        if dh_bytes.len() != 32 {
+            return None;
+        }
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&ed_bytes);
+        let mut dh = [0u8; 32];
+        dh.copy_from_slice(&dh_bytes);
         Some(Self {
             signing_key: SigningKey::from_bytes(&seed),
-            dh_secret:   StaticSecret::from(dh),
-            did:         did.to_string(),
-            ephemeral:   false,
+            dh_secret: StaticSecret::from(dh),
+            did: did.to_string(),
+            ephemeral: false,
         })
     }
 
@@ -148,8 +168,8 @@ impl AgentIdentity {
         let dh_hex = hex::encode(self.dh_secret.to_bytes());
         crate::keychain::write_identity(&crate::keychain::StoredIdentity {
             ed25519_hex: ed_hex,
-            x25519_hex:  dh_hex,
-            did:         self.did.clone(),
+            x25519_hex: dh_hex,
+            did: self.did.clone(),
         })
     }
 
@@ -177,7 +197,6 @@ impl AgentIdentity {
         hex::encode(&hash.as_bytes()[..4]) // 8 hex chars
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -243,7 +262,10 @@ mod tests {
     #[test]
     fn ephemeral_did_starts_with_did_key() {
         let id = AgentIdentity::generate_ephemeral();
-        assert!(id.did.starts_with("did:key:z"), "ephemeral DID should start with did:key:z");
+        assert!(
+            id.did.starts_with("did:key:z"),
+            "ephemeral DID should start with did:key:z"
+        );
     }
 
     // ── New tests ─────────────────────────────────────────────────────────────

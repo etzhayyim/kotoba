@@ -32,15 +32,15 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, bail};
 use sqlparser::ast::{
-    BinaryOperator, Expr, Fetch, Ident, JoinConstraint, JoinOperator,
-    OrderByExpr, SelectItem, SetExpr, Statement, TableFactor, Top, TopQuantity, Value,
+    BinaryOperator, Expr, Fetch, Ident, JoinConstraint, JoinOperator, OrderByExpr, SelectItem,
+    SetExpr, Statement, TableFactor, Top, TopQuantity, Value,
 };
 use sqlparser::dialect::Dialect;
 use sqlparser::parser::Parser;
 
+use super::PostProcess;
 use crate::datalog::{Atom, BodyLiteral, DatalogProgram, DatalogRule, Term};
 use crate::schema::{AttrKind, SchemaMap};
-use super::PostProcess;
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -52,13 +52,12 @@ impl SchemaBasedSqlCompiler {
     /// Returns the `DatalogProgram` (exactly one rule) and a `PostProcess` for
     /// LIMIT / ORDER BY directives that cannot be expressed in Datalog.
     pub fn compile(
-        sql:     &str,
+        sql: &str,
         dialect: &dyn Dialect,
-        schema:  &SchemaMap,
-        output:  &str,
+        schema: &SchemaMap,
+        output: &str,
     ) -> anyhow::Result<(DatalogProgram, PostProcess)> {
-        let stmts = Parser::parse_sql(dialect, sql)
-            .map_err(|e| anyhow!("SQL parse error: {e}"))?;
+        let stmts = Parser::parse_sql(dialect, sql).map_err(|e| anyhow!("SQL parse error: {e}"))?;
 
         let query = match stmts.into_iter().next() {
             Some(Statement::Query(q)) => q,
@@ -132,12 +131,7 @@ impl SchemaBasedSqlCompiler {
         }
 
         // ── 4. Build head from SELECT projection ─────────────────────────────
-        let head_args = build_head(
-            &select.projection,
-            &table_list,
-            schema,
-            &mut state,
-        )?;
+        let head_args = build_head(&select.projection, &table_list, schema, &mut state)?;
         if head_args.len() != 2 {
             bail!(
                 "SELECT must project exactly 2 columns for kotoba binary Datalog; got {}",
@@ -145,9 +139,15 @@ impl SchemaBasedSqlCompiler {
             );
         }
 
-        let head = Atom { relation: output.to_string(), args: head_args };
+        let head = Atom {
+            relation: output.to_string(),
+            args: head_args,
+        };
         let mut prog = DatalogProgram::new();
-        prog.add_rule(DatalogRule { head, body: state.body });
+        prog.add_rule(DatalogRule {
+            head,
+            body: state.body,
+        });
 
         Ok((prog, pp))
     }
@@ -159,15 +159,20 @@ struct VarState {
     /// alias → entity variable name (e.g. `"E_0"`)
     entity: HashMap<String, String>,
     /// (alias, col) → attribute value variable name (e.g. `"V_1"`)
-    attr:   HashMap<(String, String), String>,
+    attr: HashMap<(String, String), String>,
     /// accumulated body literals
-    pub body:   Vec<BodyLiteral>,
+    pub body: Vec<BodyLiteral>,
     counter: usize,
 }
 
 impl VarState {
     fn new() -> Self {
-        Self { entity: HashMap::new(), attr: HashMap::new(), body: Vec::new(), counter: 0 }
+        Self {
+            entity: HashMap::new(),
+            attr: HashMap::new(),
+            body: Vec::new(),
+            counter: 0,
+        }
     }
 
     fn fresh(&mut self) -> String {
@@ -190,12 +195,14 @@ impl VarState {
     fn access_col(
         &mut self,
         alias: &str,
-        col:   &str,
+        col: &str,
         table: &str,
         schema: &SchemaMap,
     ) -> anyhow::Result<Term> {
         let sch = schema.effective(table);
-        let e_var = self.entity.get(alias)
+        let e_var = self
+            .entity
+            .get(alias)
             .cloned()
             .ok_or_else(|| anyhow!("unknown alias '{alias}'"))?;
 
@@ -227,14 +234,16 @@ impl VarState {
     /// Insert a constant-equality body atom: `predicate(E_alias, Const(value))`.
     fn bind_const(
         &mut self,
-        alias:  &str,
-        col:    &str,
-        table:  &str,
-        value:  String,
+        alias: &str,
+        col: &str,
+        table: &str,
+        value: String,
         schema: &SchemaMap,
     ) -> anyhow::Result<()> {
         let sch = schema.effective(table);
-        let e_var = self.entity.get(alias)
+        let e_var = self
+            .entity
+            .get(alias)
             .cloned()
             .ok_or_else(|| anyhow!("unknown alias '{alias}'"))?;
 
@@ -259,10 +268,14 @@ impl VarState {
             let new_v = va.clone();
             // Replace all occurrences of vb → va in all variable maps
             for v in self.entity.values_mut() {
-                if *v == vb { *v = new_v.clone(); }
+                if *v == vb {
+                    *v = new_v.clone();
+                }
             }
             for v in self.attr.values_mut() {
-                if *v == vb { *v = new_v.clone(); }
+                if *v == vb {
+                    *v = new_v.clone();
+                }
             }
         }
     }
@@ -271,15 +284,21 @@ impl VarState {
     fn add_fk_atom(
         &mut self,
         fk_alias: &str,
-        fk_col:   &str,
+        fk_col: &str,
         fk_table: &str,
         pk_alias: &str,
-        schema:   &SchemaMap,
+        schema: &SchemaMap,
     ) -> anyhow::Result<()> {
         let sch = schema.effective(fk_table);
-        let e_fk = self.entity.get(fk_alias).cloned()
+        let e_fk = self
+            .entity
+            .get(fk_alias)
+            .cloned()
             .ok_or_else(|| anyhow!("unknown FK alias '{fk_alias}'"))?;
-        let e_pk = self.entity.get(pk_alias).cloned()
+        let e_pk = self
+            .entity
+            .get(pk_alias)
+            .cloned()
             .ok_or_else(|| anyhow!("unknown PK alias '{pk_alias}'"))?;
 
         let predicate = match sch.attr(fk_col) {
@@ -298,13 +317,17 @@ impl VarState {
 // ── JOIN ON processing ────────────────────────────────────────────────────────
 
 fn apply_join_on(
-    expr:       &Expr,
-    tables:     &[(String, String)],
-    schema:     &SchemaMap,
-    state:      &mut VarState,
+    expr: &Expr,
+    tables: &[(String, String)],
+    schema: &SchemaMap,
+    state: &mut VarState,
 ) -> anyhow::Result<()> {
     match expr {
-        Expr::BinaryOp { left, op: BinaryOperator::Eq, right } => {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } => {
             let (la, lc) = extract_alias_col(left)?;
             let (ra, rc) = extract_alias_col(right)?;
 
@@ -317,10 +340,8 @@ fn apply_join_on(
             let l_is_pk = l_sch.is_entity_col(&lc);
             let r_is_pk = r_sch.is_entity_col(&rc);
 
-            let r_is_fk = r_sch.attr(&rc)
-                .is_some_and(|a| a.kind == AttrKind::Entity);
-            let l_is_fk = l_sch.attr(&lc)
-                .is_some_and(|a| a.kind == AttrKind::Entity);
+            let r_is_fk = r_sch.attr(&rc).is_some_and(|a| a.kind == AttrKind::Entity);
+            let l_is_fk = l_sch.attr(&lc).is_some_and(|a| a.kind == AttrKind::Entity);
 
             match (l_is_pk, r_is_fk, r_is_pk, l_is_fk) {
                 // left.pk = right.fk  → `right/fk(E_r, E_l)`
@@ -343,10 +364,14 @@ fn apply_join_on(
                     if let (Term::Variable(lv), Term::Variable(rv)) = (lt, rt) {
                         if lv != rv {
                             for v in state.entity.values_mut() {
-                                if *v == rv { *v = lv.clone(); }
+                                if *v == rv {
+                                    *v = lv.clone();
+                                }
                             }
                             for v in state.attr.values_mut() {
-                                if *v == rv { *v = lv.clone(); }
+                                if *v == rv {
+                                    *v = lv.clone();
+                                }
                             }
                         }
                     }
@@ -354,7 +379,11 @@ fn apply_join_on(
             }
             Ok(())
         }
-        Expr::BinaryOp { left, op: BinaryOperator::And, right } => {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => {
             apply_join_on(left, tables, schema, state)?;
             apply_join_on(right, tables, schema, state)
         }
@@ -365,19 +394,27 @@ fn apply_join_on(
 // ── WHERE processing ──────────────────────────────────────────────────────────
 
 fn apply_where(
-    expr:   &Expr,
+    expr: &Expr,
     tables: &[(String, String)],
     schema: &SchemaMap,
-    state:  &mut VarState,
+    state: &mut VarState,
 ) -> anyhow::Result<()> {
     match expr {
-        Expr::BinaryOp { left, op: BinaryOperator::Eq, right } => {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } => {
             let (alias, col) = extract_alias_col(left)?;
             let table = find_table(&alias, tables).unwrap_or(alias.as_str());
             let value = expr_to_const(right)?;
             state.bind_const(&alias, &col, table, value, schema)
         }
-        Expr::BinaryOp { left, op: BinaryOperator::And, right } => {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => {
             apply_where(left, tables, schema, state)?;
             apply_where(right, tables, schema, state)
         }
@@ -389,14 +426,14 @@ fn apply_where(
 
 fn build_head(
     projection: &[SelectItem],
-    tables:     &[(String, String)],
-    schema:     &SchemaMap,
-    state:      &mut VarState,
+    tables: &[(String, String)],
+    schema: &SchemaMap,
+    state: &mut VarState,
 ) -> anyhow::Result<Vec<Term>> {
     let mut args = Vec::new();
     for item in projection {
         let expr = match item {
-            SelectItem::UnnamedExpr(e)        => e,
+            SelectItem::UnnamedExpr(e) => e,
             SelectItem::ExprWithAlias { expr, .. } => expr,
             _ => bail!("SELECT * is not supported; list columns explicitly"),
         };
@@ -406,15 +443,15 @@ fn build_head(
 }
 
 fn resolve_select_expr(
-    expr:   &Expr,
+    expr: &Expr,
     tables: &[(String, String)],
     schema: &SchemaMap,
-    state:  &mut VarState,
+    state: &mut VarState,
 ) -> anyhow::Result<Term> {
     match expr {
         Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
             let alias = &parts[0].value;
-            let col   = &parts[1].value;
+            let col = &parts[1].value;
             let table = find_table(alias, tables).unwrap_or(alias.as_str());
             state.access_col(alias, col, table, schema)
         }
@@ -423,9 +460,7 @@ fn resolve_select_expr(
             // find the unique table that has this column in schema
             let matches: Vec<Term> = tables
                 .iter()
-                .filter_map(|(tname, alias)| {
-                    state.access_col(alias, col, tname, schema).ok()
-                })
+                .filter_map(|(tname, alias)| state.access_col(alias, col, tname, schema).ok())
                 .collect();
             match matches.len() {
                 1 => Ok(matches.into_iter().next().unwrap()),
@@ -441,11 +476,11 @@ fn resolve_select_expr(
 
 fn extract_top(top: &Top, pp: &mut PostProcess) {
     let n_f64 = top.quantity.as_ref().and_then(|q| match q {
-        TopQuantity::Expr(e)    => expr_to_f64(e),
+        TopQuantity::Expr(e) => expr_to_f64(e),
         TopQuantity::Constant(n) => Some(*n as f64),
     });
     let n_usize = top.quantity.as_ref().and_then(|q| match q {
-        TopQuantity::Expr(e)    => expr_to_usize(e),
+        TopQuantity::Expr(e) => expr_to_usize(e),
         TopQuantity::Constant(n) => Some(*n as usize),
     });
     if top.percent {
@@ -468,8 +503,8 @@ fn extract_fetch(fetch: &Fetch, pp: &mut PostProcess) {
 
 fn order_by_col(ob: &OrderByExpr) -> Option<String> {
     match &ob.expr {
-        Expr::Identifier(i)               => Some(i.value.clone()),
-        Expr::CompoundIdentifier(parts)   => parts.last().map(|p| p.value.clone()),
+        Expr::Identifier(i) => Some(i.value.clone()),
+        Expr::CompoundIdentifier(parts) => parts.last().map(|p| p.value.clone()),
         _ => None,
     }
 }
@@ -479,7 +514,9 @@ fn order_by_col(ob: &OrderByExpr) -> Option<String> {
 fn extract_table_alias(factor: &TableFactor) -> anyhow::Result<(String, Option<String>)> {
     match factor {
         TableFactor::Table { name, alias, .. } => {
-            let tname = name.0.iter()
+            let tname = name
+                .0
+                .iter()
                 .map(|i: &Ident| i.value.as_str())
                 .collect::<Vec<_>>()
                 .join(".");
@@ -492,8 +529,9 @@ fn extract_table_alias(factor: &TableFactor) -> anyhow::Result<(String, Option<S
 
 fn extract_alias_col(expr: &Expr) -> anyhow::Result<(String, String)> {
     match expr {
-        Expr::CompoundIdentifier(parts) if parts.len() == 2 =>
-            Ok((parts[0].value.clone(), parts[1].value.clone())),
+        Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
+            Ok((parts[0].value.clone(), parts[1].value.clone()))
+        }
         Expr::Identifier(i) => Ok(("_".to_string(), i.value.clone())),
         _ => bail!("expected alias.col or bare column name; got {expr:?}"),
     }
@@ -502,7 +540,7 @@ fn extract_alias_col(expr: &Expr) -> anyhow::Result<(String, String)> {
 fn expr_to_const(expr: &Expr) -> anyhow::Result<String> {
     match expr {
         Expr::Value(Value::SingleQuotedString(s)) => Ok(s.clone()),
-        Expr::Value(Value::Number(n, _))           => Ok(n.clone()),
+        Expr::Value(Value::Number(n, _)) => Ok(n.clone()),
         _ => bail!("only string/number literals as WHERE constants; got {expr:?}"),
     }
 }
@@ -525,7 +563,8 @@ fn expr_to_f64(expr: &Expr) -> Option<f64> {
 
 /// Find the table name for a given alias in the table list.
 fn find_table<'a>(alias: &str, tables: &'a [(String, String)]) -> Option<&'a str> {
-    tables.iter()
+    tables
+        .iter()
         .find(|(_, a)| a == alias)
         .map(|(t, _)| t.as_str())
 }
@@ -536,35 +575,47 @@ fn find_table<'a>(alias: &str, tables: &'a [(String, String)]) -> Option<&'a str
 mod tests {
     use super::*;
     use crate::schema::{AttrDef, SchemaMap, TableSchema};
-    use crate::{delta::Delta, quad::{Quad, QuadObject}};
+    use crate::{
+        datom::{Datom, Value},
+        delta::Delta,
+    };
     use kotoba_core::cid::KotobaCid;
     use sqlparser::dialect::GenericDialect;
 
-    fn cid(s: &str) -> KotobaCid { KotobaCid::from_bytes(s.as_bytes()) }
+    fn cid(s: &str) -> KotobaCid {
+        KotobaCid::from_bytes(s.as_bytes())
+    }
 
     fn fact(pred: &str, s: &str, o: &str) -> Delta {
-        Delta::assert(Quad {
-            graph: cid("g"), subject: cid(s), predicate: pred.to_string(),
-            object: QuadObject::Cid(cid(o)),
-        })
+        Delta::assert_datom(Datom::assert(
+            cid(s),
+            pred.to_string(),
+            Value::Cid(cid(o)),
+            cid("g"),
+        ))
     }
 
     fn has(derived: &[Delta], pred: &str, s: &str, o: &str) -> bool {
         derived.iter().any(|d| {
-            d.quad.predicate == pred
-                && d.quad.subject == cid(s)
-                && matches!(&d.quad.object, QuadObject::Cid(c) if *c == cid(o))
+            d.attribute() == pred
+                && d.entity() == &cid(s)
+                && matches!(d.value(), Value::Cid(c) if *c == cid(o))
         })
     }
 
     fn orders_schema() -> SchemaMap {
         let mut m = SchemaMap::new();
-        m.add("customers", TableSchema::new("id")
-            .with_attr(AttrDef::scalar("name", "customers")));
-        m.add("orders", TableSchema::new("id")
-            .with_attr(AttrDef::entity("customer_id", "orders"))
-            .with_attr(AttrDef::numeric("amount", "orders"))
-            .with_attr(AttrDef::scalar("status", "orders")));
+        m.add(
+            "customers",
+            TableSchema::new("id").with_attr(AttrDef::scalar("name", "customers")),
+        );
+        m.add(
+            "orders",
+            TableSchema::new("id")
+                .with_attr(AttrDef::entity("customer_id", "orders"))
+                .with_attr(AttrDef::numeric("amount", "orders"))
+                .with_attr(AttrDef::scalar("status", "orders")),
+        );
         m
     }
 
@@ -576,7 +627,8 @@ mod tests {
             &GenericDialect {},
             &schema,
             "out",
-        ).unwrap();
+        )
+        .unwrap();
         assert!(pp.limit.is_none());
 
         // c.id = entity var (no atom), c.name adds customers/name atom
@@ -594,12 +646,13 @@ mod tests {
             &GenericDialect {},
             &schema,
             "result",
-        ).unwrap();
+        )
+        .unwrap();
 
         let input = vec![
-            fact("customers/name",    "c1", "alice"),
-            fact("orders/customer_id","o1", "c1"),
-            fact("orders/amount",     "o1", "100"),
+            fact("customers/name", "c1", "alice"),
+            fact("orders/customer_id", "o1", "c1"),
+            fact("orders/amount", "o1", "100"),
         ];
         let derived = prog.evaluate_delta(&input);
         assert!(has(&derived, "result", "alice", "100"));
@@ -614,16 +667,17 @@ mod tests {
             &GenericDialect {},
             &schema,
             "active_orders",
-        ).unwrap();
+        )
+        .unwrap();
 
         let input = vec![
             fact("orders/customer_id", "o1", "c1"),
-            fact("orders/amount",      "o1", "200"),
-            fact("orders/status",      "o1", "active"),
+            fact("orders/amount", "o1", "200"),
+            fact("orders/status", "o1", "active"),
             // noise: inactive order
             fact("orders/customer_id", "o2", "c2"),
-            fact("orders/amount",      "o2", "300"),
-            fact("orders/status",      "o2", "pending"),
+            fact("orders/amount", "o2", "300"),
+            fact("orders/status", "o2", "pending"),
         ];
         let derived = prog.evaluate_delta(&input);
         assert!(has(&derived, "active_orders", "c1", "200"));
@@ -638,7 +692,8 @@ mod tests {
             &sqlparser::dialect::MsSqlDialect {},
             &schema,
             "top10",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(pp.limit, Some(10));
     }
 
@@ -651,7 +706,8 @@ mod tests {
             &GenericDialect {},
             &schema,
             "out",
-        ).unwrap();
+        )
+        .unwrap();
         let input = vec![fact("knows/o", "alice", "bob")];
         let derived = prog.evaluate_delta(&input);
         assert!(has(&derived, "out", "alice", "bob"));

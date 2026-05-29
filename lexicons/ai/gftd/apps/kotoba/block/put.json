@@ -1,0 +1,24 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.block.put",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Store a content-addressed IPLD block and return its CID.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["data_b64"],
+          "properties": {
+            "data_b64": { "type": "string" }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": { "type": "unknown" }
+      }
+    }
+  }
+}

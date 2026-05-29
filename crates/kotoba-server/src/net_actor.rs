@@ -1,8 +1,9 @@
-use std::sync::Arc;
-use kotoba_net::{KotobaNetEvent, KotobaSwarm, PREGEL_GOSSIP_TOPIC};
-use kotoba_vm::distributed::DistributedMessage;
 use kotoba_core::store::BlockStore;
 use kotoba_graph::QuadStore;
+use kotoba_kqe::{quad::LegacyQuad as Quad, Datom};
+use kotoba_net::{KotobaNetEvent, KotobaSwarm, PREGEL_GOSSIP_TOPIC};
+use kotoba_vm::distributed::DistributedMessage;
+use std::sync::Arc;
 
 /// Maximum number of CID existence checks in a single Bitswap want_have list.
 const MAX_WANT_HAVE: usize = 1_000;
@@ -27,17 +28,16 @@ const MAX_DELTA_COMMITS_TOTAL_BYTES: usize = 8 * 1024 * 1024;
 ///   "kotoba/pregel/messages"                       — Distributed Pregel BSP messages
 ///
 /// Bug fix: after `journal.publish()` for "quad/assert" or "quad/retract" topics,
-/// also deserialize the data as `kotoba_kqe::quad::Quad` and call
-/// `quad_store.assert(quad).await` / `quad_store.retract(quad).await`
-/// so that the receiving node's in-memory Arrangement is updated.
+/// also deserialize the data as the legacy Quad wire projection and apply it to
+/// the local graph store as a Datom whose transaction is the Journal entry CID.
 pub async fn run(
-    mut swarm:           KotobaSwarm,
-    mut publish_rx:      tokio::sync::mpsc::Receiver<(String, Vec<u8>)>,
-    journal:             Arc<kotoba_kse::Journal>,
-    pregel_inbound_tx:   tokio::sync::mpsc::Sender<DistributedMessage>,
-    mut pregel_out_rx:   tokio::sync::mpsc::Receiver<DistributedMessage>,
-    block_store:         Arc<dyn BlockStore + Send + Sync>,
-    quad_store:          Arc<QuadStore>,
+    mut swarm: KotobaSwarm,
+    mut publish_rx: tokio::sync::mpsc::Receiver<(String, Vec<u8>)>,
+    journal: Arc<kotoba_kse::Journal>,
+    pregel_inbound_tx: tokio::sync::mpsc::Sender<DistributedMessage>,
+    mut pregel_out_rx: tokio::sync::mpsc::Receiver<DistributedMessage>,
+    block_store: Arc<dyn BlockStore + Send + Sync>,
+    quad_store: Arc<QuadStore>,
 ) {
     swarm.subscribe("quad/assert").ok();
     swarm.subscribe("quad/retract").ok();
@@ -160,18 +160,21 @@ pub async fn run(
                                 .strip_prefix("kotoba/")
                                 .unwrap_or(&topic)
                                 .to_string();
-                            // Propagate quad assert/retract to local QuadStore Arrangement
-                            if kse_name == "quad/assert" {
-                                if let Ok(quad) = serde_json::from_slice::<kotoba_kqe::quad::Quad>(&data) {
-                                    quad_store.assert(quad).await;
-                                }
+                            let maybe_quad_op = if kse_name == "quad/assert" {
+                                serde_json::from_slice::<Quad>(&data).ok().map(|quad| (quad, true))
                             } else if kse_name == "quad/retract" {
-                                if let Ok(quad) = serde_json::from_slice::<kotoba_kqe::quad::Quad>(&data) {
-                                    quad_store.retract(quad).await;
-                                }
-                            }
+                                serde_json::from_slice::<Quad>(&data).ok().map(|quad| (quad, false))
+                            } else {
+                                None
+                            };
                             let kse_topic = kotoba_kse::Topic(kse_name);
-                            journal.publish(kse_topic, bytes::Bytes::from(data)).await;
+                            let entry = journal.publish(kse_topic, bytes::Bytes::from(data)).await;
+                            if let Some((quad, op)) = maybe_quad_op {
+                                let graph_cid = quad.graph.clone();
+                                let mut datom = Datom::from_legacy_quad(quad, op);
+                                datom.tx = entry.cid.clone();
+                                quad_store.apply_journaled_datom(graph_cid, datom).await;
+                            }
                         }
                     }
                     _ => {}
@@ -212,7 +215,9 @@ mod tests {
 
     #[test]
     fn want_block_is_fraction_of_want_have() {
-        assert!(MAX_WANT_BLOCK < MAX_WANT_HAVE,
-            "want_block limit should be smaller than want_have");
+        assert!(
+            MAX_WANT_BLOCK < MAX_WANT_HAVE,
+            "want_block limit should be smaller than want_have"
+        );
     }
 }

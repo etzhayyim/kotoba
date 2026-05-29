@@ -20,8 +20,8 @@ pub fn parse_ed25519_did_key(did: &str) -> Result<[u8; 32], DidKeyError> {
         .strip_prefix("did:key:")
         .ok_or_else(|| DidKeyError::NotDidKey(did.to_string()))?;
 
-    let (_, bytes) = multibase::decode(key_str)
-        .map_err(|e| DidKeyError::MultibaseDecode(e.to_string()))?;
+    let (_, bytes) =
+        multibase::decode(key_str).map_err(|e| DidKeyError::MultibaseDecode(e.to_string()))?;
 
     if bytes.len() < 2 || bytes[0] != ED25519_CODEC[0] || bytes[1] != ED25519_CODEC[1] {
         return Err(DidKeyError::MissingCodecPrefix);
@@ -61,7 +61,10 @@ mod tests {
         let sk = test_keypair();
         let pk = sk.verifying_key();
         let did = ed25519_pubkey_to_did_key(pk.as_bytes());
-        assert!(did.starts_with("did:key:z6Mk"), "DID should start with did:key:z6Mk, got: {did}");
+        assert!(
+            did.starts_with("did:key:z6Mk"),
+            "DID should start with did:key:z6Mk, got: {did}"
+        );
         let recovered = parse_ed25519_did_key(&did).unwrap();
         assert_eq!(&recovered, pk.as_bytes());
     }
@@ -123,6 +126,9 @@ mod tests {
         let pk = sk.verifying_key();
         let did = ed25519_pubkey_to_did_key(pk.as_bytes());
         // z6Mk is the multibase base58btc prefix for ed25519 keys
-        assert!(did.starts_with("did:key:z6Mk"), "expected did:key:z6Mk prefix, got: {did}");
+        assert!(
+            did.starts_with("did:key:z6Mk"),
+            "expected did:key:z6Mk prefix, got: {did}"
+        );
     }
 }

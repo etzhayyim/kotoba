@@ -1,0 +1,15 @@
+[package]
+name = "kotoba-didcomm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "DIDComm v2 message model with Kotoba Datom projection"
+
+[dependencies]
+kotoba-core.workspace = true
+kotoba-datomic.workspace = true
+kotoba-edn.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

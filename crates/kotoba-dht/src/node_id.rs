@@ -14,13 +14,16 @@ impl NodeId {
     /// XOR distance for Kademlia-style routing
     pub fn xor_distance(&self, other: &Self) -> [u8; 32] {
         let mut dist = [0u8; 32];
-        for (i, slot) in dist.iter_mut().enumerate() { *slot = self.0[i] ^ other.0[i]; }
+        for (i, slot) in dist.iter_mut().enumerate() {
+            *slot = self.0[i] ^ other.0[i];
+        }
         dist
     }
 
     /// Find K closest nodes from candidates (XOR metric)
     pub fn k_nearest<'a>(target: &Self, candidates: &'a [NodeId], k: usize) -> Vec<&'a NodeId> {
-        let mut with_dist: Vec<(&NodeId, [u8; 32])> = candidates.iter()
+        let mut with_dist: Vec<(&NodeId, [u8; 32])> = candidates
+            .iter()
             .map(|n| (n, target.xor_distance(n)))
             .collect();
         with_dist.sort_by_key(|(_, d)| *d);
@@ -103,7 +106,10 @@ mod tests {
         let a = NodeId::from_pubkey(b"alpha");
         let b = NodeId::from_pubkey(b"beta");
         let d = a.xor_distance(&b);
-        assert_ne!(d, [0u8; 32], "distinct nodes must have non-zero XOR distance");
+        assert_ne!(
+            d, [0u8; 32],
+            "distinct nodes must have non-zero XOR distance"
+        );
     }
 
     /// XOR triangle inequality: d(a,c) ≤ d(a,b) XOR d(b,c) holds byte-by-byte
@@ -118,10 +124,19 @@ mod tests {
         let dab = a.xor_distance(&b);
         let dbc = b.xor_distance(&c);
         // ultrametric: dac[i] <= max(dab[i], dbc[i]) for leading bytes
-        let max_other = dab.iter().zip(dbc.iter()).map(|(x, y)| x.max(y)).cloned().collect::<Vec<_>>();
+        let max_other = dab
+            .iter()
+            .zip(dbc.iter())
+            .map(|(x, y)| x.max(y))
+            .cloned()
+            .collect::<Vec<_>>();
         // At least the first byte should satisfy the ultrametric
-        assert!(dac[0] <= max_other[0],
-            "XOR ultrametric violated: dac[0]={}, max(dab[0],dbc[0])={}", dac[0], max_other[0]);
+        assert!(
+            dac[0] <= max_other[0],
+            "XOR ultrametric violated: dac[0]={}, max(dab[0],dbc[0])={}",
+            dac[0],
+            max_other[0]
+        );
     }
 
     /// Ordering: NodeId implements Ord via the byte array, so two different nodes

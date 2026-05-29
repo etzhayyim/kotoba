@@ -1,8 +1,8 @@
+use crate::aead::CryptoError;
 /// Wire format: `signal:v1:{base64url(nonce || ciphertext_with_tag)}`
 /// Compatible with the TypeScript `@gftd/signal` `signal:v1:` prefix convention.
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use zeroize::Zeroizing;
-use crate::aead::CryptoError;
 
 pub const SIGNAL_VAL_PREFIX: &str = "signal:v1:";
 
@@ -98,7 +98,10 @@ mod tests {
         let enc1 = encrypt_field(&key, msg).unwrap();
         let enc2 = encrypt_field(&key, msg).unwrap();
         // Due to random nonce, envelopes must differ
-        assert_ne!(enc1, enc2, "nonces must be random — same plaintext must yield different envelopes");
+        assert_ne!(
+            enc1, enc2,
+            "nonces must be random — same plaintext must yield different envelopes"
+        );
     }
 
     #[test]

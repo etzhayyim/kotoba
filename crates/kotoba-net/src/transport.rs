@@ -34,13 +34,19 @@ mod tests {
     #[test]
     fn quic_addr_contains_port() {
         let addr = quic_addr(9000);
-        assert!(addr.to_string().contains("9000"), "multiaddr should contain port 9000: {addr}");
+        assert!(
+            addr.to_string().contains("9000"),
+            "multiaddr should contain port 9000: {addr}"
+        );
     }
 
     #[test]
     fn quic_addr_uses_quic_v1_protocol() {
         let addr = quic_addr(4242);
-        assert!(addr.to_string().ends_with("quic-v1"), "should end with quic-v1: {addr}");
+        assert!(
+            addr.to_string().ends_with("quic-v1"),
+            "should end with quic-v1: {addr}"
+        );
     }
 
     #[test]
@@ -52,7 +58,10 @@ mod tests {
     #[test]
     fn default_listen_addr_uses_udp() {
         let addr = default_listen_addr();
-        assert!(addr.to_string().contains("udp"), "default addr should use udp: {addr}");
+        assert!(
+            addr.to_string().contains("udp"),
+            "default addr should use udp: {addr}"
+        );
     }
 
     #[test]
@@ -82,6 +91,9 @@ mod tests {
     fn default_listen_addr_port_is_zero() {
         let addr = default_listen_addr();
         // Port 0 means OS-assigned
-        assert!(addr.to_string().contains("/0/"), "default addr should have port 0: {addr}");
+        assert!(
+            addr.to_string().contains("/0/"),
+            "default addr should have port 0: {addr}"
+        );
     }
 }

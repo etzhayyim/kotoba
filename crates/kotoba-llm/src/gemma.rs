@@ -41,7 +41,11 @@ mod inner {
         /// On other platforms uses CPU (F32).
         pub async fn load() -> Result<Self> {
             let device = Self::select_device();
-            let dtype  = if matches!(device, Device::Metal(_)) { DType::BF16 } else { DType::F32 };
+            let dtype = if matches!(device, Device::Metal(_)) {
+                DType::BF16
+            } else {
+                DType::F32
+            };
 
             tracing::info!(
                 device = ?device,
@@ -50,30 +54,33 @@ mod inner {
                 "GemmaRunner: loading model"
             );
 
-            let api  = Api::new()?;
+            let api = Api::new()?;
             let repo = api.repo(Repo::new(GEMMA_REPO.to_string(), RepoType::Model));
 
-            let config_path    = repo.get("config.json").await?;
+            let config_path = repo.get("config.json").await?;
             let tokenizer_path = repo.get("tokenizer.json").await?;
 
-            let model_paths: Vec<PathBuf> =
-                if let Ok(p) = repo.get("model.safetensors").await {
-                    vec![p]
-                } else {
-                    let index_path  = repo.get("model.safetensors.index.json").await?;
-                    let index_text  = std::fs::read_to_string(&index_path)?;
-                    let index: serde_json::Value = serde_json::from_str(&index_text)?;
-                    let mut files: HashSet<String> = HashSet::new();
-                    if let Some(wm) = index.get("weight_map").and_then(|v| v.as_object()) {
-                        for v in wm.values() {
-                            if let Some(s) = v.as_str() { files.insert(s.to_string()); }
+            let model_paths: Vec<PathBuf> = if let Ok(p) = repo.get("model.safetensors").await {
+                vec![p]
+            } else {
+                let index_path = repo.get("model.safetensors.index.json").await?;
+                let index_text = std::fs::read_to_string(&index_path)?;
+                let index: serde_json::Value = serde_json::from_str(&index_text)?;
+                let mut files: HashSet<String> = HashSet::new();
+                if let Some(wm) = index.get("weight_map").and_then(|v| v.as_object()) {
+                    for v in wm.values() {
+                        if let Some(s) = v.as_str() {
+                            files.insert(s.to_string());
                         }
                     }
-                    let mut paths = Vec::new();
-                    for f in files { paths.push(repo.get(&f).await?); }
-                    paths.sort();
-                    paths
-                };
+                }
+                let mut paths = Vec::new();
+                for f in files {
+                    paths.push(repo.get(&f).await?);
+                }
+                paths.sort();
+                paths
+            };
 
             let config: GemmaConfig =
                 serde_json::from_str(&std::fs::read_to_string(&config_path)?)?;
@@ -81,13 +88,15 @@ mod inner {
                 .map_err(|e| anyhow::anyhow!("tokenizer load error: {e}"))?;
 
             // Safety: mmap is read-only; all data is already on disk before this call.
-            let vb = unsafe {
-                VarBuilder::from_mmaped_safetensors(&model_paths, dtype, &device)?
-            };
+            let vb = unsafe { VarBuilder::from_mmaped_safetensors(&model_paths, dtype, &device)? };
 
             let model = GemmaModel::new(/* use_flash_attn */ false, &config, vb)?;
 
-            Ok(Self { model, tokenizer, device })
+            Ok(Self {
+                model,
+                tokenizer,
+                device,
+            })
         }
 
         /// Run text generation synchronously.
@@ -120,15 +129,17 @@ mod inner {
                     (last, tokens.len() - 1)
                 };
 
-                let input   = Tensor::new(input_slice, &self.device)?.unsqueeze(0)?;
-                let logits  = self.model.forward(&input, seqlen_offset)?;
-                let logits  = logits.squeeze(0)?;
+                let input = Tensor::new(input_slice, &self.device)?.unsqueeze(0)?;
+                let logits = self.model.forward(&input, seqlen_offset)?;
+                let logits = logits.squeeze(0)?;
                 let seq_len = logits.dim(0)?;
                 let last_logits = logits.get(seq_len - 1)?;
 
                 let next_token = logits_processor.sample(&last_logits)?;
 
-                if next_token == eos_token { break; }
+                if next_token == eos_token {
+                    break;
+                }
                 tokens.push(next_token);
                 generated.push(next_token);
             }

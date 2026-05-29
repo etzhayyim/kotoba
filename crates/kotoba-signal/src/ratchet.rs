@@ -1,3 +1,10 @@
+use crate::SignalError;
+use kotoba_crypto::{
+    aead::{open, seal},
+    hkdf::{ratchet_chain, ratchet_root},
+};
+use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
 /// Double Ratchet Algorithm (Signal specification).
 ///
 /// State:
@@ -11,41 +18,34 @@
 ///   PN     — previous sending chain length (for skipped messages)
 ///   MKSKIPPED — cache of skipped message keys
 use std::collections::HashMap;
-use x25519_dalek::{StaticSecret, PublicKey as X25519Public};
-use rand::rngs::OsRng;
-use serde::{Deserialize, Serialize};
+use x25519_dalek::{PublicKey as X25519Public, StaticSecret};
 use zeroize::ZeroizeOnDrop;
-use kotoba_crypto::{
-    hkdf::{ratchet_root, ratchet_chain},
-    aead::{seal, open},
-};
-use crate::SignalError;
 
 const MAX_SKIP: u32 = 1000;
 
 #[derive(ZeroizeOnDrop)]
 pub struct RatchetState {
-    pub root_key:         [u8; 32],
-    pub send_chain_key:   Option<[u8; 32]>,
-    pub recv_chain_key:   Option<[u8; 32]>,
+    pub root_key: [u8; 32],
+    pub send_chain_key: Option<[u8; 32]>,
+    pub recv_chain_key: Option<[u8; 32]>,
     pub send_ratchet_priv: StaticSecret,
-    pub recv_ratchet_pub:  Option<[u8; 32]>,
-    pub send_counter:      u32,
-    pub recv_counter:      u32,
+    pub recv_ratchet_pub: Option<[u8; 32]>,
+    pub send_counter: u32,
+    pub recv_counter: u32,
     pub prev_send_counter: u32,
     #[zeroize(skip)]
-    pub skipped_keys:      HashMap<(Vec<u8>, u32), [u8; 32]>,
+    pub skipped_keys: HashMap<(Vec<u8>, u32), [u8; 32]>,
 }
 
 /// Header sent with each Double Ratchet message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RatchetMessage {
     /// Sender's current ratchet public key (32 bytes).
-    pub dh_pub:    Vec<u8>,
+    pub dh_pub: Vec<u8>,
     /// Previous sending chain length (PN).
-    pub pn:        u32,
+    pub pn: u32,
     /// Message counter within the current sending chain (N).
-    pub n:         u32,
+    pub n: u32,
     /// AES-256-GCM ciphertext (nonce || ct, from `kotoba_crypto::aead::seal`).
     pub ciphertext: Vec<u8>,
 }
@@ -103,9 +103,11 @@ impl RatchetState {
 
         let ct = seal(&mk, plaintext).map_err(SignalError::Crypto)?;
         let msg = RatchetMessage {
-            dh_pub: X25519Public::from(&self.send_ratchet_priv).to_bytes().to_vec(),
+            dh_pub: X25519Public::from(&self.send_ratchet_priv)
+                .to_bytes()
+                .to_vec(),
             pn: self.prev_send_counter,
-            n:  self.send_counter,
+            n: self.send_counter,
             ciphertext: ct,
         };
         self.send_counter += 1;
@@ -128,10 +130,7 @@ impl RatchetState {
         }
 
         // DH ratchet step if dh_pub changed
-        let needs_dh_ratchet = self
-            .recv_ratchet_pub
-            .map(|r| r != dh_pub)
-            .unwrap_or(true);
+        let needs_dh_ratchet = self.recv_ratchet_pub.map(|r| r != dh_pub).unwrap_or(true);
 
         if needs_dh_ratchet {
             // Skip messages in old chain
@@ -177,8 +176,8 @@ impl RatchetState {
 
     fn do_dh_ratchet(&mut self, remote_pub: [u8; 32]) -> Result<(), SignalError> {
         self.prev_send_counter = self.send_counter;
-        self.send_counter      = 0;
-        self.recv_counter      = 0;
+        self.send_counter = 0;
+        self.recv_counter = 0;
 
         // Receiving chain
         let dh_out = self
@@ -186,7 +185,7 @@ impl RatchetState {
             .diffie_hellman(&X25519Public::from(remote_pub))
             .to_bytes();
         let (new_rk, recv_ck) = ratchet_root(&self.root_key, &dh_out);
-        self.root_key       = new_rk;
+        self.root_key = new_rk;
         self.recv_chain_key = Some(recv_ck);
 
         // New sending ratchet key
@@ -196,7 +195,7 @@ impl RatchetState {
             .diffie_hellman(&X25519Public::from(remote_pub))
             .to_bytes();
         let (new_rk2, send_ck) = ratchet_root(&self.root_key, &dh_out2);
-        self.root_key       = new_rk2;
+        self.root_key = new_rk2;
         self.send_chain_key = Some(send_ck);
         self.recv_ratchet_pub = Some(remote_pub);
 
@@ -211,10 +210,10 @@ mod tests {
     fn make_pair() -> (RatchetState, RatchetState) {
         let shared = [0x42u8; 32];
         let bob_spk_priv = StaticSecret::random_from_rng(OsRng);
-        let bob_spk_pub  = X25519Public::from(&bob_spk_priv).to_bytes();
+        let bob_spk_pub = X25519Public::from(&bob_spk_priv).to_bytes();
 
         let alice = RatchetState::init_sender(shared, bob_spk_pub);
-        let bob   = RatchetState::init_receiver(shared, bob_spk_priv);
+        let bob = RatchetState::init_receiver(shared, bob_spk_priv);
         (alice, bob)
     }
 
@@ -222,7 +221,7 @@ mod tests {
     fn send_recv_single_message() {
         let (mut alice, mut bob) = make_pair();
         let msg = alice.encrypt(b"hello bob").unwrap();
-        let pt  = bob.decrypt(&msg).unwrap();
+        let pt = bob.decrypt(&msg).unwrap();
         assert_eq!(pt, b"hello bob");
     }
 
@@ -231,7 +230,7 @@ mod tests {
         let (mut alice, mut bob) = make_pair();
         for i in 0u8..5 {
             let msg = alice.encrypt(&[i]).unwrap();
-            let pt  = bob.decrypt(&msg).unwrap();
+            let pt = bob.decrypt(&msg).unwrap();
             assert_eq!(pt, &[i]);
         }
     }

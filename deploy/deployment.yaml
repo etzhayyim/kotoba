@@ -34,8 +34,14 @@ spec:
               value: "4001"
             - name: RUST_LOG
               value: info
+            # KOTOBA_STORE_PATH must be a SUBDIRECTORY of the PVC mount, not
+            # the mount root itself.  kotoba derives `kse_store_root =
+            # path.parent()` and `journal_head_path = path + ".journal-head.json"`;
+            # if path == /data/sled (the PVC root) then parent = /data which is
+            # ephemeral container filesystem → vault key pointer + journal head
+            # vanish on every restart and the server hits genesis + first-run.
             - name: KOTOBA_STORE_PATH
-              value: /data/sled
+              value: /data/sled/wal
             - name: KOTOBA_STORAGE_BUDGET_BYTES
               value: "8589934592"
             # IPFS Pinning Service (optional — set kotoba-ipfs-pin Secret to enable)
@@ -108,9 +114,12 @@ spec:
               memory: "1Gi"
 
           volumeMounts:
+            # NOTE: no `subPath` here — kotoba's existing /data/sled tree lives
+            # at the PVC root.  Adding subPath would mask that tree and force a
+            # fresh genesis + first-run on every restart.  Kubo's sidecar uses
+            # `subPath: ipfs` to live in its own subdirectory on the same PVC.
             - name: sled-data
               mountPath: /data/sled
-              subPath: sled
 
         # ── Sidecar: Kubo (IPFS) daemon ─────────────────────────────────────
         # Provides the cold-tier BlockStore that kotoba's TieredBlockStore
@@ -141,16 +150,22 @@ spec:
             - name: ipfs-api
               containerPort: 5001
               protocol: TCP
+          # Probes execute inside the container (so they reach the API on
+          # 127.0.0.1:5001).  TCP probes would target the pod IP and fail
+          # because we deliberately bind the API to localhost only.
           readinessProbe:
-            tcpSocket:
-              port: 5001
-            initialDelaySeconds: 5
-            periodSeconds: 5
+            exec:
+              command: ["ipfs", "id"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
           livenessProbe:
-            tcpSocket:
-              port: 5001
-            initialDelaySeconds: 30
+            exec:
+              command: ["ipfs", "id"]
+            initialDelaySeconds: 60
             periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
           resources:
             limits:
               memory: "1Gi"

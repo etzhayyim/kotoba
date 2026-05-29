@@ -7,9 +7,9 @@
 /// `put_with_policy()` additionally returns a `DataPolicy::Encrypted` so that callers can
 /// attach the policy directly to `ChainEntry` / `QuadObject::Encrypted` without having to
 /// re-derive the CID.
-use crate::vault::{Vault, BlobRef};
-use kotoba_core::DataPolicy;
+use crate::vault::{BlobRef, Vault};
 use bytes::Bytes;
+use kotoba_core::DataPolicy;
 
 /// AEAD-encrypted Vault.  Callers must supply the 32-byte vault key.
 pub struct SecureVault {
@@ -18,7 +18,9 @@ pub struct SecureVault {
 
 impl SecureVault {
     pub fn new() -> Self {
-        Self { inner: Vault::new() }
+        Self {
+            inner: Vault::new(),
+        }
     }
 
     pub fn with_vault(vault: Vault) -> Self {
@@ -51,7 +53,7 @@ impl SecureVault {
     ) -> Result<(BlobRef, DataPolicy), kotoba_crypto::aead::CryptoError> {
         let blob_ref = self.put(key, plaintext).await?;
         let policy = DataPolicy::Encrypted {
-            ct_cid:     blob_ref.cid.clone(),
+            ct_cid: blob_ref.cid.clone(),
             policy_cid,
         };
         Ok((blob_ref, policy))
@@ -63,7 +65,9 @@ impl SecureVault {
         key: &[u8; 32],
         blob_ref: &BlobRef,
     ) -> Result<Option<Bytes>, kotoba_crypto::aead::CryptoError> {
-        let Some(ct) = self.inner.get(&blob_ref.cid).await else { return Ok(None) };
+        let Some(ct) = self.inner.get(&blob_ref.cid).await else {
+            return Ok(None);
+        };
         let pt = kotoba_crypto::aead::open(key, &ct)?;
         Ok(Some(Bytes::from(pt.to_vec())))
     }
@@ -74,7 +78,9 @@ impl SecureVault {
 }
 
 impl Default for SecureVault {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -90,7 +96,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_get_roundtrip() {
-        let sv  = SecureVault::new();
+        let sv = SecureVault::new();
         let key = random_key();
         let data = Bytes::from_static(b"secret payload");
         let blob_ref = sv.put(&key, data.clone()).await.unwrap();
@@ -100,17 +106,20 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_key_returns_error() {
-        let sv  = SecureVault::new();
+        let sv = SecureVault::new();
         let key = random_key();
         let wrong = random_key();
-        let blob_ref = sv.put(&key, Bytes::from_static(b"top secret")).await.unwrap();
+        let blob_ref = sv
+            .put(&key, Bytes::from_static(b"top secret"))
+            .await
+            .unwrap();
         assert!(sv.get(&wrong, &blob_ref).await.is_err());
     }
 
     #[tokio::test]
     async fn put_with_policy_returns_encrypted_data_policy() {
         use kotoba_core::{cid::KotobaCid, DataPolicy};
-        let sv  = SecureVault::new();
+        let sv = SecureVault::new();
         let key = random_key();
         let plaintext = Bytes::from_static(b"policy test");
         let policy_cid = KotobaCid::from_bytes(b"fake-pre-key-registry-entry");
@@ -119,7 +128,10 @@ mod tests {
             .await
             .unwrap();
         match policy {
-            DataPolicy::Encrypted { ct_cid, policy_cid: pcid } => {
+            DataPolicy::Encrypted {
+                ct_cid,
+                policy_cid: pcid,
+            } => {
                 assert_eq!(ct_cid, blob_ref.cid);
                 assert_eq!(pcid, policy_cid);
             }
@@ -132,7 +144,7 @@ mod tests {
 
     #[tokio::test]
     async fn raw_vault_holds_ciphertext_not_plaintext() {
-        let sv  = SecureVault::new();
+        let sv = SecureVault::new();
         let key = random_key();
         let plaintext = Bytes::from_static(b"must not be plaintext in store");
         let blob_ref = sv.put(&key, plaintext.clone()).await.unwrap();
@@ -143,7 +155,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_creates_valid_vault() {
-        let sv  = SecureVault::default();
+        let sv = SecureVault::default();
         let key = random_key();
         let data = Bytes::from_static(b"default test");
         let blob_ref = sv.put(&key, data.clone()).await.unwrap();
@@ -153,39 +165,42 @@ mod tests {
 
     #[tokio::test]
     async fn contains_returns_true_after_put() {
-        let sv  = SecureVault::new();
+        let sv = SecureVault::new();
         let key = random_key();
-        let blob_ref = sv.put(&key, Bytes::from_static(b"check contains")).await.unwrap();
+        let blob_ref = sv
+            .put(&key, Bytes::from_static(b"check contains"))
+            .await
+            .unwrap();
         assert!(sv.contains(&blob_ref).await);
     }
 
     #[tokio::test]
     async fn contains_returns_false_for_missing() {
-        use kotoba_core::cid::KotobaCid;
         use crate::vault::BlobRef;
+        use kotoba_core::cid::KotobaCid;
 
         let sv = SecureVault::new();
         let fake_ref = BlobRef {
-            cid:       KotobaCid::from_bytes(b"nonexistent"),
-            size:      0,
+            cid: KotobaCid::from_bytes(b"nonexistent"),
+            size: 0,
             mime_type: None,
-            chunked:   false,
+            chunked: false,
         };
         assert!(!sv.contains(&fake_ref).await);
     }
 
     #[tokio::test]
     async fn get_returns_none_for_missing_blob() {
-        use kotoba_core::cid::KotobaCid;
         use crate::vault::BlobRef;
+        use kotoba_core::cid::KotobaCid;
 
-        let sv  = SecureVault::new();
+        let sv = SecureVault::new();
         let key = random_key();
         let fake_ref = BlobRef {
-            cid:       KotobaCid::from_bytes(b"absent"),
-            size:      0,
+            cid: KotobaCid::from_bytes(b"absent"),
+            size: 0,
             mime_type: None,
-            chunked:   false,
+            chunked: false,
         };
         let result = sv.get(&key, &fake_ref).await.unwrap();
         assert!(result.is_none());
@@ -193,8 +208,8 @@ mod tests {
 
     #[tokio::test]
     async fn different_plaintexts_different_blob_refs() {
-        let sv   = SecureVault::new();
-        let key  = random_key();
+        let sv = SecureVault::new();
+        let key = random_key();
         let ref1 = sv.put(&key, Bytes::from_static(b"alpha")).await.unwrap();
         let ref2 = sv.put(&key, Bytes::from_static(b"beta")).await.unwrap();
         // Different plaintexts → different CIDs (AES-GCM nonce is random)
@@ -203,7 +218,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_plaintext_roundtrip() {
-        let sv  = SecureVault::new();
+        let sv = SecureVault::new();
         let key = random_key();
         let blob_ref = sv.put(&key, Bytes::new()).await.unwrap();
         let got = sv.get(&key, &blob_ref).await.unwrap().unwrap();

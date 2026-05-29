@@ -1,23 +1,28 @@
+use crate::pregel::{datalog_compute_fn, graph_from_deltas};
 use kotoba_core::cid::KotobaCid;
 use kotoba_core::store::BlockStore;
-use kotoba_kqe::{arrangement::Arrangement, delta::Delta, datalog::DatalogProgram};
+use kotoba_kqe::{arrangement::Arrangement, datalog::DatalogProgram, delta::Delta};
 use std::sync::Arc;
-use crate::pregel::{graph_from_deltas, datalog_compute_fn};
 
 /// KVM execution result
 #[derive(Debug)]
 pub struct ExecResult {
-    pub call_id:         u64,
-    pub status:          ExecStatus,
-    pub out_deltas:      Vec<Delta>,
-    pub steps_used:      u32,
+    pub call_id: u64,
+    pub status: ExecStatus,
+    pub out_deltas: Vec<Delta>,
+    pub steps_used: u32,
     /// One content-addressed ProllyTree root CID per superstep — the Merkle
     /// proof chain for this execution.  Empty when no `block_store` was supplied.
     pub checkpoint_cids: Vec<KotobaCid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExecStatus { Ok, Halt, StepsExceeded, Error }
+pub enum ExecStatus {
+    Ok,
+    Halt,
+    StepsExceeded,
+    Error,
+}
 
 /// KotobaVM — executes Invoke ChainEntry via Pregel BSP supersteps
 pub struct KotobaVm;
@@ -33,35 +38,35 @@ impl KotobaVm {
     /// every superstep and the resulting root CID is appended to
     /// `ExecResult::checkpoint_cids`, giving one Merkle proof per BSP step.
     pub fn execute(
-        program_cid:  &KotobaCid,
-        program:      &DatalogProgram,
-        input:        &Arrangement,
+        program_cid: &KotobaCid,
+        program: &DatalogProgram,
+        input: &Arrangement,
         input_deltas: &[Delta],
-        max_steps:    u32,
-        call_id:      u64,
-        block_store:  Option<&dyn BlockStore>,
+        max_steps: u32,
+        call_id: u64,
+        block_store: Option<&dyn BlockStore>,
     ) -> ExecResult {
         let _ = (program_cid, input); // used in distributed impl
 
         if program.rules.is_empty() || input_deltas.is_empty() {
             return ExecResult {
                 call_id,
-                status:          ExecStatus::Ok,
-                out_deltas:      vec![],
-                steps_used:      0,
+                status: ExecStatus::Ok,
+                out_deltas: vec![],
+                steps_used: 0,
                 checkpoint_cids: vec![],
             };
         }
 
         let mut graph = graph_from_deltas(input_deltas);
 
-        let prog   = Arc::new(program.clone());
+        let prog = Arc::new(program.clone());
         let deltas = Arc::new(input_deltas.to_vec());
         let compute = datalog_compute_fn(prog, deltas);
 
         // Drive the superstep loop manually so we can checkpoint after each step.
         let mut superstep_results = Vec::new();
-        let mut checkpoint_cids   = Vec::new();
+        let mut checkpoint_cids = Vec::new();
         let mut last_cid: Option<KotobaCid> = None;
 
         for _ in 0..max_steps {
@@ -79,18 +84,19 @@ impl KotobaVm {
             }
 
             superstep_results.push(r);
-            if halted { break; }
+            if halted {
+                break;
+            }
         }
 
         let steps_used = superstep_results.len() as u32;
 
-        let status = if steps_used >= max_steps
-            && !superstep_results.last().is_some_and(|r| r.all_halted)
-        {
-            ExecStatus::StepsExceeded
-        } else {
-            ExecStatus::Ok
-        };
+        let status =
+            if steps_used >= max_steps && !superstep_results.last().is_some_and(|r| r.all_halted) {
+                ExecStatus::StepsExceeded
+            } else {
+                ExecStatus::Ok
+            };
 
         let out_deltas = if status == ExecStatus::Ok {
             program.evaluate_delta(input_deltas)
@@ -98,7 +104,13 @@ impl KotobaVm {
             vec![]
         };
 
-        ExecResult { call_id, status, out_deltas, steps_used, checkpoint_cids }
+        ExecResult {
+            call_id,
+            status,
+            out_deltas,
+            steps_used,
+            checkpoint_cids,
+        }
     }
 }
 
@@ -109,36 +121,47 @@ impl KotobaVm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kotoba_core::cid::KotobaCid;
     use kotoba_kqe::{
         arrangement::Arrangement,
-        datalog::{DatalogProgram, DatalogRule, Atom, Term, BodyLiteral},
+        datalog::{Atom, BodyLiteral, DatalogProgram, DatalogRule, Term},
+        datom::{Datom, Value},
         delta::Delta,
-        quad::{Quad, QuadObject},
     };
-    use kotoba_core::cid::KotobaCid;
 
-    fn dummy_cid() -> KotobaCid { KotobaCid::from_bytes(b"test") }
-    fn graph_cid() -> KotobaCid { KotobaCid::from_bytes(b"graph") }
+    fn dummy_cid() -> KotobaCid {
+        KotobaCid::from_bytes(b"test")
+    }
+    fn graph_cid() -> KotobaCid {
+        KotobaCid::from_bytes(b"graph")
+    }
 
     fn make_delta(subject: &str, predicate: &str) -> Delta {
-        Delta::assert(Quad {
-            graph:     graph_cid(),
-            subject:   KotobaCid::from_bytes(subject.as_bytes()),
-            predicate: predicate.to_string(),
-            object:    QuadObject::Text(predicate.to_string()),
-        })
+        Delta::assert_datom(Datom::assert(
+            KotobaCid::from_bytes(subject.as_bytes()),
+            predicate.to_string(),
+            Value::Text(predicate.to_string()),
+            graph_cid(),
+        ))
     }
 
     fn one_rule_program() -> DatalogProgram {
         // Atom arity must be 2 (Quad subject + object)
         let mut p = DatalogProgram::default();
         p.add_rule(DatalogRule {
-            head: Atom { relation: "derived".to_string(), args: vec![
-                Term::Variable("X".to_string()), Term::Variable("Y".to_string()),
-            ]},
+            head: Atom {
+                relation: "derived".to_string(),
+                args: vec![
+                    Term::Variable("X".to_string()),
+                    Term::Variable("Y".to_string()),
+                ],
+            },
             body: vec![BodyLiteral::Positive(Atom {
                 relation: "base".to_string(),
-                args: vec![Term::Variable("X".to_string()), Term::Variable("Y".to_string())],
+                args: vec![
+                    Term::Variable("X".to_string()),
+                    Term::Variable("Y".to_string()),
+                ],
             })],
         });
         p
@@ -147,9 +170,14 @@ mod tests {
     #[test]
     fn empty_program_returns_ok_no_deltas() {
         let program = DatalogProgram::default();
-        let result  = KotobaVm::execute(
-            &dummy_cid(), &program, &Arrangement::new(),
-            &[make_delta("alice", "base")], 10, 1, None,
+        let result = KotobaVm::execute(
+            &dummy_cid(),
+            &program,
+            &Arrangement::new(),
+            &[make_delta("alice", "base")],
+            10,
+            1,
+            None,
         );
         assert_eq!(result.status, ExecStatus::Ok);
         assert!(result.out_deltas.is_empty());
@@ -159,8 +187,13 @@ mod tests {
     #[test]
     fn empty_deltas_returns_ok_no_steps() {
         let result = KotobaVm::execute(
-            &dummy_cid(), &one_rule_program(), &Arrangement::new(),
-            &[], 10, 2, None,
+            &dummy_cid(),
+            &one_rule_program(),
+            &Arrangement::new(),
+            &[],
+            10,
+            2,
+            None,
         );
         assert_eq!(result.status, ExecStatus::Ok);
         assert!(result.out_deltas.is_empty());
@@ -170,8 +203,13 @@ mod tests {
     #[test]
     fn ok_run_returns_call_id() {
         let result = KotobaVm::execute(
-            &dummy_cid(), &one_rule_program(), &Arrangement::new(),
-            &[make_delta("alice", "base")], 10, 99, None,
+            &dummy_cid(),
+            &one_rule_program(),
+            &Arrangement::new(),
+            &[make_delta("alice", "base")],
+            10,
+            99,
+            None,
         );
         // Status is Ok (datalog_compute_fn votes_halt immediately — single step)
         assert_eq!(result.status, ExecStatus::Ok);
@@ -187,18 +225,26 @@ mod tests {
     /// when run() is cut off → all_halted=false → StepsExceeded.
     #[test]
     fn steps_exceeded_returns_empty_deltas() {
-        use crate::pregel::{PregelGraph, VertexId, Message, ComputeOutput, ComputeFn};
+        use crate::pregel::{ComputeFn, ComputeOutput, Message, PregelGraph, VertexId};
 
         // Build a graph manually with a vertex that sends a message every step
         // and never votes halt — forces StepsExceeded regardless of max_steps.
         let mut graph = PregelGraph::new();
         let v = VertexId::from("v");
         graph.add_vertex(v.clone(), Vec::new());
-        graph.inject_message(Message { src: VertexId::from("seed"), dst: v.clone(), payload: b"go".to_vec() });
+        graph.inject_message(Message {
+            src: VertexId::from("seed"),
+            dst: v.clone(),
+            payload: b"go".to_vec(),
+        });
 
         let compute: ComputeFn = Box::new(|vertex, _| ComputeOutput {
             new_state: vec![],
-            messages:  vec![Message { src: vertex.id.clone(), dst: vertex.id.clone(), payload: b"loop".to_vec() }],
+            messages: vec![Message {
+                src: vertex.id.clone(),
+                dst: vertex.id.clone(),
+                payload: b"loop".to_vec(),
+            }],
             vote_halt: false, // never halts
         });
 
@@ -224,7 +270,10 @@ mod tests {
         };
 
         assert_eq!(status, ExecStatus::StepsExceeded);
-        assert!(out_deltas.is_empty(), "revert guard: StepsExceeded must produce no deltas");
+        assert!(
+            out_deltas.is_empty(),
+            "revert guard: StepsExceeded must produce no deltas"
+        );
     }
 
     #[test]
@@ -233,25 +282,41 @@ mod tests {
 
         let store = MemoryBlockStore::new();
         let result = KotobaVm::execute(
-            &dummy_cid(), &one_rule_program(), &Arrangement::new(),
-            &[make_delta("alice", "base")], 10, 42,
+            &dummy_cid(),
+            &one_rule_program(),
+            &Arrangement::new(),
+            &[make_delta("alice", "base")],
+            10,
+            42,
             Some(&store),
         );
 
         assert_eq!(result.status, ExecStatus::Ok);
         // one_rule_program + single delta → one superstep → one checkpoint CID
-        assert!(!result.checkpoint_cids.is_empty(), "expected at least one checkpoint CID");
+        assert!(
+            !result.checkpoint_cids.is_empty(),
+            "expected at least one checkpoint CID"
+        );
         // Each checkpoint CID must exist in the block store
         for cid in &result.checkpoint_cids {
-            assert!(store.has(cid), "checkpoint block missing from store: {}", cid.to_multibase());
+            assert!(
+                store.has(cid),
+                "checkpoint block missing from store: {}",
+                cid.to_multibase()
+            );
         }
     }
 
     #[test]
     fn no_checkpoint_cids_when_store_is_none() {
         let result = KotobaVm::execute(
-            &dummy_cid(), &one_rule_program(), &Arrangement::new(),
-            &[make_delta("alice", "base")], 10, 7, None,
+            &dummy_cid(),
+            &one_rule_program(),
+            &Arrangement::new(),
+            &[make_delta("alice", "base")],
+            10,
+            7,
+            None,
         );
         assert!(result.checkpoint_cids.is_empty());
     }
@@ -264,8 +329,8 @@ mod tests {
     /// and asserting the two checkpoint CIDs differ.
     #[test]
     fn chained_checkpoints_differ_across_runs() {
+        use crate::pregel::{ComputeFn, ComputeOutput, PregelGraph, Vertex, VertexId};
         use kotoba_store::MemoryBlockStore;
-        use crate::pregel::{PregelGraph, VertexId, ComputeOutput, ComputeFn, Vertex};
 
         let store = MemoryBlockStore::new();
 
@@ -279,7 +344,7 @@ mod tests {
         // Step 1 — run one superstep and checkpoint
         let halt_fn: ComputeFn = Box::new(|vertex: &Vertex, _| ComputeOutput {
             new_state: vertex.state.clone(),
-            messages:  vec![],
+            messages: vec![],
             vote_halt: true,
         });
         graph.superstep(&halt_fn);
@@ -287,7 +352,10 @@ mod tests {
 
         // Step 2 — same vertex state, different prev → different link_cid
         let cid2 = graph.checkpoint_chained(&store, Some(&cid1)).unwrap();
-        assert_ne!(cid1, cid2, "chained checkpoint with prev must differ from step-0 CID");
+        assert_ne!(
+            cid1, cid2,
+            "chained checkpoint with prev must differ from step-0 CID"
+        );
     }
 
     // ---- New tests --------------------------------------------------------
@@ -302,7 +370,7 @@ mod tests {
     #[test]
     fn exec_status_copy_clone() {
         let s = ExecStatus::StepsExceeded;
-        let c = s;   // Copy
+        let c = s; // Copy
         assert_eq!(s, c);
         let c2 = s.clone();
         assert_eq!(s, c2);
@@ -311,8 +379,13 @@ mod tests {
     #[test]
     fn exec_result_call_id_zero() {
         let result = KotobaVm::execute(
-            &dummy_cid(), &DatalogProgram::default(), &Arrangement::new(),
-            &[], 5, 0, None,
+            &dummy_cid(),
+            &DatalogProgram::default(),
+            &Arrangement::new(),
+            &[],
+            5,
+            0,
+            None,
         );
         assert_eq!(result.call_id, 0);
     }
@@ -323,8 +396,13 @@ mod tests {
         // never executes → steps_used=0, status=Ok (0 >= 0 && !last.all_halted
         // is false since last is None → condition is false).
         let result = KotobaVm::execute(
-            &dummy_cid(), &one_rule_program(), &Arrangement::new(),
-            &[make_delta("x", "base")], 0, 77, None,
+            &dummy_cid(),
+            &one_rule_program(),
+            &Arrangement::new(),
+            &[make_delta("x", "base")],
+            0,
+            77,
+            None,
         );
         // steps_used must be 0 (no loop body ran)
         assert_eq!(result.steps_used, 0);
@@ -337,8 +415,13 @@ mod tests {
             .map(|i| make_delta(&format!("node-{i}"), "base"))
             .collect();
         let result = KotobaVm::execute(
-            &dummy_cid(), &one_rule_program(), &Arrangement::new(),
-            &deltas, 10, 55, None,
+            &dummy_cid(),
+            &one_rule_program(),
+            &Arrangement::new(),
+            &deltas,
+            10,
+            55,
+            None,
         );
         assert_eq!(result.call_id, 55);
         assert_eq!(result.status, ExecStatus::Ok);
@@ -356,10 +439,15 @@ mod tests {
     #[test]
     fn call_id_preserved_with_store() {
         use kotoba_store::MemoryBlockStore;
-        let store  = MemoryBlockStore::new();
+        let store = MemoryBlockStore::new();
         let result = KotobaVm::execute(
-            &dummy_cid(), &one_rule_program(), &Arrangement::new(),
-            &[make_delta("a", "base")], 5, 12345, Some(&store),
+            &dummy_cid(),
+            &one_rule_program(),
+            &Arrangement::new(),
+            &[make_delta("a", "base")],
+            5,
+            12345,
+            Some(&store),
         );
         assert_eq!(result.call_id, 12345);
     }

@@ -21,9 +21,16 @@ pub trait AsyncBlockStore {
         let _ = cid;
         Ok(())
     }
-    async fn pin_async(&self, cid: &KotobaCid) { let _ = cid; }
-    async fn unpin_async(&self, cid: &KotobaCid) { let _ = cid; }
-    async fn is_pinned_async(&self, cid: &KotobaCid) -> bool { let _ = cid; false }
+    async fn pin_async(&self, cid: &KotobaCid) {
+        let _ = cid;
+    }
+    async fn unpin_async(&self, cid: &KotobaCid) {
+        let _ = cid;
+    }
+    async fn is_pinned_async(&self, cid: &KotobaCid) -> bool {
+        let _ = cid;
+        false
+    }
 
     /// Evict unpinned blocks until stored bytes ≤ `max_bytes`.
     /// Returns number of bytes freed. Default: no eviction.

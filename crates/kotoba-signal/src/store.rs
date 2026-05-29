@@ -5,34 +5,34 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::{
+    group::InMemorySenderKeyStore,
     identity::{DeviceId, IdentityKeyPair},
     prekey::{PreKey, PreKeyBundle, PreKeyId, SignedPreKey, SignedPreKeyId},
-    group::InMemorySenderKeyStore,
     session::InMemorySessionStore,
     SignalError,
 };
 
 /// All Signal Protocol state for a local device.
 pub struct SignalStore {
-    pub local_did:     String,
-    pub device_id:     DeviceId,
-    pub identity:      IdentityKeyPair,
-    prekeys:           Arc<RwLock<HashMap<PreKeyId, PreKey>>>,
-    signed_prekeys:    Arc<RwLock<HashMap<SignedPreKeyId, SignedPreKey>>>,
-    pub sessions:      InMemorySessionStore,
-    pub sender_keys:   InMemorySenderKeyStore,
+    pub local_did: String,
+    pub device_id: DeviceId,
+    pub identity: IdentityKeyPair,
+    prekeys: Arc<RwLock<HashMap<PreKeyId, PreKey>>>,
+    signed_prekeys: Arc<RwLock<HashMap<SignedPreKeyId, SignedPreKey>>>,
+    pub sessions: InMemorySessionStore,
+    pub sender_keys: InMemorySenderKeyStore,
 }
 
 impl SignalStore {
     pub fn new(local_did: impl Into<String>, device_id: impl Into<String>) -> Self {
         Self {
-            local_did:      local_did.into(),
-            device_id:      device_id.into(),
-            identity:       IdentityKeyPair::generate(),
-            prekeys:        Arc::new(RwLock::new(HashMap::new())),
+            local_did: local_did.into(),
+            device_id: device_id.into(),
+            identity: IdentityKeyPair::generate(),
+            prekeys: Arc::new(RwLock::new(HashMap::new())),
             signed_prekeys: Arc::new(RwLock::new(HashMap::new())),
-            sessions:       InMemorySessionStore::new(),
-            sender_keys:    InMemorySenderKeyStore::new(),
+            sessions: InMemorySessionStore::new(),
+            sender_keys: InMemorySenderKeyStore::new(),
         }
     }
 
@@ -62,11 +62,18 @@ impl SignalStore {
     }
 
     pub async fn get_signed_prekey(&self, id: SignedPreKeyId) -> Option<SignedPreKeyId> {
-        if self.signed_prekeys.read().await.contains_key(&id) { Some(id) } else { None }
+        if self.signed_prekeys.read().await.contains_key(&id) {
+            Some(id)
+        } else {
+            None
+        }
     }
 
     /// Build a PreKeyBundle for this device (for remote peers to fetch).
-    pub async fn prekey_bundle(&self, signed_prekey_id: SignedPreKeyId) -> Result<PreKeyBundle, SignalError> {
+    pub async fn prekey_bundle(
+        &self,
+        signed_prekey_id: SignedPreKeyId,
+    ) -> Result<PreKeyBundle, SignalError> {
         let spk_map = self.signed_prekeys.read().await;
         let spk = spk_map
             .get(&signed_prekey_id)
@@ -78,14 +85,14 @@ impl SignalStore {
         };
 
         Ok(PreKeyBundle {
-            did:               self.local_did.clone(),
-            device_id:         self.device_id.clone(),
-            identity_key:      self.identity.public_key(),
-            signed_prekey:     spk.public_bytes().to_vec(),
-            signed_prekey_id:  spk.id,
+            did: self.local_did.clone(),
+            device_id: self.device_id.clone(),
+            identity_key: self.identity.public_key(),
+            signed_prekey: spk.public_bytes().to_vec(),
+            signed_prekey_id: spk.id,
             signed_prekey_sig: spk.signature.clone(),
-            one_time_prekey:     opk_entry.map(|(_, pk)| pk.to_vec()),
-            one_time_prekey_id:  opk_entry.map(|(id, _)| id),
+            one_time_prekey: opk_entry.map(|(_, pk)| pk.to_vec()),
+            one_time_prekey_id: opk_entry.map(|(id, _)| id),
         })
     }
 
@@ -125,7 +132,8 @@ impl SignalStore {
         convo_id: &str,
     ) -> Result<String, SignalError> {
         let key = self.derive_field_key(peer_did, convo_id);
-        kotoba_crypto::envelope::encrypt_field(&key, plaintext.as_bytes()).map_err(SignalError::Crypto)
+        kotoba_crypto::envelope::encrypt_field(&key, plaintext.as_bytes())
+            .map_err(SignalError::Crypto)
     }
 
     /// Decrypt a `signal:v1:` field value.
@@ -136,7 +144,8 @@ impl SignalStore {
         convo_id: &str,
     ) -> Result<String, SignalError> {
         let key = self.derive_field_key(peer_did, convo_id);
-        let mut bytes = kotoba_crypto::envelope::decrypt_field(&key, envelope).map_err(SignalError::Crypto)?;
+        let mut bytes =
+            kotoba_crypto::envelope::decrypt_field(&key, envelope).map_err(SignalError::Crypto)?;
         let inner = std::mem::take(&mut *bytes);
         String::from_utf8(inner).map_err(|e| SignalError::Store(e.to_string()))
     }
@@ -154,7 +163,9 @@ mod tests {
     #[tokio::test]
     async fn field_encrypt_decrypt_roundtrip() {
         let store = SignalStore::new("did:plc:alice", "dev-1");
-        let enc = store.encrypt_field("secret value", "did:plc:bob", "convo-1").unwrap();
+        let enc = store
+            .encrypt_field("secret value", "did:plc:bob", "convo-1")
+            .unwrap();
         assert!(enc.starts_with("signal:v1:"));
         let dec = store.decrypt_field(&enc, "did:plc:bob", "convo-1").unwrap();
         assert_eq!(dec, "secret value");
@@ -166,7 +177,10 @@ mod tests {
         let store = SignalStore::new("did:plc:owner", "dev-1");
         let k1 = store.derive_field_key("did:plc:a", "b:c");
         let k2 = store.derive_field_key("did:plc:a:b", "c");
-        assert_ne!(k1, k2, "HKDF key-confusion: different splits must yield different keys");
+        assert_ne!(
+            k1, k2,
+            "HKDF key-confusion: different splits must yield different keys"
+        );
     }
 
     #[test]
@@ -212,7 +226,10 @@ mod tests {
         let ids = store.prekey_ids().await;
         assert_eq!(ids.len(), 2, "consumed key should be removed");
         let again = store.consume_prekey(1).await;
-        assert!(again.is_none(), "consuming the same key twice should return None");
+        assert!(
+            again.is_none(),
+            "consuming the same key twice should return None"
+        );
     }
 
     #[tokio::test]
@@ -238,7 +255,7 @@ mod tests {
     fn derive_field_key_changes_with_peer_did() {
         let store = SignalStore::new("did:plc:owner", "dev-1");
         let k1 = store.derive_field_key("did:plc:alice", "convo-1");
-        let k2 = store.derive_field_key("did:plc:bob",   "convo-1");
+        let k2 = store.derive_field_key("did:plc:bob", "convo-1");
         assert_ne!(k1, k2, "different peer_did must yield different keys");
     }
 
@@ -246,8 +263,12 @@ mod tests {
     fn encrypt_field_same_plaintext_produces_different_ciphertexts() {
         let store = SignalStore::new("did:plc:owner", "dev-1");
         // AES-GCM uses a random nonce per call → same plaintext encrypts differently each time
-        let c1 = store.encrypt_field("hello", "did:plc:bob", "convo-1").unwrap();
-        let c2 = store.encrypt_field("hello", "did:plc:bob", "convo-1").unwrap();
+        let c1 = store
+            .encrypt_field("hello", "did:plc:bob", "convo-1")
+            .unwrap();
+        let c2 = store
+            .encrypt_field("hello", "did:plc:bob", "convo-1")
+            .unwrap();
         assert_ne!(c1, c2, "random nonce must produce distinct ciphertexts");
     }
 

@@ -15,7 +15,8 @@ pub fn derive_key_with_salt(ikm: &[u8], salt: &[u8], info: &[u8]) -> [u8; HKDF_K
     let salt = if salt.is_empty() { None } else { Some(salt) };
     let hk = Hkdf::<Sha256>::new(salt, ikm);
     let mut okm = [0u8; HKDF_KEY_LEN];
-    hk.expand(info, &mut okm).expect("HKDF expand: output len <= 255*HashLen");
+    hk.expand(info, &mut okm)
+        .expect("HKDF expand: output len <= 255*HashLen");
     okm
 }
 
@@ -24,7 +25,8 @@ pub fn derive_bytes(ikm: &[u8], salt: &[u8], info: &[u8], len: usize) -> Vec<u8>
     let salt = if salt.is_empty() { None } else { Some(salt) };
     let hk = Hkdf::<Sha256>::new(salt, ikm);
     let mut okm = vec![0u8; len];
-    hk.expand(info, &mut okm).expect("HKDF expand: output len <= 255*HashLen");
+    hk.expand(info, &mut okm)
+        .expect("HKDF expand: output len <= 255*HashLen");
     okm
 }
 
@@ -34,7 +36,8 @@ pub fn ratchet_root(root_key: &[u8; 32], dh_out: &[u8]) -> ([u8; 32], [u8; 32]) 
     let mut out = [0u8; 64];
     let salt = Some(root_key.as_ref());
     let hk = Hkdf::<Sha256>::new(salt, dh_out);
-    hk.expand(b"kotoba-ratchet-root", &mut out).expect("HKDF expand: 64 bytes is within 255*HashLen limit");
+    hk.expand(b"kotoba-ratchet-root", &mut out)
+        .expect("HKDF expand: 64 bytes is within 255*HashLen limit");
     let mut rk = [0u8; 32];
     let mut ck = [0u8; 32];
     rk.copy_from_slice(&out[..32]);
@@ -47,11 +50,13 @@ pub fn ratchet_chain(chain_key: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
     use hmac::{Hmac, Mac};
     type HmacSha256 = Hmac<Sha256>;
 
-    let mut mk_mac = HmacSha256::new_from_slice(chain_key).expect("HMAC-SHA256 accepts any key length");
+    let mut mk_mac =
+        HmacSha256::new_from_slice(chain_key).expect("HMAC-SHA256 accepts any key length");
     mk_mac.update(&[0x01]);
     let mk: [u8; 32] = mk_mac.finalize().into_bytes().into();
 
-    let mut ck_mac = HmacSha256::new_from_slice(chain_key).expect("HMAC-SHA256 accepts any key length");
+    let mut ck_mac =
+        HmacSha256::new_from_slice(chain_key).expect("HMAC-SHA256 accepts any key length");
     ck_mac.update(&[0x02]);
     let ck: [u8; 32] = ck_mac.finalize().into_bytes().into();
 
@@ -105,7 +110,7 @@ mod tests {
     #[test]
     fn derive_key_with_salt_differs_from_no_salt() {
         let no_salt = derive_key(b"ikm", b"info");
-        let salted  = derive_key_with_salt(b"ikm", b"salt", b"info");
+        let salted = derive_key_with_salt(b"ikm", b"salt", b"info");
         assert_ne!(no_salt, salted);
     }
 

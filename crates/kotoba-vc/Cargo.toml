@@ -1,0 +1,18 @@
+[package]
+name = "kotoba-vc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "W3C Verifiable Credential / Presentation model with Kotoba Datom projection"
+
+[dependencies]
+kotoba-core.workspace = true
+kotoba-datomic.workspace = true
+kotoba-edn.workspace = true
+kotoba-auth = { path = "../kotoba-auth" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ed25519-dalek.workspace = true
+multibase.workspace = true

@@ -10,18 +10,18 @@ use crate::program::ProgramStore;
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct InvokeContext {
     /// Named graph CID this invocation operates on
-    pub graph:       String,
+    pub graph: String,
     /// Session CID (for stateful invocations; None for UDF-style)
     pub session_cid: Option<String>,
     /// CBOR-encoded arguments
-    pub args_cbor:   Vec<u8>,
+    pub args_cbor: Vec<u8>,
 }
 
 /// InvokeResult is written back as the Result ChainEntry output field.
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct InvokeResult {
-    pub output_cbor:  Vec<u8>,
-    pub gas_used:     u64,
+    pub output_cbor: Vec<u8>,
+    pub gas_used: u64,
     /// Quads to apply to Arrangement after successful execution
     pub assert_quads: Vec<SerializedQuad>,
     pub retract_quads: Vec<SerializedQuad>,
@@ -35,18 +35,18 @@ pub struct InvokeResult {
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct SerializedQuad {
-    pub graph:       String,
-    pub subject:     String,
-    pub predicate:   String,
+    pub graph: String,
+    pub subject: String,
+    pub predicate: String,
     pub object_cbor: Vec<u8>,
 }
 
 impl From<PendingQuad> for SerializedQuad {
     fn from(q: PendingQuad) -> Self {
         Self {
-            graph:       q.graph,
-            subject:     q.subject,
-            predicate:   q.predicate,
+            graph: q.graph,
+            subject: q.subject,
+            predicate: q.predicate,
             object_cbor: q.object_cbor,
         }
     }
@@ -62,18 +62,26 @@ impl From<PendingQuad> for SerializedQuad {
 ///   5. Collect pending_asserts + pending_retracts from HostState
 ///   6. Return InvokeResult (caller appends to SourceChain + applies to Arrangement)
 pub struct WasmExecutor {
-    engine:           KotobaEngine,
-    programs:         ProgramStore,
-    gas_limit:        u64,
+    engine: KotobaEngine,
+    programs: ProgramStore,
+    gas_limit: u64,
     inference_engine: Option<InferenceFn>,
 }
 
 impl WasmExecutor {
     pub fn new(gas_limit: u64) -> Result<Self> {
-        anyhow::ensure!(gas_limit > 0, "gas_limit must be > 0 (gas-less execution is prohibited)");
+        anyhow::ensure!(
+            gas_limit > 0,
+            "gas_limit must be > 0 (gas-less execution is prohibited)"
+        );
         let engine = KotobaEngine::new()?;
         let programs = ProgramStore::new(engine.clone());
-        Ok(Self { engine, programs, gas_limit, inference_engine: None })
+        Ok(Self {
+            engine,
+            programs,
+            gas_limit,
+            inference_engine: None,
+        })
     }
 
     /// Construct a `WasmExecutor` with a pre-loaded local inference engine.
@@ -86,24 +94,32 @@ impl WasmExecutor {
         Ok(s)
     }
 
-    #[instrument(skip(self, agent_did, wasm_bytes, ctx_cbor, quad_snapshot, head_commits), fields(program_cid))]
+    #[instrument(
+        skip(self, agent_did, wasm_bytes, ctx_cbor, quad_snapshot, head_commits),
+        fields(program_cid)
+    )]
     pub fn execute(
         &self,
-        program_cid:   &str,
-        wasm_bytes:    &[u8],
-        agent_did:     &str,
-        ctx_cbor:      Vec<u8>,
+        program_cid: &str,
+        wasm_bytes: &[u8],
+        agent_did: &str,
+        ctx_cbor: Vec<u8>,
         quad_snapshot: Vec<WitQuad>,
-        head_commits:  std::collections::HashMap<String, String>,
+        head_commits: std::collections::HashMap<String, String>,
     ) -> Result<InvokeResult, RuntimeError> {
-        let component = self.programs
+        let component = self
+            .programs
             .get_or_compile(program_cid, wasm_bytes)
             .map_err(RuntimeError::CompileFailed)?;
 
         let state = match &self.inference_engine {
             Some(e) => HostState::with_inference_and_snapshot(
-                agent_did, self.gas_limit, e.clone(), quad_snapshot,
-            ).with_head_commits(head_commits),
+                agent_did,
+                self.gas_limit,
+                e.clone(),
+                quad_snapshot,
+            )
+            .with_head_commits(head_commits),
             None => HostState::new(agent_did, self.gas_limit)
                 .with_snapshot(quad_snapshot)
                 .with_head_commits(head_commits),
@@ -128,10 +144,7 @@ impl WasmExecutor {
         // Call via dynamic Val dispatch (avoids wit-bindgen dependency at call site)
         use wasmtime::component::Val;
         let args = [Val::List(
-            ctx_cbor
-                .iter()
-                .map(|b| Val::U8(*b))
-                .collect::<Vec<_>>(),
+            ctx_cbor.iter().map(|b| Val::U8(*b)).collect::<Vec<_>>(),
         )];
         let mut results = vec![Val::Bool(false)];
 
@@ -173,9 +186,9 @@ impl WasmExecutor {
             .cloned()
             .map(SerializedQuad::from)
             .collect();
-        let pending_publishes     = store.data().pending_publishes.clone();
+        let pending_publishes = store.data().pending_publishes.clone();
         let pending_chain_entries = store.data().pending_chain_entries.clone();
-        let pending_lora_loads    = store.data().pending_lora_loads.clone();
+        let pending_lora_loads = store.data().pending_lora_loads.clone();
 
         Ok(InvokeResult {
             output_cbor,

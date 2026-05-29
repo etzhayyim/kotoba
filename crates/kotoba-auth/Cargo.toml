@@ -12,6 +12,7 @@ test-utils = []
 
 [dependencies]
 kotoba-core.workspace = true
+kotoba-datomic.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ed25519-dalek.workspace = true

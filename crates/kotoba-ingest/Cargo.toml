@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Email ingestion for Kotoba — Gmail → E2E encrypted KSE vault + quad graph"
 
+[features]
+default = []
+cc-parquet = ["dep:arrow", "dep:parquet"]
+
 [dependencies]
 kotoba-core.workspace    = true
 kotoba-kse.workspace     = true
@@ -22,8 +26,8 @@ tracing.workspace        = true
 blake3.workspace         = true
 base64                   = "0.22"
 mail-parser              = "0.9"
-parquet                  = { version = "53", default-features = false, features = ["arrow"] }
-arrow                    = { version = "53", default-features = false, features = ["ipc"] }
+parquet                  = { version = "53", default-features = false, features = ["arrow"], optional = true }
+arrow                    = { version = "53", default-features = false, features = ["ipc"], optional = true }
 futures                  = "0.3"
 
 [dev-dependencies]

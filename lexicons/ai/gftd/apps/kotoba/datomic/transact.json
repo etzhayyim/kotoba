@@ -1,0 +1,29 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.datomic.transact",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Append Datomic transaction data to a Kotoba distributed Datom graph.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["graph", "tx_edn"],
+          "properties": {
+            "graph": { "type": "string" },
+            "tx_edn": { "type": "string" },
+            "cacao_b64": { "type": "string" },
+            "presentation": { "type": "unknown" },
+            "expected_parent": { "type": "string" },
+            "cacao_proof_cid": { "type": "string" }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": { "type": "unknown" }
+      }
+    }
+  }
+}

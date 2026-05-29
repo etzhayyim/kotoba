@@ -28,13 +28,21 @@ pub struct SyncWindow {
 impl SyncWindow {
     /// Create a window starting from a known position.
     pub fn new(graph_cid: KotobaCid, since_seq: u64, head_cid: Option<KotobaCid>) -> Self {
-        Self { graph_cid, since_seq, head_cid }
+        Self {
+            graph_cid,
+            since_seq,
+            head_cid,
+        }
     }
 
     /// Fresh window — subscribe from the current tip only.
     /// Pass `current_seq` from `Journal::current_seq()`.
     pub fn head_only(graph_cid: KotobaCid, current_seq: u64) -> Self {
-        Self { graph_cid, since_seq: current_seq, head_cid: None }
+        Self {
+            graph_cid,
+            since_seq: current_seq,
+            head_cid: None,
+        }
     }
 
     /// Pin the window's anchor CIDs into `store` so eviction never removes them.
@@ -69,24 +77,40 @@ impl SyncWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use kotoba_core::store::BlockStore;
     use std::collections::HashSet;
     use std::sync::{Arc, RwLock};
-    use bytes::Bytes;
 
     /// Minimal in-test BlockStore that tracks pins.
     #[derive(Default)]
-    struct PinStore { pinned: Arc<RwLock<HashSet<[u8; 36]>>> }
+    struct PinStore {
+        pinned: Arc<RwLock<HashSet<[u8; 36]>>>,
+    }
     impl BlockStore for PinStore {
-        fn put(&self, _: &KotobaCid, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
-        fn get(&self, _: &KotobaCid) -> anyhow::Result<Option<Bytes>> { Ok(None) }
-        fn has(&self, _: &KotobaCid) -> bool { false }
-        fn pin(&self, cid: &KotobaCid) { self.pinned.write().unwrap().insert(cid.0); }
-        fn unpin(&self, cid: &KotobaCid) { self.pinned.write().unwrap().remove(&cid.0); }
-        fn is_pinned(&self, cid: &KotobaCid) -> bool { self.pinned.read().unwrap().contains(&cid.0) }
+        fn put(&self, _: &KotobaCid, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn get(&self, _: &KotobaCid) -> anyhow::Result<Option<Bytes>> {
+            Ok(None)
+        }
+        fn has(&self, _: &KotobaCid) -> bool {
+            false
+        }
+        fn pin(&self, cid: &KotobaCid) {
+            self.pinned.write().unwrap().insert(cid.0);
+        }
+        fn unpin(&self, cid: &KotobaCid) {
+            self.pinned.write().unwrap().remove(&cid.0);
+        }
+        fn is_pinned(&self, cid: &KotobaCid) -> bool {
+            self.pinned.read().unwrap().contains(&cid.0)
+        }
     }
 
-    fn cid(s: &str) -> KotobaCid { KotobaCid::from_bytes(s.as_bytes()) }
+    fn cid(s: &str) -> KotobaCid {
+        KotobaCid::from_bytes(s.as_bytes())
+    }
 
     #[test]
     fn pin_into_pins_graph_and_head() {
@@ -171,7 +195,7 @@ mod tests {
     #[test]
     fn advance_multiple_times_only_last_pinned() {
         let store = PinStore::default();
-        let g  = cid("g");
+        let g = cid("g");
         let h1 = cid("h1");
         let h2 = cid("h2");
         let h3 = cid("h3");

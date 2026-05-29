@@ -43,7 +43,7 @@ impl PreProxy {
     /// Verify CACAO chain then deliver the data_key HPKE-sealed to the requester.
     ///
     /// Flow:
-    ///   1. `chain` must grant `"quad:read"` on `owner_did`.
+    ///   1. `chain` must grant `"datom:read"` on `owner_did`.
     ///   2. Resolve `accessor_did` DID Document and verify `requester_pk` matches
     ///      the registered X25519 key agreement key.  Hard error on mismatch — no
     ///      fallback, because a silent pass-through would allow key substitution.
@@ -66,7 +66,8 @@ impl PreProxy {
         }
 
         // `data_key` is Zeroizing — wiped automatically when this scope exits.
-        let data_key = self.registry
+        let data_key = self
+            .registry
             .get_rekey_authed(chain, owner_did, accessor_did, owner_enc_key)
             .await?;
 
@@ -80,9 +81,8 @@ impl PreProxy {
 mod tests {
     use super::*;
     use kotoba_auth::{
-        DidDocument, VerificationMethod, ServiceEndpoint,
-        did_document::ServiceEndpointValue,
-        InMemoryDidResolver,
+        did_document::ServiceEndpointValue, DidDocument, InMemoryDidResolver, ServiceEndpoint,
+        VerificationMethod,
     };
     use kotoba_kse::PreKeyRegistry;
     use kotoba_store::MemoryBlockStore;
@@ -114,7 +114,10 @@ mod tests {
         let store = Arc::new(MemoryBlockStore::new());
         let registry = Arc::new(PreKeyRegistry::new(store));
         let resolver = Arc::new(InMemoryDidResolver::new());
-        resolver.insert(accessor_did, make_doc_with_x25519(accessor_did, registered_pk));
+        resolver.insert(
+            accessor_did,
+            make_doc_with_x25519(accessor_did, registered_pk),
+        );
         PreProxy::new(registry, resolver)
     }
 
@@ -129,7 +132,9 @@ mod tests {
         // Use a dummy chain — PkMismatch fires before registry lookup.
         use kotoba_auth::{Cacao, CacaoHeader, CacaoPayload, CacaoSig, DelegationChain};
         let chain = DelegationChain::new(Cacao {
-            h: CacaoHeader { t: "caip122".into() },
+            h: CacaoHeader {
+                t: "caip122".into(),
+            },
             p: CacaoPayload {
                 iss: accessor_did.into(),
                 aud: "kotoba://test".into(),
@@ -140,31 +145,43 @@ mod tests {
                 statement: None,
                 version: "1".into(),
                 resources: vec![
-                    "kotoba://can/quad:read".into(),
+                    "kotoba://can/datom:read".into(),
                     "kotoba://graph/bafytest".into(),
                 ],
             },
-            s: CacaoSig { t: "EdDSA".into(), s: "dummy".into() },
+            s: CacaoSig {
+                t: "EdDSA".into(),
+                s: "dummy".into(),
+            },
         });
 
-        let err = proxy.reencrypt_for(
-            &chain, "did:key:zOwner", accessor_did, &[0u8; 32], &wrong_pk,
-        ).await.unwrap_err();
+        let err = proxy
+            .reencrypt_for(
+                &chain,
+                "did:key:zOwner",
+                accessor_did,
+                &[0u8; 32],
+                &wrong_pk,
+            )
+            .await
+            .unwrap_err();
 
-        assert!(matches!(err, PreProxyError::PkMismatch),
-            "expected PkMismatch, got {err:?}");
+        assert!(
+            matches!(err, PreProxyError::PkMismatch),
+            "expected PkMismatch, got {err:?}"
+        );
     }
 
     /// Happy path: pk matches DID Document, chain is valid, grant exists → sealed data_key returned.
     /// Verifies the sealed blob can be HPKE-opened with the accessor's X25519 secret key.
     #[tokio::test]
     async fn reencrypt_for_happy_path_returns_hpke_sealed_data_key() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
         use ed25519_dalek::{Signer, SigningKey};
-        use x25519_dalek::StaticSecret;
-        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-        use kotoba_auth::{Cacao, CacaoHeader, CacaoPayload, CacaoSig, DelegationChain};
         use kotoba_auth::ed25519_pubkey_to_did_key;
+        use kotoba_auth::{Cacao, CacaoHeader, CacaoPayload, CacaoSig, DelegationChain};
         use kotoba_crypto::hpke::hpke_open;
+        use x25519_dalek::StaticSecret;
 
         // ── Accessor key material ─────────────────────────────────────────
         let ed_sk = SigningKey::from_bytes(&[7u8; 32]);
@@ -175,27 +192,32 @@ mod tests {
         let x25519_pk = x25519_dalek::PublicKey::from(&x25519_sk);
 
         // ── Owner & keys ──────────────────────────────────────────────────
-        let owner_did  = "did:key:zOwner99";
+        let owner_did = "did:key:zOwner99";
         let owner_enc_key = [42u8; 32];
         let re_key = [55u8; 32];
 
         // ── Build + sign CACAO ────────────────────────────────────────────
         let payload = CacaoPayload {
-            iss:       accessor_did.clone(),
-            aud:       "kotoba://test".into(),
+            iss: accessor_did.clone(),
+            aud: "kotoba://test".into(),
             issued_at: "2026-05-26T00:00:00Z".into(),
-            expiry:    None,
-            nonce:     "happy-path-nonce".into(),
-            domain:    "kotoba.test".into(),
+            expiry: None,
+            nonce: "happy-path-nonce".into(),
+            domain: "kotoba.test".into(),
             statement: None,
-            version:   "1".into(),
+            version: "1".into(),
             // No resource restrictions — all caps/graphs granted.
             resources: vec![],
         };
         let mut cacao = Cacao {
-            h: CacaoHeader { t: "caip122".into() },
+            h: CacaoHeader {
+                t: "caip122".into(),
+            },
             p: payload,
-            s: CacaoSig { t: "EdDSA".into(), s: String::new() },
+            s: CacaoSig {
+                t: "EdDSA".into(),
+                s: String::new(),
+            },
         };
         let msg = cacao.siwe_message();
         let sig = ed_sk.sign(msg.as_bytes());
@@ -204,7 +226,7 @@ mod tests {
         let chain = DelegationChain::new(cacao);
 
         // ── Registry: grant re_key ────────────────────────────────────────
-        let store    = Arc::new(MemoryBlockStore::new());
+        let store = Arc::new(MemoryBlockStore::new());
         let registry = Arc::new(PreKeyRegistry::new(store));
         registry
             .grant(owner_did, &accessor_did, &re_key, &owner_enc_key)
@@ -234,8 +256,11 @@ mod tests {
         // ── Verify: HPKE-open recovers the raw re_key ─────────────────────
         let recovered = hpke_open(&x25519_sk, &sealed)
             .expect("hpke_open should succeed with accessor's secret key");
-        assert_eq!(recovered.as_slice(), &re_key,
-            "recovered re_key should match what was granted");
+        assert_eq!(
+            recovered.as_slice(),
+            &re_key,
+            "recovered re_key should match what was granted"
+        );
     }
 
     #[tokio::test]
@@ -248,7 +273,9 @@ mod tests {
 
         use kotoba_auth::{Cacao, CacaoHeader, CacaoPayload, CacaoSig, DelegationChain};
         let chain = DelegationChain::new(Cacao {
-            h: CacaoHeader { t: "caip122".into() },
+            h: CacaoHeader {
+                t: "caip122".into(),
+            },
             p: CacaoPayload {
                 iss: accessor_did.into(),
                 aud: "kotoba://test".into(),
@@ -260,14 +287,26 @@ mod tests {
                 version: "1".into(),
                 resources: vec![],
             },
-            s: CacaoSig { t: "EdDSA".into(), s: "dummy".into() },
+            s: CacaoSig {
+                t: "EdDSA".into(),
+                s: "dummy".into(),
+            },
         });
 
-        let err = proxy.reencrypt_for(
-            &chain, "did:key:zOwner", accessor_did, &[0u8; 32], &[3u8; 32],
-        ).await.unwrap_err();
+        let err = proxy
+            .reencrypt_for(
+                &chain,
+                "did:key:zOwner",
+                accessor_did,
+                &[0u8; 32],
+                &[3u8; 32],
+            )
+            .await
+            .unwrap_err();
 
-        assert!(matches!(err, PreProxyError::DidResolve(_)),
-            "expected DidResolve, got {err:?}");
+        assert!(
+            matches!(err, PreProxyError::DidResolve(_)),
+            "expected DidResolve, got {err:?}"
+        );
     }
 }

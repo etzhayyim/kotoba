@@ -16,7 +16,9 @@ fn cid(s: &str) -> KotobaCid {
 }
 
 async fn open() -> IdbBlockStore {
-    IdbBlockStore::open(Some(1024 * 1024)).await.expect("open IDB")
+    IdbBlockStore::open(Some(1024 * 1024))
+        .await
+        .expect("open IDB")
 }
 
 // ── basic CRUD ────────────────────────────────────────────────────────────────
@@ -90,7 +92,10 @@ async fn pin_protects_block_from_eviction() {
     // Store in last_used order: cold1 < cold2 < pinned (pinned is most recent but flagged)
     store.put_async(&cold1, &payload).await.expect("put cold1");
     store.put_async(&cold2, &payload).await.expect("put cold2");
-    store.put_async(&pinned_key, &payload).await.expect("put pinned");
+    store
+        .put_async(&pinned_key, &payload)
+        .await
+        .expect("put pinned");
     store.pin_async(&pinned_key).await;
 
     // total = 150 bytes, budget = 100 → evict until ≤ 100
@@ -137,8 +142,14 @@ async fn get_updates_last_used_so_block_survives_eviction() {
     let payload = vec![2u8; 50];
 
     // Put the "old" block first, then the "new" one
-    store.put_async(&resurrected, &payload).await.expect("put old");
-    store.put_async(&sacrificial, &payload).await.expect("put new");
+    store
+        .put_async(&resurrected, &payload)
+        .await
+        .expect("put old");
+    store
+        .put_async(&sacrificial, &payload)
+        .await
+        .expect("put new");
 
     // Access "old" — this bumps its last_used so it becomes warm
     let _ = store.get_async(&resurrected).await.expect("get to warm up");

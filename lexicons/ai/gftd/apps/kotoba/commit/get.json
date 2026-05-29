@@ -1,0 +1,21 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.commit.get",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Resolve the current IPNS head for a graph and return its distributed Datomic commit metadata.",
+      "parameters": {
+        "type": "params",
+        "required": ["graph"],
+        "properties": {
+          "graph": { "type": "string" }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": { "type": "unknown" }
+      }
+    }
+  }
+}

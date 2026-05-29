@@ -4,7 +4,9 @@
 pub struct Topic(pub String);
 
 impl Topic {
-    pub fn new(s: impl Into<String>) -> Self { Self(s.into()) }
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
 
     pub fn segments(&self) -> Vec<&str> {
         self.0.split('/').filter(|s| !s.is_empty()).collect()
@@ -15,33 +17,49 @@ impl Topic {
         let pats = pattern.0.segments();
         let mut si = 0;
         for (pi, p) in pats.iter().enumerate() {
-            if *p == ">" { return true; }
-            if si >= segs.len() { return false; }
-            if *p != "*" && *p != segs[si] { return false; }
+            if *p == ">" {
+                return true;
+            }
+            if si >= segs.len() {
+                return false;
+            }
+            if *p != "*" && *p != segs[si] {
+                return false;
+            }
             si += 1;
-            if pi == pats.len() - 1 && si != segs.len() { return false; }
+            if pi == pats.len() - 1 && si != segs.len() {
+                return false;
+            }
         }
         si == segs.len()
     }
 
     /// SPO quad topic: /kotoba/quad/{graph}/{subject}/{predicate}/{object}
     pub fn quad_spo(graph: &str, subject: &str, predicate: &str, object: &str) -> Self {
-        Self(format!("/kotoba/quad/{graph}/{subject}/{predicate}/{object}"))
+        Self(format!(
+            "/kotoba/quad/{graph}/{subject}/{predicate}/{object}"
+        ))
     }
 
     /// POS index topic: /kotoba/pos/{graph}/{predicate}/{object}/{subject}
     pub fn quad_pos(graph: &str, predicate: &str, object: &str, subject: &str) -> Self {
-        Self(format!("/kotoba/pos/{graph}/{predicate}/{object}/{subject}"))
+        Self(format!(
+            "/kotoba/pos/{graph}/{predicate}/{object}/{subject}"
+        ))
     }
 
     /// PSO index topic: /kotoba/pso/{graph}/{predicate}/{subject}/{object}  (AEVT pub/sub)
     pub fn quad_pso(graph: &str, predicate: &str, subject: &str, object: &str) -> Self {
-        Self(format!("/kotoba/pso/{graph}/{predicate}/{subject}/{object}"))
+        Self(format!(
+            "/kotoba/pso/{graph}/{predicate}/{subject}/{object}"
+        ))
     }
 
     /// OSP index topic: /kotoba/osp/{graph}/{object}/{subject}/{predicate}
     pub fn quad_osp(graph: &str, object: &str, subject: &str, predicate: &str) -> Self {
-        Self(format!("/kotoba/osp/{graph}/{object}/{subject}/{predicate}"))
+        Self(format!(
+            "/kotoba/osp/{graph}/{object}/{subject}/{predicate}"
+        ))
     }
 
     /// Commit topic: /kotoba/commit/{graph}
@@ -54,7 +72,9 @@ impl Topic {
 pub struct TopicPattern(pub Topic);
 
 impl TopicPattern {
-    pub fn new(s: impl Into<String>) -> Self { Self(Topic::new(s)) }
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(Topic::new(s))
+    }
     /// All quads in a graph: /kotoba/quad/{graph}/>
     pub fn all_quads(graph: &str) -> Self {
         Self::new(format!("/kotoba/quad/{graph}/>"))
@@ -65,8 +85,12 @@ impl TopicPattern {
 mod tests {
     use super::*;
 
-    fn t(s: &str) -> Topic { Topic::new(s) }
-    fn p(s: &str) -> TopicPattern { TopicPattern::new(s) }
+    fn t(s: &str) -> Topic {
+        Topic::new(s)
+    }
+    fn p(s: &str) -> TopicPattern {
+        TopicPattern::new(s)
+    }
 
     #[test]
     fn exact_match() {
@@ -94,14 +118,14 @@ mod tests {
     fn all_quads_pattern_matches_quad_topic() {
         let graph = "g1";
         let topic = Topic::quad_spo(graph, "s", "pred", "obj");
-        let pat   = TopicPattern::all_quads(graph);
+        let pat = TopicPattern::all_quads(graph);
         assert!(topic.matches(&pat));
     }
 
     #[test]
     fn all_quads_pattern_does_not_match_other_graph() {
         let topic = Topic::quad_spo("g1", "s", "pred", "obj");
-        let pat   = TopicPattern::all_quads("g2");
+        let pat = TopicPattern::all_quads("g2");
         assert!(!topic.matches(&pat));
     }
 

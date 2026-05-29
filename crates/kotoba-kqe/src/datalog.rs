@@ -2,7 +2,7 @@
 //! Monotone semantics: facts only grow via Delta(+1), shrink via Delta(-1)
 //! Stratified negation: PTIME complete, halting guaranteed
 //!
-//! Atom arity is fixed at 2 (binary relations) — Quad enforces (S, P, O).
+//! Atom arity is fixed at 2 (binary relations) — a fact maps to Datom `(E, A, V)`.
 //! Ground identifiers are hashed to KotobaCid via `cid_of_str`.
 
 /// Maximum fixpoint iterations before aborting (guards against very deep
@@ -12,12 +12,12 @@ pub const MAX_DATALOG_ITERATIONS: usize = 1_000;
 /// Prevents memory exhaustion from rules with large cross-product output.
 pub const MAX_DERIVED_FACTS: usize = 1_000_000;
 
-use std::collections::{HashMap, HashSet};
-use serde::{Deserialize, Serialize};
-use kotoba_core::cid::KotobaCid;
 use crate::citation::{CitationLedger, DatomKey};
-use crate::quad::{Quad, QuadObject};
-use crate::delta::{Delta, Multiplicity};
+use crate::datom::{Datom, Value};
+use crate::delta::Delta;
+use kotoba_core::cid::KotobaCid;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -32,14 +32,14 @@ pub struct DatalogRule {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Atom {
     pub relation: String,
-    /// Exactly 2 Terms — mirrors Quad (subject, object).
+    /// Exactly 2 Terms — mirrors Datom entity and value positions.
     pub args: Vec<Term>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BodyLiteral {
     Positive(Atom),
-    Negative(Atom),  // stratified negation only
+    Negative(Atom), // stratified negation only
     Comparison(Term, CmpOp, Term),
 }
 
@@ -50,7 +50,14 @@ pub enum Term {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum CmpOp { Eq, Ne, Lt, Le, Gt, Ge }
+pub enum CmpOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct DatalogProgram {
@@ -74,14 +81,13 @@ fn cid_of_str(s: &str) -> KotobaCid {
     KotobaCid::from_bytes(s.as_bytes())
 }
 
-/// Convert a QuadObject to a CID for use in Datalog evaluation.
-fn object_to_cid(obj: &QuadObject) -> Option<KotobaCid> {
-    match obj {
-        QuadObject::Cid(c) => Some(c.clone()),
-        QuadObject::Text(s) => Some(cid_of_str(s)),
-        QuadObject::Integer(n) => Some(cid_of_str(&n.to_string())),
-        QuadObject::Bool(b) => Some(cid_of_str(if *b { "true" } else { "false" })),
-        _ => None, // Float / Bytes / VectorF32 / TensorCid not used in symbolic Datalog
+fn value_to_cid(value: &Value) -> Option<KotobaCid> {
+    match value {
+        Value::Cid(c) => Some(c.clone()),
+        Value::Text(s) => Some(cid_of_str(s)),
+        Value::Integer(n) => Some(cid_of_str(&n.to_string())),
+        Value::Bool(b) => Some(cid_of_str(if *b { "true" } else { "false" })),
+        _ => None,
     }
 }
 
@@ -90,9 +96,13 @@ fn object_to_cid(obj: &QuadObject) -> Option<KotobaCid> {
 // ---------------------------------------------------------------------------
 
 impl DatalogProgram {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-    pub fn add_rule(&mut self, rule: DatalogRule) { self.rules.push(rule); }
+    pub fn add_rule(&mut self, rule: DatalogRule) {
+        self.rules.push(rule);
+    }
 
     /// Semi-naive bottom-up evaluation.
     ///
@@ -107,8 +117,12 @@ impl DatalogProgram {
     /// Economy-aware variant: records one citation per join hit into `ledger`.
     ///
     /// Call `ledger.flush_epoch(pool_mkoto)` after evaluation to compute
-    /// royalties, then `CitationLedger::royalty_quads()` to emit ledger Quads.
-    pub fn evaluate_delta_cited(&self, deltas: &[Delta], ledger: &mut CitationLedger) -> Vec<Delta> {
+    /// royalties, then `CitationLedger::royalty_datoms()` to emit ledger Datoms.
+    pub fn evaluate_delta_cited(
+        &self,
+        deltas: &[Delta],
+        ledger: &mut CitationLedger,
+    ) -> Vec<Delta> {
         self.evaluate_delta_inner(deltas, ledger)
     }
 
@@ -122,14 +136,14 @@ impl DatalogProgram {
 
         // Seed from assert deltas only (retracts handled by caller via Arrangement)
         for d in deltas {
-            if d.mult != Multiplicity::Assert {
+            if d.datom.op != true {
                 continue;
             }
-            if let Some(obj_cid) = object_to_cid(&d.quad.object) {
+            if let Some(obj_cid) = value_to_cid(d.value()) {
                 fact_base
-                    .entry(d.quad.predicate.clone())
+                    .entry(d.attribute().to_string())
                     .or_default()
-                    .insert((d.quad.subject.clone(), obj_cid));
+                    .insert((d.entity().clone(), obj_cid));
             }
         }
 
@@ -158,8 +172,17 @@ impl DatalogProgram {
 
             for rule in &self.rules {
                 // Count positive body literals (those that participate in Δ-fan-out)
-                let pos_indices: Vec<usize> = rule.body.iter().enumerate()
-                    .filter_map(|(i, lit)| if matches!(lit, BodyLiteral::Positive(_)) { Some(i) } else { None })
+                let pos_indices: Vec<usize> = rule
+                    .body
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, lit)| {
+                        if matches!(lit, BodyLiteral::Positive(_)) {
+                            Some(i)
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
 
                 // For each positive body position p_i, evaluate the rule with
@@ -192,9 +215,7 @@ impl DatalogProgram {
                         );
                         return derived;
                     }
-                    let entry = fact_base
-                        .entry(rule.head.relation.clone())
-                        .or_default();
+                    let entry = fact_base.entry(rule.head.relation.clone()).or_default();
                     if !entry.contains(&pair) {
                         entry.insert(pair.clone());
                         added_this_round
@@ -202,14 +223,13 @@ impl DatalogProgram {
                             .or_default()
                             .insert(pair.clone());
 
-                        // Emit a Delta::assert for the derived fact
-                        let quad = Quad {
-                            graph:     graph_cid.clone(),
-                            subject:   pair.0.clone(),
-                            predicate: rule.head.relation.clone(),
-                            object:    QuadObject::Cid(pair.1.clone()),
-                        };
-                        derived.push(Delta::assert(quad));
+                        // Emit the derived fact as a native Datom.
+                        derived.push(Delta::assert_datom(Datom::assert(
+                            pair.0.clone(),
+                            rule.head.relation.clone(),
+                            Value::Cid(pair.1.clone()),
+                            graph_cid.clone(),
+                        )));
                     }
                 }
             }
@@ -233,11 +253,11 @@ impl DatalogProgram {
     /// Appends a DatomKey for every successful join hit into `cited`.
     fn eval_rule_with_delta_at(
         &self,
-        rule:      &DatalogRule,
+        rule: &DatalogRule,
         fact_base: &HashMap<String, HashSet<(KotobaCid, KotobaCid)>>,
         new_facts: &HashMap<String, HashSet<(KotobaCid, KotobaCid)>>,
         delta_pos: usize,
-        cited:     &mut Vec<DatomKey>,
+        cited: &mut Vec<DatomKey>,
     ) -> Vec<(KotobaCid, KotobaCid)> {
         let initial: Binding = HashMap::new();
         let mut results = Vec::new();
@@ -267,15 +287,15 @@ impl DatalogProgram {
     #[allow(clippy::too_many_arguments)]
     fn match_body(
         &self,
-        rule:       &DatalogRule,
-        body:       &[BodyLiteral],
-        idx:        usize,
-        binding:    Binding,
-        fact_base:  &HashMap<String, HashSet<(KotobaCid, KotobaCid)>>,
-        new_facts:  &HashMap<String, HashSet<(KotobaCid, KotobaCid)>>,
-        delta_pos:  usize,
-        out:        &mut Vec<(KotobaCid, KotobaCid)>,
-        cited:      &mut Vec<DatomKey>,
+        rule: &DatalogRule,
+        body: &[BodyLiteral],
+        idx: usize,
+        binding: Binding,
+        fact_base: &HashMap<String, HashSet<(KotobaCid, KotobaCid)>>,
+        new_facts: &HashMap<String, HashSet<(KotobaCid, KotobaCid)>>,
+        delta_pos: usize,
+        out: &mut Vec<(KotobaCid, KotobaCid)>,
+        cited: &mut Vec<DatomKey>,
     ) {
         if idx == body.len() {
             // All body literals matched — ground the head
@@ -289,19 +309,35 @@ impl DatalogProgram {
             BodyLiteral::Positive(atom) => {
                 // Choose the source: delta-constrained position uses new_facts,
                 // all others use fact_base (a superset, so correctness holds).
-                let source = if idx == delta_pos { new_facts } else { fact_base };
+                let source = if idx == delta_pos {
+                    new_facts
+                } else {
+                    fact_base
+                };
                 let pairs = match source.get(&atom.relation) {
                     Some(s) => s,
-                    None    => return, // no facts for this relation → no derivations
+                    None => return, // no facts for this relation → no derivations
                 };
 
                 for (subj, obj) in pairs {
                     if let Some(new_binding) = self.unify_atom(atom, subj, obj, &binding) {
-                        // Citation: record that this subject entity was used in a join
-                        cited.push(DatomKey::from_cid(subj));
+                        // Citation: record the exact binary fact used in a join.
+                        cited.push(DatomKey::from_datom(&Datom::assert(
+                            subj.clone(),
+                            atom.relation.clone(),
+                            Value::Cid(obj.clone()),
+                            cid_of_str("datalog:source"),
+                        )));
                         self.match_body(
-                            rule, body, idx + 1, new_binding,
-                            fact_base, new_facts, delta_pos, out, cited,
+                            rule,
+                            body,
+                            idx + 1,
+                            new_binding,
+                            fact_base,
+                            new_facts,
+                            delta_pos,
+                            out,
+                            cited,
                         );
                     }
                 }
@@ -316,8 +352,15 @@ impl DatalogProgram {
                         .is_some_and(|s| s.contains(&(gs, go)));
                     if !present {
                         self.match_body(
-                            rule, body, idx + 1, binding,
-                            fact_base, new_facts, delta_pos, out, cited,
+                            rule,
+                            body,
+                            idx + 1,
+                            binding,
+                            fact_base,
+                            new_facts,
+                            delta_pos,
+                            out,
+                            cited,
                         );
                     }
                 }
@@ -339,8 +382,15 @@ impl DatalogProgram {
                     };
                     if ok {
                         self.match_body(
-                            rule, body, idx + 1, binding,
-                            fact_base, new_facts, delta_pos, out, cited,
+                            rule,
+                            body,
+                            idx + 1,
+                            binding,
+                            fact_base,
+                            new_facts,
+                            delta_pos,
+                            out,
+                            cited,
                         );
                     }
                 }
@@ -351,12 +401,12 @@ impl DatalogProgram {
     /// Try to extend `binding` so that `atom`'s args unify with `(subj, obj)`.
     fn unify_atom(
         &self,
-        atom:    &Atom,
-        subj:    &KotobaCid,
-        obj:     &KotobaCid,
+        atom: &Atom,
+        subj: &KotobaCid,
+        obj: &KotobaCid,
         binding: &Binding,
     ) -> Option<Binding> {
-        // Quad arity is fixed at 2; reject malformed user-supplied rules gracefully.
+        // Datalog atom arity is fixed at 2; reject malformed user-supplied rules gracefully.
         if atom.args.len() != 2 {
             tracing::warn!(arity = atom.args.len(), relation = %atom.relation, "Datalog atom has wrong arity; skipping");
             return None;
@@ -368,13 +418,17 @@ impl DatalogProgram {
             match term {
                 Term::Variable(v) => {
                     if let Some(existing) = b.get(v) {
-                        if existing != *val { return None; }
+                        if existing != *val {
+                            return None;
+                        }
                     } else {
                         b.insert(v.clone(), (*val).clone());
                     }
                 }
                 Term::Constant(c) => {
-                    if &cid_of_str(c) != *val { return None; }
+                    if &cid_of_str(c) != *val {
+                        return None;
+                    }
                 }
             }
         }
@@ -382,11 +436,7 @@ impl DatalogProgram {
     }
 
     /// Ground the head atom to (subject_cid, object_cid) using current binding.
-    fn ground_head(
-        &self,
-        head:    &Atom,
-        binding: &Binding,
-    ) -> Option<(KotobaCid, KotobaCid)> {
+    fn ground_head(&self, head: &Atom, binding: &Binding) -> Option<(KotobaCid, KotobaCid)> {
         if head.args.len() != 2 {
             tracing::warn!(arity = head.args.len(), relation = %head.relation, "Datalog head has wrong arity; skipping");
             return None;
@@ -399,7 +449,7 @@ impl DatalogProgram {
     /// Ground an atom to (subject_cid, object_cid) for negation check.
     fn ground_atom_as_pair(
         &self,
-        atom:    &Atom,
+        atom: &Atom,
         binding: &Binding,
     ) -> Option<(KotobaCid, KotobaCid)> {
         self.ground_head(atom, binding)
@@ -430,8 +480,6 @@ impl DatalogProgram {
 mod tests {
     use super::*;
     use crate::delta::Delta;
-    use crate::quad::{Quad, QuadObject};
-
     /// Stable graph CID for test facts (same as evaluation uses for derived)
     fn test_graph() -> KotobaCid {
         cid_of_str("test:graph")
@@ -442,14 +490,13 @@ mod tests {
     fn fact(relation: &str, args: &[&str]) -> Delta {
         assert_eq!(args.len(), 2, "test facts must be binary");
         let subj = cid_of_str(args[0]);
-        let obj  = cid_of_str(args[1]);
-        let quad = Quad {
-            graph:     test_graph(),
-            subject:   subj,
-            predicate: relation.to_string(),
-            object:    QuadObject::Cid(obj),
-        };
-        Delta::assert(quad)
+        let obj = cid_of_str(args[1]);
+        Delta::assert_datom(Datom::assert(
+            subj,
+            relation.to_string(),
+            Value::Cid(obj),
+            test_graph(),
+        ))
     }
 
     /// Check whether `derived` contains the given relation and pair of string labels.
@@ -457,13 +504,15 @@ mod tests {
         let sa = cid_of_str(a);
         let sb = cid_of_str(b);
         derived.iter().any(|d| {
-            d.quad.predicate == rel
-                && d.quad.subject == sa
-                && matches!(&d.quad.object, QuadObject::Cid(c) if *c == sb)
+            d.attribute() == rel
+                && d.entity() == &sa
+                && matches!(d.value(), Value::Cid(c) if *c == sb)
         })
     }
 
-    fn var(name: &str) -> Term { Term::Variable(name.to_string()) }
+    fn var(name: &str) -> Term {
+        Term::Variable(name.to_string())
+    }
 
     fn pos(relation: &str, args: &[&str]) -> BodyLiteral {
         BodyLiteral::Positive(Atom {
@@ -525,10 +574,7 @@ mod tests {
 
         prog.add_rule(DatalogRule {
             head: head_atom("ancestor", &["X", "Z"]),
-            body: vec![
-                pos("parent",   &["X", "Y"]),
-                pos("ancestor", &["Y", "Z"]),
-            ],
+            body: vec![pos("parent", &["X", "Y"]), pos("ancestor", &["Y", "Z"])],
         });
 
         // Input facts: parent(alice, bob), parent(bob, carol)
@@ -564,13 +610,11 @@ mod tests {
             body: vec![pos("edge", &["X", "Y"]), pos("edge", &["Y", "Z"])],
         });
 
-        let input = vec![
-            fact("edge", &["a", "b"]),
-            fact("edge", &["b", "c"]),
-        ];
+        let input = vec![fact("edge", &["a", "b"]), fact("edge", &["b", "c"])];
         let derived = prog.evaluate_delta(&input);
 
-        let count = derived.iter()
+        let count = derived
+            .iter()
             .filter(|d| has_relation(std::slice::from_ref(d), "path", "a", "c"))
             .count();
         assert_eq!(count, 1, "path(a,c) should be derived exactly once");
@@ -595,8 +639,10 @@ mod tests {
         let derived = prog.evaluate_delta_cited(&input, &mut ledger);
 
         assert!(!derived.is_empty(), "should derive path(a,c)");
-        assert!(ledger.total_citations() > 0,
-            "at least one citation must be recorded for join hits");
+        assert!(
+            ledger.total_citations() > 0,
+            "at least one citation must be recorded for join hits"
+        );
     }
 
     #[test]
@@ -618,13 +664,15 @@ mod tests {
 
         assert!(derived.is_empty(), "no derivation expected for single edge");
         // x is cited once per delta position (2 positive literals → 2 access events).
-        assert!(ledger.total_citations() > 0,
-            "data accessed during join attempts must be cited even without derivation");
+        assert!(
+            ledger.total_citations() > 0,
+            "data accessed during join attempts must be cited even without derivation"
+        );
     }
 
     #[test]
-    fn evaluate_delta_cited_flush_epoch_produces_royalty_quads() {
-        // Verify the full gap 1+3 pipeline: join hits → citations → royalty Quads.
+    fn evaluate_delta_cited_flush_epoch_produces_royalty_datoms() {
+        // Verify the full gap 1+3 pipeline: join hits → citations → royalty Datoms.
         use crate::citation::CitationLedger;
 
         let mut prog = DatalogProgram::new();
@@ -635,7 +683,7 @@ mod tests {
 
         let input = vec![
             fact("friend", &["alice", "bob"]),
-            fact("friend", &["bob",   "carol"]),
+            fact("friend", &["bob", "carol"]),
         ];
         let mut ledger = CitationLedger::new();
         let _derived = prog.evaluate_delta_cited(&input, &mut ledger);
@@ -645,14 +693,21 @@ mod tests {
         let entries = ledger.flush_epoch(1_000_000);
         assert!(!entries.is_empty(), "flush must yield royalty entries");
 
-        let quads = CitationLedger::royalty_quads(&entries, epoch);
-        assert!(!quads.is_empty(), "royalty quads must be non-empty after join hits");
-        // royalty_quads emits 2 quads per entry: citation/count + citation/royalty_mkoto.
-        let predicates: Vec<&str> = quads.iter().map(|q| q.predicate.as_str()).collect();
-        assert!(predicates.contains(&"citation/royalty_mkoto"),
-            "must include citation/royalty_mkoto predicate");
-        assert!(predicates.contains(&"citation/count"),
-            "must include citation/count predicate");
+        let datoms = CitationLedger::royalty_datoms(&entries, epoch);
+        assert!(
+            !datoms.is_empty(),
+            "royalty datoms must be non-empty after join hits"
+        );
+        // royalty_datoms emits 2 datoms per entry: citation/count + citation/royalty_mkoto.
+        let predicates: Vec<&str> = datoms.iter().map(|d| d.a.as_str()).collect();
+        assert!(
+            predicates.contains(&"citation/royalty_mkoto"),
+            "must include citation/royalty_mkoto predicate"
+        );
+        assert!(
+            predicates.contains(&"citation/count"),
+            "must include citation/count predicate"
+        );
     }
 
     // ── Safety limits ─────────────────────────────────────────────────────────
@@ -664,10 +719,19 @@ mod tests {
         // for normal inputs (the limit only fires for pathologically deep graphs).
         let mut prog = DatalogProgram::default();
         prog.add_rule(DatalogRule {
-            head: Atom { relation: "reach".into(), args: vec![Term::Variable("X".into()), Term::Variable("Z".into())] },
+            head: Atom {
+                relation: "reach".into(),
+                args: vec![Term::Variable("X".into()), Term::Variable("Z".into())],
+            },
             body: vec![
-                BodyLiteral::Positive(Atom { relation: "reach".into(), args: vec![Term::Variable("X".into()), Term::Variable("Y".into())] }),
-                BodyLiteral::Positive(Atom { relation: "edge".into(),  args: vec![Term::Variable("Y".into()), Term::Variable("Z".into())] }),
+                BodyLiteral::Positive(Atom {
+                    relation: "reach".into(),
+                    args: vec![Term::Variable("X".into()), Term::Variable("Y".into())],
+                }),
+                BodyLiteral::Positive(Atom {
+                    relation: "edge".into(),
+                    args: vec![Term::Variable("Y".into()), Term::Variable("Z".into())],
+                }),
             ],
         });
 
@@ -676,23 +740,51 @@ mod tests {
         for i in 0..n {
             let s = KotobaCid::from_bytes(format!("node{i}").as_bytes());
             let o = KotobaCid::from_bytes(format!("node{}", i + 1).as_bytes());
-            deltas.push(Delta::assert(Quad { graph: test_graph(), subject: s.clone(), predicate: "edge".into(),  object: QuadObject::Cid(o.clone()) }));
-            deltas.push(Delta::assert(Quad { graph: test_graph(), subject: s,         predicate: "reach".into(), object: QuadObject::Cid(o) }));
+            deltas.push(Delta::assert_datom(Datom::assert(
+                s.clone(),
+                "edge".into(),
+                Value::Cid(o.clone()),
+                test_graph(),
+            )));
+            deltas.push(Delta::assert_datom(Datom::assert(
+                s,
+                "reach".into(),
+                Value::Cid(o),
+                test_graph(),
+            )));
         }
 
         let derived = prog.evaluate_delta(&deltas);
         // Transitive closure of a chain of length N produces N*(N-1)/2 pairs.
-        assert!(!derived.is_empty(), "transitive closure should produce facts");
-        assert!(derived.len() <= MAX_DERIVED_FACTS, "must not exceed MAX_DERIVED_FACTS");
+        assert!(
+            !derived.is_empty(),
+            "transitive closure should produce facts"
+        );
+        assert!(
+            derived.len() <= MAX_DERIVED_FACTS,
+            "must not exceed MAX_DERIVED_FACTS"
+        );
     }
 
     #[test]
     fn derived_facts_cap_constant_is_reasonable() {
         // Sanity check: the safety constants have sensible values.
-        assert!(MAX_DATALOG_ITERATIONS >= 100, "iteration limit must be at least 100");
-        assert!(MAX_DATALOG_ITERATIONS <= 100_000, "iteration limit should not be excessively high");
-        assert!(MAX_DERIVED_FACTS >= 10_000, "derived fact cap must allow reasonable programs");
-        assert!(MAX_DERIVED_FACTS <= 100_000_000, "derived fact cap should not be excessively high");
+        assert!(
+            MAX_DATALOG_ITERATIONS >= 100,
+            "iteration limit must be at least 100"
+        );
+        assert!(
+            MAX_DATALOG_ITERATIONS <= 100_000,
+            "iteration limit should not be excessively high"
+        );
+        assert!(
+            MAX_DERIVED_FACTS >= 10_000,
+            "derived fact cap must allow reasonable programs"
+        );
+        assert!(
+            MAX_DERIVED_FACTS <= 100_000_000,
+            "derived fact cap should not be excessively high"
+        );
     }
 
     // ── Arity guards (reject malformed user-supplied rules gracefully) ─────────
@@ -706,7 +798,10 @@ mod tests {
         prog.add_rule(DatalogRule {
             head: Atom {
                 relation: "out".to_string(),
-                args: vec![Term::Variable("X".to_string()), Term::Variable("Y".to_string())],
+                args: vec![
+                    Term::Variable("X".to_string()),
+                    Term::Variable("Y".to_string()),
+                ],
             },
             body: vec![BodyLiteral::Positive(Atom {
                 relation: "edge".to_string(),
@@ -721,7 +816,10 @@ mod tests {
         let input = vec![fact("edge", &["a", "b"])];
         // Must not panic; rule with wrong arity is skipped → no derived facts.
         let derived = prog.evaluate_delta(&input);
-        assert!(derived.is_empty(), "malformed body atom (arity 3) must produce no derivations");
+        assert!(
+            derived.is_empty(),
+            "malformed body atom (arity 3) must produce no derivations"
+        );
     }
 
     #[test]
@@ -735,12 +833,18 @@ mod tests {
             },
             body: vec![BodyLiteral::Positive(Atom {
                 relation: "edge".to_string(),
-                args: vec![Term::Variable("X".to_string()), Term::Variable("Y".to_string())],
+                args: vec![
+                    Term::Variable("X".to_string()),
+                    Term::Variable("Y".to_string()),
+                ],
             })],
         });
         let input = vec![fact("edge", &["a", "b"])];
         let derived = prog.evaluate_delta(&input);
-        assert!(derived.is_empty(), "malformed head atom (arity 1) must produce no derivations");
+        assert!(
+            derived.is_empty(),
+            "malformed head atom (arity 1) must produce no derivations"
+        );
     }
 
     #[test]
@@ -748,7 +852,10 @@ mod tests {
         // Edge case: completely empty args list must not panic.
         let mut prog = DatalogProgram::new();
         prog.add_rule(DatalogRule {
-            head: Atom { relation: "out".to_string(), args: vec![] },
+            head: Atom {
+                relation: "out".to_string(),
+                args: vec![],
+            },
             body: vec![BodyLiteral::Positive(Atom {
                 relation: "edge".to_string(),
                 args: vec![],
@@ -756,7 +863,10 @@ mod tests {
         });
         let input = vec![fact("edge", &["a", "b"])];
         let derived = prog.evaluate_delta(&input);
-        assert!(derived.is_empty(), "zero-arity atoms must produce no derivations");
+        assert!(
+            derived.is_empty(),
+            "zero-arity atoms must produce no derivations"
+        );
     }
 
     // ── Retract delta input ───────────────────────────────────────────────────
@@ -772,14 +882,16 @@ mod tests {
         });
         let subj = cid_of_str("a");
         let obj = cid_of_str("b");
-        let q = crate::quad::Quad {
-            graph:     cid_of_str("g"),
-            subject:   subj,
-            predicate: "edge".to_string(),
-            object:    crate::quad::QuadObject::Cid(obj),
-        };
-        let input = vec![Delta::retract(q)];
-        assert!(prog.evaluate_delta(&input).is_empty(), "retract input must produce no derivations");
+        let input = vec![Delta::retract_datom(Datom::retract(
+            subj,
+            "edge".to_string(),
+            Value::Cid(obj),
+            cid_of_str("g"),
+        ))];
+        assert!(
+            prog.evaluate_delta(&input).is_empty(),
+            "retract input must produce no derivations"
+        );
     }
 
     // ── Stratified negation ───────────────────────────────────────────────────
@@ -801,15 +913,19 @@ mod tests {
 
         // edge(a,b) + edge(a,c); blocked(a,b) → only allowed(a,c) derived
         let input = vec![
-            fact("edge",    &["a", "b"]),
-            fact("edge",    &["a", "c"]),
+            fact("edge", &["a", "b"]),
+            fact("edge", &["a", "c"]),
             fact("blocked", &["a", "b"]),
         ];
         let derived = prog.evaluate_delta(&input);
-        assert!(!has_relation(&derived, "allowed", "a", "b"),
-            "allowed(a,b) must be filtered by negation");
-        assert!(has_relation(&derived, "allowed", "a", "c"),
-            "allowed(a,c) must be derived (not blocked)");
+        assert!(
+            !has_relation(&derived, "allowed", "a", "b"),
+            "allowed(a,b) must be filtered by negation"
+        );
+        assert!(
+            has_relation(&derived, "allowed", "a", "c"),
+            "allowed(a,c) must be derived (not blocked)"
+        );
     }
 
     #[test]
@@ -828,10 +944,7 @@ mod tests {
             ],
         });
 
-        let input = vec![
-            fact("edge", &["a", "b"]),
-            fact("edge", &["b", "c"]),
-        ];
+        let input = vec![fact("edge", &["a", "b"]), fact("edge", &["b", "c"])];
         let derived = prog.evaluate_delta(&input);
         assert!(has_relation(&derived, "allowed", "a", "b"));
         assert!(has_relation(&derived, "allowed", "b", "c"));
@@ -857,10 +970,14 @@ mod tests {
             fact("edge", &["a", "a"]), // self-loop → not derived
         ];
         let derived = prog.evaluate_delta(&input);
-        assert!(has_relation(&derived, "self_edge_free", "a", "b"),
-            "non-self-loop edge must be derived");
-        assert!(!has_relation(&derived, "self_edge_free", "a", "a"),
-            "self-loop must be filtered by Ne comparison");
+        assert!(
+            has_relation(&derived, "self_edge_free", "a", "b"),
+            "non-self-loop edge must be derived"
+        );
+        assert!(
+            !has_relation(&derived, "self_edge_free", "a", "a"),
+            "self-loop must be filtered by Ne comparison"
+        );
     }
 
     #[test]
@@ -876,7 +993,7 @@ mod tests {
                 pos("edge", &["X", "Y"]),
                 // Comparison: X must equal the CID string of "a"
                 // Using Variable == Constant where both sides resolve via cid_of_str
-                BodyLiteral::Comparison(var("X"), CmpOp::Eq, var("X")),  // tautology
+                BodyLiteral::Comparison(var("X"), CmpOp::Eq, var("X")), // tautology
             ],
         });
 
@@ -911,13 +1028,15 @@ mod tests {
         let derived = prog.evaluate_delta(&input);
 
         let alice_bob_found = derived.iter().any(|d| {
-            d.quad.predicate == "alice_targets"
-                && d.quad.subject == alice
-                && matches!(&d.quad.object, QuadObject::Cid(c) if *c == cid_of_str("bob"))
+            d.attribute() == "alice_targets"
+                && d.entity() == &alice
+                && matches!(d.value(), Value::Cid(c) if *c == cid_of_str("bob"))
         });
         assert!(alice_bob_found, "alice_targets(alice, bob) must be derived");
-        assert!(!has_relation(&derived, "alice_targets", "carol", "dave"),
-            "carol row must not be derived");
+        assert!(
+            !has_relation(&derived, "alice_targets", "carol", "dave"),
+            "carol row must not be derived"
+        );
     }
 
     #[test]
@@ -937,7 +1056,10 @@ mod tests {
 
         let input = vec![fact("edge", &["a", "b"])];
         let derived = prog.evaluate_delta(&input);
-        assert!(derived.is_empty(), "unbound head variable must produce no derivations");
+        assert!(
+            derived.is_empty(),
+            "unbound head variable must produce no derivations"
+        );
     }
 
     #[test]
@@ -956,7 +1078,13 @@ mod tests {
         let input = vec![fact("edge", &["a", "b"])];
         let derived = prog.evaluate_delta(&input);
 
-        assert!(has_relation(&derived, "knows",     "a", "b"), "rule 1 must fire");
-        assert!(has_relation(&derived, "reachable", "a", "b"), "rule 2 must fire");
+        assert!(
+            has_relation(&derived, "knows", "a", "b"),
+            "rule 1 must fire"
+        );
+        assert!(
+            has_relation(&derived, "reachable", "a", "b"),
+            "rule 2 must fire"
+        );
     }
 }

@@ -1,7 +1,10 @@
 use anyhow::Result;
 use kotoba_dht::source_chain::ProgramType;
 use kotoba_kqe::{arrangement::Arrangement, datalog::DatalogProgram, delta::Delta};
-use kotoba_runtime::{host::{InferenceFn, WitQuad}, InvokeResult, UdfExecutor, WasmExecutor};
+use kotoba_runtime::{
+    host::{InferenceFn, WitQuad},
+    InvokeResult, UdfExecutor, WasmExecutor,
+};
 use thiserror::Error;
 
 use crate::executor::{ExecResult, ExecStatus, KotobaVm};
@@ -14,8 +17,8 @@ use crate::foreign::ForeignBridge;
 ///   ProgramType::WasmNode → WasmExecutor::execute() (kotoba-node world)
 ///   ProgramType::WasmUdf  → UdfExecutor::eval()     (kotoba-udf world, stateless)
 pub struct InvokeRouter {
-    wasm:    WasmExecutor,
-    udf:     UdfExecutor,
+    wasm: WasmExecutor,
+    udf: UdfExecutor,
     _bridge: ForeignBridge,
 }
 
@@ -52,8 +55,8 @@ pub enum DispatchResult {
 impl InvokeRouter {
     pub fn new(gas_limit: u64, gateway_url: impl Into<String>) -> Result<Self> {
         Ok(Self {
-            wasm:    WasmExecutor::new(gas_limit)?,
-            udf:     UdfExecutor::new()?,
+            wasm: WasmExecutor::new(gas_limit)?,
+            udf: UdfExecutor::new()?,
             _bridge: ForeignBridge::new(gateway_url),
         })
     }
@@ -62,13 +65,13 @@ impl InvokeRouter {
     /// local inference engine (e.g. Gemma 4 E2B).  Datalog and UDF paths are
     /// unaffected.
     pub fn with_inference(
-        gas_limit:   u64,
+        gas_limit: u64,
         gateway_url: impl Into<String>,
-        engine:      InferenceFn,
+        engine: InferenceFn,
     ) -> Result<Self> {
         Ok(Self {
-            wasm:    WasmExecutor::with_inference(gas_limit, engine)?,
-            udf:     UdfExecutor::new()?,
+            wasm: WasmExecutor::with_inference(gas_limit, engine)?,
+            udf: UdfExecutor::new()?,
             _bridge: ForeignBridge::new(gateway_url),
         })
     }
@@ -80,23 +83,30 @@ impl InvokeRouter {
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch(
         &self,
-        program_cid:    &str,
-        program_type:   ProgramType,
-        agent_did:      &str,
-        call_id:        u64,
+        program_cid: &str,
+        program_type: ProgramType,
+        agent_did: &str,
+        call_id: u64,
         // WASM path
-        program_bytes:  Option<&[u8]>,
-        ctx_cbor:       Vec<u8>,
+        program_bytes: Option<&[u8]>,
+        ctx_cbor: Vec<u8>,
         // Datalog path
-        program:        Option<&DatalogProgram>,
-        arrangement:    Option<&Arrangement>,
-        input_deltas:   &[Delta],
-        max_steps:      u32,
+        program: Option<&DatalogProgram>,
+        arrangement: Option<&Arrangement>,
+        input_deltas: &[Delta],
+        max_steps: u32,
     ) -> Result<DispatchResult, RouterError> {
         self.dispatch_with_snapshot(
-            program_cid, program_type, agent_did, call_id,
-            program_bytes, ctx_cbor,
-            program, arrangement, input_deltas, max_steps,
+            program_cid,
+            program_type,
+            agent_did,
+            call_id,
+            program_bytes,
+            ctx_cbor,
+            program,
+            arrangement,
+            input_deltas,
+            max_steps,
             vec![],
             std::collections::HashMap::new(),
         )
@@ -106,23 +116,30 @@ impl InvokeRouter {
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch_with_snapshot(
         &self,
-        program_cid:    &str,
-        program_type:   ProgramType,
-        agent_did:      &str,
-        call_id:        u64,
-        program_bytes:  Option<&[u8]>,
-        ctx_cbor:       Vec<u8>,
-        program:        Option<&DatalogProgram>,
-        arrangement:    Option<&Arrangement>,
-        input_deltas:   &[Delta],
-        max_steps:      u32,
-        quad_snapshot:  Vec<WitQuad>,
-        head_commits:   std::collections::HashMap<String, String>,
+        program_cid: &str,
+        program_type: ProgramType,
+        agent_did: &str,
+        call_id: u64,
+        program_bytes: Option<&[u8]>,
+        ctx_cbor: Vec<u8>,
+        program: Option<&DatalogProgram>,
+        arrangement: Option<&Arrangement>,
+        input_deltas: &[Delta],
+        max_steps: u32,
+        quad_snapshot: Vec<WitQuad>,
+        head_commits: std::collections::HashMap<String, String>,
     ) -> Result<DispatchResult, RouterError> {
         match program_type {
             ProgramType::WasmNode => {
                 let bytes = program_bytes.ok_or(RouterError::MissingWasmBytes)?;
-                let result = self.wasm.execute(program_cid, bytes, agent_did, ctx_cbor, quad_snapshot, head_commits)?;
+                let result = self.wasm.execute(
+                    program_cid,
+                    bytes,
+                    agent_did,
+                    ctx_cbor,
+                    quad_snapshot,
+                    head_commits,
+                )?;
                 Ok(DispatchResult::Wasm(result))
             }
 
@@ -144,14 +161,15 @@ impl InvokeRouter {
 
             ProgramType::Datalog => {
                 let prog = program.ok_or(RouterError::MissingDatalogProgram)?;
-                let arr  = arrangement.ok_or(RouterError::MissingArrangement)?;
+                let arr = arrangement.ok_or(RouterError::MissingArrangement)?;
                 use kotoba_core::cid::KotobaCid;
                 let cid = KotobaCid::from_bytes(program_cid.as_bytes());
-                let result = KotobaVm::execute(&cid, prog, arr, input_deltas, max_steps, call_id, None);
+                let result =
+                    KotobaVm::execute(&cid, prog, arr, input_deltas, max_steps, call_id, None);
                 match result.status {
                     ExecStatus::Ok | ExecStatus::Halt => Ok(DispatchResult::Datalog(result)),
-                    ExecStatus::StepsExceeded         => Err(RouterError::StepsExceeded),
-                    ExecStatus::Error                 => Err(RouterError::DatalogError),
+                    ExecStatus::StepsExceeded => Err(RouterError::StepsExceeded),
+                    ExecStatus::Error => Err(RouterError::DatalogError),
                 }
             }
         }
@@ -181,14 +199,25 @@ mod tests {
 
     #[test]
     fn datalog_empty_program_returns_dispatch_result() {
-        let r   = router();
+        let r = router();
         let prog = DatalogProgram::new();
-        let arr  = Arrangement::default();
+        let arr = Arrangement::default();
         let result = r.dispatch(
-            "prog-cid", ProgramType::Datalog, "did:test:agent",
-            1, None, vec![], Some(&prog), Some(&arr), &[], 100,
+            "prog-cid",
+            ProgramType::Datalog,
+            "did:test:agent",
+            1,
+            None,
+            vec![],
+            Some(&prog),
+            Some(&arr),
+            &[],
+            100,
         );
-        assert!(result.is_ok(), "empty datalog program should succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "empty datalog program should succeed: {result:?}"
+        );
         assert!(matches!(result.unwrap(), DispatchResult::Datalog(_)));
     }
 
@@ -196,8 +225,16 @@ mod tests {
     fn wasm_node_without_bytes_returns_missing_bytes_error() {
         let r = router();
         let result = r.dispatch(
-            "prog-cid", ProgramType::WasmNode, "did:test:agent",
-            1, None, vec![], None, None, &[], 0,
+            "prog-cid",
+            ProgramType::WasmNode,
+            "did:test:agent",
+            1,
+            None,
+            vec![],
+            None,
+            None,
+            &[],
+            0,
         );
         assert!(matches!(result, Err(RouterError::MissingWasmBytes)));
     }
@@ -206,8 +243,16 @@ mod tests {
     fn wasm_udf_without_bytes_returns_missing_bytes_error() {
         let r = router();
         let result = r.dispatch(
-            "prog-cid", ProgramType::WasmUdf, "did:test:agent",
-            1, None, vec![], None, None, &[], 0,
+            "prog-cid",
+            ProgramType::WasmUdf,
+            "did:test:agent",
+            1,
+            None,
+            vec![],
+            None,
+            None,
+            &[],
+            0,
         );
         assert!(matches!(result, Err(RouterError::MissingWasmBytes)));
     }
@@ -229,15 +274,28 @@ mod tests {
 
     #[test]
     fn dispatch_result_datalog_debug() {
-        let r    = router();
+        let r = router();
         let prog = DatalogProgram::new();
-        let arr  = Arrangement::default();
-        let result = r.dispatch(
-            "prog-cid", ProgramType::Datalog, "did:test:agent",
-            1, None, vec![], Some(&prog), Some(&arr), &[], 10,
-        ).unwrap();
+        let arr = Arrangement::default();
+        let result = r
+            .dispatch(
+                "prog-cid",
+                ProgramType::Datalog,
+                "did:test:agent",
+                1,
+                None,
+                vec![],
+                Some(&prog),
+                Some(&arr),
+                &[],
+                10,
+            )
+            .unwrap();
         let dbg = format!("{result:?}");
-        assert!(dbg.contains("Datalog"), "debug output should contain 'Datalog': {dbg}");
+        assert!(
+            dbg.contains("Datalog"),
+            "debug output should contain 'Datalog': {dbg}"
+        );
     }
 
     #[test]
@@ -249,22 +307,38 @@ mod tests {
 
     #[test]
     fn datalog_without_program_returns_missing_program_error() {
-        let r   = router();
+        let r = router();
         let arr = Arrangement::default();
         let result = r.dispatch(
-            "prog-cid", ProgramType::Datalog, "did:test:agent",
-            1, None, vec![], None, Some(&arr), &[], 100,
+            "prog-cid",
+            ProgramType::Datalog,
+            "did:test:agent",
+            1,
+            None,
+            vec![],
+            None,
+            Some(&arr),
+            &[],
+            100,
         );
         assert!(matches!(result, Err(RouterError::MissingDatalogProgram)));
     }
 
     #[test]
     fn datalog_without_arrangement_returns_missing_arrangement_error() {
-        let r    = router();
+        let r = router();
         let prog = DatalogProgram::new();
         let result = r.dispatch(
-            "prog-cid", ProgramType::Datalog, "did:test:agent",
-            1, None, vec![], Some(&prog), None, &[], 100,
+            "prog-cid",
+            ProgramType::Datalog,
+            "did:test:agent",
+            1,
+            None,
+            vec![],
+            Some(&prog),
+            None,
+            &[],
+            100,
         );
         assert!(matches!(result, Err(RouterError::MissingArrangement)));
     }

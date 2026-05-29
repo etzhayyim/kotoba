@@ -1,0 +1,22 @@
+[package]
+name = "kotoba-datomic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+kotoba-core = { path = "../kotoba-core" }
+kotoba-edn = { path = "../kotoba-edn" }
+kotoba-ipfs = { path = "../kotoba-ipfs" }
+kotoba-kqe = { path = "../kotoba-kqe" }
+anyhow.workspace = true
+ciborium.workspace = true
+ed25519-dalek.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+kotoba-store = { path = "../kotoba-store" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

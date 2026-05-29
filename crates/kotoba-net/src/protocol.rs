@@ -35,14 +35,18 @@ mod tests {
 
     #[test]
     fn sync_protocol_contains_sync() {
-        assert!(KOTOBA_SYNC_PROTOCOL.contains("sync"),
-            "sync protocol should contain 'sync'");
+        assert!(
+            KOTOBA_SYNC_PROTOCOL.contains("sync"),
+            "sync protocol should contain 'sync'"
+        );
     }
 
     #[test]
     fn bitswap_protocol_contains_bitswap() {
-        assert!(KOTOBA_BITSWAP_PROTOCOL.contains("bitswap"),
-            "bitswap protocol should contain 'bitswap'");
+        assert!(
+            KOTOBA_BITSWAP_PROTOCOL.contains("bitswap"),
+            "bitswap protocol should contain 'bitswap'"
+        );
     }
 
     #[test]

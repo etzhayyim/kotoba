@@ -1,0 +1,16 @@
+[package]
+name = "kotoba-edn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "EDN (extensible data notation) reader/writer for KOTOBA — Datomic wire format SSoT"
+
+[dependencies]
+thiserror = { workspace = true }
+serde     = { workspace = true }
+ordered-float = "4"
+
+[dev-dependencies]
+serde_json = { workspace = true }

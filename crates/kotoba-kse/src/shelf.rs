@@ -1,16 +1,16 @@
-use kotoba_core::cid::KotobaCid;
 use bytes::Bytes;
+use kotoba_core::cid::KotobaCid;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-pub const BUCKET_BLOCKS:    &str = "KOTOBA_BLOCKS";
-pub const BUCKET_GRAPHS:    &str = "KOTOBA_GRAPHS";
-pub const BUCKET_HEADS:     &str = "KOTOBA_HEADS";
-pub const BUCKET_UCANS:     &str = "KOTOBA_UCANS";
-pub const BUCKET_WARRANTS:  &str = "KOTOBA_WARRANTS";
-pub const BUCKET_WEIGHTS:   &str = "KOTOBA_WEIGHTS";   // FP8 weight blob CIDs
-pub const BUCKET_PRE_KEYS:  &str = "KOTOBA_PRE_KEYS";  // PRE grant index
+pub const BUCKET_BLOCKS: &str = "KOTOBA_BLOCKS";
+pub const BUCKET_GRAPHS: &str = "KOTOBA_GRAPHS";
+pub const BUCKET_HEADS: &str = "KOTOBA_HEADS";
+pub const BUCKET_UCANS: &str = "KOTOBA_UCANS";
+pub const BUCKET_WARRANTS: &str = "KOTOBA_WARRANTS";
+pub const BUCKET_WEIGHTS: &str = "KOTOBA_WEIGHTS"; // FP8 weight blob CIDs
+pub const BUCKET_PRE_KEYS: &str = "KOTOBA_PRE_KEYS"; // PRE grant index
 
 /// Shelf — CID-keyed KV, built on Journal (clean room, inspired by NATS KV)
 pub struct Shelf {
@@ -19,12 +19,15 @@ pub struct Shelf {
 
 pub struct ShelfBucket {
     pub name: String,
-    entries:  HashMap<String, (Bytes, u64)>, // key → (value, revision)
+    entries: HashMap<String, (Bytes, u64)>, // key → (value, revision)
 }
 
 impl ShelfBucket {
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into(), entries: HashMap::new() }
+        Self {
+            name: name.into(),
+            entries: HashMap::new(),
+        }
     }
 
     pub fn get(&self, key: &str) -> Option<&Bytes> {
@@ -37,7 +40,9 @@ impl ShelfBucket {
         rev
     }
 
-    pub fn delete(&mut self, key: &str) { self.entries.remove(key); }
+    pub fn delete(&mut self, key: &str) {
+        self.entries.remove(key);
+    }
 }
 
 impl Default for Shelf {
@@ -50,21 +55,28 @@ impl Shelf {
     pub fn new() -> Self {
         let mut buckets = HashMap::new();
         for name in &[
-            BUCKET_BLOCKS, BUCKET_GRAPHS, BUCKET_HEADS,
-            BUCKET_UCANS, BUCKET_WARRANTS, BUCKET_WEIGHTS,
+            BUCKET_BLOCKS,
+            BUCKET_GRAPHS,
+            BUCKET_HEADS,
+            BUCKET_UCANS,
+            BUCKET_WARRANTS,
+            BUCKET_WEIGHTS,
         ] {
             buckets.insert(name.to_string(), ShelfBucket::new(*name));
         }
-        Self { buckets: Arc::new(RwLock::new(buckets)) }
+        Self {
+            buckets: Arc::new(RwLock::new(buckets)),
+        }
     }
 
     pub async fn get(&self, bucket: &str, key: &str) -> Option<Bytes> {
-        self.buckets.read().await
-            .get(bucket)?.get(key).cloned()
+        self.buckets.read().await.get(bucket)?.get(key).cloned()
     }
 
     pub async fn put(&self, bucket: &str, key: String, value: Bytes) -> u64 {
-        self.buckets.write().await
+        self.buckets
+            .write()
+            .await
             .entry(bucket.to_string())
             .or_insert_with(|| ShelfBucket::new(bucket))
             .put(key, value)
@@ -76,7 +88,9 @@ impl Shelf {
             let mut arr = [0u8; 36];
             arr.copy_from_slice(&bytes);
             Some(KotobaCid(arr))
-        } else { None }
+        } else {
+            None
+        }
     }
 
     pub async fn set_head(&self, graph_cid: &KotobaCid, commit_cid: &KotobaCid) {
@@ -84,7 +98,8 @@ impl Shelf {
             BUCKET_HEADS,
             graph_cid.to_multibase(),
             Bytes::copy_from_slice(&commit_cid.0),
-        ).await;
+        )
+        .await;
     }
 }
 
@@ -104,7 +119,9 @@ mod tests {
     async fn put_then_get_returns_value() {
         let shelf = Shelf::new();
         let value = Bytes::from_static(b"hello shelf");
-        shelf.put(BUCKET_BLOCKS, "key1".to_string(), value.clone()).await;
+        shelf
+            .put(BUCKET_BLOCKS, "key1".to_string(), value.clone())
+            .await;
         let got = shelf.get(BUCKET_BLOCKS, "key1").await;
         assert_eq!(got, Some(value));
     }
@@ -139,7 +156,10 @@ mod tests {
         // Before set_head, get_head returns None
         assert!(shelf.get_head(&graph_cid).await.is_none());
         shelf.set_head(&graph_cid, &commit_cid).await;
-        let retrieved = shelf.get_head(&graph_cid).await.expect("head should be set");
+        let retrieved = shelf
+            .get_head(&graph_cid)
+            .await
+            .expect("head should be set");
         assert_eq!(retrieved, commit_cid);
     }
 
@@ -148,7 +168,11 @@ mod tests {
         let shelf = Shelf::new();
         let custom_bucket = "KOTOBA_CUSTOM";
         let rev = shelf
-            .put(custom_bucket, "some-key".to_string(), Bytes::from_static(b"val"))
+            .put(
+                custom_bucket,
+                "some-key".to_string(),
+                Bytes::from_static(b"val"),
+            )
             .await;
         assert_eq!(rev, 1);
         let got = shelf.get(custom_bucket, "some-key").await;

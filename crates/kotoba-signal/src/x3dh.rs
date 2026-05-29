@@ -11,14 +11,14 @@
 //!
 //! Reference: Signal specification https://signal.org/docs/specifications/x3dh/
 
-use x25519_dalek::{StaticSecret, PublicKey as X25519Public};
-use rand::rngs::OsRng;
-use kotoba_crypto::hkdf::derive_key_with_salt;
 use crate::{
     identity::IdentityKeyPair,
     prekey::{PreKey, PreKeyBundle, SignedPreKey},
     SignalError,
 };
+use kotoba_crypto::hkdf::derive_key_with_salt;
+use rand::rngs::OsRng;
+use x25519_dalek::{PublicKey as X25519Public, StaticSecret};
 
 const X3DH_INFO: &[u8] = b"kotoba-x3dh-v1";
 /// F-pad: 32 × 0xFF bytes prepended to DH output (per Signal spec)
@@ -43,7 +43,10 @@ pub fn x3dh_init_sender(
         .as_slice()
         .try_into()
         .map_err(|_| SignalError::BadSignature)?;
-    if !bundle.identity_key.verify(&spk_pub, &bundle.signed_prekey_sig) {
+    if !bundle
+        .identity_key
+        .verify(&spk_pub, &bundle.signed_prekey_sig)
+    {
         return Err(SignalError::BadSignature);
     }
 
@@ -58,7 +61,7 @@ pub fn x3dh_init_sender(
     let ek = StaticSecret::random_from_rng(OsRng);
     let ek_pub = X25519Public::from(&ek).to_bytes();
 
-    let dh1 = sender_ik.dh(&spk_pub);          // IK_A × SPK_B
+    let dh1 = sender_ik.dh(&spk_pub); // IK_A × SPK_B
     let dh2 = ek.diffie_hellman(&X25519Public::from(ik_b_dh)).to_bytes(); // EK_A × IK_B
     let dh3 = ek.diffie_hellman(&X25519Public::from(spk_pub)).to_bytes(); // EK_A × SPK_B
 
@@ -87,7 +90,7 @@ pub fn x3dh_init_sender(
 /// `ephemeral_public` = EK_A bytes from the sender's initial message.
 /// `used_opk_id`      = ID of the one-time pre-key consumed (if any).
 pub fn x3dh_init_receiver(
-    receiver_ik:   &IdentityKeyPair,
+    receiver_ik: &IdentityKeyPair,
     signed_prekey: &SignedPreKey,
     one_time_prekey: Option<&PreKey>,
     sender_ik_pub: &crate::identity::IdentityKey,
@@ -99,9 +102,9 @@ pub fn x3dh_init_receiver(
         .try_into()
         .map_err(|_| SignalError::BadSignature)?;
 
-    let dh1 = signed_prekey.dh(&ik_a_dh);          // SPK_B × IK_A
-    let dh2 = receiver_ik.dh(ephemeral_public);      // IK_B  × EK_A
-    let dh3 = signed_prekey.dh(ephemeral_public);    // SPK_B × EK_A
+    let dh1 = signed_prekey.dh(&ik_a_dh); // SPK_B × IK_A
+    let dh2 = receiver_ik.dh(ephemeral_public); // IK_B  × EK_A
+    let dh3 = signed_prekey.dh(ephemeral_public); // SPK_B × EK_A
 
     let mut ikm = Vec::with_capacity(32 * 5);
     ikm.extend_from_slice(&F_PAD);
@@ -116,13 +119,19 @@ pub fn x3dh_init_receiver(
 
     let shared_secret = derive_key_with_salt(&ikm, &[], X3DH_INFO);
 
-    Ok(X3dhOutput { shared_secret, ephemeral_public: None })
+    Ok(X3dhOutput {
+        shared_secret,
+        ephemeral_public: None,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{identity::IdentityKeyPair, prekey::{PreKey, SignedPreKey, PreKeyBundle}};
+    use crate::{
+        identity::IdentityKeyPair,
+        prekey::{PreKey, PreKeyBundle, SignedPreKey},
+    };
 
     fn make_bundle(ik: &IdentityKeyPair, spk: &SignedPreKey, opk: Option<&PreKey>) -> PreKeyBundle {
         PreKeyBundle {
@@ -140,20 +149,15 @@ mod tests {
     #[test]
     fn x3dh_shared_secrets_match_without_opk() {
         let alice_ik = IdentityKeyPair::generate();
-        let bob_ik   = IdentityKeyPair::generate();
-        let bob_spk  = SignedPreKey::generate(1, &bob_ik);
+        let bob_ik = IdentityKeyPair::generate();
+        let bob_spk = SignedPreKey::generate(1, &bob_ik);
 
         let bundle = make_bundle(&bob_ik, &bob_spk, None);
         let sender_out = x3dh_init_sender(&alice_ik, &bundle).unwrap();
         let ep = sender_out.ephemeral_public.unwrap();
 
-        let receiver_out = x3dh_init_receiver(
-            &bob_ik,
-            &bob_spk,
-            None,
-            &alice_ik.public_key(),
-            &ep,
-        ).unwrap();
+        let receiver_out =
+            x3dh_init_receiver(&bob_ik, &bob_spk, None, &alice_ik.public_key(), &ep).unwrap();
 
         assert_eq!(sender_out.shared_secret, receiver_out.shared_secret);
     }
@@ -161,9 +165,9 @@ mod tests {
     #[test]
     fn x3dh_shared_secrets_match_with_opk() {
         let alice_ik = IdentityKeyPair::generate();
-        let bob_ik   = IdentityKeyPair::generate();
-        let bob_spk  = SignedPreKey::generate(1, &bob_ik);
-        let bob_opk  = PreKey::generate(42);
+        let bob_ik = IdentityKeyPair::generate();
+        let bob_spk = SignedPreKey::generate(1, &bob_ik);
+        let bob_opk = PreKey::generate(42);
 
         let bundle = make_bundle(&bob_ik, &bob_spk, Some(&bob_opk));
         let sender_out = x3dh_init_sender(&alice_ik, &bundle).unwrap();
@@ -175,7 +179,8 @@ mod tests {
             Some(&bob_opk),
             &alice_ik.public_key(),
             &ep,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(sender_out.shared_secret, receiver_out.shared_secret);
     }
@@ -183,8 +188,8 @@ mod tests {
     #[test]
     fn x3dh_bad_spk_signature_rejected() {
         let alice_ik = IdentityKeyPair::generate();
-        let bob_ik   = IdentityKeyPair::generate();
-        let bob_spk  = SignedPreKey::generate(1, &bob_ik);
+        let bob_ik = IdentityKeyPair::generate();
+        let bob_spk = SignedPreKey::generate(1, &bob_ik);
         let mut bundle = make_bundle(&bob_ik, &bob_spk, None);
 
         // Corrupt signature
@@ -195,8 +200,8 @@ mod tests {
     #[test]
     fn sender_ephemeral_public_is_some() {
         let alice_ik = IdentityKeyPair::generate();
-        let bob_ik   = IdentityKeyPair::generate();
-        let bob_spk  = SignedPreKey::generate(1, &bob_ik);
+        let bob_ik = IdentityKeyPair::generate();
+        let bob_spk = SignedPreKey::generate(1, &bob_ik);
         let bundle = make_bundle(&bob_ik, &bob_spk, None);
         let out = x3dh_init_sender(&alice_ik, &bundle).unwrap();
         assert!(out.ephemeral_public.is_some());
@@ -205,26 +210,21 @@ mod tests {
     #[test]
     fn receiver_ephemeral_public_is_none() {
         let alice_ik = IdentityKeyPair::generate();
-        let bob_ik   = IdentityKeyPair::generate();
-        let bob_spk  = SignedPreKey::generate(1, &bob_ik);
+        let bob_ik = IdentityKeyPair::generate();
+        let bob_spk = SignedPreKey::generate(1, &bob_ik);
         let bundle = make_bundle(&bob_ik, &bob_spk, None);
         let sender_out = x3dh_init_sender(&alice_ik, &bundle).unwrap();
         let ep = sender_out.ephemeral_public.unwrap();
-        let receiver_out = x3dh_init_receiver(
-            &bob_ik,
-            &bob_spk,
-            None,
-            &alice_ik.public_key(),
-            &ep,
-        ).unwrap();
+        let receiver_out =
+            x3dh_init_receiver(&bob_ik, &bob_spk, None, &alice_ik.public_key(), &ep).unwrap();
         assert!(receiver_out.ephemeral_public.is_none());
     }
 
     #[test]
     fn shared_secret_is_32_bytes() {
         let alice_ik = IdentityKeyPair::generate();
-        let bob_ik   = IdentityKeyPair::generate();
-        let bob_spk  = SignedPreKey::generate(1, &bob_ik);
+        let bob_ik = IdentityKeyPair::generate();
+        let bob_spk = SignedPreKey::generate(1, &bob_ik);
         let bundle = make_bundle(&bob_ik, &bob_spk, None);
         let out = x3dh_init_sender(&alice_ik, &bundle).unwrap();
         assert_eq!(out.shared_secret.len(), 32);
@@ -233,8 +233,8 @@ mod tests {
     #[test]
     fn short_signed_prekey_returns_bad_signature() {
         let alice_ik = IdentityKeyPair::generate();
-        let bob_ik   = IdentityKeyPair::generate();
-        let bob_spk  = SignedPreKey::generate(1, &bob_ik);
+        let bob_ik = IdentityKeyPair::generate();
+        let bob_spk = SignedPreKey::generate(1, &bob_ik);
         let mut bundle = make_bundle(&bob_ik, &bob_spk, None);
         // Replace signed_prekey with a 1-byte value — not 32 bytes
         bundle.signed_prekey = vec![0x01];
@@ -246,8 +246,8 @@ mod tests {
     fn different_initiators_produce_different_secrets() {
         let alice_ik = IdentityKeyPair::generate();
         let carol_ik = IdentityKeyPair::generate();
-        let bob_ik   = IdentityKeyPair::generate();
-        let bob_spk  = SignedPreKey::generate(1, &bob_ik);
+        let bob_ik = IdentityKeyPair::generate();
+        let bob_spk = SignedPreKey::generate(1, &bob_ik);
         let bundle = make_bundle(&bob_ik, &bob_spk, None);
 
         let out_alice = x3dh_init_sender(&alice_ik, &bundle).unwrap();
@@ -258,8 +258,8 @@ mod tests {
     #[test]
     fn ephemeral_public_is_32_bytes() {
         let alice_ik = IdentityKeyPair::generate();
-        let bob_ik   = IdentityKeyPair::generate();
-        let bob_spk  = SignedPreKey::generate(1, &bob_ik);
+        let bob_ik = IdentityKeyPair::generate();
+        let bob_spk = SignedPreKey::generate(1, &bob_ik);
         let bundle = make_bundle(&bob_ik, &bob_spk, None);
         let out = x3dh_init_sender(&alice_ik, &bundle).unwrap();
         let ep = out.ephemeral_public.unwrap();

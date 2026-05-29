@@ -10,7 +10,10 @@ pub struct Neighborhood {
 
 impl Neighborhood {
     pub fn new(local: NodeId) -> Self {
-        Self { local, peers: Vec::new() }
+        Self {
+            local,
+            peers: Vec::new(),
+        }
     }
 
     pub fn add_peer(&mut self, peer: NodeId) {
@@ -37,7 +40,9 @@ impl Neighborhood {
 mod tests {
     use super::*;
 
-    fn nid(tag: &[u8]) -> NodeId { NodeId::from_pubkey(tag) }
+    fn nid(tag: &[u8]) -> NodeId {
+        NodeId::from_pubkey(tag)
+    }
 
     #[test]
     fn add_peer_deduplicates() {
@@ -59,7 +64,9 @@ mod tests {
     #[test]
     fn responsible_for_returns_at_most_k() {
         let mut nb = Neighborhood::new(nid(b"local"));
-        for i in 0..20u8 { nb.add_peer(nid(&[i])); }
+        for i in 0..20u8 {
+            nb.add_peer(nid(&[i]));
+        }
         let resp = nb.responsible_for(&nid(b"target"));
         assert!(resp.len() <= K);
     }
@@ -80,7 +87,9 @@ mod tests {
     fn peers_are_sorted_by_xor_distance() {
         let local = nid(b"local");
         let mut nb = Neighborhood::new(local.clone());
-        for i in 0..10u8 { nb.add_peer(nid(&[i, 42])); }
+        for i in 0..10u8 {
+            nb.add_peer(nid(&[i, 42]));
+        }
         // Verify sorted order
         let dists: Vec<_> = nb.peers.iter().map(|p| local.xor_distance(p)).collect();
         let mut sorted = dists.clone();
@@ -98,7 +107,10 @@ mod tests {
     fn responsible_for_empty_peers_returns_empty() {
         let nb = Neighborhood::new(nid(b"loner"));
         let resp = nb.responsible_for(&nid(b"target"));
-        assert!(resp.is_empty(), "no peers → responsible_for should return empty vec");
+        assert!(
+            resp.is_empty(),
+            "no peers → responsible_for should return empty vec"
+        );
     }
 
     #[test]

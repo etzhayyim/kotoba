@@ -13,20 +13,21 @@
 
 use sqlparser::dialect::GenericDialect;
 
-use crate::schema::SchemaMap;
 use super::{
-    CompiledEnterpriseQuery, EnterpriseDialect, EnterpriseFeature,
-    sql_base::SchemaBasedSqlCompiler,
+    sql_base::SchemaBasedSqlCompiler, CompiledEnterpriseQuery, EnterpriseDialect, EnterpriseFeature,
 };
+use crate::schema::SchemaMap;
 
 pub struct PrestoDialect;
 
 impl EnterpriseDialect for PrestoDialect {
-    fn dialect_name(&self) -> &'static str { "presto" }
+    fn dialect_name(&self) -> &'static str {
+        "presto"
+    }
 
     fn compile(
         &self,
-        query:  &str,
+        query: &str,
         schema: &SchemaMap,
         output: &str,
     ) -> anyhow::Result<CompiledEnterpriseQuery> {
@@ -48,14 +49,12 @@ impl EnterpriseDialect for PrestoDialect {
 
         let prepped = preprocess_presto(query);
 
-        let (program, mut pp) = SchemaBasedSqlCompiler::compile(
-            &prepped,
-            &GenericDialect {},
-            schema,
-            output,
-        )?;
+        let (program, mut pp) =
+            SchemaBasedSqlCompiler::compile(&prepped, &GenericDialect {}, schema, output)?;
 
-        if pp.percent.is_none() { pp.percent = pct; }
+        if pp.percent.is_none() {
+            pp.percent = pct;
+        }
 
         Ok(CompiledEnterpriseQuery {
             program,
@@ -105,7 +104,11 @@ fn preprocess_presto(sql: &str) -> String {
         if let Some(end) = find_paren(&s, idx + 6) {
             let inner = s[idx + 7..end].to_string();
             let after = &s[end + 1..];
-            let trim_extra = if after.to_uppercase().starts_with(" WITH ORDINALITY") { 16 } else { 0 };
+            let trim_extra = if after.to_uppercase().starts_with(" WITH ORDINALITY") {
+                16
+            } else {
+                0
+            };
             s.replace_range(idx..end + 1 + trim_extra, &inner);
         }
     }
@@ -115,7 +118,9 @@ fn preprocess_presto(sql: &str) -> String {
         if let Some(end) = find_paren(&s, idx + 3) {
             let inner = s[idx + 4..end].to_string();
             s.replace_range(idx..end + 1, &inner);
-        } else { break; }
+        } else {
+            break;
+        }
     }
 
     // ELEMENT_AT(map, key) → map (access by literal key not representable)
@@ -124,7 +129,9 @@ fn preprocess_presto(sql: &str) -> String {
             let args = s[idx + 11..end].to_string();
             let map_col = args.split(',').next().unwrap_or("").trim().to_string();
             s.replace_range(idx..end + 1, &map_col);
-        } else { break; }
+        } else {
+            break;
+        }
     }
 
     s
@@ -135,7 +142,12 @@ fn find_paren(s: &str, open: usize) -> Option<usize> {
     for (i, c) in s[open..].char_indices() {
         match c {
             '(' => depth += 1,
-            ')' => { depth -= 1; if depth == 0 { return Some(open + i); } }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + i);
+                }
+            }
             _ => {}
         }
     }
@@ -148,45 +160,66 @@ fn find_paren(s: &str, open: usize) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::schema::{AttrDef, SchemaMap, TableSchema};
-    use crate::{delta::Delta, quad::{Quad, QuadObject}};
+    use crate::{
+        datom::{Datom, Value},
+        delta::Delta,
+    };
     use kotoba_core::cid::KotobaCid;
 
-    fn cid(s: &str) -> KotobaCid { KotobaCid::from_bytes(s.as_bytes()) }
+    fn cid(s: &str) -> KotobaCid {
+        KotobaCid::from_bytes(s.as_bytes())
+    }
     fn fact(pred: &str, s: &str, o: &str) -> Delta {
-        Delta::assert(Quad {
-            graph: cid("g"), subject: cid(s), predicate: pred.to_string(),
-            object: QuadObject::Cid(cid(o)),
-        })
+        Delta::assert_datom(Datom::assert(
+            cid(s),
+            pred.to_string(),
+            Value::Cid(cid(o)),
+            cid("g"),
+        ))
     }
     fn has(d: &[Delta], pred: &str, s: &str, o: &str) -> bool {
-        d.iter().any(|x| x.quad.predicate == pred
-            && x.quad.subject == cid(s)
-            && matches!(&x.quad.object, QuadObject::Cid(c) if *c == cid(o)))
+        d.iter().any(|x| {
+            x.attribute() == pred
+                && x.entity() == &cid(s)
+                && matches!(x.value(), Value::Cid(c) if *c == cid(o))
+        })
     }
 
     #[test]
     fn tablesample_extraction() {
-        assert_eq!(extract_tablesample("SELECT * FROM t TABLESAMPLE BERNOULLI(10)"), Some(10.0));
-        assert_eq!(extract_tablesample("SELECT * FROM t TABLESAMPLE SYSTEM(25.5)"), Some(25.5));
+        assert_eq!(
+            extract_tablesample("SELECT * FROM t TABLESAMPLE BERNOULLI(10)"),
+            Some(10.0)
+        );
+        assert_eq!(
+            extract_tablesample("SELECT * FROM t TABLESAMPLE SYSTEM(25.5)"),
+            Some(25.5)
+        );
         assert_eq!(extract_tablesample("SELECT * FROM t"), None);
     }
 
     #[test]
     fn presto_standard_query() {
         let mut schema = SchemaMap::new();
-        schema.add("clicks", TableSchema::new("id")
-            .with_attr(AttrDef::scalar("page", "clicks"))
-            .with_attr(AttrDef::scalar("visitor", "clicks")));
+        schema.add(
+            "clicks",
+            TableSchema::new("id")
+                .with_attr(AttrDef::scalar("page", "clicks"))
+                .with_attr(AttrDef::scalar("visitor", "clicks")),
+        );
 
-        let result = PrestoDialect.compile(
-            "SELECT c.id, c.page FROM clicks c WHERE c.visitor = 'v1'",
-            &schema, "v1_clicks",
-        ).unwrap();
+        let result = PrestoDialect
+            .compile(
+                "SELECT c.id, c.page FROM clicks c WHERE c.visitor = 'v1'",
+                &schema,
+                "v1_clicks",
+            )
+            .unwrap();
 
         let input = vec![
-            fact("clicks/page",    "c1", "/home"),
+            fact("clicks/page", "c1", "/home"),
             fact("clicks/visitor", "c1", "v1"),
-            fact("clicks/page",    "c2", "/about"),
+            fact("clicks/page", "c2", "/about"),
             fact("clicks/visitor", "c2", "v2"),
         ];
         let derived = result.program.evaluate_delta(&input);
@@ -197,13 +230,18 @@ mod tests {
     #[test]
     fn tablesample_in_post_process() {
         let mut schema = SchemaMap::new();
-        schema.add("logs", TableSchema::new("id")
-            .with_attr(AttrDef::scalar("level", "logs")));
+        schema.add(
+            "logs",
+            TableSchema::new("id").with_attr(AttrDef::scalar("level", "logs")),
+        );
 
-        let result = PrestoDialect.compile(
-            "SELECT l.id, l.level FROM logs l TABLESAMPLE BERNOULLI(20)",
-            &schema, "sample",
-        ).unwrap();
+        let result = PrestoDialect
+            .compile(
+                "SELECT l.id, l.level FROM logs l TABLESAMPLE BERNOULLI(20)",
+                &schema,
+                "sample",
+            )
+            .unwrap();
         assert_eq!(result.post_process.percent, Some(20.0));
         assert!(result.features.contains(&EnterpriseFeature::Sampling));
     }

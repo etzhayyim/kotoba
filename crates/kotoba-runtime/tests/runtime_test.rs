@@ -1,3 +1,8 @@
+use kotoba_runtime::{
+    host::{EmbedFn, KotobaLinker, WitQuad},
+    program::ProgramStore,
+    HostState, KotobaEngine, UdfExecutor, WasmExecutor,
+};
 /// kotoba-runtime integration tests
 ///
 /// Phase 3: host stub fix verification (pure Rust, no WASM component)
@@ -17,20 +22,18 @@
 ///   - `guest_wasm_executes_assert_quad_and_publish` runs the full kqe+kse host ABI
 ///   - `guest_wasm_gas_exhaustion_errors` verifies gas accounting traps
 ///   - Skips gracefully when cargo-component or wasm32-wasip2 target is unavailable
-
 use std::sync::Arc;
-use kotoba_runtime::{
-    HostState, KotobaEngine, UdfExecutor, WasmExecutor,
-    host::{KotobaLinker, WitQuad, EmbedFn},
-    program::ProgramStore,
-};
 
 // ── Engine / Linker ────────────────────────────────────────────────────────
 
 #[test]
 fn engine_new_ok() {
     let engine = KotobaEngine::new();
-    assert!(engine.is_ok(), "KotobaEngine::new() failed: {:?}", engine.err());
+    assert!(
+        engine.is_ok(),
+        "KotobaEngine::new() failed: {:?}",
+        engine.err()
+    );
 }
 
 #[test]
@@ -170,20 +173,21 @@ fn chain_head_cid_none_when_not_set() {
 fn auth_has_capability_matches_quad_snapshot() {
     // Build a quad snapshot granting did:plc:alice the "cc/index" "write" capability
     let cap_quad = WitQuad {
-        graph:       "kotoba/auth".to_string(),
-        subject:     "did:plc:alice".to_string(),
-        predicate:   "auth/capability/cc%2Findex/write".to_string(),
+        graph: "kotoba/auth".to_string(),
+        subject: "did:plc:alice".to_string(),
+        predicate: "auth/capability/cc%2Findex/write".to_string(),
         object_cbor: vec![0xf5], // CBOR true
     };
-    let state = HostState::new("did:plc:alice", 5000)
-        .with_snapshot(vec![cap_quad]);
+    let state = HostState::new("did:plc:alice", 5000).with_snapshot(vec![cap_quad]);
 
-    let agent_did   = &state.agent_did;
+    let agent_did = &state.agent_did;
     let resource_uri = "cc%2Findex";
-    let ability      = "write";
-    let predicate    = format!("auth/capability/{resource_uri}/{ability}");
+    let ability = "write";
+    let predicate = format!("auth/capability/{resource_uri}/{ability}");
 
-    let has = state.quad_snapshot.iter()
+    let has = state
+        .quad_snapshot
+        .iter()
         .any(|q| &q.subject == agent_did && q.predicate == predicate);
     assert!(has, "capability predicate scan should find the quad");
 }
@@ -191,16 +195,17 @@ fn auth_has_capability_matches_quad_snapshot() {
 #[test]
 fn auth_has_capability_miss_on_wrong_did() {
     let cap_quad = WitQuad {
-        graph:       "kotoba/auth".to_string(),
-        subject:     "did:plc:bob".to_string(),   // different DID
-        predicate:   "auth/capability/resource/read".to_string(),
+        graph: "kotoba/auth".to_string(),
+        subject: "did:plc:bob".to_string(), // different DID
+        predicate: "auth/capability/resource/read".to_string(),
         object_cbor: vec![0xf5],
     };
-    let state = HostState::new("did:plc:alice", 5000)
-        .with_snapshot(vec![cap_quad]);
+    let state = HostState::new("did:plc:alice", 5000).with_snapshot(vec![cap_quad]);
 
     let predicate = "auth/capability/resource/read";
-    let has = state.quad_snapshot.iter()
+    let has = state
+        .quad_snapshot
+        .iter()
         .any(|q| q.subject == state.agent_did && q.predicate == predicate);
     assert!(!has, "capability check should fail for wrong DID");
 }
@@ -208,16 +213,17 @@ fn auth_has_capability_miss_on_wrong_did() {
 #[test]
 fn auth_has_capability_miss_on_wrong_ability() {
     let cap_quad = WitQuad {
-        graph:       "kotoba/auth".to_string(),
-        subject:     "did:plc:alice".to_string(),
-        predicate:   "auth/capability/resource/read".to_string(),
+        graph: "kotoba/auth".to_string(),
+        subject: "did:plc:alice".to_string(),
+        predicate: "auth/capability/resource/read".to_string(),
         object_cbor: vec![0xf5],
     };
-    let state = HostState::new("did:plc:alice", 5000)
-        .with_snapshot(vec![cap_quad]);
+    let state = HostState::new("did:plc:alice", 5000).with_snapshot(vec![cap_quad]);
 
     let predicate = "auth/capability/resource/write"; // different ability
-    let has = state.quad_snapshot.iter()
+    let has = state
+        .quad_snapshot
+        .iter()
         .any(|q| q.subject == state.agent_did && q.predicate == predicate);
     assert!(!has, "capability check should fail for wrong ability");
 }
@@ -229,8 +235,7 @@ fn llm_embed_fn_dispatches_and_returns_f32_bytes() {
         let v = text.len() as f32;
         Ok(vec![v, v * 2.0, v * 3.0])
     });
-    let state = HostState::new("did:plc:alice", 5000)
-        .with_embed_fn(embed_fn);
+    let state = HostState::new("did:plc:alice", 5000).with_embed_fn(embed_fn);
 
     let f = state.embed_fn.as_ref().expect("embed_fn should be set");
     let floats = f("hello").expect("embed should succeed");
@@ -252,15 +257,33 @@ fn llm_embed_fn_none_without_configuration() {
 
 #[test]
 fn kqe_evaluate_rules_datalog_cbor_roundtrip() {
-    use kotoba_kqe::{DatalogProgram, DatalogRule};
     use kotoba_kqe::datalog::{Atom, BodyLiteral, Term};
+    use kotoba_kqe::{DatalogProgram, DatalogRule};
 
     // Rule: knows(X, Z) :- knows(X, Y), knows(Y, Z)  (transitivity)
     let rule = DatalogRule {
-        head: Atom { relation: "knows".to_string(), args: vec![Term::Variable("X".to_string()), Term::Variable("Z".to_string())] },
+        head: Atom {
+            relation: "knows".to_string(),
+            args: vec![
+                Term::Variable("X".to_string()),
+                Term::Variable("Z".to_string()),
+            ],
+        },
         body: vec![
-            BodyLiteral::Positive(Atom { relation: "knows".to_string(), args: vec![Term::Variable("X".to_string()), Term::Variable("Y".to_string())] }),
-            BodyLiteral::Positive(Atom { relation: "knows".to_string(), args: vec![Term::Variable("Y".to_string()), Term::Variable("Z".to_string())] }),
+            BodyLiteral::Positive(Atom {
+                relation: "knows".to_string(),
+                args: vec![
+                    Term::Variable("X".to_string()),
+                    Term::Variable("Y".to_string()),
+                ],
+            }),
+            BodyLiteral::Positive(Atom {
+                relation: "knows".to_string(),
+                args: vec![
+                    Term::Variable("Y".to_string()),
+                    Term::Variable("Z".to_string()),
+                ],
+            }),
         ],
     };
 
@@ -269,8 +292,8 @@ fn kqe_evaluate_rules_datalog_cbor_roundtrip() {
     let mut cbor_bytes = Vec::new();
     ciborium::ser::into_writer(&rules, &mut cbor_bytes).expect("CBOR serialize");
 
-    let decoded: Vec<DatalogRule> = ciborium::de::from_reader(cbor_bytes.as_slice())
-        .expect("CBOR deserialize");
+    let decoded: Vec<DatalogRule> =
+        ciborium::de::from_reader(cbor_bytes.as_slice()).expect("CBOR deserialize");
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].head.relation, "knows");
     assert_eq!(decoded[0].body.len(), 2);
@@ -278,19 +301,39 @@ fn kqe_evaluate_rules_datalog_cbor_roundtrip() {
 
 #[test]
 fn kqe_evaluate_rules_derives_transitive_facts() {
-    use kotoba_kqe::{DatalogProgram, DatalogRule, Delta};
-    use kotoba_kqe::datalog::{Atom, BodyLiteral, Term};
-    use kotoba_kqe::quad::{Quad, QuadObject};
     use kotoba_core::cid::KotobaCid;
+    use kotoba_kqe::datalog::{Atom, BodyLiteral, Term};
+    use kotoba_kqe::quad::{LegacyQuad as Quad, LegacyQuadObject as QuadObject};
+    use kotoba_kqe::{DatalogProgram, DatalogRule, Delta};
 
-    fn cid(s: &str) -> KotobaCid { KotobaCid::from_bytes(s.as_bytes()) }
+    fn cid(s: &str) -> KotobaCid {
+        KotobaCid::from_bytes(s.as_bytes())
+    }
 
     // Rule: knows(X,Z) :- knows(X,Y), knows(Y,Z)
     let rule = DatalogRule {
-        head: Atom { relation: "knows".to_string(), args: vec![Term::Variable("X".to_string()), Term::Variable("Z".to_string())] },
+        head: Atom {
+            relation: "knows".to_string(),
+            args: vec![
+                Term::Variable("X".to_string()),
+                Term::Variable("Z".to_string()),
+            ],
+        },
         body: vec![
-            BodyLiteral::Positive(Atom { relation: "knows".to_string(), args: vec![Term::Variable("X".to_string()), Term::Variable("Y".to_string())] }),
-            BodyLiteral::Positive(Atom { relation: "knows".to_string(), args: vec![Term::Variable("Y".to_string()), Term::Variable("Z".to_string())] }),
+            BodyLiteral::Positive(Atom {
+                relation: "knows".to_string(),
+                args: vec![
+                    Term::Variable("X".to_string()),
+                    Term::Variable("Y".to_string()),
+                ],
+            }),
+            BodyLiteral::Positive(Atom {
+                relation: "knows".to_string(),
+                args: vec![
+                    Term::Variable("Y".to_string()),
+                    Term::Variable("Z".to_string()),
+                ],
+            }),
         ],
     };
 
@@ -300,25 +343,42 @@ fn kqe_evaluate_rules_derives_transitive_facts() {
     // Base facts: alice knows bob, bob knows carol
     let graph = cid("g");
     let input = vec![
-        Delta::assert(Quad { graph: graph.clone(), subject: cid("alice"), predicate: "knows".into(), object: QuadObject::Cid(cid("bob")) }),
-        Delta::assert(Quad { graph: graph.clone(), subject: cid("bob"),   predicate: "knows".into(), object: QuadObject::Cid(cid("carol")) }),
+        Delta::assert(Quad {
+            graph: graph.clone(),
+            subject: cid("alice"),
+            predicate: "knows".into(),
+            object: QuadObject::Cid(cid("bob")),
+        }),
+        Delta::assert(Quad {
+            graph: graph.clone(),
+            subject: cid("bob"),
+            predicate: "knows".into(),
+            object: QuadObject::Cid(cid("carol")),
+        }),
     ];
 
     let derived = program.evaluate_delta(&input);
 
     // Should derive: alice knows carol
-    let derived_text: Vec<String> = derived.iter()
+    let derived_text: Vec<String> = derived
+        .iter()
         .filter(|d| d.is_assert())
-        .map(|d| format!("{} -> {}", d.quad.subject, d.quad.predicate))
+        .map(|d| format!("{} -> {}", d.quad().subject, d.quad().predicate))
         .collect();
-    assert!(!derived.is_empty(), "expected at least 1 derived fact, derived: {derived_text:?}");
+    assert!(
+        !derived.is_empty(),
+        "expected at least 1 derived fact, derived: {derived_text:?}"
+    );
     let alice_knows_carol = derived.iter().any(|d| {
         d.is_assert()
-            && d.quad.subject == cid("alice")
-            && d.quad.predicate == "knows"
-            && d.quad.object == QuadObject::Cid(cid("carol"))
+            && d.quad().subject == cid("alice")
+            && d.quad().predicate == "knows"
+            && d.quad().object == QuadObject::Cid(cid("carol"))
     });
-    assert!(alice_knows_carol, "expected derived fact alice-knows-carol; got: {derived_text:?}");
+    assert!(
+        alice_knows_carol,
+        "expected derived fact alice-knows-carol; got: {derived_text:?}"
+    );
 }
 
 // ── Phase 2: end-to-end WASM guest execution ──────────────────────────────
@@ -341,9 +401,12 @@ fn build_guest_component() -> Option<Vec<u8>> {
 
     let status = Command::new("cargo")
         .args([
-            "component", "build",
-            "--manifest-path", "crates/kotoba-guest/Cargo.toml",
-            "--target", "wasm32-wasip2",
+            "component",
+            "build",
+            "--manifest-path",
+            "crates/kotoba-guest/Cargo.toml",
+            "--target",
+            "wasm32-wasip2",
             "--release",
             "--quiet",
         ])
@@ -359,8 +422,7 @@ fn build_guest_component() -> Option<Vec<u8>> {
         return None;
     }
 
-    let wasm_path = workspace
-        .join("target/wasm32-wasip2/release/kotoba_echo_assert.wasm");
+    let wasm_path = workspace.join("target/wasm32-wasip2/release/kotoba_echo_assert.wasm");
     if !wasm_path.exists() {
         // cargo-component may place the file under a different name
         // (package name = "kotoba:echo-assert" → file = "kotoba_echo_assert.wasm")
@@ -369,8 +431,7 @@ fn build_guest_component() -> Option<Vec<u8>> {
             return Some(std::fs::read(alt).expect("read wasm"));
         }
         // Try any .wasm in the release dir
-        let entries = std::fs::read_dir(workspace.join("target/wasm32-wasip2/release"))
-            .ok()?;
+        let entries = std::fs::read_dir(workspace.join("target/wasm32-wasip2/release")).ok()?;
         for e in entries.flatten() {
             let p = e.path();
             if p.extension().map(|x| x == "wasm").unwrap_or(false) {
@@ -393,9 +454,9 @@ fn make_ctx_cbor(graph: &str, args: &[u8]) -> Vec<u8> {
     use std::collections::BTreeMap;
     // InvokeContext as a CBOR map with string keys.
     let mut map: BTreeMap<&str, ciborium::Value> = BTreeMap::new();
-    map.insert("graph",       ciborium::Value::Text(graph.to_string()));
+    map.insert("graph", ciborium::Value::Text(graph.to_string()));
     map.insert("session_cid", ciborium::Value::Null);
-    map.insert("args_cbor",   ciborium::Value::Bytes(args.to_vec()));
+    map.insert("args_cbor", ciborium::Value::Bytes(args.to_vec()));
     let mut buf = Vec::new();
     ciborium::into_writer(&map, &mut buf).expect("cbor encode");
     buf
@@ -403,7 +464,9 @@ fn make_ctx_cbor(graph: &str, args: &[u8]) -> Vec<u8> {
 
 #[test]
 fn guest_wasm_executes_assert_quad_and_publish() {
-    let Some(wasm_bytes) = build_guest_component() else { return };
+    let Some(wasm_bytes) = build_guest_component() else {
+        return;
+    };
 
     let executor = WasmExecutor::new(10_000_000).expect("executor");
 
@@ -421,34 +484,52 @@ fn guest_wasm_executes_assert_quad_and_publish() {
     let r = result.expect("WasmExecutor::execute failed");
 
     // Guest calls kqe.assert-quad once → pending_asserts must have 1 entry.
-    assert_eq!(r.assert_quads.len(), 1,
-        "expected 1 assert quad, got {}: {:?}", r.assert_quads.len(), r.assert_quads);
+    assert_eq!(
+        r.assert_quads.len(),
+        1,
+        "expected 1 assert quad, got {}: {:?}",
+        r.assert_quads.len(),
+        r.assert_quads
+    );
 
     let q = &r.assert_quads[0];
-    assert_eq!(q.graph,     "test-graph");
+    assert_eq!(q.graph, "test-graph");
     assert_eq!(q.predicate, "kotoba/task");
-    assert_eq!(q.subject,   "did:plc:kotoba-test");
+    assert_eq!(q.subject, "did:plc:kotoba-test");
     assert_eq!(q.object_cbor, b"hello kotoba wasm");
 
     // Guest calls kse.publish once → pending_publishes must have 1 entry.
-    assert_eq!(r.pending_publishes.len(), 1,
-        "expected 1 kse publish, got {}", r.pending_publishes.len());
+    assert_eq!(
+        r.pending_publishes.len(),
+        1,
+        "expected 1 kse publish, got {}",
+        r.pending_publishes.len()
+    );
     assert!(r.pending_publishes[0].0.contains("test-graph"));
 
     // Gas must have been consumed (assert=10, kse.publish=20, auth.current_did + overhead).
-    assert!(r.gas_used >= 30, "expected ≥30 gas used, got {}", r.gas_used);
+    assert!(
+        r.gas_used >= 30,
+        "expected ≥30 gas used, got {}",
+        r.gas_used
+    );
 
     // Output CBOR should decode to a map containing "status" = "ok".
-    let out: ciborium::Value = ciborium::from_reader(r.output_cbor.as_slice())
-        .expect("output_cbor should be valid CBOR");
+    let out: ciborium::Value =
+        ciborium::from_reader(r.output_cbor.as_slice()).expect("output_cbor should be valid CBOR");
     if let ciborium::Value::Map(pairs) = out {
         let status = pairs.iter().find_map(|(k, v)| {
             if k == &ciborium::Value::Text("status".into()) {
                 v.as_text().map(|s| s.to_string())
-            } else { None }
+            } else {
+                None
+            }
         });
-        assert_eq!(status.as_deref(), Some("ok"),
-            "expected status=ok in output CBOR");
+        assert_eq!(
+            status.as_deref(),
+            Some("ok"),
+            "expected status=ok in output CBOR"
+        );
     } else {
         panic!("output CBOR is not a map: {:?}", out);
     }
@@ -456,7 +537,9 @@ fn guest_wasm_executes_assert_quad_and_publish() {
 
 #[test]
 fn guest_wasm_gas_exhaustion_errors() {
-    let Some(wasm_bytes) = build_guest_component() else { return };
+    let Some(wasm_bytes) = build_guest_component() else {
+        return;
+    };
 
     // Only 5 gas — assert-quad costs 10, so the guest should fail with gas exhausted.
     let executor = WasmExecutor::new(5).expect("executor");

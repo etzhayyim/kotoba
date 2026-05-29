@@ -73,9 +73,9 @@ impl CypherCompiler {
             .return_vars
             .iter()
             .map(|alias| {
-                var_map
-                    .to_term(alias)
-                    .ok_or_else(|| anyhow!("RETURN variable '{}' not found in MATCH pattern", alias))
+                var_map.to_term(alias).ok_or_else(|| {
+                    anyhow!("RETURN variable '{}' not found in MATCH pattern", alias)
+                })
             })
             .collect::<anyhow::Result<_>>()?;
 
@@ -106,17 +106,17 @@ struct NodeRef {
 
 #[derive(Debug)]
 struct EdgeRef {
-    from:     String, // node alias on the left
-    to:       String, // node alias on the right
+    from: String,     // node alias on the left
+    to: String,       // node alias on the right
     relation: String, // relation type (lowercased), or "*" for anonymous
 }
 
 #[derive(Debug)]
 struct CypherQuery {
-    nodes:       Vec<NodeRef>,         // deduplicated ordered nodes
-    edges:       Vec<EdgeRef>,
+    nodes: Vec<NodeRef>, // deduplicated ordered nodes
+    edges: Vec<EdgeRef>,
     where_consts: Vec<(String, String)>, // (alias, constant_value)
-    return_vars:  Vec<String>,
+    return_vars: Vec<String>,
 }
 
 // ── Parser ────────────────────────────────────────────────────────────────────
@@ -128,7 +128,10 @@ fn parse(input: &str) -> anyhow::Result<CypherQuery> {
     // Require MATCH clause
     let upper_check = upper.to_uppercase();
     if !upper_check.starts_with("MATCH") {
-        anyhow::bail!("query must start with MATCH; got: {}", &upper[..upper.len().min(20)]);
+        anyhow::bail!(
+            "query must start with MATCH; got: {}",
+            &upper[..upper.len().min(20)]
+        );
     }
 
     // Reject non-MATCH write operations
@@ -148,8 +151,8 @@ fn parse(input: &str) -> anyhow::Result<CypherQuery> {
     let (_, after_match) = split_clause_after(upper, "MATCH")?;
 
     // Look for RETURN in what follows MATCH (always present)
-    let (before_return, return_str) = split_clause_after(&after_match, "RETURN")
-        .map_err(|_| anyhow!("missing RETURN clause"))?;
+    let (before_return, return_str) =
+        split_clause_after(&after_match, "RETURN").map_err(|_| anyhow!("missing RETURN clause"))?;
 
     // Look for WHERE between MATCH and RETURN
     let (match_str, where_str) =
@@ -174,7 +177,12 @@ fn parse(input: &str) -> anyhow::Result<CypherQuery> {
     // Parse RETURN
     let return_vars = parse_return(&return_body)?;
 
-    Ok(CypherQuery { nodes, edges, where_consts, return_vars })
+    Ok(CypherQuery {
+        nodes,
+        edges,
+        where_consts,
+        return_vars,
+    })
 }
 
 /// Given `input` that contains `keyword` (case-insensitive), return
@@ -188,16 +196,21 @@ fn split_clause_after(input: &str, keyword: &str) -> anyhow::Result<(String, Str
     let mut pos = 0;
     loop {
         match upper[pos..].find(&kw_upper) {
-            None => anyhow::bail!("keyword '{}' not found in: {}", keyword, &input[..input.len().min(60)]),
+            None => anyhow::bail!(
+                "keyword '{}' not found in: {}",
+                keyword,
+                &input[..input.len().min(60)]
+            ),
             Some(offset) => {
                 let abs = pos + offset;
                 // Verify word-boundary before and after
                 let before_ok = abs == 0 || !upper.as_bytes()[abs - 1].is_ascii_alphanumeric();
                 let after_pos = abs + kw_upper.len();
-                let after_ok = after_pos >= upper.len() || !upper.as_bytes()[after_pos].is_ascii_alphanumeric();
+                let after_ok = after_pos >= upper.len()
+                    || !upper.as_bytes()[after_pos].is_ascii_alphanumeric();
                 if before_ok && after_ok {
                     let before = input[..abs].to_string();
-                    let after  = input[after_pos..].to_string();
+                    let after = input[after_pos..].to_string();
                     return Ok((before, after));
                 }
                 pos = abs + 1;
@@ -223,7 +236,10 @@ fn parse_match_pattern(s: &str) -> anyhow::Result<(Vec<NodeRef>, Vec<EdgeRef>)> 
     let first = parse_node_pattern(&mut chars)?;
     if !seen_aliases.contains_key(&first.alias) {
         seen_aliases.insert(first.alias.clone(), ());
-        nodes.push(NodeRef { alias: first.alias.clone(), label: first.label.clone() });
+        nodes.push(NodeRef {
+            alias: first.alias.clone(),
+            label: first.label.clone(),
+        });
     }
     let mut prev_alias = first.alias;
 
@@ -241,7 +257,10 @@ fn parse_match_pattern(s: &str) -> anyhow::Result<(Vec<NodeRef>, Vec<EdgeRef>)> 
                     let next = parse_node_pattern(&mut chars)?;
                     if !seen_aliases.contains_key(&next.alias) {
                         seen_aliases.insert(next.alias.clone(), ());
-                        nodes.push(NodeRef { alias: next.alias.clone(), label: next.label.clone() });
+                        nodes.push(NodeRef {
+                            alias: next.alias.clone(),
+                            label: next.label.clone(),
+                        });
                     }
                     edges.push(EdgeRef {
                         from: prev_alias.clone(),
@@ -270,7 +289,11 @@ fn parse_node_pattern(chars: &mut std::iter::Peekable<std::str::Chars>) -> anyho
     expect_char(chars, '(')?;
 
     let alias = read_identifier(chars);
-    let alias = if alias.is_empty() { fresh_anon_alias() } else { alias };
+    let alias = if alias.is_empty() {
+        fresh_anon_alias()
+    } else {
+        alias
+    };
 
     let label = if chars.peek() == Some(&':') {
         chars.next(); // consume ':'
@@ -288,14 +311,16 @@ fn parse_node_pattern(chars: &mut std::iter::Peekable<std::str::Chars>) -> anyho
 
 /// Parse `-[r:TYPE]->` or `-[:TYPE]->` or `-[]->` or `-->`.
 /// Returns `(relation_name, direction)` where direction is always "forward" for our subset.
-fn parse_edge_pattern(chars: &mut std::iter::Peekable<std::str::Chars>) -> anyhow::Result<(String, &'static str)> {
+fn parse_edge_pattern(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+) -> anyhow::Result<(String, &'static str)> {
     skip_whitespace(chars);
     expect_char(chars, '-')?;
 
     skip_whitespace(chars);
     let relation = if chars.peek() == Some(&'[') {
         chars.next(); // '['
-        // Optional variable name
+                      // Optional variable name
         skip_whitespace(chars);
         if chars.peek() != Some(&':') && chars.peek() != Some(&']') {
             // variable name — skip it
@@ -340,7 +365,9 @@ fn parse_where(s: &str) -> anyhow::Result<Vec<(String, String)>> {
             continue;
         }
         // Find '='
-        let eq_pos = part.find('=').ok_or_else(|| anyhow!("WHERE condition must be an equality: {part}"))?;
+        let eq_pos = part
+            .find('=')
+            .ok_or_else(|| anyhow!("WHERE condition must be an equality: {part}"))?;
         let lhs = part[..eq_pos].trim();
         let rhs = part[eq_pos + 1..].trim();
 
@@ -379,13 +406,16 @@ enum Slot {
 }
 
 struct VarMap {
-    slots:   HashMap<String, Slot>,
+    slots: HashMap<String, Slot>,
     counter: usize,
 }
 
 impl VarMap {
     fn new() -> Self {
-        Self { slots: HashMap::new(), counter: 0 }
+        Self {
+            slots: HashMap::new(),
+            counter: 0,
+        }
     }
 
     /// Assign a fresh Datalog variable name for `alias`.
@@ -412,7 +442,7 @@ impl VarMap {
 
     fn to_term(&self, alias: &str) -> Option<Term> {
         match self.slots.get(alias)? {
-            Slot::Var(v)   => Some(Term::Variable(v.clone())),
+            Slot::Var(v) => Some(Term::Variable(v.clone())),
             Slot::Const(c) => Some(Term::Constant(c.clone())),
         }
     }
@@ -426,17 +456,23 @@ fn skip_whitespace(chars: &mut std::iter::Peekable<std::str::Chars>) {
     }
 }
 
-fn expect_char(chars: &mut std::iter::Peekable<std::str::Chars>, expected: char) -> anyhow::Result<()> {
+fn expect_char(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    expected: char,
+) -> anyhow::Result<()> {
     match chars.next() {
         Some(c) if c == expected => Ok(()),
         Some(c) => anyhow::bail!("expected '{expected}', got '{c}'"),
-        None    => anyhow::bail!("expected '{expected}', got end-of-input"),
+        None => anyhow::bail!("expected '{expected}', got end-of-input"),
     }
 }
 
 fn read_identifier(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
     let mut s = String::new();
-    while chars.peek().is_some_and(|c| c.is_alphanumeric() || *c == '_') {
+    while chars
+        .peek()
+        .is_some_and(|c| c.is_alphanumeric() || *c == '_')
+    {
         s.push(chars.next().unwrap());
     }
     s
@@ -445,7 +481,10 @@ fn read_identifier(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
 /// Read a relation type — allow alphanumeric, `_`, and `-` (e.g. KNOWS, HAS-TYPE).
 fn read_relation_type(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
     let mut s = String::new();
-    while chars.peek().is_some_and(|c| c.is_alphanumeric() || *c == '_' || *c == '-') {
+    while chars
+        .peek()
+        .is_some_and(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+    {
         s.push(chars.next().unwrap());
     }
     s
@@ -461,7 +500,9 @@ fn parse_string_literal(s: &str) -> Option<String> {
     } else {
         return None;
     };
-    if s.len() < 2 { return None; }
+    if s.len() < 2 {
+        return None;
+    }
     let inner = &s[1..];
     let end = inner.find(close)?;
     Some(inner[..end].to_string())
@@ -478,7 +519,8 @@ fn split_and(s: &str) -> Vec<String> {
         if upper[i..].starts_with("AND") {
             let before_ok = i == 0 || !upper.as_bytes()[i - 1].is_ascii_alphanumeric();
             let after_pos = i + 3;
-            let after_ok = after_pos >= upper.len() || !upper.as_bytes()[after_pos].is_ascii_alphanumeric();
+            let after_ok =
+                after_pos >= upper.len() || !upper.as_bytes()[after_pos].is_ascii_alphanumeric();
             if before_ok && after_ok {
                 result.push(s[start..i].to_string());
                 start = after_pos;
@@ -505,8 +547,8 @@ fn fresh_anon_alias() -> String {
 mod tests {
     use super::*;
     use crate::{
+        datom::{Datom, Value},
         delta::Delta,
-        quad::{Quad, QuadObject},
     };
     use kotoba_core::cid::KotobaCid;
 
@@ -515,30 +557,26 @@ mod tests {
     }
 
     fn fact(relation: &str, s: &str, o: &str) -> Delta {
-        Delta::assert(Quad {
-            graph:     cid("g"),
-            subject:   cid(s),
-            predicate: relation.to_string(),
-            object:    QuadObject::Cid(cid(o)),
-        })
+        Delta::assert_datom(Datom::assert(
+            cid(s),
+            relation.to_string(),
+            Value::Cid(cid(o)),
+            cid("g"),
+        ))
     }
 
     fn has(derived: &[Delta], rel: &str, s: &str, o: &str) -> bool {
         derived.iter().any(|d| {
-            d.quad.predicate == rel
-                && d.quad.subject == cid(s)
-                && matches!(&d.quad.object, QuadObject::Cid(c) if *c == cid(o))
+            d.attribute() == rel
+                && d.entity() == &cid(s)
+                && matches!(d.value(), Value::Cid(c) if *c == cid(o))
         })
     }
 
     // 1. simple_match_two_hops
     #[test]
     fn simple_match_two_hops() {
-        let mv = CypherCompiler::compile(
-            "MATCH (a)-[:knows]->(b) RETURN a, b",
-            "output",
-        )
-        .unwrap();
+        let mv = CypherCompiler::compile("MATCH (a)-[:knows]->(b) RETURN a, b", "output").unwrap();
         let input = vec![fact("knows", "alice", "bob")];
         let derived = mv.program.evaluate_delta(&input);
         assert!(has(&derived, "output", "alice", "bob"));
@@ -554,8 +592,10 @@ mod tests {
         .unwrap();
         let input = vec![fact("knows", "alice", "bob")];
         let derived = mv.program.evaluate_delta(&input);
-        assert!(has(&derived, "output", "alice", "bob"),
-            "node labels should be ignored; relation 'knows' must still match");
+        assert!(
+            has(&derived, "output", "alice", "bob"),
+            "node labels should be ignored; relation 'knows' must still match"
+        );
     }
 
     // 3. match_chain_three_nodes — projects the first and last variable
@@ -567,13 +607,12 @@ mod tests {
         )
         .unwrap();
 
-        let input = vec![
-            fact("knows", "alice", "bob"),
-            fact("likes", "bob",   "carol"),
-        ];
+        let input = vec![fact("knows", "alice", "bob"), fact("likes", "bob", "carol")];
         let derived = mv.program.evaluate_delta(&input);
-        assert!(has(&derived, "a_likes_c", "alice", "carol"),
-            "expected transitive a_likes_c(alice, carol)");
+        assert!(
+            has(&derived, "a_likes_c", "alice", "carol"),
+            "expected transitive a_likes_c(alice, carol)"
+        );
         // Intermediate variable b should not leak into output
         assert!(!has(&derived, "a_likes_c", "alice", "bob"));
     }
@@ -592,20 +631,24 @@ mod tests {
             fact("knows", "carol", "dave"),
         ];
         let derived = mv.program.evaluate_delta(&input);
-        assert!(has(&derived, "output", "alice", "bob"),
-            "alice->bob should match");
-        assert!(!has(&derived, "output", "carol", "dave"),
-            "carol->dave should be filtered out");
+        assert!(
+            has(&derived, "output", "alice", "bob"),
+            "alice->bob should match"
+        );
+        assert!(
+            !has(&derived, "output", "carol", "dave"),
+            "carol->dave should be filtered out"
+        );
     }
 
     // 5. wrong_arity_one_var_errors — RETURN with only 1 variable
     #[test]
     fn wrong_arity_one_var_errors() {
-        let result = CypherCompiler::compile(
-            "MATCH (a)-[:knows]->(b) RETURN a",
-            "output",
+        let result = CypherCompiler::compile("MATCH (a)-[:knows]->(b) RETURN a", "output");
+        assert!(
+            result.is_err(),
+            "single-variable RETURN should fail arity check"
         );
-        assert!(result.is_err(), "single-variable RETURN should fail arity check");
     }
 
     // 6. wrong_arity_three_vars_errors — RETURN with 3 variables
@@ -615,35 +658,34 @@ mod tests {
             "MATCH (a)-[:knows]->(b)-[:likes]->(c) RETURN a, b, c",
             "output",
         );
-        assert!(result.is_err(), "three-variable RETURN should fail arity check");
+        assert!(
+            result.is_err(),
+            "three-variable RETURN should fail arity check"
+        );
     }
 
     // 7. non_match_query_errors — query without MATCH
     #[test]
     fn non_match_query_errors() {
-        let result = CypherCompiler::compile(
-            "RETURN a, b",
-            "output",
-        );
+        let result = CypherCompiler::compile("RETURN a, b", "output");
         assert!(result.is_err(), "query without MATCH should fail");
     }
 
     // 8. relation_name_from_type — relation type becomes Datalog predicate (lowercased)
     #[test]
     fn relation_name_from_type() {
-        let mv = CypherCompiler::compile(
-            "MATCH (a)-[:FRIENDS_WITH]->(b) RETURN a, b",
-            "friends",
-        )
-        .unwrap();
+        let mv = CypherCompiler::compile("MATCH (a)-[:FRIENDS_WITH]->(b) RETURN a, b", "friends")
+            .unwrap();
 
         // The predicate stored in DatalogRule body should be lowercased relation type
         let rule = &mv.program.rules[0];
         assert_eq!(rule.head.relation, "friends");
         assert_eq!(rule.body.len(), 1);
         if let BodyLiteral::Positive(atom) = &rule.body[0] {
-            assert_eq!(atom.relation, "friends_with",
-                "relation type 'FRIENDS_WITH' should become 'friends_with' in body atom");
+            assert_eq!(
+                atom.relation, "friends_with",
+                "relation type 'FRIENDS_WITH' should become 'friends_with' in body atom"
+            );
         } else {
             panic!("expected positive body literal");
         }
@@ -652,15 +694,13 @@ mod tests {
     // Bonus: upper-case KNOWS is lowercased correctly
     #[test]
     fn upper_case_relation_lowercased() {
-        let mv = CypherCompiler::compile(
-            "MATCH (a)-[:KNOWS]->(b) RETURN a, b",
-            "output",
-        )
-        .unwrap();
+        let mv = CypherCompiler::compile("MATCH (a)-[:KNOWS]->(b) RETURN a, b", "output").unwrap();
         let input = vec![fact("knows", "alice", "bob")];
         let derived = mv.program.evaluate_delta(&input);
-        assert!(has(&derived, "output", "alice", "bob"),
-            "KNOWS should be lowercased to 'knows' and match fact");
+        assert!(
+            has(&derived, "output", "alice", "bob"),
+            "KNOWS should be lowercased to 'knows' and match fact"
+        );
     }
 
     // Bonus: chain with WHERE filter on middle node
@@ -674,13 +714,15 @@ mod tests {
         let input = vec![
             fact("knows", "alice", "bob"),
             fact("knows", "alice", "mallory"),
-            fact("likes", "bob",   "carol"),
+            fact("likes", "bob", "carol"),
             fact("likes", "mallory", "eve"),
         ];
         let derived = mv.program.evaluate_delta(&input);
         assert!(has(&derived, "output", "alice", "carol"));
-        assert!(!has(&derived, "output", "alice", "eve"),
-            "mallory path should be filtered since WHERE b.name='bob' applies to b");
+        assert!(
+            !has(&derived, "output", "alice", "eve"),
+            "mallory path should be filtered since WHERE b.name='bob' applies to b"
+        );
     }
 
     // ── Mutation keyword rejection tests ─────────────────────────────────────
@@ -688,29 +730,20 @@ mod tests {
     #[test]
     fn create_keyword_rejected() {
         // The parser expects MATCH first; a query starting with CREATE must fail
-        let result = CypherCompiler::compile(
-            "CREATE (a)-[:knows]->(b) RETURN a, b",
-            "output",
-        );
+        let result = CypherCompiler::compile("CREATE (a)-[:knows]->(b) RETURN a, b", "output");
         assert!(result.is_err(), "CREATE query should be rejected");
     }
 
     #[test]
     fn delete_keyword_rejected() {
-        let result = CypherCompiler::compile(
-            "MATCH (a)-[:knows]->(b) DELETE a",
-            "output",
-        );
+        let result = CypherCompiler::compile("MATCH (a)-[:knows]->(b) DELETE a", "output");
         // Either parse error or missing RETURN with arity != 2
         assert!(result.is_err(), "DELETE query should be rejected");
     }
 
     #[test]
     fn merge_keyword_rejected() {
-        let result = CypherCompiler::compile(
-            "MERGE (a)-[:knows]->(b) RETURN a, b",
-            "output",
-        );
+        let result = CypherCompiler::compile("MERGE (a)-[:knows]->(b) RETURN a, b", "output");
         assert!(result.is_err(), "MERGE query should be rejected");
     }
 
@@ -719,15 +752,13 @@ mod tests {
     #[test]
     fn anonymous_arrow_compiles_as_wildcard() {
         // `-->` should compile using relation `"*"` as the predicate
-        let mv = CypherCompiler::compile(
-            "MATCH (a)-->(b) RETURN a, b",
-            "output",
-        )
-        .unwrap();
+        let mv = CypherCompiler::compile("MATCH (a)-->(b) RETURN a, b", "output").unwrap();
         let rule = &mv.program.rules[0];
         if let BodyLiteral::Positive(atom) = &rule.body[0] {
-            assert_eq!(atom.relation, "*",
-                "anonymous --> should produce relation '*'");
+            assert_eq!(
+                atom.relation, "*",
+                "anonymous --> should produce relation '*'"
+            );
         } else {
             panic!("expected positive body literal for anonymous arrow");
         }
@@ -749,7 +780,9 @@ mod tests {
         ];
         let derived = mv.program.evaluate_delta(&input);
         assert!(has(&derived, "output", "alice", "bob"));
-        assert!(!has(&derived, "output", "carol", "dave"),
-            "carol->dave must be filtered by single-quoted WHERE");
+        assert!(
+            !has(&derived, "output", "carol", "dave"),
+            "carol->dave must be filtered by single-quoted WHERE"
+        );
     }
 }

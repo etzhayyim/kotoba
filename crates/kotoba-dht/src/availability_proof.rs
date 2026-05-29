@@ -188,7 +188,13 @@ mod tests {
         let cid = make_cid(1);
 
         let challenge = make_challenge(vec![cid.clone()]);
-        let proof = make_proof(1, vec![ProofEntry { cid_bytes: cid, content_hash: h.clone() }]);
+        let proof = make_proof(
+            1,
+            vec![ProofEntry {
+                cid_bytes: cid,
+                content_hash: h.clone(),
+            }],
+        );
         let result = verify_proof(&challenge, &proof, &[Some(h)]).unwrap();
 
         assert_eq!(result.score, 1.0);
@@ -200,10 +206,16 @@ mod tests {
     fn zero_score_triggers_slash() {
         let cid = make_cid(2);
         let expected = vec![0xAAu8; 32];
-        let wrong    = vec![0xBBu8; 32];
+        let wrong = vec![0xBBu8; 32];
 
         let challenge = make_challenge(vec![cid.clone()]);
-        let proof = make_proof(1, vec![ProofEntry { cid_bytes: cid, content_hash: wrong }]);
+        let proof = make_proof(
+            1,
+            vec![ProofEntry {
+                cid_bytes: cid,
+                content_hash: wrong,
+            }],
+        );
         let result = verify_proof(&challenge, &proof, &[Some(expected)]).unwrap();
 
         assert_eq!(result.score, 0.0);
@@ -239,7 +251,10 @@ mod tests {
         let entries: Vec<ProofEntry> = cids[..3]
             .iter()
             .zip(hashes[..3].iter())
-            .map(|(c, h)| ProofEntry { cid_bytes: c.clone(), content_hash: h.clone() })
+            .map(|(c, h)| ProofEntry {
+                cid_bytes: c.clone(),
+                content_hash: h.clone(),
+            })
             .collect();
 
         let challenge = make_challenge(cids);
@@ -284,7 +299,10 @@ mod tests {
         let entries: Vec<ProofEntry> = cids[..4]
             .iter()
             .zip(hashes[..4].iter())
-            .map(|(c, h)| ProofEntry { cid_bytes: c.clone(), content_hash: h.clone() })
+            .map(|(c, h)| ProofEntry {
+                cid_bytes: c.clone(),
+                content_hash: h.clone(),
+            })
             .collect();
 
         let challenge = make_challenge(cids);
@@ -303,9 +321,10 @@ mod tests {
         let cids: Vec<Vec<u8>> = (0..2).map(make_cid).collect();
         let hashes: Vec<Vec<u8>> = cids.iter().map(|c| hash_block(c)).collect();
 
-        let entries: Vec<ProofEntry> = vec![
-            ProofEntry { cid_bytes: cids[0].clone(), content_hash: hashes[0].clone() },
-        ];
+        let entries: Vec<ProofEntry> = vec![ProofEntry {
+            cid_bytes: cids[0].clone(),
+            content_hash: hashes[0].clone(),
+        }];
 
         let challenge = make_challenge(cids);
         let proof = make_proof(1, entries);
@@ -313,8 +332,14 @@ mod tests {
         let result = verify_proof(&challenge, &proof, &expected).unwrap();
 
         assert!((result.score - 0.5).abs() < 1e-9);
-        assert!(!result.trigger_slash(), "score=0.5 must not trigger slash (threshold is < 0.50)");
-        assert!(!result.eligible_for_reward(), "score=0.5 must not be eligible for reward");
+        assert!(
+            !result.trigger_slash(),
+            "score=0.5 must not trigger slash (threshold is < 0.50)"
+        );
+        assert!(
+            !result.eligible_for_reward(),
+            "score=0.5 must not be eligible for reward"
+        );
     }
 
     #[test]
@@ -323,10 +348,19 @@ mod tests {
         let h = hash_block(&cid);
         let challenge = make_challenge(vec![cid.clone()]);
         let extra_cid = make_cid(99);
-        let proof = make_proof(1, vec![
-            ProofEntry { cid_bytes: cid,       content_hash: h.clone() },
-            ProofEntry { cid_bytes: extra_cid, content_hash: vec![0u8; 32] }, // extra — not in challenge
-        ]);
+        let proof = make_proof(
+            1,
+            vec![
+                ProofEntry {
+                    cid_bytes: cid,
+                    content_hash: h.clone(),
+                },
+                ProofEntry {
+                    cid_bytes: extra_cid,
+                    content_hash: vec![0u8; 32],
+                }, // extra — not in challenge
+            ],
+        );
         let result = verify_proof(&challenge, &proof, &[Some(h)]).unwrap();
         assert_eq!(result.score, 1.0, "extra entries must not degrade score");
         assert_eq!(result.challenged, 1);
@@ -335,7 +369,10 @@ mod tests {
 
     #[test]
     fn proof_entry_clone_is_equal() {
-        let entry = ProofEntry { cid_bytes: vec![1, 2, 3], content_hash: vec![4, 5, 6] };
+        let entry = ProofEntry {
+            cid_bytes: vec![1, 2, 3],
+            content_hash: vec![4, 5, 6],
+        };
         let cloned = entry.clone();
         assert_eq!(entry.cid_bytes, cloned.cid_bytes);
         assert_eq!(entry.content_hash, cloned.content_hash);
@@ -343,7 +380,10 @@ mod tests {
 
     #[test]
     fn proof_entry_serde_roundtrip() {
-        let entry = ProofEntry { cid_bytes: vec![0u8; 36], content_hash: hash_block(b"test") };
+        let entry = ProofEntry {
+            cid_bytes: vec![0u8; 36],
+            content_hash: hash_block(b"test"),
+        };
         let json = serde_json::to_string(&entry).unwrap();
         let back: ProofEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(entry.cid_bytes, back.cid_bytes);

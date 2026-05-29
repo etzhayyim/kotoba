@@ -10,7 +10,7 @@ use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 use crate::{
-    aead::{seal, open, CryptoError},
+    aead::{open, seal, CryptoError},
     hkdf::derive_key_with_salt,
 };
 

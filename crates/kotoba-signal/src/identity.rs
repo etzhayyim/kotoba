@@ -1,7 +1,7 @@
-use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Verifier, Signature};
-use x25519_dalek::{StaticSecret, PublicKey as X25519Public};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use x25519_dalek::{PublicKey as X25519Public, StaticSecret};
 use zeroize::ZeroizeOnDrop;
 
 pub type DeviceId = String;
@@ -13,7 +13,7 @@ pub type DeviceId = String;
 pub struct IdentityKeyPair {
     pub signing: SigningKey,
     // StaticSecret implements ZeroizeOnDrop
-    pub dh:      StaticSecret,
+    pub dh: StaticSecret,
 }
 
 /// Public half of an identity key pair (serializable, shareable).
@@ -22,20 +22,20 @@ pub struct IdentityKey {
     /// Ed25519 verifying key (32 bytes, base64url).
     pub signing: Vec<u8>,
     /// X25519 public key (32 bytes, base64url).
-    pub dh:      Vec<u8>,
+    pub dh: Vec<u8>,
 }
 
 impl IdentityKeyPair {
     pub fn generate() -> Self {
         let signing = SigningKey::generate(&mut OsRng);
-        let dh      = StaticSecret::random_from_rng(OsRng);
+        let dh = StaticSecret::random_from_rng(OsRng);
         Self { signing, dh }
     }
 
     pub fn public_key(&self) -> IdentityKey {
         IdentityKey {
             signing: self.signing.verifying_key().to_bytes().to_vec(),
-            dh:      X25519Public::from(&self.dh).to_bytes().to_vec(),
+            dh: X25519Public::from(&self.dh).to_bytes().to_vec(),
         }
     }
 
@@ -53,8 +53,14 @@ impl IdentityKeyPair {
 
 impl IdentityKey {
     pub fn verify(&self, msg: &[u8], sig: &[u8]) -> bool {
-        let Ok(vk)  = VerifyingKey::from_bytes(self.signing.as_slice().try_into().unwrap_or(&[0u8; 32])) else { return false };
-        let Ok(sig) = Signature::from_slice(sig) else { return false };
+        let Ok(vk) =
+            VerifyingKey::from_bytes(self.signing.as_slice().try_into().unwrap_or(&[0u8; 32]))
+        else {
+            return false;
+        };
+        let Ok(sig) = Signature::from_slice(sig) else {
+            return false;
+        };
         vk.verify(msg, &sig).is_ok()
     }
 

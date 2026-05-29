@@ -20,16 +20,14 @@
 //! superstep.  This matches LangGraph's default execution (BSP barrier is used
 //! for cross-thread parallelism in a future phase, not intra-graph sequencing).
 
+use kotoba_core::cid::KotobaCid;
+use kotoba_kqe::quad::{LegacyQuad as Quad, LegacyQuadObject as QuadObject};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use serde_json::Value;
-use kotoba_core::cid::KotobaCid;
-use kotoba_kqe::quad::{Quad, QuadObject};
 
 use crate::agent::{Tool, ToolRegistry};
-use crate::pregel::{
-    ComputeFn, ComputeOutput, Message, PregelGraph, SuperstepResult, VertexId,
-};
+use crate::pregel::{ComputeFn, ComputeOutput, Message, PregelGraph, SuperstepResult, VertexId};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Part 1 — Reducer, ChannelSchema, StateSchema, State
@@ -47,7 +45,7 @@ pub enum Reducer {
 /// Declaration of one named channel: its name and reducer.
 #[derive(Debug, Clone)]
 pub struct ChannelSchema {
-    pub name:    String,
+    pub name: String,
     pub reducer: Reducer,
 }
 
@@ -65,7 +63,9 @@ pub struct StateSchema {
 }
 
 impl StateSchema {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Declare a channel.  Later calls with the same name replace the reducer.
     pub fn channel(mut self, name: impl Into<String>, reducer: Reducer) -> Self {
@@ -97,13 +97,16 @@ impl StateSchema {
 /// schema is re-injected from the compiled graph closure.
 #[derive(Clone)]
 pub struct State {
-    schema:   Arc<StateSchema>,
+    schema: Arc<StateSchema>,
     channels: HashMap<String, Value>,
 }
 
 impl State {
     pub fn new(schema: Arc<StateSchema>) -> Self {
-        Self { schema, channels: HashMap::new() }
+        Self {
+            schema,
+            channels: HashMap::new(),
+        }
     }
 
     /// Convenience: create State with an initial `messages` array.
@@ -112,7 +115,8 @@ impl State {
     /// (defaults to `Override` if not declared).
     pub fn from_messages(messages: Vec<Value>, schema: Arc<StateSchema>) -> Self {
         let mut s = Self::new(schema);
-        s.channels.insert("messages".to_string(), Value::Array(messages));
+        s.channels
+            .insert("messages".to_string(), Value::Array(messages));
         s
     }
 
@@ -120,7 +124,7 @@ impl State {
     /// deserialisation).
     pub(crate) fn from_channels(
         channels: HashMap<String, Value>,
-        schema:   Arc<StateSchema>,
+        schema: Arc<StateSchema>,
     ) -> Self {
         Self { schema, channels }
     }
@@ -143,18 +147,19 @@ impl State {
                 self.channels.insert(key.to_string(), value);
             }
             Reducer::Append => {
-                let existing = self.channels
+                let existing = self
+                    .channels
                     .entry(key.to_string())
                     .or_insert_with(|| Value::Array(vec![]));
                 match existing {
                     Value::Array(arr) => match value {
                         // extend semantics: appending a list merges it (matches LangGraph add_messages)
                         Value::Array(new_items) => arr.extend(new_items),
-                        single                  => arr.push(single),
+                        single => arr.push(single),
                     },
                     other => match value {
                         Value::Array(new_items) => *other = Value::Array(new_items),
-                        single                  => *other = Value::Array(vec![single]),
+                        single => *other = Value::Array(vec![single]),
                     },
                 }
             }
@@ -180,7 +185,9 @@ impl State {
         }
     }
 
-    pub fn schema(&self) -> &Arc<StateSchema> { &self.schema }
+    pub fn schema(&self) -> &Arc<StateSchema> {
+        &self.schema
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -195,7 +202,9 @@ pub struct NodeOutput {
 }
 
 impl NodeOutput {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn set(mut self, key: impl Into<String>, value: Value) -> Self {
         self.updates.insert(key.into(), value);
@@ -229,8 +238,8 @@ pub type NodeFn = Arc<dyn Fn(&State) -> NodeOutput + Send + Sync>;
 
 #[derive(Clone)]
 enum EdgeEntry {
-    Always      { from: String, target: EdgeTarget },
-    Conditional { from: String, router: RouterFn   },
+    Always { from: String, target: EdgeTarget },
+    Conditional { from: String, router: RouterFn },
 }
 
 /// Node variant: a Rust closure or the built-in `ToolNode`.
@@ -262,14 +271,19 @@ pub enum NodeKind {
 /// ```
 pub struct StateGraph {
     schema: StateSchema,
-    nodes:  Vec<(String, NodeKind)>,
-    edges:  Vec<EdgeEntry>,
-    entry:  Option<String>,
+    nodes: Vec<(String, NodeKind)>,
+    edges: Vec<EdgeEntry>,
+    entry: Option<String>,
 }
 
 impl StateGraph {
     pub fn new(schema: StateSchema) -> Self {
-        Self { schema, nodes: Vec::new(), edges: Vec::new(), entry: None }
+        Self {
+            schema,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            entry: None,
+        }
     }
 
     /// Register a node.  The order of registration matters only for
@@ -282,7 +296,7 @@ impl StateGraph {
     /// Add an unconditional edge `from → to`.
     pub fn add_edge(mut self, from: impl Into<String>, to: impl Into<String>) -> Self {
         self.edges.push(EdgeEntry::Always {
-            from:   from.into(),
+            from: from.into(),
             target: EdgeTarget::Node(to.into()),
         });
         self
@@ -291,7 +305,7 @@ impl StateGraph {
     /// Add a terminal unconditional edge `from → END`.
     pub fn add_end_edge(mut self, from: impl Into<String>) -> Self {
         self.edges.push(EdgeEntry::Always {
-            from:   from.into(),
+            from: from.into(),
             target: EdgeTarget::End,
         });
         self
@@ -299,12 +313,11 @@ impl StateGraph {
 
     /// Add a conditional edge.  `router` receives the current `State` and
     /// returns the next `EdgeTarget`.
-    pub fn add_conditional_edges(
-        mut self,
-        from:   impl Into<String>,
-        router: RouterFn,
-    ) -> Self {
-        self.edges.push(EdgeEntry::Conditional { from: from.into(), router });
+    pub fn add_conditional_edges(mut self, from: impl Into<String>, router: RouterFn) -> Self {
+        self.edges.push(EdgeEntry::Conditional {
+            from: from.into(),
+            router,
+        });
         self
     }
 
@@ -329,14 +342,22 @@ impl StateGraph {
         let graph_def_cid = derive_graph_def_cid(&self);
 
         let schema = Arc::new(self.schema);
-        let nodes:  HashMap<String, NodeKind> = self.nodes.into_iter().collect();
-        let edges:  HashMap<String, EdgeEntry> = self.edges.into_iter()
+        let nodes: HashMap<String, NodeKind> = self.nodes.into_iter().collect();
+        let edges: HashMap<String, EdgeEntry> = self
+            .edges
+            .into_iter()
             .map(|e| {
-                let from = match &e { EdgeEntry::Always { from, .. } | EdgeEntry::Conditional { from, .. } => from.clone() };
+                let from = match &e {
+                    EdgeEntry::Always { from, .. } | EdgeEntry::Conditional { from, .. } => {
+                        from.clone()
+                    }
+                };
                 (from, e)
             })
             .collect();
-        let entry = self.entry.expect("StateGraph::compile(): set_entry_point() not called");
+        let entry = self
+            .entry
+            .expect("StateGraph::compile(): set_entry_point() not called");
 
         CompiledGraph {
             graph_def_cid,
@@ -352,19 +373,40 @@ impl StateGraph {
 /// Derive a content-addressed CID from the graph shape (not closures).
 fn derive_graph_def_cid(g: &StateGraph) -> KotobaCid {
     // Canonical representation: sorted JSON
-    let mut channels: Vec<(&str, &str)> = g.schema.channels.iter()
-        .map(|(k, r)| (k.as_str(), match r { Reducer::Override => "override", Reducer::Append => "append" }))
+    let mut channels: Vec<(&str, &str)> = g
+        .schema
+        .channels
+        .iter()
+        .map(|(k, r)| {
+            (
+                k.as_str(),
+                match r {
+                    Reducer::Override => "override",
+                    Reducer::Append => "append",
+                },
+            )
+        })
         .collect();
     channels.sort_unstable();
 
     let mut node_names: Vec<&str> = g.nodes.iter().map(|(n, _)| n.as_str()).collect();
     node_names.sort_unstable();
 
-    let mut edge_strs: Vec<String> = g.edges.iter().map(|e| match e {
-        EdgeEntry::Always      { from, target: EdgeTarget::Node(to) } => format!("{from}->{to}"),
-        EdgeEntry::Always      { from, target: EdgeTarget::End      } => format!("{from}->END"),
-        EdgeEntry::Conditional { from, ..                            } => format!("{from}->?"),
-    }).collect();
+    let mut edge_strs: Vec<String> = g
+        .edges
+        .iter()
+        .map(|e| match e {
+            EdgeEntry::Always {
+                from,
+                target: EdgeTarget::Node(to),
+            } => format!("{from}->{to}"),
+            EdgeEntry::Always {
+                from,
+                target: EdgeTarget::End,
+            } => format!("{from}->END"),
+            EdgeEntry::Conditional { from, .. } => format!("{from}->?"),
+        })
+        .collect();
     edge_strs.sort_unstable();
 
     let repr = serde_json::json!({
@@ -384,10 +426,10 @@ fn derive_graph_def_cid(g: &StateGraph) -> KotobaCid {
 pub struct CompiledGraph {
     /// Content-addressed identifier for the graph **shape** (not closures).
     pub graph_def_cid: KotobaCid,
-    schema:   Arc<StateSchema>,
-    nodes:    HashMap<String, NodeKind>,
-    edges:    HashMap<String, EdgeEntry>,
-    entry:    String,
+    schema: Arc<StateSchema>,
+    nodes: HashMap<String, NodeKind>,
+    edges: HashMap<String, EdgeEntry>,
+    entry: String,
     registry: Arc<ToolRegistry>,
 }
 
@@ -400,8 +442,7 @@ impl CompiledGraph {
 
     /// Add a single tool on top of the current registry.
     pub fn with_tool(mut self, tool: Tool) -> Self {
-        let reg = Arc::try_unwrap(self.registry)
-            .unwrap_or_else(|arc| (*arc).clone());
+        let reg = Arc::try_unwrap(self.registry).unwrap_or_else(|arc| (*arc).clone());
         self.registry = Arc::new(reg.register(tool));
         self
     }
@@ -413,36 +454,36 @@ impl CompiledGraph {
         let g = &self.graph_def_cid;
         let mut quads = vec![
             Quad {
-                graph:     g.clone(),
-                subject:   g.clone(),
+                graph: g.clone(),
+                subject: g.clone(),
                 predicate: "lgraph/type".to_string(),
-                object:    QuadObject::Text("state_graph".to_string()),
+                object: QuadObject::Text("state_graph".to_string()),
             },
             Quad {
-                graph:     g.clone(),
-                subject:   g.clone(),
+                graph: g.clone(),
+                subject: g.clone(),
                 predicate: "lgraph/entry".to_string(),
-                object:    QuadObject::Text(self.entry.clone()),
+                object: QuadObject::Text(self.entry.clone()),
             },
         ];
         for name in self.schema.channel_names_sorted() {
             let reducer = match self.schema.reducer_for(name) {
                 Reducer::Override => "override",
-                Reducer::Append   => "append",
+                Reducer::Append => "append",
             };
             quads.push(Quad {
-                graph:     g.clone(),
-                subject:   KotobaCid::from_bytes(format!("channel/{name}").as_bytes()),
+                graph: g.clone(),
+                subject: KotobaCid::from_bytes(format!("channel/{name}").as_bytes()),
                 predicate: "lgraph/channel/reducer".to_string(),
-                object:    QuadObject::Text(reducer.to_string()),
+                object: QuadObject::Text(reducer.to_string()),
             });
         }
         for node_name in self.nodes.keys() {
             quads.push(Quad {
-                graph:     g.clone(),
-                subject:   KotobaCid::from_bytes(format!("node/{node_name}").as_bytes()),
+                graph: g.clone(),
+                subject: KotobaCid::from_bytes(format!("node/{node_name}").as_bytes()),
                 predicate: "lgraph/node/name".to_string(),
-                object:    QuadObject::Text(node_name.clone()),
+                object: QuadObject::Text(node_name.clone()),
             });
         }
         quads
@@ -456,23 +497,29 @@ impl CompiledGraph {
     pub fn invoke(&self, input: State, thread_id: Option<KotobaCid>) -> Thread {
         let thread_id = thread_id.unwrap_or_else(|| {
             KotobaCid::from_bytes(
-                format!("thread/{}", self.graph_def_cid.to_multibase()).as_bytes()
+                format!("thread/{}", self.graph_def_cid.to_multibase()).as_bytes(),
             )
         });
 
-        let schema   = Arc::clone(&self.schema);
-        let nodes    = Arc::new(
-            self.nodes.iter()
-                .map(|(k, v)| (k.clone(), match v {
-                    NodeKind::Fn(f)   => InternalNode::Fn(Arc::clone(f)),
-                    NodeKind::ToolNode => InternalNode::ToolNode,
-                }))
-                .collect::<HashMap<String, InternalNode>>()
+        let schema = Arc::clone(&self.schema);
+        let nodes = Arc::new(
+            self.nodes
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        match v {
+                            NodeKind::Fn(f) => InternalNode::Fn(Arc::clone(f)),
+                            NodeKind::ToolNode => InternalNode::ToolNode,
+                        },
+                    )
+                })
+                .collect::<HashMap<String, InternalNode>>(),
         );
-        let edges    = Arc::new(self.edges.clone());
-        let entry    = self.entry.clone();
+        let edges = Arc::new(self.edges.clone());
+        let entry = self.entry.clone();
         let registry = Arc::clone(&self.registry);
-        let schema2  = Arc::clone(&schema);
+        let schema2 = Arc::clone(&schema);
 
         // Vertex state is just the channels HashMap serialised as JSON.
         let initial_channels = input.channels().clone();
@@ -482,7 +529,7 @@ impl CompiledGraph {
             if inbox.is_empty() {
                 return ComputeOutput {
                     new_state: vertex.state.clone(),
-                    messages:  vec![],
+                    messages: vec![],
                     vote_halt: true,
                 };
             }
@@ -517,11 +564,17 @@ impl CompiledGraph {
 
                 // Resolve edge
                 let next = match edges.get(&current) {
-                    Some(EdgeEntry::Always { target: EdgeTarget::End, .. }) => break,
-                    Some(EdgeEntry::Always { target: EdgeTarget::Node(n), .. }) => n.clone(),
+                    Some(EdgeEntry::Always {
+                        target: EdgeTarget::End,
+                        ..
+                    }) => break,
+                    Some(EdgeEntry::Always {
+                        target: EdgeTarget::Node(n),
+                        ..
+                    }) => n.clone(),
                     Some(EdgeEntry::Conditional { router, .. }) => match router(&state) {
-                        EdgeTarget::End      => break,
-                        EdgeTarget::Node(n)  => n,
+                        EdgeTarget::End => break,
+                        EdgeTarget::Node(n) => n,
                     },
                     None => break, // no edge declared = END
                 };
@@ -529,15 +582,19 @@ impl CompiledGraph {
             }
 
             let new_state = serde_json::to_vec(state.channels()).unwrap_or_default();
-            ComputeOutput { new_state, messages: vec![], vote_halt: true }
+            ComputeOutput {
+                new_state,
+                messages: vec![],
+                vote_halt: true,
+            }
         });
 
         let vid = VertexId(thread_id.clone());
         let mut graph = PregelGraph::new();
         graph.add_vertex(vid.clone(), initial_state);
         graph.inject_message(Message {
-            src:     vid.clone(),
-            dst:     vid.clone(),
+            src: vid.clone(),
+            dst: vid.clone(),
             payload: b"start".to_vec(),
         });
 
@@ -552,7 +609,7 @@ impl CompiledGraph {
 
         Thread {
             thread_id,
-            state:            final_state,
+            state: final_state,
             superstep_results,
         }
     }
@@ -580,8 +637,11 @@ fn run_tool_node(state: &State, registry: &ToolRegistry) -> HashMap<String, Valu
     let mut tool_messages: Vec<Value> = Vec::new();
 
     for call in calls {
-        let tool_name = call.get("tool").and_then(|v| v.as_str()).unwrap_or("finish");
-        let input     = call.get("input").and_then(|v| v.as_str()).unwrap_or("");
+        let tool_name = call
+            .get("tool")
+            .and_then(|v| v.as_str())
+            .unwrap_or("finish");
+        let input = call.get("input").and_then(|v| v.as_str()).unwrap_or("");
         let out = registry.call(tool_name, input, &mut snap);
         tool_messages.push(serde_json::json!({
             "role":    "tool",
@@ -600,19 +660,23 @@ fn run_tool_node(state: &State, registry: &ToolRegistry) -> HashMap<String, Valu
 /// Result of `CompiledGraph::invoke()` — equivalent to a LangGraph thread.
 pub struct Thread {
     /// Content-addressed thread identifier (≅ LangGraph `thread_id`).
-    pub thread_id:        KotobaCid,
+    pub thread_id: KotobaCid,
     /// Final state after the graph terminated.
-    pub state:            State,
+    pub state: State,
     /// Pregel superstep results (for introspection / checkpointing).
     pub superstep_results: Vec<SuperstepResult>,
 }
 
 impl Thread {
     /// Convenience: return the final `messages` channel value.
-    pub fn messages(&self) -> Vec<Value> { self.state.messages() }
+    pub fn messages(&self) -> Vec<Value> {
+        self.state.messages()
+    }
 
     /// Convenience: return any channel value by name.
-    pub fn get(&self, key: &str) -> Option<&Value> { self.state.get(key) }
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.state.get(key)
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -627,7 +691,7 @@ mod tests {
     fn schema() -> StateSchema {
         StateSchema::new()
             .channel("messages", Reducer::Append)
-            .channel("score",    Reducer::Override)
+            .channel("score", Reducer::Override)
     }
 
     // ── Reducer / State ───────────────────────────────────────────────────
@@ -719,14 +783,15 @@ mod tests {
     #[test]
     fn single_node_graph_runs_and_terminates() {
         let compiled = StateGraph::new(schema())
-            .add_node("agent", NodeKind::Fn(Arc::new(|s| {
-                NodeOutput::new().set("score", json!(42))
-            })))
+            .add_node(
+                "agent",
+                NodeKind::Fn(Arc::new(|_s| NodeOutput::new().set("score", json!(42)))),
+            )
             .add_end_edge("agent")
             .set_entry_point("agent")
             .compile();
 
-        let input  = State::new(Arc::new(schema()));
+        let input = State::new(Arc::new(schema()));
         let thread = compiled.invoke(input, None);
         assert_eq!(thread.get("score"), Some(&json!(42)));
     }
@@ -735,17 +800,22 @@ mod tests {
     fn two_node_sequential_graph() {
         // agent → tools → END
         let compiled = StateGraph::new(schema())
-            .add_node("agent", NodeKind::Fn(Arc::new(|_| {
-                NodeOutput::new()
-                    .set("tool_calls", json!([{"tool": "kqe.assert", "input": "fact"}]))
-            })))
+            .add_node(
+                "agent",
+                NodeKind::Fn(Arc::new(|_| {
+                    NodeOutput::new().set(
+                        "tool_calls",
+                        json!([{"tool": "kqe.assert", "input": "fact"}]),
+                    )
+                })),
+            )
             .add_node("tools", NodeKind::ToolNode)
             .add_edge("agent", "tools")
             .add_end_edge("tools")
             .set_entry_point("agent")
             .compile();
 
-        let input  = State::new(Arc::new(schema()));
+        let input = State::new(Arc::new(schema()));
         let thread = compiled.invoke(input, None);
         // ToolNode appended a tool result message
         let msgs = thread.messages();
@@ -756,20 +826,24 @@ mod tests {
     #[test]
     fn conditional_edge_routes_to_end() {
         let compiled = StateGraph::new(schema())
-            .add_node("agent", NodeKind::Fn(Arc::new(|_| {
-                NodeOutput::new().set("score", json!(99))
-            })))
-            .add_conditional_edges("agent", Arc::new(|state| {
-                if state.get("score").and_then(|v| v.as_i64()) == Some(99) {
-                    EdgeTarget::End
-                } else {
-                    EdgeTarget::Node("agent".to_string())
-                }
-            }))
+            .add_node(
+                "agent",
+                NodeKind::Fn(Arc::new(|_| NodeOutput::new().set("score", json!(99)))),
+            )
+            .add_conditional_edges(
+                "agent",
+                Arc::new(|state| {
+                    if state.get("score").and_then(|v| v.as_i64()) == Some(99) {
+                        EdgeTarget::End
+                    } else {
+                        EdgeTarget::Node("agent".to_string())
+                    }
+                }),
+            )
             .set_entry_point("agent")
             .compile();
 
-        let input  = State::new(Arc::new(schema()));
+        let input = State::new(Arc::new(schema()));
         let thread = compiled.invoke(input, None);
         assert_eq!(thread.get("score"), Some(&json!(99)));
     }
@@ -785,7 +859,7 @@ mod tests {
 
         // This should return (not hang) because of the 256-step limit
         let thread = compiled.invoke(State::new(Arc::new(schema())), None);
-        let _ = thread;  // just checking it terminates
+        let _ = thread; // just checking it terminates
     }
 
     #[test]
@@ -796,10 +870,12 @@ mod tests {
             .compile();
 
         let datoms = compiled.definition_datoms();
-        let has_type  = datoms.iter().any(|q| q.predicate == "lgraph/type");
+        let has_type = datoms.iter().any(|q| q.predicate == "lgraph/type");
         let has_entry = datoms.iter().any(|q| q.predicate == "lgraph/entry");
-        let has_chan  = datoms.iter().any(|q| q.predicate == "lgraph/channel/reducer");
-        let has_node  = datoms.iter().any(|q| q.predicate == "lgraph/node/name");
+        let has_chan = datoms
+            .iter()
+            .any(|q| q.predicate == "lgraph/channel/reducer");
+        let has_node = datoms.iter().any(|q| q.predicate == "lgraph/node/name");
         assert!(has_type && has_entry && has_chan && has_node);
     }
 
@@ -830,8 +906,8 @@ mod tests {
     #[test]
     fn state_schema_channel_names_sorted() {
         let schema = StateSchema::new()
-            .channel("zebra",    Reducer::Override)
-            .channel("alpha",    Reducer::Append)
+            .channel("zebra", Reducer::Override)
+            .channel("alpha", Reducer::Append)
             .channel("messages", Reducer::Append);
         let names = schema.channel_names_sorted();
         assert_eq!(names, vec!["alpha", "messages", "zebra"]);
@@ -843,9 +919,7 @@ mod tests {
         extra.insert("count".to_string(), json!(3));
         extra.insert("ready".to_string(), json!(true));
 
-        let out = NodeOutput::new()
-            .set("score", json!(10))
-            .extend(extra);
+        let out = NodeOutput::new().set("score", json!(10)).extend(extra);
 
         assert_eq!(out.updates.get("score"), Some(&json!(10)));
         assert_eq!(out.updates.get("count"), Some(&json!(3)));
@@ -867,9 +941,7 @@ mod tests {
 
     #[test]
     fn definition_datoms_count_increases_with_channels_and_nodes() {
-        let compiled_1 = StateGraph::new(
-            StateSchema::new().channel("x", Reducer::Override)
-        )
+        let compiled_1 = StateGraph::new(StateSchema::new().channel("x", Reducer::Override))
             .add_node("n1", NodeKind::Fn(Arc::new(|_| NodeOutput::new())))
             .set_entry_point("n1")
             .compile();
@@ -877,12 +949,12 @@ mod tests {
         let compiled_2 = StateGraph::new(
             StateSchema::new()
                 .channel("x", Reducer::Override)
-                .channel("y", Reducer::Append)
+                .channel("y", Reducer::Append),
         )
-            .add_node("n1", NodeKind::Fn(Arc::new(|_| NodeOutput::new())))
-            .add_node("n2", NodeKind::Fn(Arc::new(|_| NodeOutput::new())))
-            .set_entry_point("n1")
-            .compile();
+        .add_node("n1", NodeKind::Fn(Arc::new(|_| NodeOutput::new())))
+        .add_node("n2", NodeKind::Fn(Arc::new(|_| NodeOutput::new())))
+        .set_entry_point("n1")
+        .compile();
 
         let d1 = compiled_1.definition_datoms().len();
         let d2 = compiled_2.definition_datoms().len();
@@ -892,11 +964,14 @@ mod tests {
     #[test]
     fn thread_get_returns_channel_value() {
         let compiled = StateGraph::new(schema())
-            .add_node("a", NodeKind::Fn(Arc::new(|_| {
-                NodeOutput::new()
-                    .set("score",    json!(77))
-                    .set("messages", json!("hello"))
-            })))
+            .add_node(
+                "a",
+                NodeKind::Fn(Arc::new(|_| {
+                    NodeOutput::new()
+                        .set("score", json!(77))
+                        .set("messages", json!("hello"))
+                })),
+            )
             .add_end_edge("a")
             .set_entry_point("a")
             .compile();

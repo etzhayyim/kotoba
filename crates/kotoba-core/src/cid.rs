@@ -1,12 +1,14 @@
-use blake3::Hasher;
-use thiserror::Error;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KotobaCid(pub [u8; 36]);
 
 impl Default for KotobaCid {
-    fn default() -> Self { Self([0u8; 36]) }
+    fn default() -> Self {
+        Self([0u8; 36])
+    }
 } // version(1) + codec(1) + multihash(34)
 
 // Manual Serialize/Deserialize for [u8; 36] (fixed arrays need special handling in serde)
@@ -32,10 +34,15 @@ impl<'de> Deserialize<'de> for KotobaCid {
                 arr.copy_from_slice(v);
                 Ok(KotobaCid(arr))
             }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<KotobaCid, A::Error> {
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<KotobaCid, A::Error> {
                 let mut arr = [0u8; 36];
                 for (i, slot) in arr.iter_mut().enumerate() {
-                    *slot = seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
+                    *slot = seq
+                        .next_element()?
+                        .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
                 }
                 Ok(KotobaCid(arr))
             }
@@ -54,24 +61,25 @@ pub enum CidError {
 
 impl KotobaCid {
     pub const CODEC_DAG_CBOR: u8 = 0x71;
-    pub const MH_BLAKE3: u8 = 0x1e;
+    pub const MH_SHA2_256: u8 = 0x12;
+    pub const CIDV1: u8 = 1;
+    pub const DIGEST_LEN_SHA2_256: u8 = 32;
 
-    /// CIDv1 dag-cbor blake3-256 (clean room, no IPFS dep)
+    /// CIDv1 dag-cbor sha2-256 (IPFS-compatible).
     pub fn from_bytes(payload: &[u8]) -> Self {
-        let hash = Hasher::new().update(payload).finalize();
+        let hash = Sha256::digest(payload);
         let mut cid = [0u8; 36];
-        cid[0] = 1;                    // CIDv1
+        cid[0] = Self::CIDV1; // CIDv1
         cid[1] = Self::CODEC_DAG_CBOR; // dag-cbor
-        cid[2] = Self::MH_BLAKE3;      // blake3 multicodec
-        cid[3] = 32;                   // hash length varint
-        cid[4..36].copy_from_slice(hash.as_bytes());
+        cid[2] = Self::MH_SHA2_256; // sha2-256 multicodec
+        cid[3] = Self::DIGEST_LEN_SHA2_256; // hash length varint
+        cid[4..36].copy_from_slice(&hash);
         Self(cid)
     }
 
     pub fn from_cbor<T: serde::Serialize>(value: &T) -> Result<Self, CidError> {
         let mut buf = Vec::new();
-        ciborium::into_writer(value, &mut buf)
-            .map_err(|e| CidError::Cbor(e.to_string()))?;
+        ciborium::into_writer(value, &mut buf).map_err(|e| CidError::Cbor(e.to_string()))?;
         Ok(Self::from_bytes(&buf))
     }
 
@@ -82,13 +90,39 @@ impl KotobaCid {
     }
 
     /// Parse a multibase-encoded CID (base32lower, 'b' prefix).
-    /// Returns `None` if the string is malformed or decodes to != 36 bytes.
+    /// Returns `None` unless it is the Kotoba canonical CIDv1 dag-cbor sha2-256 form.
     pub fn from_multibase(s: &str) -> Option<Self> {
-        let hex = s.strip_prefix('b')?;
-        let bytes = data_encoding::BASE32_NOPAD
-            .decode(hex.to_uppercase().as_bytes())
-            .ok()?;
-        if bytes.len() != 36 { return None; }
+        s.strip_prefix('b')?;
+        let cid = s.parse::<::cid::Cid>().ok()?;
+        Self::from_standard_cid(&cid)
+    }
+
+    pub fn is_ipfs_compatible(&self) -> bool {
+        self.0[0] == Self::CIDV1
+            && self.0[1] == Self::CODEC_DAG_CBOR
+            && self.0[2] == Self::MH_SHA2_256
+            && self.0[3] == Self::DIGEST_LEN_SHA2_256
+    }
+
+    pub fn to_standard_cid(&self) -> Result<::cid::Cid, CidError> {
+        if !self.is_ipfs_compatible() {
+            return Err(CidError::InvalidBytes);
+        }
+        ::cid::Cid::try_from(self.0.as_slice()).map_err(|_| CidError::InvalidBytes)
+    }
+
+    pub fn from_standard_cid(cid: &::cid::Cid) -> Option<Self> {
+        if cid.version() != ::cid::Version::V1
+            || cid.codec() != u64::from(Self::CODEC_DAG_CBOR)
+            || cid.hash().code() != u64::from(Self::MH_SHA2_256)
+            || cid.hash().size() != Self::DIGEST_LEN_SHA2_256
+        {
+            return None;
+        }
+        let bytes = cid.to_bytes();
+        if bytes.len() != 36 {
+            return None;
+        }
         let mut arr = [0u8; 36];
         arr.copy_from_slice(&bytes);
         Some(Self(arr))
@@ -106,12 +140,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_bytes_header_is_cidv1_dag_cbor_blake3() {
+    fn from_bytes_header_is_cidv1_dag_cbor_sha2_256() {
         let cid = KotobaCid::from_bytes(b"hello");
-        assert_eq!(cid.0[0], 1,                            "CIDv1 version byte");
-        assert_eq!(cid.0[1], KotobaCid::CODEC_DAG_CBOR,   "dag-cbor codec");
-        assert_eq!(cid.0[2], KotobaCid::MH_BLAKE3,        "blake3 multicodec");
-        assert_eq!(cid.0[3], 32,                           "hash length varint");
+        assert_eq!(cid.0[0], KotobaCid::CIDV1, "CIDv1 version byte");
+        assert_eq!(cid.0[1], KotobaCid::CODEC_DAG_CBOR, "dag-cbor codec");
+        assert_eq!(cid.0[2], KotobaCid::MH_SHA2_256, "sha2-256 multicodec");
+        assert_eq!(
+            cid.0[3],
+            KotobaCid::DIGEST_LEN_SHA2_256,
+            "hash length varint"
+        );
     }
 
     #[test]
@@ -132,7 +170,10 @@ mod tests {
     fn multibase_roundtrip() {
         let cid = KotobaCid::from_bytes(b"roundtrip test");
         let encoded = cid.to_multibase();
-        assert!(encoded.starts_with('b'), "multibase prefix must be 'b' (base32lower)");
+        assert!(
+            encoded.starts_with('b'),
+            "multibase prefix must be 'b' (base32lower)"
+        );
         let decoded = KotobaCid::from_multibase(&encoded).expect("must roundtrip");
         assert_eq!(cid, decoded);
     }
@@ -167,7 +208,7 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::into_writer(&value, &mut buf).unwrap();
         let expected = KotobaCid::from_bytes(&buf);
-        let actual   = KotobaCid::from_cbor(&value).unwrap();
+        let actual = KotobaCid::from_cbor(&value).unwrap();
         assert_eq!(expected, actual);
     }
 
@@ -203,5 +244,45 @@ mod tests {
     fn cid_is_exactly_36_bytes() {
         let cid = KotobaCid::from_bytes(b"size-check");
         assert_eq!(cid.0.len(), 36);
+    }
+
+    #[test]
+    fn cid_is_parseable_as_standard_ipfs_cid() {
+        let cid = KotobaCid::from_bytes(b"hello");
+        let standard = cid.to_standard_cid().expect("valid standard CID");
+
+        assert_eq!(standard.version(), ::cid::Version::V1);
+        assert_eq!(standard.codec(), u64::from(KotobaCid::CODEC_DAG_CBOR));
+        assert_eq!(standard.hash().code(), u64::from(KotobaCid::MH_SHA2_256));
+        assert_eq!(standard.hash().size(), KotobaCid::DIGEST_LEN_SHA2_256);
+        assert_eq!(standard.to_string(), cid.to_multibase());
+    }
+
+    #[test]
+    fn standard_cid_roundtrip_preserves_exact_bytes() {
+        let cid = KotobaCid::from_bytes(b"standard roundtrip");
+        let standard = cid.to_standard_cid().unwrap();
+        let decoded = KotobaCid::from_standard_cid(&standard).expect("canonical CID");
+
+        assert_eq!(decoded, cid);
+        assert_eq!(decoded.0, standard.to_bytes().as_slice());
+    }
+
+    #[test]
+    fn from_standard_cid_rejects_non_kotoba_codec() {
+        let mut bytes = KotobaCid::from_bytes(b"raw codec").0;
+        bytes[1] = 0x55; // raw
+        let standard = ::cid::Cid::try_from(bytes.as_slice()).expect("valid raw CID");
+
+        assert!(KotobaCid::from_standard_cid(&standard).is_none());
+        assert!(KotobaCid::from_multibase(&standard.to_string()).is_none());
+    }
+
+    #[test]
+    fn to_standard_cid_rejects_non_canonical_bytes() {
+        let cid = KotobaCid([0u8; 36]);
+
+        assert!(!cid.is_ipfs_compatible());
+        assert!(cid.to_standard_cid().is_err());
     }
 }

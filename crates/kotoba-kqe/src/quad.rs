@@ -1,18 +1,22 @@
 use kotoba_core::cid::KotobaCid;
 use serde::{Deserialize, Serialize};
 
-/// Quad — (S, P, O, G) = KOTOBA's atomic fact unit (≅ Datom E,A,V,T)
+/// Legacy graph quad boundary.
+///
+/// New storage and reasoning code should use `Datom` as the atomic fact:
+/// `(E, A, V, T, Added)`. This type remains for ATProto/RDF/graph APIs whose
+/// public contract is still `(S, P, O, G)`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Quad {
-    pub graph:     KotobaCid,   // G = named graph (≅ Datom T, content-addressed)
-    pub subject:   KotobaCid,   // S = entity  (≅ Datom E)
-    pub predicate: String,      // P = attribute (≅ Datom A) — NSID
-    pub object:    QuadObject,  // O = value (≅ Datom V)
+pub struct LegacyQuad {
+    pub graph: KotobaCid,         // G = named graph (≅ Datom T, content-addressed)
+    pub subject: KotobaCid,       // S = entity  (≅ Datom E)
+    pub predicate: String,        // P = attribute (≅ Datom A) — NSID
+    pub object: LegacyQuadObject, // O = value (≅ Datom V)
 }
 
-/// Typed object — CID reference, scalar literal, vector, or encrypted value.
+/// Legacy quad value boundary — CID reference, scalar literal, vector, or encrypted value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum QuadObject {
+pub enum LegacyQuadObject {
     Cid(KotobaCid),
     Integer(i64),
     Float(f64),
@@ -22,7 +26,11 @@ pub enum QuadObject {
     /// Embedding vector (dim ≤ 1024 inline; larger → Vault CID)
     VectorF32(Vec<f32>),
     /// FP8 tensor reference (dim > 1024 → Vault blob CID)
-    TensorCid { cid: KotobaCid, shape: Vec<u32>, dtype: TensorDtype },
+    TensorCid {
+        cid: KotobaCid,
+        shape: Vec<u32>,
+        dtype: TensorDtype,
+    },
     /// Encrypted value — the actual content is AES-GCM ciphertext at `ct_cid`.
     /// The symmetric key is delivered via PRE after CACAO authorisation.
     /// VAET (reverse-ref index) does NOT index this variant — encrypted refs stay private.
@@ -35,18 +43,24 @@ pub enum QuadObject {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum TensorDtype { F32, F16, BF16, F8E4M3, F8E5M2 }
+pub enum TensorDtype {
+    F32,
+    F16,
+    BF16,
+    F8E4M3,
+    F8E5M2,
+}
 
-impl Quad {
+impl LegacyQuad {
     /// SPO sort key for EAVT index
     pub fn spo_key(&self) -> Vec<u8> {
         let mut key = Vec::new();
         key.extend_from_slice(&self.subject.0);
         key.extend_from_slice(self.predicate.as_bytes());
         match &self.object {
-            QuadObject::Cid(c) => key.extend_from_slice(&c.0),
+            LegacyQuadObject::Cid(c) => key.extend_from_slice(&c.0),
             // Encrypted: use ct_cid for dedup so each ciphertext is a distinct fact.
-            QuadObject::Encrypted { ct_cid, .. } => key.extend_from_slice(&ct_cid.0),
+            LegacyQuadObject::Encrypted { ct_cid, .. } => key.extend_from_slice(&ct_cid.0),
             _ => {}
         }
         key
@@ -57,10 +71,17 @@ impl Quad {
 mod tests {
     use super::*;
 
-    fn cid(tag: &[u8]) -> KotobaCid { KotobaCid::from_bytes(tag) }
+    fn cid(tag: &[u8]) -> KotobaCid {
+        KotobaCid::from_bytes(tag)
+    }
 
     fn quad(pred: &str, obj: QuadObject) -> Quad {
-        Quad { graph: cid(b"g"), subject: cid(b"s"), predicate: pred.to_string(), object: obj }
+        Quad {
+            graph: cid(b"g"),
+            subject: cid(b"s"),
+            predicate: pred.to_string(),
+            object: obj,
+        }
     }
 
     #[test]
@@ -89,11 +110,11 @@ mod tests {
 
     #[test]
     fn spo_key_scalar_object_not_appended() {
-        let q_int  = quad("p", QuadObject::Integer(42)).spo_key();
+        let q_int = quad("p", QuadObject::Integer(42)).spo_key();
         let q_text = quad("p", QuadObject::Text("x".to_string())).spo_key();
         // Both should be same length: subject + predicate only
         let expected_len = 36 + "p".len();
-        assert_eq!(q_int.len(),  expected_len);
+        assert_eq!(q_int.len(), expected_len);
         assert_eq!(q_text.len(), expected_len);
     }
 
@@ -101,7 +122,13 @@ mod tests {
     fn spo_key_encrypted_uses_ct_cid() {
         let ct = cid(b"ct");
         let pol = cid(b"policy");
-        let q = quad("enc/field", QuadObject::Encrypted { ct_cid: ct.clone(), policy_cid: pol });
+        let q = quad(
+            "enc/field",
+            QuadObject::Encrypted {
+                ct_cid: ct.clone(),
+                policy_cid: pol,
+            },
+        );
         let key = q.spo_key();
         assert_eq!(&key[36 + "enc/field".len()..], &ct.0);
     }
@@ -134,11 +161,15 @@ mod tests {
 
     #[test]
     fn spo_key_tensor_cid_not_appended() {
-        let k = quad("p", QuadObject::TensorCid {
-            cid: cid(b"t"),
-            shape: vec![4, 4],
-            dtype: TensorDtype::F32,
-        }).spo_key();
+        let k = quad(
+            "p",
+            QuadObject::TensorCid {
+                cid: cid(b"t"),
+                shape: vec![4, 4],
+                dtype: TensorDtype::F32,
+            },
+        )
+        .spo_key();
         assert_eq!(k.len(), 36 + "p".len());
     }
 
@@ -146,12 +177,12 @@ mod tests {
 
     #[test]
     fn tensor_dtype_equality_all_variants() {
-        assert_eq!(TensorDtype::F32,   TensorDtype::F32);
-        assert_eq!(TensorDtype::F16,   TensorDtype::F16);
-        assert_eq!(TensorDtype::BF16,  TensorDtype::BF16);
+        assert_eq!(TensorDtype::F32, TensorDtype::F32);
+        assert_eq!(TensorDtype::F16, TensorDtype::F16);
+        assert_eq!(TensorDtype::BF16, TensorDtype::BF16);
         assert_eq!(TensorDtype::F8E4M3, TensorDtype::F8E4M3);
         assert_eq!(TensorDtype::F8E5M2, TensorDtype::F8E5M2);
-        assert_ne!(TensorDtype::F32,   TensorDtype::F16);
+        assert_ne!(TensorDtype::F32, TensorDtype::F16);
         assert_ne!(TensorDtype::F8E4M3, TensorDtype::F8E5M2);
     }
 
@@ -169,7 +200,10 @@ mod tests {
         assert_ne!(QuadObject::Integer(7), QuadObject::Integer(8));
         assert_eq!(QuadObject::Bool(false), QuadObject::Bool(false));
         assert_ne!(QuadObject::Bool(true), QuadObject::Bool(false));
-        assert_eq!(QuadObject::Text("hi".to_string()), QuadObject::Text("hi".to_string()));
+        assert_eq!(
+            QuadObject::Text("hi".to_string()),
+            QuadObject::Text("hi".to_string())
+        );
     }
 
     #[test]
@@ -182,8 +216,14 @@ mod tests {
 
     #[test]
     fn quad_object_partial_eq_encrypted_variant() {
-        let enc1 = QuadObject::Encrypted { ct_cid: cid(b"ct1"), policy_cid: cid(b"pol") };
-        let enc2 = QuadObject::Encrypted { ct_cid: cid(b"ct2"), policy_cid: cid(b"pol") };
+        let enc1 = QuadObject::Encrypted {
+            ct_cid: cid(b"ct1"),
+            policy_cid: cid(b"pol"),
+        };
+        let enc2 = QuadObject::Encrypted {
+            ct_cid: cid(b"ct2"),
+            policy_cid: cid(b"pol"),
+        };
         assert_eq!(enc1.clone(), enc1.clone());
         assert_ne!(enc1, enc2);
     }
@@ -237,7 +277,7 @@ mod tests {
 
     #[test]
     fn serde_quad_object_bool() {
-        assert_eq!(roundtrip(QuadObject::Bool(true)),  QuadObject::Bool(true));
+        assert_eq!(roundtrip(QuadObject::Bool(true)), QuadObject::Bool(true));
         assert_eq!(roundtrip(QuadObject::Bool(false)), QuadObject::Bool(false));
     }
 
@@ -266,7 +306,7 @@ mod tests {
     #[test]
     fn serde_quad_object_encrypted() {
         let obj = QuadObject::Encrypted {
-            ct_cid:     cid(b"ct"),
+            ct_cid: cid(b"ct"),
             policy_cid: cid(b"policy"),
         };
         assert_eq!(roundtrip(obj.clone()), obj);
@@ -275,10 +315,10 @@ mod tests {
     #[test]
     fn serde_quad_full_roundtrip() {
         let q = Quad {
-            graph:     cid(b"graph"),
-            subject:   cid(b"subj"),
+            graph: cid(b"graph"),
+            subject: cid(b"subj"),
             predicate: "ai.gftd.test/attr".to_string(),
-            object:    QuadObject::Text("value".to_string()),
+            object: QuadObject::Text("value".to_string()),
         };
         let json = serde_json::to_string(&q).expect("serialize");
         let q2: Quad = serde_json::from_str(&json).expect("deserialize");

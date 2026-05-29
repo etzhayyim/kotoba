@@ -26,7 +26,8 @@ mod cid_serde {
     pub fn deserialize_cid_arr<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 36], D::Error> {
         let buf = serde_bytes::ByteBuf::deserialize(d)?;
         let v: &[u8] = buf.as_ref();
-        v.try_into().map_err(|_| serde::de::Error::invalid_length(v.len(), &"36-byte CID"))
+        v.try_into()
+            .map_err(|_| serde::de::Error::invalid_length(v.len(), &"36-byte CID"))
     }
 
     pub fn serialize_cid_vec<S: Serializer>(cids: &Vec<[u8; 36]>, s: S) -> Result<S::Ok, S::Error> {
@@ -45,13 +46,16 @@ mod cid_serde {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "sequence of 36-byte CIDs")
             }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<[u8; 36]>, A::Error> {
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Vec<[u8; 36]>, A::Error> {
                 let mut out = Vec::new();
                 while let Some(bytes) = seq.next_element::<serde_bytes::ByteBuf>()? {
                     let v: &[u8] = bytes.as_ref();
-                    let arr: [u8; 36] = v.try_into().map_err(|_| {
-                        serde::de::Error::invalid_length(v.len(), &self)
-                    })?;
+                    let arr: [u8; 36] = v
+                        .try_into()
+                        .map_err(|_| serde::de::Error::invalid_length(v.len(), &self))?;
                     out.push(arr);
                 }
                 Ok(out)
@@ -61,7 +65,8 @@ mod cid_serde {
     }
 
     pub fn serialize_block_vec<S: Serializer>(
-        blocks: &Vec<BlockEntry>, s: S,
+        blocks: &Vec<BlockEntry>,
+        s: S,
     ) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeSeq;
         let mut seq = s.serialize_seq(Some(blocks.len()))?;
@@ -80,15 +85,18 @@ mod cid_serde {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "sequence of (CID, bytes) tuples")
             }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<BlockEntry>, A::Error> {
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Vec<BlockEntry>, A::Error> {
                 let mut out = Vec::new();
                 while let Some((cid_buf, data_buf)) =
                     seq.next_element::<(serde_bytes::ByteBuf, serde_bytes::ByteBuf)>()?
                 {
                     let cid_bytes: &[u8] = cid_buf.as_ref();
-                    let arr: [u8; 36] = cid_bytes.try_into().map_err(|_| {
-                        serde::de::Error::invalid_length(cid_bytes.len(), &Self)
-                    })?;
+                    let arr: [u8; 36] = cid_bytes
+                        .try_into()
+                        .map_err(|_| serde::de::Error::invalid_length(cid_bytes.len(), &Self))?;
                     out.push((arr, data_buf.into_vec()));
                 }
                 Ok(out)
@@ -98,7 +106,8 @@ mod cid_serde {
     }
 
     pub fn serialize_opt_cid<S: Serializer>(
-        opt: &Option<[u8; 36]>, s: S,
+        opt: &Option<[u8; 36]>,
+        s: S,
     ) -> Result<S::Ok, S::Error> {
         match opt {
             Some(cid) => s.serialize_some(&serde_bytes::Bytes::new(cid)),
@@ -130,7 +139,8 @@ mod cid_serde {
     }
 
     pub fn serialize_want_since_vec<S: Serializer>(
-        items: &Vec<WantSince>, s: S,
+        items: &Vec<WantSince>,
+        s: S,
     ) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeSeq;
         let mut seq = s.serialize_seq(Some(items.len()))?;
@@ -151,7 +161,10 @@ mod cid_serde {
 /// `head_cid = None` means fresh agent — return full history from the graph root.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WantSince {
-    #[serde(serialize_with = "cid_serde::serialize_cid_arr", deserialize_with = "cid_serde::deserialize_cid_arr")]
+    #[serde(
+        serialize_with = "cid_serde::serialize_cid_arr",
+        deserialize_with = "cid_serde::deserialize_cid_arr"
+    )]
     pub graph_cid: [u8; 36],
     pub since_seq: u64,
     #[serde(
@@ -164,10 +177,16 @@ pub struct WantSince {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BitswapRequest {
     /// CIDs to check existence of (cheap, no data transfer)
-    #[serde(serialize_with = "cid_serde::serialize_cid_vec", deserialize_with = "cid_serde::deserialize_cid_vec")]
+    #[serde(
+        serialize_with = "cid_serde::serialize_cid_vec",
+        deserialize_with = "cid_serde::deserialize_cid_vec"
+    )]
     pub want_have: Vec<[u8; 36]>,
     /// CIDs to fetch bytes for
-    #[serde(serialize_with = "cid_serde::serialize_cid_vec", deserialize_with = "cid_serde::deserialize_cid_vec")]
+    #[serde(
+        serialize_with = "cid_serde::serialize_cid_vec",
+        deserialize_with = "cid_serde::deserialize_cid_vec"
+    )]
     pub want_block: Vec<[u8; 36]>,
     /// Selective-sync delta requests (SyncWindow wire format)
     #[serde(
@@ -180,11 +199,20 @@ pub struct BitswapRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BitswapResponse {
-    #[serde(serialize_with = "cid_serde::serialize_cid_vec", deserialize_with = "cid_serde::deserialize_cid_vec")]
-    pub have: Vec<[u8; 36]>,       // CIDs this peer has
-    #[serde(serialize_with = "cid_serde::serialize_cid_vec", deserialize_with = "cid_serde::deserialize_cid_vec")]
-    pub dont_have: Vec<[u8; 36]>,  // CIDs this peer does not have
-    #[serde(serialize_with = "cid_serde::serialize_block_vec", deserialize_with = "cid_serde::deserialize_block_vec")]
+    #[serde(
+        serialize_with = "cid_serde::serialize_cid_vec",
+        deserialize_with = "cid_serde::deserialize_cid_vec"
+    )]
+    pub have: Vec<[u8; 36]>, // CIDs this peer has
+    #[serde(
+        serialize_with = "cid_serde::serialize_cid_vec",
+        deserialize_with = "cid_serde::deserialize_cid_vec"
+    )]
+    pub dont_have: Vec<[u8; 36]>, // CIDs this peer does not have
+    #[serde(
+        serialize_with = "cid_serde::serialize_block_vec",
+        deserialize_with = "cid_serde::deserialize_block_vec"
+    )]
     pub blocks: Vec<BlockEntry>, // (CID, bytes) for want_block requests
     /// CBOR-serialised Commit structs, oldest-first, for want_since delta responses
     #[serde(
@@ -201,31 +229,49 @@ pub struct BitswapCodec;
 #[async_trait]
 impl request_response::Codec for BitswapCodec {
     type Protocol = &'static str;
-    type Request  = BitswapRequest;
+    type Request = BitswapRequest;
     type Response = BitswapResponse;
 
-    async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T) -> std::io::Result<Self::Request>
+    async fn read_request<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+    ) -> std::io::Result<Self::Request>
     where
         T: AsyncRead + Unpin + Send,
     {
         read_cbor(io).await
     }
 
-    async fn read_response<T>(&mut self, _: &Self::Protocol, io: &mut T) -> std::io::Result<Self::Response>
+    async fn read_response<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+    ) -> std::io::Result<Self::Response>
     where
         T: AsyncRead + Unpin + Send,
     {
         read_cbor(io).await
     }
 
-    async fn write_request<T>(&mut self, _: &Self::Protocol, io: &mut T, req: Self::Request) -> std::io::Result<()>
+    async fn write_request<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+        req: Self::Request,
+    ) -> std::io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
     {
         write_cbor(io, &req).await
     }
 
-    async fn write_response<T>(&mut self, _: &Self::Protocol, io: &mut T, resp: Self::Response) -> std::io::Result<()>
+    async fn write_response<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+        resp: Self::Response,
+    ) -> std::io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
     {
@@ -256,7 +302,8 @@ async fn read_cbor<T: AsyncRead + Unpin + Send, D: serde::de::DeserializeOwned>(
 }
 
 async fn write_cbor<T: AsyncWrite + Unpin + Send, S: Serialize>(
-    io: &mut T, value: &S,
+    io: &mut T,
+    value: &S,
 ) -> std::io::Result<()> {
     let mut buf = Vec::new();
     ciborium::into_writer(value, &mut buf)
@@ -281,14 +328,17 @@ mod tests {
         assert!(result.is_err(), "oversized length prefix must be rejected");
         let err = result.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-        assert!(err.to_string().contains("too large"), "error should mention size: {err}");
+        assert!(
+            err.to_string().contains("too large"),
+            "error should mention size: {err}"
+        );
     }
 
     #[tokio::test]
     async fn read_cbor_accepts_valid_size() {
         // A small valid CBOR-encoded BitswapRequest should pass through cleanly.
         let req = BitswapRequest {
-            want_have:  vec![],
+            want_have: vec![],
             want_block: vec![],
             want_since: vec![],
         };
@@ -298,7 +348,10 @@ mod tests {
         let stream: Vec<u8> = [&len_prefix[..], &encoded].concat();
 
         let result: std::io::Result<BitswapRequest> = read_cbor(&mut &*stream.as_slice()).await;
-        assert!(result.is_ok(), "valid small request must be accepted: {result:?}");
+        assert!(
+            result.is_ok(),
+            "valid small request must be accepted: {result:?}"
+        );
     }
 
     #[test]
@@ -344,7 +397,7 @@ mod tests {
     #[test]
     fn bitswap_request_empty_cbor_roundtrip() {
         let req = BitswapRequest {
-            want_have:  vec![],
+            want_have: vec![],
             want_block: vec![],
             want_since: vec![],
         };
@@ -359,9 +412,9 @@ mod tests {
     #[test]
     fn bitswap_response_empty_cbor_roundtrip() {
         let resp = BitswapResponse {
-            have:          vec![],
-            dont_have:     vec![],
-            blocks:        vec![],
+            have: vec![],
+            dont_have: vec![],
+            blocks: vec![],
             delta_commits: vec![],
         };
         let mut buf = Vec::new();
@@ -378,7 +431,7 @@ mod tests {
         let cid_a = [0xAAu8; 36];
         let cid_b = [0xBBu8; 36];
         let req = BitswapRequest {
-            want_have:  vec![cid_a],
+            want_have: vec![cid_a],
             want_block: vec![cid_b],
             want_since: vec![],
         };
@@ -391,12 +444,12 @@ mod tests {
 
     #[test]
     fn bitswap_response_with_block_entry_roundtrip() {
-        let cid  = [0xCCu8; 36];
+        let cid = [0xCCu8; 36];
         let data = b"block-data".to_vec();
         let resp = BitswapResponse {
-            have:          vec![cid],
-            dont_have:     vec![],
-            blocks:        vec![(cid, data.clone())],
+            have: vec![cid],
+            dont_have: vec![],
+            blocks: vec![(cid, data.clone())],
             delta_commits: vec![],
         };
         let mut buf = Vec::new();

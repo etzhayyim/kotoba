@@ -19,9 +19,9 @@ use std::{collections::HashMap, sync::Arc};
 
 #[derive(Clone)]
 pub struct IpfsPinClient {
-    client:   reqwest::Client,
+    client: reqwest::Client,
     endpoint: String,
-    token:    Option<String>,
+    token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,20 +61,20 @@ impl IpfsPinClient {
     fn authed(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.token {
             Some(t) => rb.bearer_auth(t),
-            None    => rb,
+            None => rb,
         }
     }
 
     /// Pin a CID recursively (fire-and-forget; call via `tokio::spawn`).
     pub async fn pin(&self, cid: &str) {
         let url = format!("{}?arg={cid}&recursive=true", self.api_url("pin/add"));
-        let rb  = self.authed(self.client.post(&url));
+        let rb = self.authed(self.client.post(&url));
 
         match rb.send().await {
             Err(e) => tracing::warn!(cid, err = %e, "ipfs pin/add request failed"),
             Ok(resp) if !resp.status().is_success() => {
                 let status = resp.status();
-                let text   = resp.text().await.unwrap_or_default();
+                let text = resp.text().await.unwrap_or_default();
                 tracing::warn!(cid, %status, body = %text, "ipfs pin/add rejected");
             }
             Ok(resp) => match resp.json::<PinAddResponse>().await {
@@ -87,13 +87,13 @@ impl IpfsPinClient {
     /// Unpin a CID (fire-and-forget; call via `tokio::spawn`).
     pub async fn unpin(&self, cid: &str) {
         let url = format!("{}?arg={cid}", self.api_url("pin/rm"));
-        let rb  = self.authed(self.client.post(&url));
+        let rb = self.authed(self.client.post(&url));
 
         match rb.send().await {
             Err(e) => tracing::warn!(cid, err = %e, "ipfs pin/rm request failed"),
             Ok(resp) if !resp.status().is_success() => {
                 let status = resp.status();
-                let text   = resp.text().await.unwrap_or_default();
+                let text = resp.text().await.unwrap_or_default();
                 // "not pinned" is not an error
                 if text.contains("not pinned") {
                     tracing::debug!(cid, "ipfs cid was not pinned, skipping unpin");
@@ -109,7 +109,7 @@ impl IpfsPinClient {
     /// `"not_found"`, or an error description.
     pub async fn status(&self, cid: &str) -> String {
         let url = format!("{}?type=all&arg={cid}", self.api_url("pin/ls"));
-        let rb  = self.authed(self.client.get(&url));
+        let rb = self.authed(self.client.get(&url));
 
         match rb.send().await {
             Err(e) => format!("request error: {e}"),
@@ -122,8 +122,9 @@ impl IpfsPinClient {
                 }
             }
             Ok(r) => match r.json::<PinLsResponse>().await {
-                Err(e)  => format!("parse error: {e}"),
-                Ok(ls)  => ls.keys
+                Err(e) => format!("parse error: {e}"),
+                Ok(ls) => ls
+                    .keys
                     .get(cid)
                     .map(|e| e.pin_type.clone())
                     .unwrap_or_else(|| "not_found".into()),

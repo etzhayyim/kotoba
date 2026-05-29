@@ -10,11 +10,11 @@ pub const BOUNDARY_MASK: u32 = 0x0000_00FF; // tune for ~256 byte chunks in PoC
 pub enum ProllyNode {
     Leaf {
         entries: Vec<(Vec<u8>, Vec<u8>)>, // (key, value) sorted
-        cid:     KotobaCid,
+        cid: KotobaCid,
     },
     Internal {
         children: Vec<(Vec<u8>, KotobaCid)>, // (boundary_key, child_cid)
-        cid:      KotobaCid,
+        cid: KotobaCid,
     },
 }
 
@@ -40,7 +40,9 @@ pub struct ProllyTree {
 }
 
 impl ProllyTree {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn root_cid(&self) -> Option<&KotobaCid> {
         self.root.as_ref()
@@ -48,7 +50,9 @@ impl ProllyTree {
 
     /// Diff two roots → returns (only_in_a, only_in_b)
     pub fn diff(a_root: &KotobaCid, b_root: &KotobaCid) -> (Vec<KotobaCid>, Vec<KotobaCid>) {
-        if a_root == b_root { return (vec![], vec![]); }
+        if a_root == b_root {
+            return (vec![], vec![]);
+        }
         // Full diff implementation: walk tree, compare children CIDs
         // Placeholder — O(|diff|) implementation in Phase 1
         (vec![a_root.clone()], vec![b_root.clone()])
@@ -58,15 +62,17 @@ impl ProllyTree {
     /// Returns the node's CID (= blake3(cbor_bytes)).
     pub fn put_node(node: &ProllyNode, store: &dyn BlockStore) -> anyhow::Result<KotobaCid> {
         let mut buf = Vec::new();
-        ciborium::into_writer(node, &mut buf)
-            .map_err(|e| anyhow::anyhow!("cbor encode: {e}"))?;
+        ciborium::into_writer(node, &mut buf).map_err(|e| anyhow::anyhow!("cbor encode: {e}"))?;
         let cid = KotobaCid::from_bytes(&buf);
         store.put(&cid, &buf)?;
         Ok(cid)
     }
 
     /// Load a ProllyNode from the block store by CID.
-    pub fn load_node(cid: &KotobaCid, store: &dyn BlockStore) -> anyhow::Result<Option<ProllyNode>> {
+    pub fn load_node(
+        cid: &KotobaCid,
+        store: &dyn BlockStore,
+    ) -> anyhow::Result<Option<ProllyNode>> {
         match store.get(cid)? {
             None => Ok(None),
             Some(bytes) => {
@@ -82,9 +88,14 @@ impl ProllyTree {
     /// Recursively follows all `Internal` node children.  Leaf entries are not followed
     /// (their values are opaque bytes, not CID references).  Used by GC to compute the
     /// live set reachable from a commit's ProllyTree roots.
-    pub fn walk_all_cids(root: &KotobaCid, store: &dyn BlockStore) -> anyhow::Result<Vec<KotobaCid>> {
+    pub fn walk_all_cids(
+        root: &KotobaCid,
+        store: &dyn BlockStore,
+    ) -> anyhow::Result<Vec<KotobaCid>> {
         let mut out = vec![root.clone()];
-        let Some(node) = Self::load_node(root, store)? else { return Ok(out); };
+        let Some(node) = Self::load_node(root, store)? else {
+            return Ok(out);
+        };
         if let ProllyNode::Internal { children, .. } = node {
             for (_, child_cid) in children {
                 out.extend(Self::walk_all_cids(&child_cid, store)?);
@@ -115,10 +126,13 @@ impl ProllyTree {
     ///      remains — each level applies the same boundary split to child keys.
     pub fn build_tree(
         entries: Vec<(Vec<u8>, Vec<u8>)>,
-        store:   &dyn BlockStore,
+        store: &dyn BlockStore,
     ) -> anyhow::Result<KotobaCid> {
         if entries.is_empty() {
-            let leaf = ProllyNode::Leaf { entries: vec![], cid: KotobaCid::default() };
+            let leaf = ProllyNode::Leaf {
+                entries: vec![],
+                cid: KotobaCid::default(),
+            };
             return Self::put_node(&leaf, store);
         }
 
@@ -134,25 +148,31 @@ impl ProllyTree {
 
     fn build_leaf_level(
         entries: Vec<(Vec<u8>, Vec<u8>)>,
-        store:   &dyn BlockStore,
+        store: &dyn BlockStore,
     ) -> anyhow::Result<Vec<(Vec<u8>, KotobaCid)>> {
         let mut ptrs: Vec<(Vec<u8>, KotobaCid)> = Vec::new();
-        let mut chunk: Vec<(Vec<u8>, Vec<u8>)>   = Vec::new();
+        let mut chunk: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
 
         for entry in entries {
             let at_boundary = ProllyNode::is_boundary(&entry.0);
             chunk.push(entry);
             if at_boundary {
                 let max_key = chunk.last().unwrap().0.clone();
-                let leaf    = ProllyNode::Leaf { entries: std::mem::take(&mut chunk), cid: KotobaCid::default() };
-                let cid     = Self::put_node(&leaf, store)?;
+                let leaf = ProllyNode::Leaf {
+                    entries: std::mem::take(&mut chunk),
+                    cid: KotobaCid::default(),
+                };
+                let cid = Self::put_node(&leaf, store)?;
                 ptrs.push((max_key, cid));
             }
         }
         if !chunk.is_empty() {
             let max_key = chunk.last().unwrap().0.clone();
-            let leaf    = ProllyNode::Leaf { entries: chunk, cid: KotobaCid::default() };
-            let cid     = Self::put_node(&leaf, store)?;
+            let leaf = ProllyNode::Leaf {
+                entries: chunk,
+                cid: KotobaCid::default(),
+            };
+            let cid = Self::put_node(&leaf, store)?;
             ptrs.push((max_key, cid));
         }
         Ok(ptrs)
@@ -170,16 +190,17 @@ impl ProllyTree {
     /// Returns `None` if the key is not found.
     pub fn get(
         root: &KotobaCid,
-        key:  &[u8],
+        key: &[u8],
         store: &dyn BlockStore,
     ) -> anyhow::Result<Option<Vec<u8>>> {
         let Some(node) = Self::load_node(root, store)? else {
             return Ok(None);
         };
         match node {
-            ProllyNode::Leaf { entries, .. } => {
-                Ok(entries.into_iter().find(|(k, _)| k.as_slice() == key).map(|(_, v)| v))
-            }
+            ProllyNode::Leaf { entries, .. } => Ok(entries
+                .into_iter()
+                .find(|(k, _)| k.as_slice() == key)
+                .map(|(_, v)| v)),
             ProllyNode::Internal { children, .. } => {
                 // Find the first child whose max_key >= key, then recurse.
                 let child_cid = children
@@ -188,7 +209,7 @@ impl ProllyTree {
                     .map(|(_, cid)| cid);
                 match child_cid {
                     Some(cid) => Self::get(&cid, key, store),
-                    None      => Ok(None),
+                    None => Ok(None),
                 }
             }
         }
@@ -202,19 +223,18 @@ impl ProllyTree {
     ///
     /// Cost: O(log N + M) block loads, where M = number of matching leaf entries.
     pub fn scan_prefix(
-        root:   &KotobaCid,
+        root: &KotobaCid,
         prefix: &[u8],
-        store:  &dyn BlockStore,
+        store: &dyn BlockStore,
     ) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let Some(node) = Self::load_node(root, store)? else {
             return Ok(vec![]);
         };
         match node {
-            ProllyNode::Leaf { entries, .. } => {
-                Ok(entries.into_iter()
-                    .filter(|(k, _)| k.starts_with(prefix))
-                    .collect())
-            }
+            ProllyNode::Leaf { entries, .. } => Ok(entries
+                .into_iter()
+                .filter(|(k, _)| k.starts_with(prefix))
+                .collect()),
             ProllyNode::Internal { children, .. } => {
                 let mut result = Vec::new();
                 let mut found_any = false;
@@ -242,7 +262,7 @@ impl ProllyTree {
 
     fn build_internal_level(
         children: Vec<(Vec<u8>, KotobaCid)>,
-        store:    &dyn BlockStore,
+        store: &dyn BlockStore,
     ) -> anyhow::Result<KotobaCid> {
         let mut ptrs: Vec<(Vec<u8>, KotobaCid)> = Vec::new();
         let mut chunk: Vec<(Vec<u8>, KotobaCid)> = Vec::new();
@@ -253,19 +273,25 @@ impl ProllyTree {
             // same key keeps triggering the boundary check at every level.
             // The CID changes at each level (it's the hash of node content), so
             // the boundary condition will not repeat indefinitely.
-            let at_boundary = ProllyNode::is_boundary(&child.1.0);
+            let at_boundary = ProllyNode::is_boundary(&child.1 .0);
             chunk.push(child);
             if at_boundary {
                 let max_key = chunk.last().unwrap().0.clone();
-                let node    = ProllyNode::Internal { children: std::mem::take(&mut chunk), cid: KotobaCid::default() };
-                let cid     = Self::put_node(&node, store)?;
+                let node = ProllyNode::Internal {
+                    children: std::mem::take(&mut chunk),
+                    cid: KotobaCid::default(),
+                };
+                let cid = Self::put_node(&node, store)?;
                 ptrs.push((max_key, cid));
             }
         }
         if !chunk.is_empty() {
             let max_key = chunk.last().unwrap().0.clone();
-            let node    = ProllyNode::Internal { children: chunk, cid: KotobaCid::default() };
-            let cid     = Self::put_node(&node, store)?;
+            let node = ProllyNode::Internal {
+                children: chunk,
+                cid: KotobaCid::default(),
+            };
+            let cid = Self::put_node(&node, store)?;
             ptrs.push((max_key, cid));
         }
 
@@ -293,7 +319,9 @@ mod tests {
 
     impl MemoryBlockStore {
         fn new() -> Self {
-            Self { blocks: Arc::new(RwLock::new(HashMap::new())) }
+            Self {
+                blocks: Arc::new(RwLock::new(HashMap::new())),
+            }
         }
         fn block_count(&self) -> usize {
             self.blocks.read().unwrap().len()
@@ -302,7 +330,10 @@ mod tests {
 
     impl BlockStore for MemoryBlockStore {
         fn put(&self, cid: &KotobaCid, data: &[u8]) -> anyhow::Result<()> {
-            self.blocks.write().unwrap().insert(cid.0, Bytes::copy_from_slice(data));
+            self.blocks
+                .write()
+                .unwrap()
+                .insert(cid.0, Bytes::copy_from_slice(data));
             Ok(())
         }
         fn get(&self, cid: &KotobaCid) -> anyhow::Result<Option<Bytes>> {
@@ -419,8 +450,8 @@ mod tests {
         // Keys: "alice:name", "alice:knows", "bob:name", "charlie:name"
         let entries: Vec<(Vec<u8>, Vec<u8>)> = vec![
             (b"alice:knows".to_vec(), b"bob".to_vec()),
-            (b"alice:name".to_vec(),  b"Alice".to_vec()),
-            (b"bob:name".to_vec(),    b"Bob".to_vec()),
+            (b"alice:name".to_vec(), b"Alice".to_vec()),
+            (b"bob:name".to_vec(), b"Bob".to_vec()),
             (b"charlie:name".to_vec(), b"Charlie".to_vec()),
         ];
         let root = ProllyTree::build_tree(entries, &store).unwrap();
@@ -429,10 +460,14 @@ mod tests {
         assert_eq!(matches.len(), 2, "expected 2 entries for alice prefix");
         let keys: std::collections::HashSet<Vec<u8>> =
             matches.iter().map(|(k, _)| k.clone()).collect();
-        assert!(keys.contains(b"alice:knows".as_ref() as &[u8]),
-            "alice:knows must be found");
-        assert!(keys.contains(b"alice:name".as_ref() as &[u8]),
-            "alice:name must be found");
+        assert!(
+            keys.contains(b"alice:knows".as_ref() as &[u8]),
+            "alice:knows must be found"
+        );
+        assert!(
+            keys.contains(b"alice:name".as_ref() as &[u8]),
+            "alice:name must be found"
+        );
     }
 
     /// scan_prefix with no matching entries returns empty vec.
@@ -453,9 +488,15 @@ mod tests {
         let store = MemoryBlockStore::new();
         // prefix "b" entries: "b000".."b049" (50 entries) interleaved with "a*" and "c*"
         let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        for i in 0u32..500 { entries.push((format!("a{i:04}").into_bytes(), b"va".to_vec())); }
-        for i in 0u32..50  { entries.push((format!("b{i:04}").into_bytes(), b"vb".to_vec())); }
-        for i in 0u32..450 { entries.push((format!("c{i:04}").into_bytes(), b"vc".to_vec())); }
+        for i in 0u32..500 {
+            entries.push((format!("a{i:04}").into_bytes(), b"va".to_vec()));
+        }
+        for i in 0u32..50 {
+            entries.push((format!("b{i:04}").into_bytes(), b"vb".to_vec()));
+        }
+        for i in 0u32..450 {
+            entries.push((format!("c{i:04}").into_bytes(), b"vc".to_vec()));
+        }
         entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
         let root = ProllyTree::build_tree(entries, &store).unwrap();
 
@@ -499,8 +540,14 @@ mod tests {
     fn diff_same_root_returns_empty_vecs() {
         let root = KotobaCid::from_bytes(b"same-root");
         let (only_a, only_b) = ProllyTree::diff(&root, &root);
-        assert!(only_a.is_empty(), "diff of same root: only_in_a must be empty");
-        assert!(only_b.is_empty(), "diff of same root: only_in_b must be empty");
+        assert!(
+            only_a.is_empty(),
+            "diff of same root: only_in_a must be empty"
+        );
+        assert!(
+            only_b.is_empty(),
+            "diff of same root: only_in_b must be empty"
+        );
     }
 
     #[test]
@@ -509,8 +556,10 @@ mod tests {
         let root_b = KotobaCid::from_bytes(b"root-b");
         let (only_a, only_b) = ProllyTree::diff(&root_a, &root_b);
         // With the current placeholder impl, roots themselves are returned.
-        assert!(!only_a.is_empty() || !only_b.is_empty(),
-            "diff of different roots must report at least one difference");
+        assert!(
+            !only_a.is_empty() || !only_b.is_empty(),
+            "diff of different roots must report at least one difference"
+        );
     }
 
     #[test]

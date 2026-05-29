@@ -1,5 +1,8 @@
 /// Two-node block exchange: A stores a block, B fetches it via `/kotoba/ipfs/1.0.0`.
-use kotoba_ipfs::IpfsConfig;
+use ciborium::value::Value as CborValue;
+use ipld_core::ipld::Ipld;
+use kotoba_ipfs::{raw_cid, IpfsConfig, Multiaddr, CODEC_DAG_CBOR, CODEC_RAW};
+use serde::{Deserialize, Serialize};
 use tokio::time::{timeout, Duration};
 
 #[tokio::test]
@@ -12,25 +15,45 @@ async fn two_node_block_exchange() {
     let data = b"hello kotoba-ipfs block exchange".to_vec();
 
     // Node A on a fixed port so B can dial it.
-    let node_a = IpfsConfig {
-        listen: "/ip4/127.0.0.1/tcp/17011".parse().unwrap(),
-    }
-    .start()
-    .await
-    .expect("node A start");
+    let node_a = IpfsConfig::new()
+        .with_listen("/ip4/127.0.0.1/tcp/17011".parse().unwrap())
+        .start()
+        .await
+        .expect("node A start");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let cid = node_a.put_block(data.clone()).await.expect("put_block");
+    let cid = node_a.put_raw_block(&data).await.expect("put_raw_block");
     let peer_a = node_a.peer_id();
     eprintln!("node A peer_id: {peer_a}");
     eprintln!("stored CID:     {cid}");
 
-    // Node B on ephemeral port, dials A.
-    let node_b = IpfsConfig::new().start().await.expect("node B start");
-    node_b
-        .dial(format!("/ip4/127.0.0.1/tcp/17011/p2p/{peer_a}").parse().unwrap())
-        .expect("dial");
+    let peer_a_addr: Multiaddr = format!("/ip4/127.0.0.1/tcp/17011/p2p/{peer_a}")
+        .parse()
+        .unwrap();
+    // Node B on ephemeral port, seeded with A as a bootstrap peer.
+    let node_b = IpfsConfig::new()
+        .with_bootstrap(vec![peer_a_addr.clone()])
+        .start()
+        .await
+        .expect("node B start");
+    assert_eq!(
+        node_b.bootstrap_list().await.expect("bootstrap/list"),
+        vec![peer_a_addr.clone()]
+    );
+    assert_eq!(
+        node_b
+            .bootstrap_add(peer_a_addr.clone())
+            .await
+            .expect("bootstrap/add"),
+        vec![peer_a_addr.clone()]
+    );
+    let connected = node_b
+        .swarm_connect(peer_a_addr.clone())
+        .await
+        .expect("swarm/connect");
+    assert_eq!(connected.peer, peer_a);
+    assert_eq!(connected.addr, peer_a_addr);
 
     // Wait for connection to establish.
     tokio::time::sleep(Duration::from_millis(400)).await;
@@ -38,16 +61,493 @@ async fn two_node_block_exchange() {
     let peers = node_b.connected_peers().await.expect("peers");
     eprintln!("B connected peers: {peers:?}");
     assert!(peers.contains(&peer_a), "B should be connected to A");
+    assert_eq!(node_b.swarm_peers().await.expect("swarm/peers").len(), 1);
+    assert_eq!(
+        node_b
+            .dht_find_peer(peer_a)
+            .await
+            .expect("dht/findpeer")
+            .len(),
+        1
+    );
+    node_a.dht_provide(&cid).await.expect("dht/provide");
+    let providers = node_a
+        .dht_find_providers(&cid)
+        .await
+        .expect("dht/findprovs");
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0].peer, peer_a);
+    assert!(!providers[0].addrs.is_empty());
 
     // B fetches the block from A.
-    let fetched = timeout(
-        Duration::from_secs(5),
-        node_b.get_block(cid, peer_a),
-    )
-    .await
-    .expect("timed out waiting for block")
-    .expect("get_block failed");
+    let fetched = timeout(Duration::from_secs(5), node_b.fetch_block(&cid, peer_a))
+        .await
+        .expect("timed out waiting for block")
+        .expect("get_block failed");
 
     assert_eq!(fetched, data, "fetched data must match original");
+    let bw_a = node_a.stats_bw();
+    let bw_b = node_b.stats_bw();
+    assert!(bw_a.total_out >= data.len() as u64);
+    assert!(bw_b.total_in >= data.len() as u64);
+    let bitswap_b = node_b.stats_bitswap().await.expect("stats/bitswap");
+    assert!(bitswap_b.blocks_received >= 1);
+    assert!(bitswap_b.data_received >= data.len() as u64);
+    assert_eq!(bitswap_b.peers, vec![peer_a]);
+    let disconnected = node_b
+        .swarm_disconnect(peer_a)
+        .await
+        .expect("swarm/disconnect")
+        .expect("peer removed");
+    assert_eq!(disconnected.peer, peer_a);
+    assert!(node_b
+        .swarm_disconnect(peer_a)
+        .await
+        .expect("swarm/disconnect idempotent")
+        .is_none());
+    assert_eq!(
+        node_b
+            .bootstrap_rm(&peer_a_addr)
+            .await
+            .expect("bootstrap/rm"),
+        vec![peer_a_addr.clone()]
+    );
+    assert!(node_b
+        .bootstrap_clear()
+        .await
+        .expect("bootstrap/rm all")
+        .is_empty());
     eprintln!("two-node block exchange: PASS");
+}
+
+#[tokio::test]
+async fn repo_persists_blocks_and_pins() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data = b"persistent block".to_vec();
+
+    let node = IpfsConfig::new()
+        .with_repo_path(temp.path())
+        .start()
+        .await
+        .expect("node start");
+    let cid = node.put_raw_block(&data).await.expect("put");
+    node.pin(&cid).await.expect("pin");
+    assert_eq!(
+        node.block_stat(&cid).await.expect("stat").size,
+        data.len() as u64
+    );
+    assert_eq!(node.list_blocks().await.expect("blocks"), vec![cid]);
+    assert_eq!(node.list_pins().await.expect("pins"), vec![cid]);
+    node.shutdown().await;
+
+    let restarted = IpfsConfig::new()
+        .with_repo_path(temp.path())
+        .start()
+        .await
+        .expect("restart");
+    assert_eq!(restarted.get_block(&cid).await.expect("get"), data);
+    assert!(restarted.is_pinned(&cid).await.expect("is pinned"));
+}
+
+#[tokio::test]
+async fn gc_removes_unpinned_blocks_and_keeps_pinned() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let node = IpfsConfig::new()
+        .with_repo_path(temp.path())
+        .start()
+        .await
+        .expect("node start");
+
+    let pinned = node.put_raw_block(b"pinned").await.expect("put pinned");
+    let loose = node.put_raw_block(b"loose").await.expect("put loose");
+    node.pin(&pinned).await.expect("pin");
+
+    let removed = node.gc().await.expect("gc");
+    assert_eq!(removed, vec![loose]);
+    assert!(node.has_block(&pinned).await.expect("has pinned"));
+    assert!(!node.has_block(&loose).await.expect("has loose"));
+}
+
+#[tokio::test]
+async fn kubo_compatible_local_api_surface() {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct Doc {
+        title: String,
+        n: u64,
+    }
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let node = IpfsConfig::new()
+        .with_repo_path(temp.path())
+        .start()
+        .await
+        .expect("node start");
+
+    let raw = node.add(b"hello").await.expect("add");
+    assert_eq!(node.block_get(&raw).await.expect("block/get"), b"hello"[..]);
+    assert_eq!(node.cat(&raw).await.expect("cat"), b"hello"[..]);
+    assert_eq!(
+        node.resolve_path(format!("/ipfs/{raw}"))
+            .await
+            .expect("resolve /ipfs raw")
+            .cid,
+        raw
+    );
+    assert_eq!(
+        node.cat_path(format!("/ipfs/{raw}"))
+            .await
+            .expect("cat /ipfs raw"),
+        b"hello"[..]
+    );
+    assert!(node
+        .dht_find_providers(&raw)
+        .await
+        .expect("dht/findprovs empty")
+        .is_empty());
+    node.dht_provide(&raw).await.expect("dht/provide");
+    let providers = node.dht_find_providers(&raw).await.expect("dht/findprovs");
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0].peer, node.peer_id());
+    let codec_put = node
+        .block_put_codec(CODEC_RAW, b"hello codec")
+        .await
+        .expect("block/put codec");
+    assert_eq!(codec_put.cid, raw_cid(b"hello codec"));
+    assert_eq!(codec_put.size, 11);
+    assert_eq!(
+        node.block_get(&codec_put.cid)
+            .await
+            .expect("block/get codec"),
+        b"hello codec"[..]
+    );
+    let raw_object = node.object_stat(&raw).await.expect("object/stat raw");
+    assert_eq!(raw_object.cid, raw);
+    assert_eq!(raw_object.codec, CODEC_RAW);
+    assert_eq!(raw_object.block_size, 5);
+    assert_eq!(raw_object.cumulative_size, 5);
+
+    let doc = Doc {
+        title: "kotoba".into(),
+        n: 42,
+    };
+    let dag = node.dag_put(&doc).await.expect("dag/put");
+    let decoded: Doc = node.dag_get(&dag).await.expect("dag/get");
+    assert_eq!(decoded, doc);
+    let dag_object = node.object_stat(&dag).await.expect("object/stat dag");
+    assert_eq!(dag_object.cid, dag);
+    assert_eq!(dag_object.codec, CODEC_DAG_CBOR);
+    assert!(dag_object.block_size > 0);
+    assert_eq!(dag_object.block_size, dag_object.cumulative_size);
+    let dag_stat = node.dag_stat(&dag).await.expect("dag/stat");
+    assert_eq!(dag_stat.cid, dag);
+    assert_eq!(dag_stat.codec, CODEC_DAG_CBOR);
+    assert_eq!(dag_stat.size, dag_object.block_size);
+    assert!(node.dag_stat(&raw).await.is_err());
+    let root_resolve = node.dag_resolve(&dag, "").await.expect("dag/resolve root");
+    assert_eq!(root_resolve.cid, dag);
+    assert_eq!(root_resolve.rem_path, "");
+
+    let leaf = put_cbor_value(&node, CborValue::Text("leaf".into()))
+        .await
+        .expect("dag leaf");
+    let mut leaf_bytes = vec![0];
+    leaf_bytes.extend(leaf.to_bytes());
+    let child = put_cbor_value(
+        &node,
+        CborValue::Map(vec![(
+            CborValue::Text("leaf".into()),
+            CborValue::Tag(42, Box::new(CborValue::Bytes(leaf_bytes))),
+        )]),
+    )
+    .await
+    .expect("dag child");
+    let mut link_bytes = vec![0];
+    link_bytes.extend(child.to_bytes());
+    let linked = put_cbor_value(
+        &node,
+        CborValue::Map(vec![(
+            CborValue::Text("child".into()),
+            CborValue::Tag(42, Box::new(CborValue::Bytes(link_bytes))),
+        )]),
+    )
+    .await
+    .expect("dag linked");
+    assert_eq!(node.refs(&linked, false).await.expect("refs"), vec![child]);
+    assert_eq!(
+        node.refs(&linked, true).await.expect("recursive refs"),
+        vec![child, leaf]
+    );
+    let ipld = node.dag_get_ipld(&linked).await.expect("dag/get ipld");
+    let Ipld::Map(map) = ipld else {
+        panic!("linked dag-cbor root should decode as IPLD map");
+    };
+    assert!(matches!(map.get("child"), Some(Ipld::Link(link)) if link == &child));
+    let link_resolve = node
+        .dag_resolve(&linked, "/child")
+        .await
+        .expect("dag/resolve link");
+    assert_eq!(link_resolve.cid, child);
+    assert_eq!(link_resolve.rem_path, "");
+    let path_resolve = node
+        .resolve_path(format!("/ipfs/{linked}/child"))
+        .await
+        .expect("resolve /ipfs dag link path");
+    assert_eq!(path_resolve.cid, child);
+    assert_eq!(path_resolve.rem_path, "");
+
+    let updated_pin = node.add(b"hello v2").await.expect("add updated pin");
+    node.pin_add(&raw).await.expect("pin/add");
+    assert!(node.is_pinned(&raw).await.expect("is pinned"));
+    assert_eq!(node.pin_ls().await.expect("pin/ls"), vec![raw]);
+    assert_eq!(
+        node.pin_verify().await.expect("pin/verify"),
+        vec![kotoba_ipfs::PinVerify {
+            cid: raw,
+            ok: true,
+            error: None,
+        }]
+    );
+    node.pin_update(&raw, &updated_pin)
+        .await
+        .expect("pin/update");
+    assert!(!node.is_pinned(&raw).await.expect("old pin removed"));
+    assert!(node
+        .is_pinned(&updated_pin)
+        .await
+        .expect("new pin inserted"));
+    node.pin_rm(&updated_pin).await.expect("pin/rm updated");
+    assert!(!node
+        .is_pinned(&updated_pin)
+        .await
+        .expect("updated pin after rm"));
+    node.pin_add(&raw).await.expect("pin/add raw again");
+    node.pin_rm(&raw).await.expect("pin/rm");
+    assert!(!node.is_pinned(&raw).await.expect("is pinned after rm"));
+    node.pin_add(&linked).await.expect("pin/add recursive dag");
+    assert!(node
+        .pin_verify()
+        .await
+        .expect("pin/verify recursive dag")
+        .iter()
+        .any(|entry| entry.cid == linked && entry.ok));
+    let dag_gc = node.repo_gc().await.expect("repo/gc pinned dag");
+    assert!(!dag_gc.contains(&linked));
+    assert!(!dag_gc.contains(&child));
+    assert!(!dag_gc.contains(&leaf));
+    assert!(node.has_block(&linked).await.expect("has linked after gc"));
+    assert!(node.has_block(&child).await.expect("has child after gc"));
+    assert!(node.has_block(&leaf).await.expect("has leaf after gc"));
+    node.pin_rm(&linked).await.expect("pin/rm recursive dag");
+    assert_eq!(node.add(b"hello").await.expect("re-add raw"), raw);
+    assert_eq!(node.dag_put(&doc).await.expect("re-add dag"), dag);
+
+    node.files_write("/docs/hello.txt", &raw)
+        .await
+        .expect("files/write");
+    let write_bytes_stat = node
+        .files_write_bytes("/docs/generated.txt", b"generated", true)
+        .await
+        .expect("files/write bytes");
+    assert_eq!(write_bytes_stat.path, "/docs/generated.txt");
+    assert_eq!(write_bytes_stat.size, 9);
+    assert_eq!(
+        node.files_read("/docs/generated.txt")
+            .await
+            .expect("files/read generated"),
+        b"generated"[..]
+    );
+    assert_eq!(
+        node.files_read("/docs/hello.txt")
+            .await
+            .expect("files/read"),
+        b"hello"[..]
+    );
+    let file_stat = node
+        .files_stat("/docs/hello.txt")
+        .await
+        .expect("files/stat");
+    assert_eq!(file_stat.path, "/docs/hello.txt");
+    assert_eq!(file_stat.cid, raw);
+    assert_eq!(file_stat.size, 5);
+    assert_eq!(
+        node.files_flush("/docs/hello.txt")
+            .await
+            .expect("files/flush"),
+        file_stat
+    );
+    let files = node.files_ls("/docs").await.expect("files/ls");
+    assert_eq!(files.len(), 2);
+    assert!(files
+        .iter()
+        .any(|entry| entry.path == "/docs/hello.txt" && entry.cid == Some(raw)));
+    assert!(files.iter().any(
+        |entry| entry.path == "/docs/generated.txt" && entry.cid == Some(write_bytes_stat.cid)
+    ));
+    assert_eq!(node.files_ls("/").await.expect("files/ls root").len(), 3);
+
+    node.files_mkdir("/docs/archive", true)
+        .await
+        .expect("files/mkdir");
+    let docs_after_mkdir = node.files_ls("/docs").await.expect("files/ls mkdir");
+    assert!(docs_after_mkdir
+        .iter()
+        .any(|entry| entry.path == "/docs/archive" && entry.cid.is_none()));
+    node.files_cp("/docs/hello.txt", "/docs/archive/hello-copy.txt")
+        .await
+        .expect("files/cp");
+    assert_eq!(
+        node.files_read("/docs/archive/hello-copy.txt")
+            .await
+            .expect("files/read copy"),
+        b"hello"[..]
+    );
+    let copy_stat = node
+        .files_stat("/docs/archive/hello-copy.txt")
+        .await
+        .expect("files/stat copy");
+    assert_eq!(copy_stat.cid, raw);
+    assert_eq!(copy_stat.size, 5);
+    node.files_cp(format!("/ipfs/{raw}"), "/docs/from-ipfs.txt")
+        .await
+        .expect("files/cp /ipfs source");
+    assert_eq!(
+        node.files_read("/docs/from-ipfs.txt")
+            .await
+            .expect("files/read /ipfs copy"),
+        b"hello"[..]
+    );
+    node.files_mv("/docs/from-ipfs.txt", "/docs/archive/from-ipfs-moved.txt")
+        .await
+        .expect("files/mv file");
+    assert_eq!(
+        node.files_read("/docs/archive/from-ipfs-moved.txt")
+            .await
+            .expect("files/read moved file"),
+        b"hello"[..]
+    );
+    assert!(node.files_read("/docs/from-ipfs.txt").await.is_err());
+    node.files_mkdir("/docs/move-src", true)
+        .await
+        .expect("files/mkdir move-src");
+    node.files_cp(format!("/ipfs/{raw}"), "/docs/move-src/nested.txt")
+        .await
+        .expect("files/cp nested /ipfs source");
+    node.files_mv("/docs/move-src", "/docs/archive/moved-dir")
+        .await
+        .expect("files/mv dir");
+    assert_eq!(
+        node.files_read("/docs/archive/moved-dir/nested.txt")
+            .await
+            .expect("files/read moved dir child"),
+        b"hello"[..]
+    );
+
+    let refs = node.refs_local().await.expect("refs/local");
+    assert!(refs.contains(&raw));
+    assert!(refs.contains(&dag));
+
+    let published = node
+        .name_publish("k51-kotoba-local", &raw, "2026-05-29T00:00:00Z")
+        .await
+        .expect("name/publish");
+    assert_eq!(published.value, raw.to_string());
+    assert_eq!(published.sequence, 1);
+    let resolved = node
+        .name_resolve("k51-kotoba-local")
+        .await
+        .expect("name/resolve");
+    assert_eq!(resolved.cid, raw);
+    assert_eq!(resolved.path, format!("/ipfs/{raw}"));
+    assert_eq!(resolved.record, published);
+    assert_eq!(
+        node.resolve_path("/ipns/k51-kotoba-local")
+            .await
+            .expect("resolve /ipns")
+            .cid,
+        raw
+    );
+    assert_eq!(
+        node.cat_path("/ipns/k51-kotoba-local")
+            .await
+            .expect("cat /ipns"),
+        b"hello"[..]
+    );
+    let republished = node
+        .name_publish("k51-kotoba-local", &dag, "2026-05-29T00:01:00Z")
+        .await
+        .expect("name/publish sequence");
+    assert_eq!(republished.sequence, 2);
+    assert_eq!(
+        node.name_resolve("k51-kotoba-local")
+            .await
+            .expect("name/resolve updated")
+            .cid,
+        dag
+    );
+
+    let stat = node.repo_stat().await.expect("repo/stat");
+    assert_eq!(
+        stat.num_objects,
+        node.list_blocks().await.expect("list blocks").len() as u64
+    );
+    assert!(stat.num_objects >= 6);
+    assert!(stat.repo_size >= 5);
+    let verify = node.repo_verify().await.expect("repo/verify");
+    assert_eq!(verify.checked, stat.num_objects);
+    assert!(verify.ok, "repo/verify errors: {:?}", verify.errors);
+    let bw = node.stats_bw();
+    assert_eq!(bw.total_in, 0);
+    let bitswap = node.stats_bitswap().await.expect("stats/bitswap");
+    assert_eq!(bitswap.blocks_received, stat.num_objects);
+    assert_eq!(bitswap.data_received, stat.repo_size);
+    assert!(bitswap.provide_buf_len >= 1);
+    assert!(bitswap.wantlist.is_empty());
+
+    assert!(!node
+        .repo_gc()
+        .await
+        .expect("repo/gc mfs root")
+        .contains(&raw));
+    assert!(node.has_block(&raw).await.expect("has raw under mfs"));
+    assert!(!node.has_block(&dag).await.expect("has dag after gc"));
+    assert_eq!(node.files_rm("/docs", true).await.expect("files/rm"), 8);
+    assert!(node
+        .files_ls("/docs")
+        .await
+        .expect("files/ls empty")
+        .is_empty());
+
+    assert!(node.repo_gc().await.expect("repo/gc").contains(&raw));
+    assert!(!node.has_block(&raw).await.expect("has raw"));
+}
+
+#[tokio::test]
+async fn block_put_rejects_cid_data_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let node = IpfsConfig::new()
+        .with_repo_path(temp.path())
+        .start()
+        .await
+        .expect("node start");
+
+    let cid = raw_cid(b"expected bytes");
+    let err = node
+        .block_put(&cid, b"different bytes")
+        .await
+        .expect_err("block/put must reject data that does not hash to the CID");
+
+    assert!(
+        err.to_string().contains("cid/data mismatch"),
+        "unexpected error: {err}"
+    );
+    assert!(!node.has_block(&cid).await.expect("has_block"));
+}
+
+async fn put_cbor_value(
+    node: &kotoba_ipfs::KotobaIpfsNode,
+    value: CborValue,
+) -> anyhow::Result<kotoba_ipfs::IpldCid> {
+    let mut data = Vec::new();
+    ciborium::into_writer(&value, &mut data)?;
+    node.put_codec_block(CODEC_DAG_CBOR, &data).await
 }

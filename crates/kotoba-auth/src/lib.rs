@@ -1,28 +1,38 @@
-pub mod did_document;
 pub mod cacao;
 pub mod delegation;
-pub mod eth;
+pub mod did_document;
 pub mod did_key;
-pub mod resolver;
+pub mod eth;
 pub mod passkey;
+pub mod resolver;
 
-pub use did_document::{DidDocument, VerificationMethod, ServiceEndpoint};
-pub use cacao::{Cacao, CacaoHeader, CacaoPayload, CacaoSig, CacaoError};
+pub use cacao::{Cacao, CacaoError, CacaoHeader, CacaoPayload, CacaoSig};
 pub use delegation::{DelegationChain, DelegationError};
+pub use did_document::{
+    DidDocument, ServiceEndpoint, VerificationMethod, ATPROTO_PDS_SERVICE,
+    ATTR_DID_ASSERTION_METHOD, ATTR_DID_AUTHENTICATION, ATTR_DID_CAPABILITY_DELEGATION,
+    ATTR_DID_CAPABILITY_INVOCATION, ATTR_DID_CONTEXT, ATTR_DID_ID, ATTR_DID_SERVICE_ENDPOINT,
+    ATTR_DID_SERVICE_ID, ATTR_DID_SERVICE_TYPE, ATTR_DID_VERIFICATION_METHOD,
+    DIDCOMM_MESSAGING_SERVICE, DID_CONTEXT_V1, KOTOBA_GRAPH_MEMBERSHIP_SERVICE,
+    KOTOBA_NODE_SERVICE,
+};
+pub use did_key::{ed25519_pubkey_to_did_key, parse_ed25519_did_key};
 pub use eth::{eth_address_to_erc725_did, personal_sign_hash, recover_eth_address};
-pub use did_key::{parse_ed25519_did_key, ed25519_pubkey_to_did_key};
-pub use resolver::{DidDocumentResolver, DidResolverError, InMemoryDidResolver};
 pub use passkey::{
-    PasskeyAssertion, PasskeyGate, PasskeyGateError,
-    KeyOpKind, AuthLevel, KeyOpPolicy, Authorization,
-    KeyHierarchy,
+    AuthLevel, Authorization, KeyHierarchy, KeyOpKind, KeyOpPolicy, PasskeyAssertion, PasskeyGate,
+    PasskeyGateError,
+};
+pub use resolver::{
+    did_web_url, CompositeDidResolver, DatomDidResolver, DidDocumentFetcher, DidDocumentResolver,
+    DidKeyResolver, DidMethod, DidMethodResolver, DidPlcResolver, DidResolverError, DidWebResolver,
+    InMemoryDidDocumentFetcher, InMemoryDidResolver, KotobaDidServiceConfig, LayeredDidResolver,
+    ProtocolServiceDidResolver,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use cacao::{Cacao, CacaoHeader, CacaoPayload, CacaoSig};
-    use bytes::Bytes;
 
     // ── eth helpers ────────────────────────────────────────────────────────
 
@@ -44,14 +54,20 @@ mod tests {
     fn parse_eth_address_did_pkh() {
         let did = "did:pkh:eip155:1:0xab16a96d359ec26a11e2c2b3d8f8b8942d5bfcdb";
         let addr = eth::parse_eth_address_from_did(did).expect("valid did:pkh");
-        assert_eq!(hex::encode(addr), "ab16a96d359ec26a11e2c2b3d8f8b8942d5bfcdb");
+        assert_eq!(
+            hex::encode(addr),
+            "ab16a96d359ec26a11e2c2b3d8f8b8942d5bfcdb"
+        );
     }
 
     #[test]
     fn parse_eth_address_erc725() {
         let did = "did:erc725:gftd:260425:0xab16a96d359ec26a11e2c2b3d8f8b8942d5bfcdb";
         let addr = eth::parse_eth_address_from_did(did).expect("valid did:erc725");
-        assert_eq!(hex::encode(addr), "ab16a96d359ec26a11e2c2b3d8f8b8942d5bfcdb");
+        assert_eq!(
+            hex::encode(addr),
+            "ab16a96d359ec26a11e2c2b3d8f8b8942d5bfcdb"
+        );
     }
 
     #[test]
@@ -62,9 +78,10 @@ mod tests {
 
     #[test]
     fn eth_address_to_erc725_did_format() {
-        let addr = [0xabu8, 0x16, 0xa9, 0x6d, 0x35, 0x9e, 0xc2, 0x6a,
-                    0x11, 0xe2, 0xc2, 0xb3, 0xd8, 0xf8, 0xb8, 0x94,
-                    0x2d, 0x5b, 0xfc, 0xdb];
+        let addr = [
+            0xabu8, 0x16, 0xa9, 0x6d, 0x35, 0x9e, 0xc2, 0x6a, 0x11, 0xe2, 0xc2, 0xb3, 0xd8, 0xf8,
+            0xb8, 0x94, 0x2d, 0x5b, 0xfc, 0xdb,
+        ];
         let did = eth_address_to_erc725_did(&addr);
         assert!(did.starts_with("did:erc725:gftd:260425:0x"));
         assert!(did.contains("ab16a96d359ec26a11e2c2b3d8f8b8942d5bfcdb"));
@@ -101,8 +118,8 @@ mod tests {
 
     #[test]
     fn payload_capability_extracts_correctly() {
-        let p = test_payload(vec!["kotoba://can/quad:write".into()]);
-        assert_eq!(p.capability(), Some("quad:write"));
+        let p = test_payload(vec!["kotoba://can/datom:write".into()]);
+        assert_eq!(p.capability(), Some("datom:write"));
     }
 
     #[test]
@@ -124,9 +141,14 @@ mod tests {
     #[test]
     fn siwe_message_contains_required_fields() {
         let cacao = Cacao {
-            h: CacaoHeader { t: "eip4361".into() },
+            h: CacaoHeader {
+                t: "eip4361".into(),
+            },
             p: test_payload(vec![]),
-            s: CacaoSig { t: "eip191".into(), s: "0x00".into() },
+            s: CacaoSig {
+                t: "eip191".into(),
+                s: "0x00".into(),
+            },
         };
         let msg = cacao.siwe_message();
         assert!(msg.contains("kotoba.test wants you to sign in"));
@@ -141,9 +163,14 @@ mod tests {
         let mut p = test_payload(vec![]);
         p.statement = Some("Grant access to Kotoba graph".into());
         let cacao = Cacao {
-            h: CacaoHeader { t: "eip4361".into() },
+            h: CacaoHeader {
+                t: "eip4361".into(),
+            },
             p,
-            s: CacaoSig { t: "eip191".into(), s: "0x00".into() },
+            s: CacaoSig {
+                t: "eip191".into(),
+                s: "0x00".into(),
+            },
         };
         let msg = cacao.siwe_message();
         assert!(msg.contains("Grant access to Kotoba graph"));
@@ -153,12 +180,17 @@ mod tests {
     fn siwe_message_includes_resources_when_present() {
         let p = test_payload(vec![
             "kotoba://graph/bafy123".into(),
-            "kotoba://can/quad:write".into(),
+            "kotoba://can/datom:write".into(),
         ]);
         let cacao = Cacao {
-            h: CacaoHeader { t: "eip4361".into() },
+            h: CacaoHeader {
+                t: "eip4361".into(),
+            },
             p,
-            s: CacaoSig { t: "eip191".into(), s: "0x00".into() },
+            s: CacaoSig {
+                t: "eip191".into(),
+                s: "0x00".into(),
+            },
         };
         let msg = cacao.siwe_message();
         assert!(msg.contains("Resources:"));
@@ -170,9 +202,14 @@ mod tests {
     #[test]
     fn verify_signature_unsupported_type_errors() {
         let cacao = Cacao {
-            h: CacaoHeader { t: "eip4361".into() },
+            h: CacaoHeader {
+                t: "eip4361".into(),
+            },
             p: test_payload(vec![]),
-            s: CacaoSig { t: "secp256r1".into(), s: "deaddead".into() },
+            s: CacaoSig {
+                t: "secp256r1".into(),
+                s: "deaddead".into(),
+            },
         };
         let err = cacao.verify_signature().unwrap_err();
         assert!(matches!(err, CacaoError::UnsupportedSigType(_)));
@@ -181,9 +218,14 @@ mod tests {
     #[test]
     fn verify_signature_bad_hex_errors() {
         let cacao = Cacao {
-            h: CacaoHeader { t: "eip4361".into() },
+            h: CacaoHeader {
+                t: "eip4361".into(),
+            },
             p: test_payload(vec![]),
-            s: CacaoSig { t: "eip191".into(), s: "not_hex!!".into() },
+            s: CacaoSig {
+                t: "eip191".into(),
+                s: "not_hex!!".into(),
+            },
         };
         assert!(cacao.verify_signature().is_err());
     }
@@ -197,13 +239,11 @@ mod tests {
 
         // Known 32-byte test private key
         let sk_bytes = [
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-            0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
-            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-            0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+            0x1d, 0x1e, 0x1f, 0x20,
         ];
-        let sk = SigningKey::from_bytes((&sk_bytes).into())
-            .expect("valid test key");
+        let sk = SigningKey::from_bytes((&sk_bytes).into()).expect("valid test key");
 
         // Derive ETH address
         let pk = sk.verifying_key();
@@ -226,16 +266,22 @@ mod tests {
             resources: vec![],
         };
         let mut cacao = Cacao {
-            h: CacaoHeader { t: "eip4361".into() },
+            h: CacaoHeader {
+                t: "eip4361".into(),
+            },
             p: payload,
-            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+            s: CacaoSig {
+                t: "eip191".into(),
+                s: "00".into(),
+            },
         };
 
         // Compute the SIWE message and sign it
         let msg = cacao.siwe_message();
         let hash = eth::personal_sign_hash(msg.as_bytes());
 
-        let (sig, rec_id) = sk.sign_prehash_recoverable(&hash)
+        let (sig, rec_id) = sk
+            .sign_prehash_recoverable(&hash)
             .expect("sign_prehash_recoverable");
 
         // Encode as 65 bytes (r||s||v), v = rec_id + 27 (MetaMask legacy)
@@ -244,15 +290,19 @@ mod tests {
         cacao.s.s = hex::encode(&sig65);
 
         let result = cacao.verify_signature();
-        assert!(result.is_ok(), "verify_signature failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "verify_signature failed: {:?}",
+            result.err()
+        );
     }
 
     // ── Cacao::verify_signature — EdDSA roundtrip ─────────────────────────
 
     #[test]
     fn verify_signature_eddsa_roundtrip() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
         use ed25519_dalek::{Signer, SigningKey};
-        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
         let sk = SigningKey::from_bytes(&[13u8; 32]);
         let pk = sk.verifying_key();
@@ -267,12 +317,17 @@ mod tests {
             domain: "kotoba.test".into(),
             statement: None,
             version: "1".into(),
-            resources: vec!["kotoba://can/quad:write".into()],
+            resources: vec!["kotoba://can/datom:write".into()],
         };
         let mut cacao = Cacao {
-            h: CacaoHeader { t: "caip122".into() },
+            h: CacaoHeader {
+                t: "caip122".into(),
+            },
             p: payload,
-            s: CacaoSig { t: "EdDSA".into(), s: String::new() },
+            s: CacaoSig {
+                t: "EdDSA".into(),
+                s: String::new(),
+            },
         };
 
         let msg = cacao.siwe_message();
@@ -289,9 +344,14 @@ mod tests {
     #[test]
     fn delegation_chain_new_stores_cacao() {
         let cacao = Cacao {
-            h: CacaoHeader { t: "eip4361".into() },
+            h: CacaoHeader {
+                t: "eip4361".into(),
+            },
             p: test_payload(vec![]),
-            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+            s: CacaoSig {
+                t: "eip191".into(),
+                s: "00".into(),
+            },
         };
         let chain = delegation::DelegationChain::new(cacao);
         assert_eq!(chain.chain.len(), 1);
@@ -307,16 +367,21 @@ mod tests {
     fn delegation_verify_chain_depth_exceeded_errors() {
         // Depth=2 is now supported; depth=3+ is still rejected.
         let cacao1 = Cacao {
-            h: CacaoHeader { t: "eip4361".into() },
+            h: CacaoHeader {
+                t: "eip4361".into(),
+            },
             p: test_payload(vec![]),
-            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+            s: CacaoSig {
+                t: "eip191".into(),
+                s: "00".into(),
+            },
         };
         let cacao2 = cacao1.clone();
         let cacao3 = cacao1.clone();
         let mut chain = delegation::DelegationChain::new(cacao1);
         chain.chain.push(cacao2);
         chain.chain.push(cacao3); // depth-3 chain
-        let err = chain.verify("graph_cid", "quad:write").unwrap_err();
+        let err = chain.verify("graph_cid", "datom:write").unwrap_err();
         assert!(
             matches!(err, DelegationError::ChainDepthExceeded(3)),
             "expected ChainDepthExceeded(3), got {err:?}"
@@ -328,13 +393,21 @@ mod tests {
         let mut p = test_payload(vec![]);
         p.expiry = Some("2020-01-01T00:00:00Z".into()); // clearly in the past
         let cacao = Cacao {
-            h: CacaoHeader { t: "eip4361".into() },
+            h: CacaoHeader {
+                t: "eip4361".into(),
+            },
             p,
-            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+            s: CacaoSig {
+                t: "eip191".into(),
+                s: "00".into(),
+            },
         };
         let chain = delegation::DelegationChain::new(cacao);
-        let err = chain.verify("graph_cid", "quad:write").unwrap_err();
-        assert!(matches!(err, DelegationError::Expired), "expected Expired, got {err:?}");
+        let err = chain.verify("graph_cid", "datom:write").unwrap_err();
+        assert!(
+            matches!(err, DelegationError::Expired),
+            "expected Expired, got {err:?}"
+        );
     }
 
     #[test]
@@ -343,14 +416,21 @@ mod tests {
         // +09:00 offset: would corrupt lexicographic comparison against `...Z` now_iso
         p.expiry = Some("2099-01-01T09:00:00+09:00".into());
         let cacao = Cacao {
-            h: CacaoHeader { t: "eip4361".into() },
+            h: CacaoHeader {
+                t: "eip4361".into(),
+            },
             p,
-            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+            s: CacaoSig {
+                t: "eip191".into(),
+                s: "00".into(),
+            },
         };
         let chain = delegation::DelegationChain::new(cacao);
-        let err = chain.verify("graph_cid", "quad:write").unwrap_err();
-        assert!(matches!(err, DelegationError::InvalidExpiry(_)),
-            "expected InvalidExpiry, got {err:?}");
+        let err = chain.verify("graph_cid", "datom:write").unwrap_err();
+        assert!(
+            matches!(err, DelegationError::InvalidExpiry(_)),
+            "expected InvalidExpiry, got {err:?}"
+        );
     }
 
     #[test]
@@ -360,14 +440,21 @@ mod tests {
         p.issued_at = "2020-01-01T00:00:00Z".into();
         p.expiry = None;
         let cacao = Cacao {
-            h: CacaoHeader { t: "eip4361".into() },
+            h: CacaoHeader {
+                t: "eip4361".into(),
+            },
             p,
-            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+            s: CacaoSig {
+                t: "eip191".into(),
+                s: "00".into(),
+            },
         };
         let chain = delegation::DelegationChain::new(cacao);
-        let err = chain.verify("graph_cid", "quad:write").unwrap_err();
-        assert!(matches!(err, DelegationError::Expired),
-            "expected Expired (max-age), got {err:?}");
+        let err = chain.verify("graph_cid", "datom:write").unwrap_err();
+        assert!(
+            matches!(err, DelegationError::Expired),
+            "expected Expired (max-age), got {err:?}"
+        );
     }
 
     #[test]
@@ -376,14 +463,21 @@ mod tests {
         p.issued_at = "not-a-date".into();
         p.expiry = None;
         let cacao = Cacao {
-            h: CacaoHeader { t: "eip4361".into() },
+            h: CacaoHeader {
+                t: "eip4361".into(),
+            },
             p,
-            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+            s: CacaoSig {
+                t: "eip191".into(),
+                s: "00".into(),
+            },
         };
         let chain = delegation::DelegationChain::new(cacao);
-        let err = chain.verify("graph_cid", "quad:write").unwrap_err();
-        assert!(matches!(err, DelegationError::InvalidExpiry(_)),
-            "expected InvalidExpiry, got {err:?}");
+        let err = chain.verify("graph_cid", "datom:write").unwrap_err();
+        assert!(
+            matches!(err, DelegationError::InvalidExpiry(_)),
+            "expected InvalidExpiry, got {err:?}"
+        );
     }
 
     #[test]
@@ -391,12 +485,19 @@ mod tests {
         let p = test_payload(vec![]);
         // test_payload sets aud = "kotoba://test"
         let cacao = Cacao {
-            h: CacaoHeader { t: "eip4361".into() },
+            h: CacaoHeader {
+                t: "eip4361".into(),
+            },
             p,
-            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+            s: CacaoSig {
+                t: "eip191".into(),
+                s: "00".into(),
+            },
         };
         let chain = delegation::DelegationChain::new(cacao);
-        let err = chain.verify_with_aud("graph_cid", "quad:read", "kotoba://different-node").unwrap_err();
+        let err = chain
+            .verify_with_aud("graph_cid", "datom:read", "kotoba://different-node")
+            .unwrap_err();
         assert!(
             matches!(err, DelegationError::AudienceMismatch { .. }),
             "expected AudienceMismatch, got {err:?}"
@@ -412,12 +513,19 @@ mod tests {
         let mut p = test_payload(vec![]);
         p.expiry = Some("2099-12-31T23:59:59Z".into()); // far future
         let cacao = Cacao {
-            h: CacaoHeader { t: "eip4361".into() },
+            h: CacaoHeader {
+                t: "eip4361".into(),
+            },
             p,
-            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+            s: CacaoSig {
+                t: "eip191".into(),
+                s: "00".into(),
+            },
         };
         let chain = delegation::DelegationChain::new(cacao);
-        let err = chain.verify_with_aud("graph_cid", "quad:read", "kotoba://test").unwrap_err();
+        let err = chain
+            .verify_with_aud("graph_cid", "datom:read", "kotoba://test")
+            .unwrap_err();
         assert!(
             !matches!(err, DelegationError::AudienceMismatch { .. }),
             "should have passed audience gate; got {err:?}"
@@ -431,12 +539,19 @@ mod tests {
         let mut p = test_payload(vec![]);
         p.aud = String::new(); // no audience binding
         let cacao = Cacao {
-            h: CacaoHeader { t: "eip4361".into() },
+            h: CacaoHeader {
+                t: "eip4361".into(),
+            },
             p,
-            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+            s: CacaoSig {
+                t: "eip191".into(),
+                s: "00".into(),
+            },
         };
         let chain = delegation::DelegationChain::new(cacao);
-        let err = chain.verify_with_aud("graph_cid", "quad:read", "kotoba://test").unwrap_err();
+        let err = chain
+            .verify_with_aud("graph_cid", "datom:read", "kotoba://test")
+            .unwrap_err();
         assert!(
             matches!(err, DelegationError::AudienceMismatch { .. }),
             "expected AudienceMismatch for empty aud, got {err:?}"
@@ -459,7 +574,7 @@ mod tests {
                     id: "#kotoba".into(),
                     service_type: "KotobaNode".into(),
                     endpoint: did_document::ServiceEndpointValue::Single(
-                        "/ip4/127.0.0.1/tcp/4001".into()
+                        "/ip4/127.0.0.1/tcp/4001".into(),
                     ),
                 },
                 ServiceEndpoint {
@@ -512,9 +627,14 @@ mod tests {
         p.issued_at = issued_at.into();
         p.expiry = expiry.map(|s| s.into());
         Cacao {
-            h: CacaoHeader { t: "eip4361".into() },
+            h: CacaoHeader {
+                t: "eip4361".into(),
+            },
             p,
-            s: CacaoSig { t: "eip191".into(), s: "00".into() },
+            s: CacaoSig {
+                t: "eip191".into(),
+                s: "00".into(),
+            },
         }
     }
 
@@ -546,7 +666,10 @@ mod tests {
     #[test]
     fn is_expired_wrong_length_exp_treated_as_expired() {
         let c = make_cacao(Some("2099-01-01"), "2026-01-01T00:00:00Z");
-        assert!(c.is_expired(), "short/malformed exp must be treated as expired");
+        assert!(
+            c.is_expired(),
+            "short/malformed exp must be treated as expired"
+        );
     }
 
     #[test]

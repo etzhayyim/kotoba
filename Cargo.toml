@@ -19,6 +19,10 @@ members = [
     "crates/kotoba-ingest",
     "crates/kotoba-ipfs",
     "crates/kotoba-cli",
+    "crates/kotoba-edn",
+    "crates/kotoba-datomic",
+    "crates/kotoba-vc",
+    "crates/kotoba-didcomm",
     "examples/ashiba-bmc",
     "examples/gftdcojp-chargespot-bma",
     "examples/gftdcojp-chargespot-ingest",
@@ -31,6 +35,16 @@ edition = "2021"
 license = "Apache-2.0"
 authors = ["etzhayyim <dev@etzhayyim.com>"]
 repository = "https://github.com/etzhayyim/kotoba"
+
+[profile.dev]
+split-debuginfo = "unpacked"
+debug = 1
+incremental = true
+
+[profile.test]
+split-debuginfo = "unpacked"
+debug = 1
+incremental = true
 
 [workspace.dependencies]
 # async
@@ -67,6 +81,7 @@ libp2p = { version = "0.53", features = [
     "quic", "noise", "yamux", "gossipsub", "kad",
     "identify", "ping", "macros", "request-response",
 ] }
+ipld-core = "0.4"
 
 # crypto / DID
 ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
@@ -117,6 +132,7 @@ kotoba-ingest  = { path = "crates/kotoba-ingest" }
 kotoba-core    = { path = "crates/kotoba-core" }
 kotoba-kse     = { path = "crates/kotoba-kse" }
 kotoba-kqe     = { path = "crates/kotoba-kqe" }
+kotoba-graph   = { path = "crates/kotoba-graph" }
 kotoba-dht     = { path = "crates/kotoba-dht" }
 kotoba-auth    = { path = "crates/kotoba-auth" }
 kotoba-runtime = { path = "crates/kotoba-runtime" }
@@ -126,3 +142,7 @@ kotoba-store-web = { path = "crates/kotoba-store-web" }
 kotoba-crypto  = { path = "crates/kotoba-crypto" }
 kotoba-signal  = { path = "crates/kotoba-signal" }
 kotoba-ipfs    = { path = "crates/kotoba-ipfs" }
+kotoba-edn     = { path = "crates/kotoba-edn" }
+kotoba-datomic = { path = "crates/kotoba-datomic" }
+kotoba-vc      = { path = "crates/kotoba-vc" }
+kotoba-didcomm = { path = "crates/kotoba-didcomm" }

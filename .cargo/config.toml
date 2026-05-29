@@ -3,3 +3,8 @@
 # WASM guest crates (examples/kotoba-hello) use their own [workspace]
 # and must be built with an explicit --target flag.
 target = "aarch64-apple-darwin"
+
+[target.aarch64-apple-darwin]
+# Optimize generated host code for the local Apple Silicon CPU instead of the
+# generic ARMv8 baseline. This keeps the workspace native and avoids Rosetta.
+rustflags = ["-C", "target-cpu=native"]

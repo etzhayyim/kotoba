@@ -57,8 +57,8 @@ mod idb_impl {
     /// `!Send` because it wraps browser JS objects.  Use with
     /// `#[async_trait(?Send)]` — see `AsyncBlockStore`.
     pub struct IdbBlockStore {
-        db:       IdbDatabase,
-        pinned:   RefCell<HashSet<String>>, // in-memory; reset on page reload
+        db: IdbDatabase,
+        pinned: RefCell<HashSet<String>>, // in-memory; reset on page reload
         max_bytes: Option<usize>,
     }
 
@@ -83,7 +83,8 @@ mod idb_impl {
                     .and_then(|e| e.target())
                     .and_then(|t| t.dyn_into::<web_sys::IdbOpenDbRequest>().ok())
                     .expect("upgrade event target");
-                let db: IdbDatabase = req.result()
+                let db: IdbDatabase = req
+                    .result()
                     .expect("db result")
                     .dyn_into()
                     .expect("IdbDatabase");
@@ -93,22 +94,20 @@ mod idb_impl {
             request.set_onupgradeneeded(Some(on_upgrade.as_ref().unchecked_ref()));
             on_upgrade.forget();
 
-            let db: IdbDatabase = JsFuture::from(
-                js_sys::Promise::new(&mut |resolve, reject| {
-                    let req_clone = request.clone();
-                    let res_cb: Closure<dyn FnMut()> = Closure::new(move || {
-                        let db = req_clone.result().unwrap();
-                        resolve.call1(&JsValue::undefined(), &db).unwrap();
-                    });
-                    let rej_cb: Closure<dyn FnMut(JsValue)> = Closure::new(move |e: JsValue| {
-                        reject.call1(&JsValue::undefined(), &e).unwrap();
-                    });
-                    request.set_onsuccess(Some(res_cb.as_ref().unchecked_ref()));
-                    request.set_onerror(Some(rej_cb.as_ref().unchecked_ref()));
-                    res_cb.forget();
-                    rej_cb.forget();
-                }),
-            )
+            let db: IdbDatabase = JsFuture::from(js_sys::Promise::new(&mut |resolve, reject| {
+                let req_clone = request.clone();
+                let res_cb: Closure<dyn FnMut()> = Closure::new(move || {
+                    let db = req_clone.result().unwrap();
+                    resolve.call1(&JsValue::undefined(), &db).unwrap();
+                });
+                let rej_cb: Closure<dyn FnMut(JsValue)> = Closure::new(move |e: JsValue| {
+                    reject.call1(&JsValue::undefined(), &e).unwrap();
+                });
+                request.set_onsuccess(Some(res_cb.as_ref().unchecked_ref()));
+                request.set_onerror(Some(rej_cb.as_ref().unchecked_ref()));
+                res_cb.forget();
+                rej_cb.forget();
+            }))
             .await
             .map_err(|e| anyhow!("IDB open: {e:?}"))?
             .dyn_into()
@@ -128,7 +127,12 @@ mod idb_impl {
             JsFuture::from(js_sys::Promise::new(&mut |resolve, reject| {
                 let req_inner = req_outer.clone(); // captured by res_cb move closure
                 let res_cb: Closure<dyn FnMut()> = Closure::new(move || {
-                    resolve.call1(&JsValue::undefined(), &req_inner.result().unwrap_or(JsValue::undefined())).unwrap();
+                    resolve
+                        .call1(
+                            &JsValue::undefined(),
+                            &req_inner.result().unwrap_or(JsValue::undefined()),
+                        )
+                        .unwrap();
                 });
                 let rej_cb: Closure<dyn FnMut(JsValue)> = Closure::new(move |e: JsValue| {
                     reject.call1(&JsValue::undefined(), &e).unwrap();
@@ -190,14 +194,19 @@ mod idb_impl {
                 &JsValue::from_str(STORE_BLOCKS),
                 &JsValue::from_str(STORE_META),
             );
-            let tx = self.db
+            let tx = self
+                .db
                 .transaction_with_str_sequence_and_mode(&stores, IdbTransactionMode::Readwrite)
                 .map_err(|e| anyhow!("{e:?}"))?;
 
-            let blocks = tx.object_store(STORE_BLOCKS).map_err(|e| anyhow!("{e:?}"))?;
-            let meta   = tx.object_store(STORE_META).map_err(|e| anyhow!("{e:?}"))?;
+            let blocks = tx
+                .object_store(STORE_BLOCKS)
+                .map_err(|e| anyhow!("{e:?}"))?;
+            let meta = tx.object_store(STORE_META).map_err(|e| anyhow!("{e:?}"))?;
 
-            blocks.put_with_key(&val, &key).map_err(|e| anyhow!("{e:?}"))?;
+            blocks
+                .put_with_key(&val, &key)
+                .map_err(|e| anyhow!("{e:?}"))?;
             let pinned = self.pinned.borrow().contains(&cid.to_multibase());
             meta.put_with_key(&Self::meta_obj(pinned, Self::now_ms(), size), &key)
                 .map_err(|e| anyhow!("{e:?}"))?;
@@ -214,7 +223,8 @@ mod idb_impl {
         async fn get_async(&self, cid: &KotobaCid) -> Result<Option<Bytes>> {
             let key = JsValue::from_str(&cid.to_multibase());
 
-            let tx = self.db
+            let tx = self
+                .db
                 .transaction_with_str_sequence_and_mode(
                     &Array::of2(
                         &JsValue::from_str(STORE_BLOCKS),
@@ -224,8 +234,10 @@ mod idb_impl {
                 )
                 .map_err(|e| anyhow!("{e:?}"))?;
 
-            let blocks = tx.object_store(STORE_BLOCKS).map_err(|e| anyhow!("{e:?}"))?;
-            let meta   = tx.object_store(STORE_META).map_err(|e| anyhow!("{e:?}"))?;
+            let blocks = tx
+                .object_store(STORE_BLOCKS)
+                .map_err(|e| anyhow!("{e:?}"))?;
+            let meta = tx.object_store(STORE_META).map_err(|e| anyhow!("{e:?}"))?;
 
             let block_req = blocks.get(&key).map_err(|e| anyhow!("{e:?}"))?;
             let val = Self::await_request(&block_req).await?;
@@ -255,10 +267,17 @@ mod idb_impl {
 
         async fn has_async(&self, cid: &KotobaCid) -> bool {
             let key = JsValue::from_str(&cid.to_multibase());
-            let Ok(tx) = self.db.transaction_with_str(STORE_BLOCKS) else { return false; };
-            let Ok(store) = tx.object_store(STORE_BLOCKS) else { return false; };
-            let Ok(req) = store.count_with_key(&key) else { return false; };
-            Self::await_request(&req).await
+            let Ok(tx) = self.db.transaction_with_str(STORE_BLOCKS) else {
+                return false;
+            };
+            let Ok(store) = tx.object_store(STORE_BLOCKS) else {
+                return false;
+            };
+            let Ok(req) = store.count_with_key(&key) else {
+                return false;
+            };
+            Self::await_request(&req)
+                .await
                 .ok()
                 .and_then(|v| v.as_f64())
                 .map(|n| n > 0.0)
@@ -271,11 +290,18 @@ mod idb_impl {
                 &JsValue::from_str(STORE_BLOCKS),
                 &JsValue::from_str(STORE_META),
             );
-            let tx = self.db
+            let tx = self
+                .db
                 .transaction_with_str_sequence_and_mode(&stores, IdbTransactionMode::Readwrite)
                 .map_err(|e| anyhow!("{e:?}"))?;
-            tx.object_store(STORE_BLOCKS).map_err(|e| anyhow!("{e:?}"))?.delete(&key).map_err(|e| anyhow!("{e:?}"))?;
-            tx.object_store(STORE_META).map_err(|e| anyhow!("{e:?}"))?.delete(&key).map_err(|e| anyhow!("{e:?}"))?;
+            tx.object_store(STORE_BLOCKS)
+                .map_err(|e| anyhow!("{e:?}"))?
+                .delete(&key)
+                .map_err(|e| anyhow!("{e:?}"))?;
+            tx.object_store(STORE_META)
+                .map_err(|e| anyhow!("{e:?}"))?
+                .delete(&key)
+                .map_err(|e| anyhow!("{e:?}"))?;
             Self::tx_complete(tx).await?;
             Ok(())
         }
@@ -296,18 +322,33 @@ mod idb_impl {
         async fn evict_cold_async(&self, max_bytes: usize) -> usize {
             // Collect all meta entries via cursor, sorted by last_used ascending
             let Ok(tx) = self.db.transaction_with_str_sequence_and_mode(
-                &Array::of2(&JsValue::from_str(STORE_BLOCKS), &JsValue::from_str(STORE_META)),
+                &Array::of2(
+                    &JsValue::from_str(STORE_BLOCKS),
+                    &JsValue::from_str(STORE_META),
+                ),
                 IdbTransactionMode::Readwrite,
-            ) else { return 0; };
+            ) else {
+                return 0;
+            };
 
-            let Ok(meta_store) = tx.object_store(STORE_META) else { return 0; };
+            let Ok(meta_store) = tx.object_store(STORE_META) else {
+                return 0;
+            };
 
             // Get all keys + meta to determine what to evict
-            let Ok(all_req) = meta_store.get_all() else { return 0; };
-            let Ok(keys_req) = meta_store.get_all_keys() else { return 0; };
+            let Ok(all_req) = meta_store.get_all() else {
+                return 0;
+            };
+            let Ok(keys_req) = meta_store.get_all_keys() else {
+                return 0;
+            };
 
-            let all_vals = Self::await_request(&all_req).await.unwrap_or(JsValue::undefined());
-            let all_keys = Self::await_request(&keys_req).await.unwrap_or(JsValue::undefined());
+            let all_vals = Self::await_request(&all_req)
+                .await
+                .unwrap_or(JsValue::undefined());
+            let all_keys = Self::await_request(&keys_req)
+                .await
+                .unwrap_or(JsValue::undefined());
 
             let vals: js_sys::Array = all_vals.dyn_into().unwrap_or_default();
             let keys: js_sys::Array = all_keys.dyn_into().unwrap_or_default();
@@ -318,27 +359,41 @@ mod idb_impl {
             for i in 0..keys.length() {
                 let k = keys.get(i).as_string().unwrap_or_default();
                 let v = vals.get(i);
-                let last_used = Reflect::get(&v, &"last_used".into()).ok()
-                    .and_then(|x| x.as_f64()).unwrap_or(0.0);
-                let size = Reflect::get(&v, &"size".into()).ok()
-                    .and_then(|x| x.as_f64()).unwrap_or(0.0) as usize;
-                let pinned = Reflect::get(&v, &"pinned".into()).ok()
-                    .and_then(|x| x.as_bool()).unwrap_or(false);
+                let last_used = Reflect::get(&v, &"last_used".into())
+                    .ok()
+                    .and_then(|x| x.as_f64())
+                    .unwrap_or(0.0);
+                let size = Reflect::get(&v, &"size".into())
+                    .ok()
+                    .and_then(|x| x.as_f64())
+                    .unwrap_or(0.0) as usize;
+                let pinned = Reflect::get(&v, &"pinned".into())
+                    .ok()
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false);
                 total += size;
                 entries.push((k, last_used, size, pinned));
             }
 
-            if total <= max_bytes { return 0; }
+            if total <= max_bytes {
+                return 0;
+            }
 
             // Sort cold-first (ascending last_used)
             entries.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-            let Ok(blocks_store) = tx.object_store(STORE_BLOCKS) else { return 0; };
+            let Ok(blocks_store) = tx.object_store(STORE_BLOCKS) else {
+                return 0;
+            };
             let mut freed = 0usize;
 
             for (key, _, size, pinned) in &entries {
-                if total - freed <= max_bytes { break; }
-                if *pinned { continue; }
+                if total - freed <= max_bytes {
+                    break;
+                }
+                if *pinned {
+                    continue;
+                }
                 let k = JsValue::from_str(key);
                 let _ = blocks_store.delete(&k);
                 let _ = meta_store.delete(&k);

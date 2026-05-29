@@ -34,44 +34,51 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// E4M3FN: sign=1 / exp=4 (bias 7) / mantissa=3 bits.
 /// NaN sentinel: exp=0x0F AND man=0x07 only (S_1111_111).
 pub fn dequantize_fp8_e4m3(bytes: &[u8]) -> Vec<f32> {
-    bytes.iter().map(|&b| {
-        let sign     = if b & 0x80 != 0 { -1.0f32 } else { 1.0f32 };
-        let exp_bits = (b >> 3) & 0x0F;
-        let man_bits = b & 0x07;
-        if exp_bits == 0x0F && man_bits == 0x07 {
-            f32::NAN
-        } else if exp_bits == 0 {
-            // subnormal: sign × 2^(1−7) × (man/8) = sign × man / 64
-            sign * (man_bits as f32) / 64.0
-        } else {
-            let exp  = exp_bits as i32 - 7;
-            let mant = 1.0 + (man_bits as f32) / 8.0;
-            sign * mant * (2.0f32).powi(exp)
-        }
-    }).collect()
+    bytes
+        .iter()
+        .map(|&b| {
+            let sign = if b & 0x80 != 0 { -1.0f32 } else { 1.0f32 };
+            let exp_bits = (b >> 3) & 0x0F;
+            let man_bits = b & 0x07;
+            if exp_bits == 0x0F && man_bits == 0x07 {
+                f32::NAN
+            } else if exp_bits == 0 {
+                // subnormal: sign × 2^(1−7) × (man/8) = sign × man / 64
+                sign * (man_bits as f32) / 64.0
+            } else {
+                let exp = exp_bits as i32 - 7;
+                let mant = 1.0 + (man_bits as f32) / 8.0;
+                sign * mant * (2.0f32).powi(exp)
+            }
+        })
+        .collect()
 }
 
 /// Quantize f32 vec → FP8 E4M3FN bytes (saturate to ±448).
 ///
 /// E4M3FN max normal = 2^(15−7) × (1 + 6/8) = 256 × 1.75 = 448.
 pub fn quantize_f32_to_fp8_e4m3(vals: &[f32]) -> Vec<u8> {
-    vals.iter().map(|&v| {
-        if v.is_nan() {
-            return 0x7F;
-        }
-        let sign: u8 = if v < 0.0 { 0x80 } else { 0x00 };
-        let av       = v.abs().min(448.0);
-        if av == 0.0 { return sign; }
-        let exp        = av.log2().floor() as i32;
-        let exp_biased = (exp + 7).clamp(0, 15) as u8;
-        let mant_f     = av / (2.0f32).powi(exp) - 1.0;
-        let man_bits   = (mant_f * 8.0).round() as u8 & 0x07;
-        // Avoid NaN sentinel (exp=15, man=7)
-        if exp_biased == 15 && man_bits == 7 {
-            return sign | (15 << 3) | 6; // clamp to 448
-        }
-        sign | (exp_biased << 3) | man_bits
-    }).collect()
+    vals.iter()
+        .map(|&v| {
+            if v.is_nan() {
+                return 0x7F;
+            }
+            let sign: u8 = if v < 0.0 { 0x80 } else { 0x00 };
+            let av = v.abs().min(448.0);
+            if av == 0.0 {
+                return sign;
+            }
+            let exp = av.log2().floor() as i32;
+            let exp_biased = (exp + 7).clamp(0, 15) as u8;
+            let mant_f = av / (2.0f32).powi(exp) - 1.0;
+            let man_bits = (mant_f * 8.0).round() as u8 & 0x07;
+            // Avoid NaN sentinel (exp=15, man=7)
+            if exp_biased == 15 && man_bits == 7 {
+                return sign | (15 << 3) | 6; // clamp to 448
+            }
+            sign | (exp_biased << 3) | man_bits
+        })
+        .collect()
 }
 
 // ── CPU kernels ───────────────────────────────────────────────────────────────
@@ -150,7 +157,8 @@ mod tests {
         let expected = 4.0f32 / 64.0;
         assert!(
             (result[0] - expected).abs() < 1e-6,
-            "subnormal decode: got {}, expected {expected}", result[0]
+            "subnormal decode: got {}, expected {expected}",
+            result[0]
         );
     }
 
@@ -163,7 +171,8 @@ mod tests {
         let dec = dequantize_fp8_e4m3(&enc);
         assert!(
             dec[0] <= 448.0 + 1.0,
-            "saturation: decoded {}, expected ≤ 449", dec[0]
+            "saturation: decoded {}, expected ≤ 449",
+            dec[0]
         );
     }
 

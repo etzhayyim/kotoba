@@ -1,87 +1,84 @@
 use kotoba_core::cid::KotobaCid;
-use kotoba_kqe::quad::{Quad, QuadObject};
+use kotoba_kqe::datom::{Datom, TensorDtype, Value};
 use kotoba_kqe::delta::Delta;
 
 /// LoraAdapter — weight delta as Datom Delta
-/// LoRA is natively expressed as Delta(Quad, +1) in KOTOBA
+/// LoRA is natively expressed as Delta(Datom) in KOTOBA
 /// effective_weight = base + lora_A × lora_B × scale
 #[derive(Debug, Clone)]
 pub struct LoraAdapter {
-    pub base_cid:    KotobaCid,  // base model CID
-    pub adapter_cid: KotobaCid,  // adapter blob CID
-    pub scale:       f32,
-    pub rank:        u32,
+    pub base_cid: KotobaCid,    // base model CID
+    pub adapter_cid: KotobaCid, // adapter blob CID
+    pub scale: f32,
+    pub rank: u32,
 }
 
 /// Convert LoRA adapter to Kotoba Delta (Datom assertion)
 /// Bonsai ADR-2605092100: LoRA-per-Cell as MoE Expert = LoRA as Delta per DHT Node
 pub fn lora_to_delta(adapter: &LoraAdapter, graph_cid: KotobaCid) -> Delta {
-    let quad = Quad {
-        graph:     graph_cid,
-        subject:   adapter.base_cid.clone(),
-        predicate: "lora/adapter".to_string(),
-        object:    QuadObject::TensorCid {
-            cid:   adapter.adapter_cid.clone(),
+    Delta::assert_datom(Datom::assert(
+        adapter.base_cid.clone(),
+        "lora/adapter".to_string(),
+        Value::TensorCid {
+            cid: adapter.adapter_cid.clone(),
             shape: vec![adapter.rank],
-            dtype: kotoba_kqe::quad::TensorDtype::F8E4M3,
+            dtype: TensorDtype::F8E4M3,
         },
-    };
-    Delta::assert(quad)
+        graph_cid,
+    ))
 }
 
 /// Remove LoRA adapter (retraction)
 pub fn lora_retract_delta(adapter: &LoraAdapter, graph_cid: KotobaCid) -> Delta {
-    let quad = Quad {
-        graph:     graph_cid,
-        subject:   adapter.base_cid.clone(),
-        predicate: "lora/adapter".to_string(),
-        object:    QuadObject::TensorCid {
-            cid:   adapter.adapter_cid.clone(),
+    Delta::retract_datom(Datom::retract(
+        adapter.base_cid.clone(),
+        "lora/adapter".to_string(),
+        Value::TensorCid {
+            cid: adapter.adapter_cid.clone(),
             shape: vec![adapter.rank],
-            dtype: kotoba_kqe::quad::TensorDtype::F8E4M3,
+            dtype: TensorDtype::F8E4M3,
         },
-    };
-    Delta::retract(quad)
+        graph_cid,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kotoba_kqe::delta::Multiplicity;
 
     fn adapter() -> LoraAdapter {
         LoraAdapter {
-            base_cid:    KotobaCid::from_bytes(b"base"),
+            base_cid: KotobaCid::from_bytes(b"base"),
             adapter_cid: KotobaCid::from_bytes(b"adapter"),
-            scale:       0.5,
-            rank:        16,
+            scale: 0.5,
+            rank: 16,
         }
     }
 
     #[test]
     fn lora_to_delta_is_assert() {
         let d = lora_to_delta(&adapter(), KotobaCid::from_bytes(b"g"));
-        assert_eq!(d.mult, Multiplicity::Assert);
+        assert!(d.is_assert());
     }
 
     #[test]
     fn lora_to_delta_predicate() {
         let d = lora_to_delta(&adapter(), KotobaCid::from_bytes(b"g"));
-        assert_eq!(d.quad.predicate, "lora/adapter");
+        assert_eq!(d.datom.a, "lora/adapter");
     }
 
     #[test]
     fn lora_to_delta_subject_is_base_cid() {
         let a = adapter();
         let d = lora_to_delta(&a, KotobaCid::from_bytes(b"g"));
-        assert_eq!(d.quad.subject, a.base_cid);
+        assert_eq!(d.datom.e, a.base_cid);
     }
 
     #[test]
     fn lora_to_delta_shape_is_rank() {
         let a = adapter();
         let d = lora_to_delta(&a, KotobaCid::from_bytes(b"g"));
-        if let QuadObject::TensorCid { shape, .. } = d.quad.object {
+        if let Value::TensorCid { shape, .. } = d.datom.v {
             assert_eq!(shape, vec![a.rank]);
         } else {
             panic!("expected TensorCid");
@@ -91,7 +88,7 @@ mod tests {
     #[test]
     fn lora_retract_delta_is_retract() {
         let d = lora_retract_delta(&adapter(), KotobaCid::from_bytes(b"g"));
-        assert_eq!(d.mult, Multiplicity::Retract);
+        assert!(!d.is_assert());
     }
 
     #[test]
@@ -100,8 +97,8 @@ mod tests {
         let g = KotobaCid::from_bytes(b"g");
         let da = lora_to_delta(&a, g.clone());
         let dr = lora_retract_delta(&a, g);
-        assert_eq!(da.quad.subject,   dr.quad.subject);
-        assert_eq!(da.quad.predicate, dr.quad.predicate);
+        assert_eq!(da.datom.e, dr.datom.e);
+        assert_eq!(da.datom.a, dr.datom.a);
     }
 
     // ── additional LoraAdapter tests ──────────────────────────────────────────
@@ -123,7 +120,7 @@ mod tests {
         let a = adapter();
         let g = KotobaCid::from_bytes(b"my-graph");
         let d = lora_to_delta(&a, g.clone());
-        assert_eq!(d.quad.graph, g);
+        assert_eq!(d.datom.tx, g);
     }
 
     #[test]
@@ -131,15 +128,15 @@ mod tests {
         let a = adapter();
         let g = KotobaCid::from_bytes(b"my-graph");
         let d = lora_retract_delta(&a, g.clone());
-        assert_eq!(d.quad.graph, g);
+        assert_eq!(d.datom.tx, g);
     }
 
     #[test]
     fn lora_to_delta_tensor_dtype_is_f8e4m3() {
         let a = adapter();
         let d = lora_to_delta(&a, KotobaCid::from_bytes(b"g"));
-        if let QuadObject::TensorCid { dtype, .. } = d.quad.object {
-            assert!(matches!(dtype, kotoba_kqe::quad::TensorDtype::F8E4M3));
+        if let Value::TensorCid { dtype, .. } = d.datom.v {
+            assert!(matches!(dtype, TensorDtype::F8E4M3));
         } else {
             panic!("expected TensorCid object");
         }
@@ -158,7 +155,7 @@ mod tests {
     fn lora_to_delta_adapter_cid_in_object() {
         let a = adapter();
         let d = lora_to_delta(&a, KotobaCid::from_bytes(b"g"));
-        if let QuadObject::TensorCid { cid, .. } = d.quad.object {
+        if let Value::TensorCid { cid, .. } = d.datom.v {
             assert_eq!(cid, a.adapter_cid);
         } else {
             panic!("expected TensorCid object");

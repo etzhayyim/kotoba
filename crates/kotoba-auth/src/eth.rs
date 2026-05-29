@@ -30,14 +30,15 @@ pub fn personal_sign_hash(msg: &[u8]) -> [u8; 32] {
 /// Handles both legacy v ∈ {27,28} and EIP-155 v ∈ {0,1}.
 pub fn recover_eth_address(hash: &[u8; 32], sig: &[u8]) -> Result<[u8; 20], EthError> {
     if sig.len() != 65 {
-        return Err(EthError::Sig(format!("expected 65 bytes, got {}", sig.len())));
+        return Err(EthError::Sig(format!(
+            "expected 65 bytes, got {}",
+            sig.len()
+        )));
     }
     let v_raw = sig[64];
     let v = if v_raw >= 27 { v_raw - 27 } else { v_raw } % 2;
-    let rec_id = RecoveryId::try_from(v)
-        .map_err(|e| EthError::Sig(e.to_string()))?;
-    let sig65 = Signature::from_slice(&sig[..64])
-        .map_err(|e| EthError::Sig(e.to_string()))?;
+    let rec_id = RecoveryId::try_from(v).map_err(|e| EthError::Sig(e.to_string()))?;
+    let sig65 = Signature::from_slice(&sig[..64]).map_err(|e| EthError::Sig(e.to_string()))?;
     let vk = VerifyingKey::recover_from_prehash(hash, &sig65, rec_id)
         .map_err(|e| EthError::Sig(e.to_string()))?;
 
@@ -57,12 +58,16 @@ pub fn parse_eth_address_from_did(iss: &str) -> Result<[u8; 20], EthError> {
     let parts: Vec<&str> = iss.split(':').collect();
     // did:pkh:eip155:1:0x...  → parts[4]
     // did:erc725:gftd:N:0x... → parts[4]
-    let hex_addr = parts.last()
+    let hex_addr = parts
+        .last()
         .ok_or_else(|| EthError::Did(iss.to_string()))?
         .trim_start_matches("0x");
     let bytes = hex::decode(hex_addr)?;
     if bytes.len() != 20 {
-        return Err(EthError::Did(format!("address is {} bytes, expected 20", bytes.len())));
+        return Err(EthError::Did(format!(
+            "address is {} bytes, expected 20",
+            bytes.len()
+        )));
     }
     let mut addr = [0u8; 20];
     addr.copy_from_slice(&bytes);
@@ -84,7 +89,7 @@ mod tests {
     #[test]
     fn erc725_did_format() {
         let addr = [0x00u8; 20];
-        let did  = eth_address_to_erc725_did(&addr);
+        let did = eth_address_to_erc725_did(&addr);
         assert!(did.starts_with("did:erc725:gftd:260425:0x"));
         assert_eq!(did.len(), "did:erc725:gftd:260425:0x".len() + 40);
     }
@@ -156,7 +161,7 @@ mod tests {
     #[test]
     fn recover_rejects_wrong_length_sig() {
         let hash = [0u8; 32];
-        let sig  = [0u8; 64]; // 64 bytes, not 65
+        let sig = [0u8; 64]; // 64 bytes, not 65
         let result = recover_eth_address(&hash, &sig);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -182,8 +187,8 @@ mod tests {
     #[test]
     fn roundtrip_address_via_erc725_did() {
         let original = [0x11u8; 20];
-        let did      = eth_address_to_erc725_did(&original);
-        let parsed   = parse_eth_address_from_did(&did).unwrap();
+        let did = eth_address_to_erc725_did(&original);
+        let parsed = parse_eth_address_from_did(&did).unwrap();
         assert_eq!(original, parsed);
     }
 }

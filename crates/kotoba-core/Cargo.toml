@@ -3,10 +3,15 @@ name = "kotoba-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "CIDv1 blake3, KAIS 8-bit frame, Prolly Tree"
+description = "CIDv1 sha2-256, KAIS 8-bit frame, Prolly Tree"
+
+[features]
+default = []
+foreign-http = ["dep:reqwest", "dep:serde_json"]
 
 [dependencies]
 blake3.workspace = true
+sha2.workspace = true
 multihash.workspace = true
 cid.workspace = true
 multibase.workspace = true
@@ -17,6 +22,5 @@ thiserror.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 data-encoding = "2"
-reqwest.workspace = true
-tokio.workspace = true
-serde_json.workspace = true
+reqwest = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }

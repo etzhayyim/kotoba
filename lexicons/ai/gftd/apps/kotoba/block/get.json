@@ -1,0 +1,21 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.block.get",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Fetch a content-addressed IPLD/DAG-CBOR block by CID.",
+      "parameters": {
+        "type": "params",
+        "required": ["cid"],
+        "properties": {
+          "cid": { "type": "string" }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": { "type": "unknown" }
+      }
+    }
+  }
+}

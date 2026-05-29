@@ -11,19 +11,19 @@ fn make_cid(n: u64) -> KotobaCid {
 
 fn make_text_quad(s: u64, p: &str, o: &str) -> Quad {
     Quad {
-        graph:     make_cid(0),
-        subject:   make_cid(s),
+        graph: make_cid(0),
+        subject: make_cid(s),
         predicate: p.to_string(),
-        object:    QuadObject::Text(o.to_string()),
+        object: QuadObject::Text(o.to_string()),
     }
 }
 
 fn make_ref_quad(s: u64, p: &str, o: u64) -> Quad {
     Quad {
-        graph:     make_cid(0),
-        subject:   make_cid(s),
+        graph: make_cid(0),
+        subject: make_cid(s),
         predicate: p.to_string(),
-        object:    QuadObject::Cid(make_cid(o)),
+        object: QuadObject::Cid(make_cid(o)),
     }
 }
 
@@ -54,7 +54,7 @@ fn bench_spo_lookup(c: &mut Criterion) {
     let subject = make_cid(42);
 
     c.bench_function("arrangement/spo_lookup_eavt", |b| {
-        b.iter(|| arr.get_objects(&subject, "name"));
+        b.iter(|| arr.get_values(&subject, "name"));
     });
 }
 
@@ -65,22 +65,26 @@ fn bench_pso_lookup(c: &mut Criterion) {
     }
 
     c.bench_function("arrangement/pso_get_subjects_aevt", |b| {
-        b.iter(|| arr.get_subjects_by_predicate("role"));
+        b.iter(|| arr.get_entities_by_attribute("role"));
     });
 
     c.bench_function("arrangement/pso_get_by_predicate_aevt", |b| {
-        b.iter(|| arr.get_by_predicate("role"));
+        b.iter(|| arr.get_by_attribute("role"));
     });
 }
 
 fn bench_pos_lookup(c: &mut Criterion) {
     let mut arr = Arrangement::new();
     for i in 0..10_000u64 {
-        arr.insert(&make_text_quad(i, "status", if i % 2 == 0 { "active" } else { "inactive" }));
+        arr.insert(&make_text_quad(
+            i,
+            "status",
+            if i % 2 == 0 { "active" } else { "inactive" },
+        ));
     }
 
     c.bench_function("arrangement/pos_lookup_avet", |b| {
-        b.iter(|| arr.get_subjects_by_predicate_object("status", "active"));
+        b.iter(|| arr.get_entities_by_attribute_value("status", "active"));
     });
 }
 
@@ -99,13 +103,21 @@ fn bench_ocp_lookup(c: &mut Criterion) {
 fn bench_predicate_prefix_scan(c: &mut Criterion) {
     let mut arr = Arrangement::new();
     for i in 0..10_000u64 {
-        arr.insert(&make_text_quad(i % 100, &format!("weight/block/{}/attn/q", i % 32), "v"));
-        arr.insert(&make_text_quad(i % 100, &format!("weight/block/{}/ffn/gate", i % 32), "v"));
+        arr.insert(&make_text_quad(
+            i % 100,
+            &format!("weight/block/{}/attn/q", i % 32),
+            "v",
+        ));
+        arr.insert(&make_text_quad(
+            i % 100,
+            &format!("weight/block/{}/ffn/gate", i % 32),
+            "v",
+        ));
     }
     let g = make_cid(0);
 
     c.bench_function("arrangement/prefix_scan_avet_weight", |b| {
-        b.iter(|| arr.quads_with_predicate_prefix(&g, "weight/"));
+        b.iter(|| arr.datoms_with_attribute_prefix(&g, "weight/"));
     });
 }
 
@@ -141,11 +153,13 @@ fn bench_multi_hop_traversal(c: &mut Criterion) {
     c.bench_function("arrangement/multi_hop_3hop_vaet", |b| {
         b.iter(|| {
             let hop1 = arr.get_referencing_subjects_by_predicate(&seed, "knows");
-            let mut hop2: Vec<KotobaCid> = hop1.iter()
+            let mut hop2: Vec<KotobaCid> = hop1
+                .iter()
                 .flat_map(|h| arr.get_referencing_subjects_by_predicate(h, "knows"))
                 .collect();
             hop2.dedup();
-            let hop3: Vec<KotobaCid> = hop2.iter()
+            let hop3: Vec<KotobaCid> = hop2
+                .iter()
                 .flat_map(|h| arr.get_referencing_subjects_by_predicate(h, "knows"))
                 .collect();
             hop3
@@ -159,17 +173,31 @@ fn bench_join_avet_intersection(c: &mut Criterion) {
     let mut arr = Arrangement::new();
     let n = 10_000u64;
     for i in 0..n {
-        arr.insert(&make_text_quad(i, "status", if i % 3 == 0 { "active" } else { "inactive" }));
-        arr.insert(&make_text_quad(i, "role", if i % 7 == 0 { "admin" } else { "viewer" }));
+        arr.insert(&make_text_quad(
+            i,
+            "status",
+            if i % 3 == 0 { "active" } else { "inactive" },
+        ));
+        arr.insert(&make_text_quad(
+            i,
+            "role",
+            if i % 7 == 0 { "admin" } else { "viewer" },
+        ));
     }
 
     c.bench_function("arrangement/join_avet_status_active_and_role_admin", |b| {
         b.iter(|| {
-            let active: std::collections::HashSet<_> =
-                arr.get_subjects_by_predicate_object("status", "active").into_iter().collect();
-            let admins = arr.get_subjects_by_predicate_object("role", "admin");
+            let active: std::collections::HashSet<_> = arr
+                .get_entities_by_attribute_value("status", "active")
+                .into_iter()
+                .collect();
+            let admins = arr.get_entities_by_attribute_value("role", "admin");
             // intersection
-            admins.iter().filter(|s| active.contains(s)).cloned().collect::<Vec<_>>()
+            admins
+                .iter()
+                .filter(|s| active.contains(s))
+                .cloned()
+                .collect::<Vec<_>>()
         });
     });
 }
@@ -181,7 +209,10 @@ fn bench_population_count_aevt(c: &mut Criterion) {
     let n = 50_000u64;
     for i in 0..n {
         let status = match i % 4 {
-            0 => "active", 1 => "inactive", 2 => "pending", _ => "archived",
+            0 => "active",
+            1 => "inactive",
+            2 => "pending",
+            _ => "archived",
         };
         arr.insert(&make_text_quad(i, "status", status));
     }
@@ -189,12 +220,13 @@ fn bench_population_count_aevt(c: &mut Criterion) {
     c.bench_function("arrangement/population_count_by_status_aevt", |b| {
         b.iter(|| {
             // AEVT scan: all subjects per predicate
-            let all = arr.get_by_predicate("status");
+            let all = arr.get_by_attribute("status");
             // count unique subjects per object value
-            let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            let mut counts: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
             for (_, objs) in &all {
                 for obj in objs {
-                    if let kotoba_kqe::quad::QuadObject::Text(v) = obj {
+                    if let kotoba_kqe::quad::LegacyQuadObject::Text(v) = obj {
                         *counts.entry(v.clone()).or_default() += 1;
                     }
                 }
@@ -211,10 +243,28 @@ fn bench_star_pattern_eavt(c: &mut Criterion) {
     let g = make_cid(0);
     let target = make_cid(42);
     // Add 20 predicates to the target entity
-    let preds = ["name", "email", "role", "status", "country", "city",
-                 "org", "dept", "level", "score", "created", "updated",
-                 "weight/embed", "weight/lm_head", "knows", "manages",
-                 "reports_to", "member_of", "owner", "lang"];
+    let preds = [
+        "name",
+        "email",
+        "role",
+        "status",
+        "country",
+        "city",
+        "org",
+        "dept",
+        "level",
+        "score",
+        "created",
+        "updated",
+        "weight/embed",
+        "weight/lm_head",
+        "knows",
+        "manages",
+        "reports_to",
+        "member_of",
+        "owner",
+        "lang",
+    ];
     for p in &preds {
         arr.insert(&make_text_quad(42, p, "value"));
     }
@@ -224,7 +274,7 @@ fn bench_star_pattern_eavt(c: &mut Criterion) {
     }
 
     c.bench_function("arrangement/star_pattern_eavt_20pred", |b| {
-        b.iter(|| arr.get_subject_quads(&g, &target));
+        b.iter(|| arr.get_subject_datoms(&g, &target));
     });
 }
 

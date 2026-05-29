@@ -1,9 +1,9 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
-use bytes::Bytes;
 use anyhow::Result;
+use bytes::Bytes;
 use kotoba_core::cid::KotobaCid;
 use kotoba_core::store::BlockStore;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 /// LRU + pin-aware eviction wrapper over any BlockStore.
 ///
@@ -19,16 +19,16 @@ use kotoba_core::store::BlockStore;
 ///   inner store still has them — shadow eviction is never used here because
 ///   `delete()` is called on the inner store).
 pub struct BudgetedBlockStore<S: BlockStore> {
-    inner:     Arc<S>,
+    inner: Arc<S>,
     max_bytes: usize,
-    state:     Mutex<Budget>,
+    state: Mutex<Budget>,
 }
 
 struct Budget {
-    used_bytes:  usize,
-    sizes:       HashMap<[u8; 36], usize>,
-    lru_gen:     HashMap<[u8; 36], u64>, // cid → access generation (lower = colder)
-    pinned:      HashSet<[u8; 36]>,
+    used_bytes: usize,
+    sizes: HashMap<[u8; 36], usize>,
+    lru_gen: HashMap<[u8; 36], u64>, // cid → access generation (lower = colder)
+    pinned: HashSet<[u8; 36]>,
     gen_counter: u64,
 }
 
@@ -46,10 +46,10 @@ impl<S: BlockStore + 'static> BudgetedBlockStore<S> {
             inner: Arc::new(inner),
             max_bytes,
             state: Mutex::new(Budget {
-                used_bytes:  0,
-                sizes:       HashMap::new(),
-                lru_gen:     HashMap::new(),
-                pinned:      HashSet::new(),
+                used_bytes: 0,
+                sizes: HashMap::new(),
+                lru_gen: HashMap::new(),
+                pinned: HashSet::new(),
                 gen_counter: 0,
             }),
         }
@@ -73,7 +73,9 @@ impl<S: BlockStore + 'static> BudgetedBlockStore<S> {
                 return 0;
             }
             // Sort unpinned entries by generation (lowest = coldest).
-            let mut candidates: Vec<([u8; 36], u64)> = st.lru_gen.iter()
+            let mut candidates: Vec<([u8; 36], u64)> = st
+                .lru_gen
+                .iter()
                 .filter(|(k, _)| !st.pinned.contains(*k))
                 .map(|(k, &g)| (*k, g))
                 .collect();
@@ -82,7 +84,9 @@ impl<S: BlockStore + 'static> BudgetedBlockStore<S> {
             let mut evict = Vec::new();
             let mut projected = st.used_bytes;
             for (key, _) in candidates {
-                if projected <= target { break; }
+                if projected <= target {
+                    break;
+                }
                 if let Some(&sz) = st.sizes.get(&key) {
                     evict.push(key);
                     projected = projected.saturating_sub(sz);
@@ -173,7 +177,9 @@ mod tests {
     use super::*;
     use crate::memory_store::MemoryBlockStore;
 
-    fn cid(seed: &[u8]) -> KotobaCid { KotobaCid::from_bytes(seed) }
+    fn cid(seed: &[u8]) -> KotobaCid {
+        KotobaCid::from_bytes(seed)
+    }
     fn budgeted(max: usize) -> BudgetedBlockStore<MemoryBlockStore> {
         BudgetedBlockStore::new(MemoryBlockStore::new(), max)
     }

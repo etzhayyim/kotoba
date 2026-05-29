@@ -8,21 +8,21 @@ authors.workspace = true
 [dependencies]
 anyhow.workspace    = true
 thiserror.workspace = true
-tracing.workspace   = true
-tokio = { workspace = true }
-futures.workspace   = true
-async-trait.workspace = true
-serde = { workspace = true }
+tokio               = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+reqwest             = { workspace = true, features = ["blocking", "multipart"] }
 ciborium.workspace  = true
+bytes               = { workspace = true }
+tracing.workspace   = true
+ed25519-dalek.workspace = true
+multibase.workspace = true
 
-sha2.workspace  = true
-multihash = { workspace = true }
-cid = { workspace = true }
-
-# libp2p 0.53 — aligns with workspace; avoids hickory-resolver conflict with iroh 0.30
-# We implement block exchange over request_response with CBOR + SHA2-256 CIDs.
-libp2p = { workspace = true, features = ["tokio", "tcp", "noise", "yamux", "request-response", "macros", "identify"] }
+# IPFS-compatible CID substrate plus a lightweight self-owned block exchange.
+ipld-core = { workspace = true }
+multihash-codetable = { version = "0.2", features = ["sha2"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 tracing-subscriber.workspace = true
+tempfile = "3"

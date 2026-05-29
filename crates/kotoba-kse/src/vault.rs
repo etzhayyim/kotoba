@@ -1,8 +1,8 @@
 use crate::chunker::{split, strategy_for};
+use bytes::Bytes;
 use kotoba_core::cid::KotobaCid;
 use kotoba_core::store::BlockStore;
 use kotoba_store::car_bundle::CarBundleWriter;
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,20 +14,20 @@ use tokio::sync::RwLock;
 /// CBOR-encoded `BlobManifest` block, not the raw data directly.
 #[derive(Debug, Clone)]
 pub struct BlobRef {
-    pub cid:       KotobaCid,
-    pub size:      usize,
+    pub cid: KotobaCid,
+    pub size: usize,
     pub mime_type: Option<String>,
     /// `true` when `cid` points to a `BlobManifest` (chunked blob).
-    pub chunked:   bool,
+    pub chunked: bool,
 }
 
 /// CBOR-encoded manifest stored as a block when a blob is split into chunks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlobManifest {
-    pub mime_type:  String,
+    pub mime_type: String,
     pub total_size: u64,
     /// Ordered chunk CIDs (each chunk is a raw block in the store).
-    pub chunks:     Vec<KotobaCid>,
+    pub chunks: Vec<KotobaCid>,
 }
 
 /// Vault — chunked, content-addressed binary blob store.
@@ -49,12 +49,18 @@ pub struct Vault {
 impl Vault {
     /// In-memory only — no persistence.
     pub fn new() -> Self {
-        Self { blobs: Arc::new(RwLock::new(HashMap::new())), store: None }
+        Self {
+            blobs: Arc::new(RwLock::new(HashMap::new())),
+            store: None,
+        }
     }
 
     /// Persistent — blobs are written to / read from the given block store.
     pub fn with_block_store(store: Arc<dyn BlockStore + Send + Sync>) -> Self {
-        Self { blobs: Arc::new(RwLock::new(HashMap::new())), store: Some(store) }
+        Self {
+            blobs: Arc::new(RwLock::new(HashMap::new())),
+            store: Some(store),
+        }
     }
 
     /// Store a blob, choosing the chunking strategy from its MIME type.
@@ -69,12 +75,19 @@ impl Vault {
 
         if chunks.len() == 1 {
             // Single chunk — store raw, no manifest overhead.
-            let cid  = KotobaCid::from_bytes(&data);
-            let key  = cid.to_multibase();
+            let cid = KotobaCid::from_bytes(&data);
+            let key = cid.to_multibase();
             let size = data.len();
             self.blobs.write().await.insert(key, data.clone());
-            if let Some(s) = &self.store { s.put(&cid, &data).ok(); }
-            BlobRef { cid, size, mime_type: Some(mime), chunked: false }
+            if let Some(s) = &self.store {
+                s.put(&cid, &data).ok();
+            }
+            BlobRef {
+                cid,
+                size,
+                mime_type: Some(mime),
+                chunked: false,
+            }
         } else {
             self.put_chunks(data.len(), mime, chunks).await
         }
@@ -119,8 +132,12 @@ impl Vault {
 
     pub async fn contains(&self, cid: &KotobaCid) -> bool {
         let key = cid.to_multibase();
-        if self.blobs.read().await.contains_key(&key) { return true; }
-        if let Some(s) = &self.store { return s.has(cid); }
+        if self.blobs.read().await.contains_key(&key) {
+            return true;
+        }
+        if let Some(s) = &self.store {
+            return s.has(cid);
+        }
         false
     }
 
@@ -146,25 +163,39 @@ impl Vault {
         let mut chunk_cids = Vec::with_capacity(chunks.len());
         for chunk in &chunks {
             let cid = KotobaCid::from_bytes(chunk);
-            self.blobs.write().await.insert(cid.to_multibase(), chunk.clone());
-            if let Some(s) = &self.store { s.put(&cid, chunk).ok(); }
+            self.blobs
+                .write()
+                .await
+                .insert(cid.to_multibase(), chunk.clone());
+            if let Some(s) = &self.store {
+                s.put(&cid, chunk).ok();
+            }
             chunk_cids.push(cid);
         }
 
         let manifest = BlobManifest {
-            mime_type:  mime.clone(),
+            mime_type: mime.clone(),
             total_size: total_size as u64,
-            chunks:     chunk_cids,
+            chunks: chunk_cids,
         };
         let mut cbor = Vec::new();
-        ciborium::into_writer(&manifest, &mut cbor)
-            .expect("BlobManifest CBOR serialization");
+        ciborium::into_writer(&manifest, &mut cbor).expect("BlobManifest CBOR serialization");
         let manifest_cid = KotobaCid::from_bytes(&cbor);
-        let cbor_bytes   = Bytes::from(cbor);
-        self.blobs.write().await.insert(manifest_cid.to_multibase(), cbor_bytes.clone());
-        if let Some(s) = &self.store { s.put(&manifest_cid, &cbor_bytes).ok(); }
+        let cbor_bytes = Bytes::from(cbor);
+        self.blobs
+            .write()
+            .await
+            .insert(manifest_cid.to_multibase(), cbor_bytes.clone());
+        if let Some(s) = &self.store {
+            s.put(&manifest_cid, &cbor_bytes).ok();
+        }
 
-        BlobRef { cid: manifest_cid, size: total_size, mime_type: Some(mime), chunked: true }
+        BlobRef {
+            cid: manifest_cid,
+            size: total_size,
+            mime_type: Some(mime),
+            chunked: true,
+        }
     }
 
     async fn reassemble(&self, manifest: &BlobManifest) -> Option<Bytes> {
@@ -178,7 +209,9 @@ impl Vault {
 
     async fn get_raw(&self, cid: &KotobaCid) -> Option<Bytes> {
         let key = cid.to_multibase();
-        if let Some(b) = self.blobs.read().await.get(&key).cloned() { return Some(b); }
+        if let Some(b) = self.blobs.read().await.get(&key).cloned() {
+            return Some(b);
+        }
         if let Some(s) = &self.store {
             if let Ok(Some(b)) = s.get(cid) {
                 self.blobs.write().await.insert(key, b.clone());
@@ -190,7 +223,9 @@ impl Vault {
 }
 
 impl Default for Vault {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -204,7 +239,10 @@ mod tests {
     struct MemStore(StdRwLock<HashMap<[u8; 36], Bytes>>);
     impl BlockStore for MemStore {
         fn put(&self, cid: &KotobaCid, data: &[u8]) -> anyhow::Result<()> {
-            self.0.write().unwrap().insert(cid.0, Bytes::copy_from_slice(data));
+            self.0
+                .write()
+                .unwrap()
+                .insert(cid.0, Bytes::copy_from_slice(data));
             Ok(())
         }
         fn get(&self, cid: &KotobaCid) -> anyhow::Result<Option<Bytes>> {
@@ -219,7 +257,9 @@ mod tests {
         }
         fn pin(&self, _: &KotobaCid) {}
         fn unpin(&self, _: &KotobaCid) {}
-        fn is_pinned(&self, _: &KotobaCid) -> bool { false }
+        fn is_pinned(&self, _: &KotobaCid) -> bool {
+            false
+        }
     }
 
     #[tokio::test]
@@ -296,7 +336,10 @@ mod tests {
         // ~1.5 MB of pseudo-random bytes (> SINGLE_THRESHOLD, triggers FixedLen for video/mp4)
         let mut data = Vec::with_capacity(1_500_000);
         let mut v: u8 = 7;
-        for _ in 0..data.capacity() { v = v.wrapping_mul(13).wrapping_add(37); data.push(v); }
+        for _ in 0..data.capacity() {
+            v = v.wrapping_mul(13).wrapping_add(37);
+            data.push(v);
+        }
         let data = Bytes::from(data);
 
         let blob_ref = vault.put_typed(data.clone(), "video/mp4").await;
@@ -315,7 +358,9 @@ mod tests {
         let ref1 = vault.put(Bytes::from_static(b"block one")).await;
         let ref2 = vault.put(Bytes::from_static(b"block two")).await;
 
-        let car = vault.flush_as_car(&ref1.cid, &[ref1.cid.clone(), ref2.cid.clone()]).await;
+        let car = vault
+            .flush_as_car(&ref1.cid, &[ref1.cid.clone(), ref2.cid.clone()])
+            .await;
         assert!(car.is_some());
         assert!(car.unwrap().len() > 16); // CAR header + at least one block
     }
@@ -333,8 +378,13 @@ mod tests {
     async fn flush_as_car_without_store_returns_none() {
         let vault = Vault::new(); // no block store
         let blob_ref = vault.put(Bytes::from_static(b"no-store")).await;
-        let car = vault.flush_as_car(&blob_ref.cid, &[blob_ref.cid.clone()]).await;
-        assert!(car.is_none(), "flush_as_car without a block store must return None");
+        let car = vault
+            .flush_as_car(&blob_ref.cid, &[blob_ref.cid.clone()])
+            .await;
+        assert!(
+            car.is_none(),
+            "flush_as_car without a block store must return None"
+        );
     }
 
     #[test]
@@ -342,15 +392,15 @@ mod tests {
         let cid1 = KotobaCid::from_bytes(b"chunk1");
         let cid2 = KotobaCid::from_bytes(b"chunk2");
         let manifest = BlobManifest {
-            mime_type:  "video/mp4".to_string(),
+            mime_type: "video/mp4".to_string(),
             total_size: 1_048_576,
-            chunks:     vec![cid1.clone(), cid2.clone()],
+            chunks: vec![cid1.clone(), cid2.clone()],
         };
         let mut cbor = Vec::new();
         ciborium::into_writer(&manifest, &mut cbor).expect("serialize BlobManifest");
         let recovered: BlobManifest =
             ciborium::from_reader(&cbor[..]).expect("deserialize BlobManifest");
-        assert_eq!(recovered.mime_type,  manifest.mime_type);
+        assert_eq!(recovered.mime_type, manifest.mime_type);
         assert_eq!(recovered.total_size, manifest.total_size);
         assert_eq!(recovered.chunks.len(), 2);
         assert_eq!(recovered.chunks[0], cid1);

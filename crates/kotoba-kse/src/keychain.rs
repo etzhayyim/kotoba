@@ -13,17 +13,17 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-const SERVICE:        &str = "gftd.kotoba";
+const SERVICE: &str = "gftd.kotoba";
 const ACCOUNT_ED25519: &str = "agent-ed25519";
-const ACCOUNT_X25519:  &str = "agent-x25519";
-const ACCOUNT_DID:     &str = "agent-did";
+const ACCOUNT_X25519: &str = "agent-x25519";
+const ACCOUNT_DID: &str = "agent-did";
 
 /// Triple of identity material persisted on the local device.
 #[derive(Debug, Clone)]
 pub struct StoredIdentity {
-    pub ed25519_hex: String,  // 64 hex chars (32-byte seed)
-    pub x25519_hex:  String,  // 64 hex chars (32-byte static secret)
-    pub did:         String,  // e.g. did:key:z...
+    pub ed25519_hex: String, // 64 hex chars (32-byte seed)
+    pub x25519_hex: String,  // 64 hex chars (32-byte static secret)
+    pub did: String,         // e.g. did:key:z...
 }
 
 /// Read the triple if all three items are present.  Returns `None` if any is
@@ -33,7 +33,11 @@ pub fn read_identity() -> Option<StoredIdentity> {
         let ed = read_macos(ACCOUNT_ED25519)?;
         let dh = read_macos(ACCOUNT_X25519)?;
         let did = read_macos(ACCOUNT_DID)?;
-        Some(StoredIdentity { ed25519_hex: ed, x25519_hex: dh, did })
+        Some(StoredIdentity {
+            ed25519_hex: ed,
+            x25519_hex: dh,
+            did,
+        })
     } else {
         read_file_backend()
     }
@@ -43,8 +47,8 @@ pub fn read_identity() -> Option<StoredIdentity> {
 pub fn write_identity(id: &StoredIdentity) -> anyhow::Result<()> {
     if cfg!(target_os = "macos") {
         write_macos(ACCOUNT_ED25519, &id.ed25519_hex)?;
-        write_macos(ACCOUNT_X25519,  &id.x25519_hex)?;
-        write_macos(ACCOUNT_DID,     &id.did)?;
+        write_macos(ACCOUNT_X25519, &id.x25519_hex)?;
+        write_macos(ACCOUNT_DID, &id.did)?;
         Ok(())
     } else {
         write_file_backend(id)
@@ -59,19 +63,36 @@ fn read_macos(account: &str) -> Option<String> {
         .args(["find-generic-password", "-s", SERVICE, "-a", account, "-w"])
         .output()
         .ok()?;
-    if !out.status.success() { return None; }
+    if !out.status.success() {
+        return None;
+    }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn read_macos(_account: &str) -> Option<String> { None }
+fn read_macos(_account: &str) -> Option<String> {
+    None
+}
 
 #[cfg(target_os = "macos")]
 fn write_macos(account: &str, value: &str) -> anyhow::Result<()> {
     // -U updates existing item if present; -s = service, -a = account, -w = password
     let status = Command::new("/usr/bin/security")
-        .args(["add-generic-password", "-U", "-s", SERVICE, "-a", account, "-w", value])
+        .args([
+            "add-generic-password",
+            "-U",
+            "-s",
+            SERVICE,
+            "-a",
+            account,
+            "-w",
+            value,
+        ])
         .status()?;
     if !status.success() {
         anyhow::bail!("security add-generic-password failed for {account}");
@@ -93,9 +114,9 @@ fn env_file_path() -> Option<PathBuf> {
 
 fn read_file_backend() -> Option<StoredIdentity> {
     let path = env_file_path()?;
-    let raw  = std::fs::read_to_string(&path).ok()?;
-    let mut ed: Option<String>  = None;
-    let mut dh: Option<String>  = None;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let mut ed: Option<String> = None;
+    let mut dh: Option<String> = None;
     let mut did: Option<String> = None;
     for line in raw.lines() {
         if let Some(rest) = line.strip_prefix("KOTOBA_AGENT_ED25519_HEX=") {
@@ -106,7 +127,11 @@ fn read_file_backend() -> Option<StoredIdentity> {
             did = Some(rest.trim().to_string());
         }
     }
-    Some(StoredIdentity { ed25519_hex: ed?, x25519_hex: dh?, did: did? })
+    Some(StoredIdentity {
+        ed25519_hex: ed?,
+        x25519_hex: dh?,
+        did: did?,
+    })
 }
 
 fn write_file_backend(id: &StoredIdentity) -> anyhow::Result<()> {
@@ -119,7 +144,8 @@ fn write_file_backend(id: &StoredIdentity) -> anyhow::Result<()> {
         id.ed25519_hex, id.x25519_hex, id.did
     );
     std::fs::write(&path, body)?;
-    #[cfg(unix)] {
+    #[cfg(unix)]
+    {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(&path)?.permissions();
         perms.set_mode(0o600);
@@ -146,13 +172,13 @@ mod tests {
         std::env::set_var("HOME", tmp.path());
         let id = StoredIdentity {
             ed25519_hex: "a".repeat(64),
-            x25519_hex:  "b".repeat(64),
-            did:         "did:key:zABC".into(),
+            x25519_hex: "b".repeat(64),
+            did: "did:key:zABC".into(),
         };
         write_file_backend(&id).unwrap();
         let got = read_file_backend().unwrap();
         assert_eq!(got.ed25519_hex, id.ed25519_hex);
-        assert_eq!(got.x25519_hex,  id.x25519_hex);
-        assert_eq!(got.did,         id.did);
+        assert_eq!(got.x25519_hex, id.x25519_hex);
+        assert_eq!(got.did, id.did);
     }
 }

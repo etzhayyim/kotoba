@@ -6,10 +6,10 @@
 
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::time::{Duration, sleep};
+use tokio::time::{sleep, Duration};
 
 use kotoba_vm::distributed::{DistributedMessage, DistributedPregelRunner, SharedComputeFn};
-use kotoba_vm::pregel::{ComputeOutput, Message, VertexId, Vertex};
+use kotoba_vm::pregel::{ComputeOutput, Message, Vertex, VertexId};
 
 // ---------------------------------------------------------------------------
 // Helper: relay task
@@ -20,7 +20,7 @@ use kotoba_vm::pregel::{ComputeOutput, Message, VertexId, Vertex};
 /// ends are dropped.
 fn spawn_relay(
     mut outbound_rx: mpsc::Receiver<DistributedMessage>,
-    inbound_tx:      mpsc::Sender<DistributedMessage>,
+    inbound_tx: mpsc::Sender<DistributedMessage>,
 ) -> tokio::task::JoinHandle<usize> {
     tokio::spawn(async move {
         let mut forwarded = 0usize;
@@ -42,12 +42,13 @@ fn spawn_relay(
 /// and then votes to halt (so we get exactly one active superstep per message).
 fn echo_state_compute() -> SharedComputeFn {
     Arc::new(|_v: &Vertex, inbox: &[Message]| {
-        let payload = inbox.iter()
+        let payload = inbox
+            .iter()
             .flat_map(|m| m.payload.iter().copied())
             .collect::<Vec<u8>>();
         ComputeOutput {
             new_state: payload,
-            messages:  vec![],
+            messages: vec![],
             vote_halt: true,
         }
     })
@@ -82,21 +83,21 @@ async fn cross_node_message_arrives_at_remote_vertex() {
         let mut out_msgs = Vec::new();
         if !inbox.is_empty() {
             out_msgs.push(Message {
-                src:     v.id.clone(),
-                dst:     vid_b_for_compute.clone(),
+                src: v.id.clone(),
+                dst: vid_b_for_compute.clone(),
                 payload: b"hello-from-node1".to_vec(),
             });
         }
         ComputeOutput {
             new_state: b"sent".to_vec(),
-            messages:  out_msgs,
+            messages: out_msgs,
             vote_halt: true,
         }
     });
 
     runner1.graph.inject_message(Message {
-        src:     VertexId::from("seed"),
-        dst:     vid_a.clone(),
+        src: VertexId::from("seed"),
+        dst: vid_a.clone(),
         payload: b"go".to_vec(),
     });
 
@@ -109,8 +110,14 @@ async fn cross_node_message_arrives_at_remote_vertex() {
 
     // Step node2: drain inbound (relay delivered the message), vertex-B activates
     let r2 = runner2.distributed_superstep(echo_state_compute()).await;
-    assert_eq!(r2.active_count, 1,    "vertex-B should be activated by relayed message");
-    assert_eq!(r2.msg_delivered, 1,   "exactly one message should arrive at vertex-B");
+    assert_eq!(
+        r2.active_count, 1,
+        "vertex-B should be activated by relayed message"
+    );
+    assert_eq!(
+        r2.msg_delivered, 1,
+        "exactly one message should arrive at vertex-B"
+    );
 
     // drain_inbound reconstructs VertexId via from_str(multibase_string), so the
     // lookup key for the remote-delivered vertex is the multibase string treated as
@@ -128,7 +135,10 @@ async fn cross_node_message_arrives_at_remote_vertex() {
 
     drop(runner1); // causes relay to finish (outbound_rx drops)
     let forwarded = relay.await.expect("relay task should complete");
-    assert_eq!(forwarded, 1, "relay should have forwarded exactly one message");
+    assert_eq!(
+        forwarded, 1,
+        "relay should have forwarded exactly one message"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -140,7 +150,11 @@ async fn cross_node_message_arrives_at_remote_vertex() {
 fn ping_pong_compute(reply_to: VertexId, iteration_limit: u8) -> SharedComputeFn {
     Arc::new(move |v: &Vertex, inbox: &[Message]| {
         if inbox.is_empty() {
-            return ComputeOutput { new_state: v.state.clone(), messages: vec![], vote_halt: true };
+            return ComputeOutput {
+                new_state: v.state.clone(),
+                messages: vec![],
+                vote_halt: true,
+            };
         }
         // Extract the iteration counter from the last byte of the first message payload
         let count = inbox[0].payload.last().copied().unwrap_or(0);
@@ -148,8 +162,8 @@ fn ping_pong_compute(reply_to: VertexId, iteration_limit: u8) -> SharedComputeFn
 
         let messages = if new_count <= iteration_limit {
             vec![Message {
-                src:     v.id.clone(),
-                dst:     reply_to.clone(),
+                src: v.id.clone(),
+                dst: reply_to.clone(),
                 payload: vec![new_count],
             }]
         } else {
@@ -187,19 +201,25 @@ async fn cross_node_bidirectional_exchange() {
 
     // Seed node1 with an initial message (counter=0)
     runner1.graph.inject_message(Message {
-        src:     VertexId::from("tester"),
-        dst:     vid_a.clone(),
+        src: VertexId::from("tester"),
+        dst: vid_a.clone(),
         payload: vec![0],
     });
 
     // Round 1: vertex-A activates, sends counter=1 to vertex-B (remote → outbound)
     let r1a = runner1.distributed_superstep(Arc::clone(&compute_a)).await;
-    assert_eq!(r1a.active_count, 1, "round1/node1: vertex-A should be active");
+    assert_eq!(
+        r1a.active_count, 1,
+        "round1/node1: vertex-A should be active"
+    );
     sleep(Duration::from_millis(20)).await;
 
     // Round 1: relay delivers to node2; vertex-B activates, sends counter=2 to vertex-A
     let r2a = runner2.distributed_superstep(Arc::clone(&compute_b)).await;
-    assert_eq!(r2a.active_count, 1, "round1/node2: vertex-B should activate");
+    assert_eq!(
+        r2a.active_count, 1,
+        "round1/node2: vertex-B should activate"
+    );
     sleep(Duration::from_millis(20)).await;
 
     // Round 2: drain_inbound on node1 reconstructs VertexId from multibase string,
@@ -217,7 +237,9 @@ async fn cross_node_bidirectional_exchange() {
 
     // Vertex-A (node1) state after round1: counter=1 (set when seed was processed)
     // The locally-owned vertex-A is updated after its first activation.
-    let state_a = runner1.graph.vertex(&vid_a)
+    let state_a = runner1
+        .graph
+        .vertex(&vid_a)
         .map(|v| v.state.clone())
         .expect("vertex-A must exist (added with add_local_vertex)");
     assert_eq!(
@@ -241,34 +263,33 @@ async fn cross_node_bidirectional_exchange() {
 async fn outbound_message_to_unknown_dst_is_forwarded() {
     let (_in_tx, mut out_rx, mut runner) = DistributedPregelRunner::channel_pair(16);
 
-    let local_vid  = VertexId::from("local-only");
+    let local_vid = VertexId::from("local-only");
     let remote_vid = VertexId::from("somewhere-else");
 
     runner.add_local_vertex(local_vid.clone(), Vec::new());
 
     runner.graph.inject_message(Message {
-        src:     VertexId::from("seed"),
-        dst:     local_vid.clone(),
+        src: VertexId::from("seed"),
+        dst: local_vid.clone(),
         payload: b"activate".to_vec(),
     });
 
     let remote_dst = remote_vid.clone();
-    let compute: SharedComputeFn = Arc::new(move |v: &Vertex, _inbox: &[Message]| {
-        ComputeOutput {
-            new_state: b"forwarded".to_vec(),
-            messages:  vec![Message {
-                src:     v.id.clone(),
-                dst:     remote_dst.clone(),
-                payload: b"cross-node-payload".to_vec(),
-            }],
-            vote_halt: true,
-        }
+    let compute: SharedComputeFn = Arc::new(move |v: &Vertex, _inbox: &[Message]| ComputeOutput {
+        new_state: b"forwarded".to_vec(),
+        messages: vec![Message {
+            src: v.id.clone(),
+            dst: remote_dst.clone(),
+            payload: b"cross-node-payload".to_vec(),
+        }],
+        vote_halt: true,
     });
 
     runner.distributed_superstep(compute).await;
 
     // The message for the unknown remote vertex must appear on outbound_rx
-    let dmsg = out_rx.try_recv()
+    let dmsg = out_rx
+        .try_recv()
         .expect("remote message should be in outbound channel");
 
     assert_eq!(

@@ -19,18 +19,21 @@
 //!   kg/claim/<pred> — property claim (Text / Float / Bool)
 //!   kg/relation/<pred> — edge to another entity (Cid object = subject CID of dst)
 
-use std::sync::Arc;
+use crate::graph_auth::{check_read_access, AccessDenied};
+use crate::server::KotobaState;
 use axum::{
-    Json,
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
+    Json,
+};
+use kotoba_core::cid::KotobaCid;
+use kotoba_kqe::{
+    datom::{Datom as KqeDatom, Value as KqeValue},
+    quad::LegacyQuadObject as QuadObject,
 };
 use serde::{Deserialize, Serialize};
-use kotoba_core::cid::KotobaCid;
-use kotoba_kqe::quad::QuadObject;
-use crate::server::KotobaState;
-use crate::graph_auth::{AccessDenied, check_read_access};
+use std::sync::Arc;
 
 /// Require a valid, non-expired Bearer JWT to authorise KG write operations.
 /// Any authenticated principal with a `sub` claim and a valid `exp` is accepted.
@@ -41,49 +44,81 @@ fn require_kg_write_auth(headers: &HeaderMap) -> Result<(), (StatusCode, String)
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or_else(|| {
             tracing::warn!("kg write auth: missing Bearer token");
-            (StatusCode::UNAUTHORIZED,
-                "Authorization: Bearer <token> required for KG write operations".to_string())
+            (
+                StatusCode::UNAUTHORIZED,
+                "Authorization: Bearer <token> required for KG write operations".to_string(),
+            )
         })?;
     if crate::graph_auth::jwt_exp_elapsed(token) {
         tracing::warn!("kg write auth: expired JWT");
-        return Err((StatusCode::UNAUTHORIZED, "Bearer token has expired".to_string()));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Bearer token has expired".to_string(),
+        ));
     }
-    crate::graph_auth::jwt_sub(token)
-        .ok_or_else(|| {
-            tracing::warn!("kg write auth: JWT missing sub claim");
-            (StatusCode::UNAUTHORIZED, "Bearer token missing sub claim".to_string())
-        })?;
+    crate::graph_auth::jwt_sub(token).ok_or_else(|| {
+        tracing::warn!("kg write auth: JWT missing sub claim");
+        (
+            StatusCode::UNAUTHORIZED,
+            "Bearer token missing sub claim".to_string(),
+        )
+    })?;
     Ok(())
 }
 
-pub const NSID_KG_ENTITY:  &str = "ai.gftd.apps.kotobase.kg.entity";
+pub const NSID_KG_ENTITY: &str = "ai.gftd.apps.kotobase.kg.entity";
 pub const NSID_KG_CATALOG: &str = "ai.gftd.apps.kotobase.kg.catalog";
-pub const NSID_KG_EMBED:   &str = "ai.gftd.apps.kotobase.kg.embed";
-pub const NSID_KG_SEARCH:  &str = "ai.gftd.apps.kotobase.kg.search";
-pub const NSID_KG_QUERY:   &str = "ai.gftd.apps.kotobase.kg.query";
-pub const NSID_KG_SPARQL:  &str = "ai.gftd.apps.kotoba.graph.sparql";
-pub const NSID_KG_INGEST:  &str = "ai.gftd.apps.kotobase.kg.ingest";
+pub const NSID_KG_EMBED: &str = "ai.gftd.apps.kotobase.kg.embed";
+pub const NSID_KG_SEARCH: &str = "ai.gftd.apps.kotobase.kg.search";
+pub const NSID_KG_QUERY: &str = "ai.gftd.apps.kotobase.kg.query";
+pub const NSID_KG_SPARQL: &str = "ai.gftd.apps.kotoba.graph.sparql";
+pub const NSID_KG_INGEST: &str = "ai.gftd.apps.kotobase.kg.ingest";
 pub const NSID_KG_INGEST_BATCH: &str = "ai.gftd.apps.kotobase.kg.ingest_batch";
-pub const NSID_KG_DELETE:  &str = "ai.gftd.apps.kotobase.kg.delete";
-pub const NSID_KG_COMMIT:  &str = "ai.gftd.apps.kotobase.kg.commit";
+pub const NSID_KG_DELETE: &str = "ai.gftd.apps.kotobase.kg.delete";
+pub const NSID_KG_COMMIT: &str = "ai.gftd.apps.kotobase.kg.commit";
 
 /// All yatabase KG quads are written into this named graph.
 pub fn kg_graph_cid() -> KotobaCid {
     KotobaCid::from_bytes(b"kotobase-kg-v1")
 }
 
-const MAX_KG_ID_LEN:    usize = 256;
-const MAX_KG_TEXT_LEN:  usize = 8_192;  // max embed text — prevents inference-engine DoS
+fn kg_pending_tx_cid() -> KotobaCid {
+    KotobaCid::from_bytes(b"kotoba-kg-pending-tx")
+}
+
+async fn assert_kg_datom(
+    state: &KotobaState,
+    graph: &KotobaCid,
+    subject: &KotobaCid,
+    predicate: impl Into<String>,
+    value: KqeValue,
+) {
+    state
+        .quad_store
+        .assert_datom(
+            graph.clone(),
+            KqeDatom::assert(
+                subject.clone(),
+                predicate.into(),
+                value,
+                kg_pending_tx_cid(),
+            ),
+        )
+        .await;
+}
+
+const MAX_KG_ID_LEN: usize = 256;
+const MAX_KG_TEXT_LEN: usize = 8_192; // max embed text — prevents inference-engine DoS
 const MAX_KG_QUERY_LEN: usize = 2_048;
-const MAX_KG_LIMIT:     usize = 1_000;
+const MAX_KG_LIMIT: usize = 1_000;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KgEntityQuery {
-    pub id:  Option<String>,
+    pub id: Option<String>,
     pub qid: Option<String>,
     #[serde(default = "default_true")]
-    pub include_claims:    bool,
+    pub include_claims: bool,
     #[serde(default = "default_true")]
     pub include_relations: bool,
     #[serde(default = "default_max_relations")]
@@ -92,17 +127,21 @@ pub struct KgEntityQuery {
     pub cacao_b64: Option<String>,
 }
 
-fn default_true()         -> bool  { true }
-fn default_max_relations() -> usize { 50   }
+fn default_true() -> bool {
+    true
+}
+fn default_max_relations() -> usize {
+    50
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KgEntityResp {
-    pub ok:        bool,
+    pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error:     Option<String>,
+    pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub entity:    Option<serde_json::Value>,
+    pub entity: Option<serde_json::Value>,
     pub elapsed_ms: u128,
 }
 
@@ -110,37 +149,53 @@ pub struct KgEntityResp {
 /// GET /xrpc/ai.gftd.apps.kotobase.kg.entity?qid=Q42
 pub async fn kg_entity(
     State(state): State<Arc<KotobaState>>,
-    headers:      HeaderMap,
-    Query(q):     Query<KgEntityQuery>,
+    headers: HeaderMap,
+    Query(q): Query<KgEntityQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     use std::time::Instant;
-    let t0        = Instant::now();
+    let t0 = Instant::now();
     let graph_cid = kg_graph_cid();
 
     // ── Read-access gate ─────────────────────────────────────────────────────
     let visibility = state.graph_visibility(&graph_cid).await;
-    check_read_access(&visibility, &headers, q.cacao_b64.as_deref(), Some(&state.operator_did), Some(&state.nonce_store))
-        .map_err(AccessDenied::into_response)?;
+    check_read_access(
+        &visibility,
+        &headers,
+        q.cacao_b64.as_deref(),
+        Some(&state.operator_did),
+        Some(&state.nonce_store),
+    )
+    .map_err(AccessDenied::into_response)?;
 
     let (lookup_pred, lookup_val) = match (&q.id, &q.qid) {
         (Some(id), _) => {
             if id.len() > MAX_KG_ID_LEN {
-                return Err((StatusCode::BAD_REQUEST,
-                    format!("id must be ≤{MAX_KG_ID_LEN} bytes")));
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("id must be ≤{MAX_KG_ID_LEN} bytes"),
+                ));
             }
             ("kg/id", id.as_str())
         }
         (_, Some(qid)) => {
             if qid.len() > MAX_KG_ID_LEN {
-                return Err((StatusCode::BAD_REQUEST,
-                    format!("qid must be ≤{MAX_KG_ID_LEN} bytes")));
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("qid must be ≤{MAX_KG_ID_LEN} bytes"),
+                ));
             }
             ("kg/qid", qid.as_str())
         }
-        _ => return Err((StatusCode::BAD_REQUEST, "missing `id` or `qid` query param".into())),
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "missing `id` or `qid` query param".into(),
+            ))
+        }
     };
 
-    let subjects = state.quad_store
+    let subjects = state
+        .quad_store
         .lookup_subject_by_po(Some(&graph_cid), lookup_pred, lookup_val)
         .await;
 
@@ -148,37 +203,62 @@ pub async fn kg_entity(
         Some(s) => s,
         None => {
             return Ok(Json(KgEntityResp {
-                ok:         false,
-                error:      Some(format!("entity not found: {lookup_val}")),
-                entity:     None,
+                ok: false,
+                error: Some(format!("entity not found: {lookup_val}")),
+                entity: None,
                 elapsed_ms: t0.elapsed().as_millis(),
             }));
         }
     };
 
-    let quads = state.quad_store
+    let quads = state
+        .quad_store
         .get_entity_quads(Some(&graph_cid), &subject_cid)
         .await;
 
     let mut meta: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
-    let mut claims:    Vec<serde_json::Value> = Vec::new();
+    let mut claims: Vec<serde_json::Value> = Vec::new();
     let mut relations: Vec<serde_json::Value> = Vec::new();
 
     for quad in &quads {
         let pred = quad.predicate.as_str();
         match pred {
-            "kg/id"          => { meta.insert("id".into(),          obj_to_json(&quad.object)); }
-            "kg/qid"         => { meta.insert("qid".into(),         obj_to_json(&quad.object)); }
-            "kg/type"        => { meta.insert("type".into(),        obj_to_json(&quad.object)); }
-            "kg/label/ja"    => { meta.insert("labelJa".into(),     obj_to_json(&quad.object)); }
-            "kg/label/en"    => { meta.insert("labelEn".into(),     obj_to_json(&quad.object)); }
-            "kg/confidence"  => { meta.insert("confidence".into(),  obj_to_json(&quad.object)); }
-            "kg/license"     => { meta.insert("license".into(),     obj_to_json(&quad.object)); }
-            "kg/extractor"   => { meta.insert("extractor".into(),   obj_to_json(&quad.object)); }
-            "kg/valid_from"  => { meta.insert("validFrom".into(),   obj_to_json(&quad.object)); }
-            "kg/valid_to"    => { meta.insert("validTo".into(),     obj_to_json(&quad.object)); }
-            "kg/ingested_at" => { meta.insert("ingestedAt".into(),  obj_to_json(&quad.object)); }
-            "kg/source_id"   => { meta.insert("sourceId".into(),    obj_to_json(&quad.object)); }
+            "kg/id" => {
+                meta.insert("id".into(), obj_to_json(&quad.object));
+            }
+            "kg/qid" => {
+                meta.insert("qid".into(), obj_to_json(&quad.object));
+            }
+            "kg/type" => {
+                meta.insert("type".into(), obj_to_json(&quad.object));
+            }
+            "kg/label/ja" => {
+                meta.insert("labelJa".into(), obj_to_json(&quad.object));
+            }
+            "kg/label/en" => {
+                meta.insert("labelEn".into(), obj_to_json(&quad.object));
+            }
+            "kg/confidence" => {
+                meta.insert("confidence".into(), obj_to_json(&quad.object));
+            }
+            "kg/license" => {
+                meta.insert("license".into(), obj_to_json(&quad.object));
+            }
+            "kg/extractor" => {
+                meta.insert("extractor".into(), obj_to_json(&quad.object));
+            }
+            "kg/valid_from" => {
+                meta.insert("validFrom".into(), obj_to_json(&quad.object));
+            }
+            "kg/valid_to" => {
+                meta.insert("validTo".into(), obj_to_json(&quad.object));
+            }
+            "kg/ingested_at" => {
+                meta.insert("ingestedAt".into(), obj_to_json(&quad.object));
+            }
+            "kg/source_id" => {
+                meta.insert("sourceId".into(), obj_to_json(&quad.object));
+            }
             _ if pred.starts_with("kg/claim/") && q.include_claims => {
                 let claim_pred = &pred["kg/claim/".len()..];
                 claims.push(serde_json::json!({
@@ -186,7 +266,8 @@ pub async fn kg_entity(
                     "value":     obj_to_json(&quad.object),
                 }));
             }
-            _ if pred.starts_with("kg/relation/") && q.include_relations
+            _ if pred.starts_with("kg/relation/")
+                && q.include_relations
                 && relations.len() < q.max_relations.min(MAX_KG_LIMIT) =>
             {
                 let rel_pred = &pred["kg/relation/".len()..];
@@ -202,25 +283,29 @@ pub async fn kg_entity(
         }
     }
 
-    if q.include_claims    { meta.insert("claims".into(),    serde_json::Value::Array(claims));    }
-    if q.include_relations { meta.insert("relations".into(), serde_json::Value::Array(relations)); }
+    if q.include_claims {
+        meta.insert("claims".into(), serde_json::Value::Array(claims));
+    }
+    if q.include_relations {
+        meta.insert("relations".into(), serde_json::Value::Array(relations));
+    }
 
     Ok(Json(KgEntityResp {
-        ok:         true,
-        error:      None,
-        entity:     Some(serde_json::Value::Object(meta)),
+        ok: true,
+        error: None,
+        entity: Some(serde_json::Value::Object(meta)),
         elapsed_ms: t0.elapsed().as_millis(),
     }))
 }
 
 fn obj_to_json(obj: &QuadObject) -> serde_json::Value {
     match obj {
-        QuadObject::Text(s)    => serde_json::Value::String(s.clone()),
+        QuadObject::Text(s) => serde_json::Value::String(s.clone()),
         QuadObject::Integer(n) => serde_json::json!(n),
-        QuadObject::Float(f)   => serde_json::json!(f),
-        QuadObject::Bool(b)    => serde_json::json!(b),
-        QuadObject::Cid(c)     => serde_json::Value::String(c.to_multibase()),
-        _                      => serde_json::Value::Null,
+        QuadObject::Float(f) => serde_json::json!(f),
+        QuadObject::Bool(b) => serde_json::json!(b),
+        QuadObject::Cid(c) => serde_json::Value::String(c.to_multibase()),
+        _ => serde_json::Value::Null,
     }
 }
 
@@ -237,35 +322,53 @@ pub struct KgCatalogQuery {
 /// Returns aggregate stats and source breakdown from the QuadStore.
 pub async fn kg_catalog(
     State(state): State<Arc<KotobaState>>,
-    headers:      HeaderMap,
-    Query(q):     Query<KgCatalogQuery>,
+    headers: HeaderMap,
+    Query(q): Query<KgCatalogQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     use std::time::Instant;
-    let t0        = Instant::now();
+    let t0 = Instant::now();
     let graph_cid = kg_graph_cid();
 
     // ── Read-access gate ─────────────────────────────────────────────────────
     let visibility = state.graph_visibility(&graph_cid).await;
-    check_read_access(&visibility, &headers, q.cacao_b64.as_deref(), Some(&state.operator_did), Some(&state.nonce_store))
-        .map_err(AccessDenied::into_response)?;
+    check_read_access(
+        &visibility,
+        &headers,
+        q.cacao_b64.as_deref(),
+        Some(&state.operator_did),
+        Some(&state.nonce_store),
+    )
+    .map_err(AccessDenied::into_response)?;
 
-    let entity_count   = state.quad_store.count_by_predicate_prefix(&graph_cid, "kg/id").await;
-    let claim_count    = state.quad_store.count_by_predicate_prefix(&graph_cid, "kg/claim/").await;
-    let relation_count = state.quad_store.count_by_predicate_prefix(&graph_cid, "kg/relation/").await;
+    let entity_count = state
+        .quad_store
+        .count_by_attribute_prefix(&graph_cid, "kg/id")
+        .await;
+    let claim_count = state
+        .quad_store
+        .count_by_attribute_prefix(&graph_cid, "kg/claim/")
+        .await;
+    let relation_count = state
+        .quad_store
+        .count_by_attribute_prefix(&graph_cid, "kg/relation/")
+        .await;
 
     // Gather source_ids from kg/source_id quads
-    let source_quads = state.quad_store
+    let source_quads = state
+        .quad_store
         .quads_by_predicate_prefix(Some(&graph_cid), "kg/source_id")
         .await;
-    let mut source_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut source_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for q in &source_quads {
         let src = match &q.object {
             QuadObject::Text(s) => s.clone(),
-            other               => format!("{other:?}"),
+            other => format!("{other:?}"),
         };
         *source_counts.entry(src).or_insert(0) += 1;
     }
-    let sources: Vec<serde_json::Value> = source_counts.into_iter()
+    let sources: Vec<serde_json::Value> = source_counts
+        .into_iter()
         .map(|(id, count)| serde_json::json!({ "id": id, "entityCount": count }))
         .collect();
 
@@ -295,7 +398,7 @@ pub struct KgEmbedReq {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KgEmbedResp {
-    pub ok:   bool,
+    pub ok: bool,
     pub dims: usize,
 }
 
@@ -304,26 +407,34 @@ pub struct KgEmbedResp {
 /// VectorF32 quad for the entity.  Uses the inference engine when available.
 pub async fn kg_embed(
     State(state): State<Arc<KotobaState>>,
-    headers:      HeaderMap,
-    Json(req):    Json<KgEmbedReq>,
+    headers: HeaderMap,
+    Json(req): Json<KgEmbedReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     require_kg_write_auth(&headers)?;
-    use kotoba_kqe::quad::Quad;
     if req.entity_id.is_empty() || req.entity_id.len() > MAX_KG_ID_LEN {
-        return Err((StatusCode::BAD_REQUEST,
-            format!("entityId must be 1–{MAX_KG_ID_LEN} bytes")));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("entityId must be 1–{MAX_KG_ID_LEN} bytes"),
+        ));
     }
     if req.text.is_empty() || req.text.len() > MAX_KG_TEXT_LEN {
-        return Err((StatusCode::BAD_REQUEST,
-            format!("text must be 1–{MAX_KG_TEXT_LEN} bytes")));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("text must be 1–{MAX_KG_TEXT_LEN} bytes"),
+        ));
     }
     let graph_cid = kg_graph_cid();
 
-    let subjects = state.quad_store
+    let subjects = state
+        .quad_store
         .lookup_subject_by_po(Some(&graph_cid), "kg/id", &req.entity_id)
         .await;
-    let subject = subjects.into_iter().next()
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("entity not found: {}", req.entity_id)))?;
+    let subject = subjects.into_iter().next().ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("entity not found: {}", req.entity_id),
+        )
+    })?;
 
     let vector: Vec<f32> = if let Some(engine) = &state.inference_engine {
         let engine = engine.clone();
@@ -332,22 +443,28 @@ pub async fn kg_embed(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let parsed: Vec<f32> = result.split_whitespace()
+        let parsed: Vec<f32> = result
+            .split_whitespace()
             .filter_map(|s| s.parse::<f32>().ok())
             .collect();
-        if parsed.is_empty() { blake3_pseudo_vector(&req.text, 128) } else { parsed }
+        if parsed.is_empty() {
+            blake3_pseudo_vector(&req.text, 128)
+        } else {
+            parsed
+        }
     } else {
         blake3_pseudo_vector(&req.text, 128)
     };
 
     let dims = vector.len();
-    let quad = Quad {
-        graph:     graph_cid,
-        subject,
-        predicate: "kg/label_vec".to_string(),
-        object:    QuadObject::VectorF32(vector),
-    };
-    state.quad_store.assert(quad).await;
+    assert_kg_datom(
+        &state,
+        &graph_cid,
+        &subject,
+        "kg/label_vec",
+        KqeValue::VectorF32(vector),
+    )
+    .await;
 
     Ok(Json(KgEmbedResp { ok: true, dims }))
 }
@@ -355,10 +472,12 @@ pub async fn kg_embed(
 fn blake3_pseudo_vector(text: &str, dims: usize) -> Vec<f32> {
     let hash = blake3::hash(text.as_bytes());
     let hash_bytes = hash.as_bytes();
-    (0..dims).map(|i| {
-        let b = hash_bytes[i % 32] as f32;
-        (b / 127.5) - 1.0
-    }).collect()
+    (0..dims)
+        .map(|i| {
+            let b = hash_bytes[i % 32] as f32;
+            (b / 127.5) - 1.0
+        })
+        .collect()
 }
 
 // ── kg.search ─────────────────────────────────────────────────────────────────
@@ -367,58 +486,75 @@ fn blake3_pseudo_vector(text: &str, dims: usize) -> Vec<f32> {
 #[serde(rename_all = "camelCase")]
 pub struct KgSearchQuery {
     /// Free-text query string
-    pub q:     String,
+    pub q: String,
     #[serde(default = "default_limit")]
     pub limit: usize,
     /// CACAO delegation chain for private graphs (DAG-CBOR, base64-standard encoded).
     pub cacao_b64: Option<String>,
 }
-fn default_limit() -> usize { 10 }
+fn default_limit() -> usize {
+    10
+}
 
 /// GET /xrpc/ai.gftd.apps.kotobase.kg.search?q=<text>&limit=10
 /// Cosine similarity search over `kg/label_vec` VectorF32 quads.
 pub async fn kg_search(
     State(state): State<Arc<KotobaState>>,
-    headers:      HeaderMap,
-    Query(q):     Query<KgSearchQuery>,
+    headers: HeaderMap,
+    Query(q): Query<KgSearchQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     use std::time::Instant;
     if q.q.is_empty() || q.q.len() > MAX_KG_QUERY_LEN {
-        return Err((StatusCode::BAD_REQUEST,
-            format!("q must be 1–{MAX_KG_QUERY_LEN} bytes")));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("q must be 1–{MAX_KG_QUERY_LEN} bytes"),
+        ));
     }
-    let t0        = Instant::now();
+    let t0 = Instant::now();
     let graph_cid = kg_graph_cid();
-    let limit     = q.limit.min(MAX_KG_LIMIT);
+    let limit = q.limit.min(MAX_KG_LIMIT);
 
     // ── Read-access gate ─────────────────────────────────────────────────────
     let visibility = state.graph_visibility(&graph_cid).await;
-    check_read_access(&visibility, &headers, q.cacao_b64.as_deref(), Some(&state.operator_did), Some(&state.nonce_store))
-        .map_err(AccessDenied::into_response)?;
+    check_read_access(
+        &visibility,
+        &headers,
+        q.cacao_b64.as_deref(),
+        Some(&state.operator_did),
+        Some(&state.nonce_store),
+    )
+    .map_err(AccessDenied::into_response)?;
 
     // Use inference engine for query embedding when available, matching kg_embed semantics.
     // Falls back to blake3 pseudo-vector so search works without an LLM.
     let query_vec: Vec<f32> = if let Some(engine) = &state.inference_engine {
         let engine = engine.clone();
-        let text   = format!("embed: {}", q.q);
+        let text = format!("embed: {}", q.q);
         let result = tokio::task::spawn_blocking(move || engine(&text, 256))
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let parsed: Vec<f32> = result.split_whitespace()
+        let parsed: Vec<f32> = result
+            .split_whitespace()
             .filter_map(|s| s.parse::<f32>().ok())
             .collect();
-        if parsed.is_empty() { blake3_pseudo_vector(&q.q, 128) } else { parsed }
+        if parsed.is_empty() {
+            blake3_pseudo_vector(&q.q, 128)
+        } else {
+            parsed
+        }
     } else {
         blake3_pseudo_vector(&q.q, 128)
     };
 
-    let vec_quads = state.quad_store
+    let vec_quads = state
+        .quad_store
         .quads_by_predicate_prefix(Some(&graph_cid), "kg/label_vec")
         .await;
 
     // Score each entity
-    let mut scored: Vec<(f32, KotobaCid)> = vec_quads.iter()
+    let mut scored: Vec<(f32, KotobaCid)> = vec_quads
+        .iter()
         .filter_map(|quad| {
             if let QuadObject::VectorF32(v) = &quad.object {
                 Some((cosine(&query_vec, v), quad.subject.clone()))
@@ -434,19 +570,30 @@ pub async fn kg_search(
     // Fetch entity metadata for top-k subjects
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(scored.len());
     for (score, subject) in &scored {
-        let quads = state.quad_store
+        let quads = state
+            .quad_store
             .get_entity_quads(Some(&graph_cid), subject)
             .await;
         let mut meta: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
         meta.insert("score".into(), serde_json::json!(score));
         for quad in &quads {
             match quad.predicate.as_str() {
-                "kg/id"       => { meta.insert("id".into(),      obj_to_json(&quad.object)); }
-                "kg/qid"      => { meta.insert("qid".into(),     obj_to_json(&quad.object)); }
-                "kg/label/ja" => { meta.insert("labelJa".into(), obj_to_json(&quad.object)); }
-                "kg/label/en" => { meta.insert("labelEn".into(), obj_to_json(&quad.object)); }
-                "kg/type"     => { meta.insert("type".into(),    obj_to_json(&quad.object)); }
-                _             => {}
+                "kg/id" => {
+                    meta.insert("id".into(), obj_to_json(&quad.object));
+                }
+                "kg/qid" => {
+                    meta.insert("qid".into(), obj_to_json(&quad.object));
+                }
+                "kg/label/ja" => {
+                    meta.insert("labelJa".into(), obj_to_json(&quad.object));
+                }
+                "kg/label/en" => {
+                    meta.insert("labelEn".into(), obj_to_json(&quad.object));
+                }
+                "kg/type" => {
+                    meta.insert("type".into(), obj_to_json(&quad.object));
+                }
+                _ => {}
             }
         }
         results.push(serde_json::Value::Object(meta));
@@ -465,40 +612,40 @@ pub async fn kg_search(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KgClaim {
-    pub pred:  String,
+    pub pred: String,
     pub value: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KgRelation {
-    pub pred:   String,
+    pub pred: String,
     pub dst_id: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KgIngestReq {
-    pub id:          String,
-    pub qid:         Option<String>,
+    pub id: String,
+    pub qid: Option<String>,
     #[serde(rename = "type")]
-    pub kind:        Option<String>,
-    pub label_ja:    Option<String>,
-    pub label_en:    Option<String>,
-    pub confidence:  Option<String>,
-    pub license:     Option<String>,
-    pub extractor:   Option<String>,
-    pub valid_from:  Option<String>,
-    pub valid_to:    Option<String>,
+    pub kind: Option<String>,
+    pub label_ja: Option<String>,
+    pub label_en: Option<String>,
+    pub confidence: Option<String>,
+    pub license: Option<String>,
+    pub extractor: Option<String>,
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
     pub ingested_at: Option<String>,
-    pub source_id:   Option<String>,
+    pub source_id: Option<String>,
     /// Pre-computed embedding vector (e.g. from yatabase vLLM).
     /// When present, stored as `kg/label_vec` VectorF32 quad so that
     /// `kg_search` can do real cosine similarity without a local inference engine.
     #[serde(default)]
     pub label_vec: Vec<f32>,
     #[serde(default)]
-    pub claims:    Vec<KgClaim>,
+    pub claims: Vec<KgClaim>,
     #[serde(default)]
     pub relations: Vec<KgRelation>,
 }
@@ -506,103 +653,150 @@ pub struct KgIngestReq {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KgIngestResp {
-    pub ok:          bool,
+    pub ok: bool,
     pub subject_cid: String,
-    pub quad_count:  usize,
+    pub quad_count: usize,
 }
 
 /// POST /xrpc/ai.gftd.apps.kotobase.kg.ingest
 ///
 /// Write a KG entity into the `kotobase-kg-v1` named graph. Each field becomes
 /// a quad with predicate conventions matching `kg_entity` lookups.
-const MAX_KG_CLAIMS:      usize = 1_024;
-const MAX_KG_RELATIONS:   usize = 1_024;
-const MAX_KG_VEC_DIMS:    usize = 4_096;
-const MAX_KG_FIELD_LEN:   usize = 4_096;
+const MAX_KG_CLAIMS: usize = 1_024;
+const MAX_KG_RELATIONS: usize = 1_024;
+const MAX_KG_VEC_DIMS: usize = 4_096;
+const MAX_KG_FIELD_LEN: usize = 4_096;
 
 pub async fn kg_ingest(
     State(state): State<Arc<KotobaState>>,
-    headers:      HeaderMap,
-    Json(req):    Json<KgIngestReq>,
+    headers: HeaderMap,
+    Json(req): Json<KgIngestReq>,
 ) -> impl IntoResponse {
     if let Err((code, msg)) = require_kg_write_auth(&headers) {
-        return (code, axum::Json(serde_json::json!({"ok": false, "error": msg}))).into_response();
+        return (
+            code,
+            axum::Json(serde_json::json!({"ok": false, "error": msg})),
+        )
+            .into_response();
     }
     use axum::Json as AxumJson;
     if req.id.is_empty() || req.id.len() > MAX_KG_ID_LEN {
-        return (StatusCode::BAD_REQUEST,
+        return (
+            StatusCode::BAD_REQUEST,
             AxumJson(serde_json::json!({"ok": false, "error":
-                format!("id must be 1–{MAX_KG_ID_LEN} bytes")}))).into_response();
+                format!("id must be 1–{MAX_KG_ID_LEN} bytes")})),
+        )
+            .into_response();
     }
     if req.claims.len() > MAX_KG_CLAIMS {
-        return (StatusCode::BAD_REQUEST,
+        return (
+            StatusCode::BAD_REQUEST,
             AxumJson(serde_json::json!({"ok": false, "error":
-                format!("claims array exceeds {MAX_KG_CLAIMS} entries")}))).into_response();
+                format!("claims array exceeds {MAX_KG_CLAIMS} entries")})),
+        )
+            .into_response();
     }
     if req.relations.len() > MAX_KG_RELATIONS {
-        return (StatusCode::BAD_REQUEST,
+        return (
+            StatusCode::BAD_REQUEST,
             AxumJson(serde_json::json!({"ok": false, "error":
-                format!("relations array exceeds {MAX_KG_RELATIONS} entries")}))).into_response();
+                format!("relations array exceeds {MAX_KG_RELATIONS} entries")})),
+        )
+            .into_response();
     }
     if req.label_vec.len() > MAX_KG_VEC_DIMS {
-        return (StatusCode::BAD_REQUEST,
+        return (
+            StatusCode::BAD_REQUEST,
             AxumJson(serde_json::json!({"ok": false, "error":
-                format!("labelVec exceeds {MAX_KG_VEC_DIMS} dimensions")}))).into_response();
+                format!("labelVec exceeds {MAX_KG_VEC_DIMS} dimensions")})),
+        )
+            .into_response();
     }
     if req.label_vec.iter().any(|f| !f.is_finite()) {
-        return (StatusCode::BAD_REQUEST,
+        return (
+            StatusCode::BAD_REQUEST,
             AxumJson(serde_json::json!({"ok": false, "error":
-                "labelVec contains non-finite values (NaN/Inf)"}))).into_response();
+                "labelVec contains non-finite values (NaN/Inf)"})),
+        )
+            .into_response();
     }
     // Validate per-field lengths to prevent oversized individual quads
-    for v in [&req.qid, &req.kind, &req.label_ja, &req.label_en, &req.license,
-              &req.extractor, &req.valid_from, &req.valid_to, &req.ingested_at, &req.source_id].into_iter().flatten() {
-                  if v.len() > MAX_KG_FIELD_LEN {
-                      return (StatusCode::BAD_REQUEST,
-                          AxumJson(serde_json::json!({"ok": false, "error":
-                              format!("field value exceeds {MAX_KG_FIELD_LEN} bytes")}))).into_response();
-                  }
-              }
+    for v in [
+        &req.qid,
+        &req.kind,
+        &req.label_ja,
+        &req.label_en,
+        &req.license,
+        &req.extractor,
+        &req.valid_from,
+        &req.valid_to,
+        &req.ingested_at,
+        &req.source_id,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if v.len() > MAX_KG_FIELD_LEN {
+            return (
+                StatusCode::BAD_REQUEST,
+                AxumJson(serde_json::json!({"ok": false, "error":
+                              format!("field value exceeds {MAX_KG_FIELD_LEN} bytes")})),
+            )
+                .into_response();
+        }
+    }
     // Validate per-item predicate/value lengths within claims and relations
     for claim in &req.claims {
         if claim.pred.is_empty() || claim.pred.len() > MAX_KG_ID_LEN {
-            return (StatusCode::BAD_REQUEST,
+            return (
+                StatusCode::BAD_REQUEST,
                 AxumJson(serde_json::json!({"ok": false, "error":
-                    format!("claim.pred must be 1–{MAX_KG_ID_LEN} bytes")}))).into_response();
+                    format!("claim.pred must be 1–{MAX_KG_ID_LEN} bytes")})),
+            )
+                .into_response();
         }
         if claim.value.len() > MAX_KG_FIELD_LEN {
-            return (StatusCode::BAD_REQUEST,
+            return (
+                StatusCode::BAD_REQUEST,
                 AxumJson(serde_json::json!({"ok": false, "error":
-                    format!("claim.value must be ≤{MAX_KG_FIELD_LEN} bytes")}))).into_response();
+                    format!("claim.value must be ≤{MAX_KG_FIELD_LEN} bytes")})),
+            )
+                .into_response();
         }
     }
     for rel in &req.relations {
         if rel.pred.is_empty() || rel.pred.len() > MAX_KG_ID_LEN {
-            return (StatusCode::BAD_REQUEST,
+            return (
+                StatusCode::BAD_REQUEST,
                 AxumJson(serde_json::json!({"ok": false, "error":
-                    format!("relation.pred must be 1–{MAX_KG_ID_LEN} bytes")}))).into_response();
+                    format!("relation.pred must be 1–{MAX_KG_ID_LEN} bytes")})),
+            )
+                .into_response();
         }
         if rel.dst_id.is_empty() || rel.dst_id.len() > MAX_KG_ID_LEN {
-            return (StatusCode::BAD_REQUEST,
+            return (
+                StatusCode::BAD_REQUEST,
                 AxumJson(serde_json::json!({"ok": false, "error":
-                    format!("relation.dstId must be 1–{MAX_KG_ID_LEN} bytes")}))).into_response();
+                    format!("relation.dstId must be 1–{MAX_KG_ID_LEN} bytes")})),
+            )
+                .into_response();
         }
     }
-    use kotoba_kqe::quad::Quad;
-
-    let graph   = kg_graph_cid();
+    let graph = kg_graph_cid();
     let subject = KotobaCid::from_bytes(req.id.as_bytes());
 
     let mut count = 0usize;
 
     macro_rules! assert_text {
         ($pred:expr, $val:expr) => {{
-            state.quad_store.assert(Quad {
-                graph:     graph.clone(),
-                subject:   subject.clone(),
-                predicate: $pred.to_string(),
-                object:    QuadObject::Text($val.to_string()),
-            }).await;
+            assert_kg_datom(
+                &state,
+                &graph,
+                &subject,
+                $pred,
+                KqeValue::Text($val.to_string()),
+            )
+            .await;
             count += 1;
         }};
     }
@@ -610,17 +804,39 @@ pub async fn kg_ingest(
     // Always write kg/id so lookup_subject_by_po works
     assert_text!("kg/id", req.id);
 
-    if let Some(v) = &req.qid         { assert_text!("kg/qid",         v); }
-    if let Some(v) = &req.kind        { assert_text!("kg/type",        v); }
-    if let Some(v) = &req.label_ja    { assert_text!("kg/label/ja",    v); }
-    if let Some(v) = &req.label_en    { assert_text!("kg/label/en",    v); }
-    if let Some(v) = &req.confidence  { assert_text!("kg/confidence",  v); }
-    if let Some(v) = &req.license     { assert_text!("kg/license",     v); }
-    if let Some(v) = &req.extractor   { assert_text!("kg/extractor",   v); }
-    if let Some(v) = &req.valid_from  { assert_text!("kg/valid_from",  v); }
-    if let Some(v) = &req.valid_to    { assert_text!("kg/valid_to",    v); }
-    if let Some(v) = &req.ingested_at { assert_text!("kg/ingested_at", v); }
-    if let Some(v) = &req.source_id   { assert_text!("kg/source_id",   v); }
+    if let Some(v) = &req.qid {
+        assert_text!("kg/qid", v);
+    }
+    if let Some(v) = &req.kind {
+        assert_text!("kg/type", v);
+    }
+    if let Some(v) = &req.label_ja {
+        assert_text!("kg/label/ja", v);
+    }
+    if let Some(v) = &req.label_en {
+        assert_text!("kg/label/en", v);
+    }
+    if let Some(v) = &req.confidence {
+        assert_text!("kg/confidence", v);
+    }
+    if let Some(v) = &req.license {
+        assert_text!("kg/license", v);
+    }
+    if let Some(v) = &req.extractor {
+        assert_text!("kg/extractor", v);
+    }
+    if let Some(v) = &req.valid_from {
+        assert_text!("kg/valid_from", v);
+    }
+    if let Some(v) = &req.valid_to {
+        assert_text!("kg/valid_to", v);
+    }
+    if let Some(v) = &req.ingested_at {
+        assert_text!("kg/ingested_at", v);
+    }
+    if let Some(v) = &req.source_id {
+        assert_text!("kg/source_id", v);
+    }
 
     for claim in &req.claims {
         assert_text!(format!("kg/claim/{}", claim.pred), claim.value);
@@ -628,30 +844,35 @@ pub async fn kg_ingest(
 
     for rel in &req.relations {
         let dst_cid = KotobaCid::from_bytes(rel.dst_id.as_bytes());
-        state.quad_store.assert(Quad {
-            graph:     graph.clone(),
-            subject:   subject.clone(),
-            predicate: format!("kg/relation/{}", rel.pred),
-            object:    QuadObject::Cid(dst_cid),
-        }).await;
+        assert_kg_datom(
+            &state,
+            &graph,
+            &subject,
+            format!("kg/relation/{}", rel.pred),
+            KqeValue::Cid(dst_cid),
+        )
+        .await;
         count += 1;
     }
 
     if !req.label_vec.is_empty() {
-        state.quad_store.assert(Quad {
-            graph:     graph.clone(),
-            subject:   subject.clone(),
-            predicate: "kg/label_vec".to_string(),
-            object:    QuadObject::VectorF32(req.label_vec.clone()),
-        }).await;
+        assert_kg_datom(
+            &state,
+            &graph,
+            &subject,
+            "kg/label_vec",
+            KqeValue::VectorF32(req.label_vec.clone()),
+        )
+        .await;
         count += 1;
     }
 
     Json(KgIngestResp {
-        ok:          true,
+        ok: true,
         subject_cid: subject.to_multibase(),
-        quad_count:  count,
-    }).into_response()
+        quad_count: count,
+    })
+    .into_response()
 }
 
 // ── kg.ingest_batch ───────────────────────────────────────────────────────────
@@ -666,11 +887,11 @@ pub struct KgIngestBatchReq {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KgIngestBatchResp {
-    pub ok:           bool,
+    pub ok: bool,
     /// CIDs of subjects ingested, in input order.
     pub subject_cids: Vec<String>,
     /// Total quads written across all entities.
-    pub quad_count:   usize,
+    pub quad_count: usize,
     /// Number of entities ingested.
     pub entity_count: usize,
 }
@@ -688,38 +909,50 @@ const MAX_KG_BATCH_SIZE: usize = 1_000;
 /// HTTP + JSON + auth-gate cost across the whole batch.
 pub async fn kg_ingest_batch(
     State(state): State<Arc<KotobaState>>,
-    headers:      HeaderMap,
-    Json(req):    Json<KgIngestBatchReq>,
+    headers: HeaderMap,
+    Json(req): Json<KgIngestBatchReq>,
 ) -> impl IntoResponse {
     use axum::Json as AxumJson;
     if let Err((code, msg)) = require_kg_write_auth(&headers) {
-        return (code, AxumJson(serde_json::json!({"ok": false, "error": msg}))).into_response();
+        return (
+            code,
+            AxumJson(serde_json::json!({"ok": false, "error": msg})),
+        )
+            .into_response();
     }
     if req.entities.is_empty() {
-        return (StatusCode::BAD_REQUEST,
+        return (
+            StatusCode::BAD_REQUEST,
             AxumJson(serde_json::json!({"ok": false,
-                "error": "entities[] is empty"}))).into_response();
+                "error": "entities[] is empty"})),
+        )
+            .into_response();
     }
     if req.entities.len() > MAX_KG_BATCH_SIZE {
-        return (StatusCode::BAD_REQUEST,
+        return (
+            StatusCode::BAD_REQUEST,
             AxumJson(serde_json::json!({"ok": false,
                 "error": format!("batch size {} exceeds limit {MAX_KG_BATCH_SIZE}",
-                    req.entities.len())}))).into_response();
+                    req.entities.len())})),
+        )
+            .into_response();
     }
 
     // Validate ALL entities up front so we never partially-write a batch.
     for (i, e) in req.entities.iter().enumerate() {
         if let Err(msg) = validate_ingest_req(e) {
-            return (StatusCode::BAD_REQUEST,
+            return (
+                StatusCode::BAD_REQUEST,
                 AxumJson(serde_json::json!({"ok": false,
-                    "error": format!("entity[{i}]: {msg}")}))).into_response();
+                    "error": format!("entity[{i}]: {msg}")})),
+            )
+                .into_response();
         }
     }
 
-    use kotoba_kqe::quad::Quad;
     let graph = kg_graph_cid();
     let mut subject_cids = Vec::with_capacity(req.entities.len());
-    let mut total_quads  = 0usize;
+    let mut total_quads = 0usize;
 
     for e in &req.entities {
         let subject = KotobaCid::from_bytes(e.id.as_bytes());
@@ -728,60 +961,89 @@ pub async fn kg_ingest_batch(
 
         macro_rules! assert_text {
             ($pred:expr, $val:expr) => {{
-                state.quad_store.assert(Quad {
-                    graph:     graph.clone(),
-                    subject:   subject.clone(),
-                    predicate: $pred.to_string(),
-                    object:    QuadObject::Text($val.to_string()),
-                }).await;
+                assert_kg_datom(
+                    &state,
+                    &graph,
+                    &subject,
+                    $pred,
+                    KqeValue::Text($val.to_string()),
+                )
+                .await;
                 count += 1;
             }};
         }
 
         assert_text!("kg/id", e.id);
-        if let Some(v) = &e.qid         { assert_text!("kg/qid",         v); }
-        if let Some(v) = &e.kind        { assert_text!("kg/type",        v); }
-        if let Some(v) = &e.label_ja    { assert_text!("kg/label/ja",    v); }
-        if let Some(v) = &e.label_en    { assert_text!("kg/label/en",    v); }
-        if let Some(v) = &e.confidence  { assert_text!("kg/confidence",  v); }
-        if let Some(v) = &e.license     { assert_text!("kg/license",     v); }
-        if let Some(v) = &e.extractor   { assert_text!("kg/extractor",   v); }
-        if let Some(v) = &e.valid_from  { assert_text!("kg/valid_from",  v); }
-        if let Some(v) = &e.valid_to    { assert_text!("kg/valid_to",    v); }
-        if let Some(v) = &e.ingested_at { assert_text!("kg/ingested_at", v); }
-        if let Some(v) = &e.source_id   { assert_text!("kg/source_id",   v); }
+        if let Some(v) = &e.qid {
+            assert_text!("kg/qid", v);
+        }
+        if let Some(v) = &e.kind {
+            assert_text!("kg/type", v);
+        }
+        if let Some(v) = &e.label_ja {
+            assert_text!("kg/label/ja", v);
+        }
+        if let Some(v) = &e.label_en {
+            assert_text!("kg/label/en", v);
+        }
+        if let Some(v) = &e.confidence {
+            assert_text!("kg/confidence", v);
+        }
+        if let Some(v) = &e.license {
+            assert_text!("kg/license", v);
+        }
+        if let Some(v) = &e.extractor {
+            assert_text!("kg/extractor", v);
+        }
+        if let Some(v) = &e.valid_from {
+            assert_text!("kg/valid_from", v);
+        }
+        if let Some(v) = &e.valid_to {
+            assert_text!("kg/valid_to", v);
+        }
+        if let Some(v) = &e.ingested_at {
+            assert_text!("kg/ingested_at", v);
+        }
+        if let Some(v) = &e.source_id {
+            assert_text!("kg/source_id", v);
+        }
 
         for claim in &e.claims {
             assert_text!(format!("kg/claim/{}", claim.pred), claim.value);
         }
         for rel in &e.relations {
             let dst_cid = KotobaCid::from_bytes(rel.dst_id.as_bytes());
-            state.quad_store.assert(Quad {
-                graph:     graph.clone(),
-                subject:   subject.clone(),
-                predicate: format!("kg/relation/{}", rel.pred),
-                object:    QuadObject::Cid(dst_cid),
-            }).await;
+            assert_kg_datom(
+                &state,
+                &graph,
+                &subject,
+                format!("kg/relation/{}", rel.pred),
+                KqeValue::Cid(dst_cid),
+            )
+            .await;
             count += 1;
         }
         if !e.label_vec.is_empty() {
-            state.quad_store.assert(Quad {
-                graph:     graph.clone(),
-                subject:   subject.clone(),
-                predicate: "kg/label_vec".to_string(),
-                object:    QuadObject::VectorF32(e.label_vec.clone()),
-            }).await;
+            assert_kg_datom(
+                &state,
+                &graph,
+                &subject,
+                "kg/label_vec",
+                KqeValue::VectorF32(e.label_vec.clone()),
+            )
+            .await;
             count += 1;
         }
         total_quads += count;
     }
 
     AxumJson(KgIngestBatchResp {
-        ok:           true,
+        ok: true,
         subject_cids,
-        quad_count:   total_quads,
+        quad_count: total_quads,
         entity_count: req.entities.len(),
-    }).into_response()
+    })
+    .into_response()
 }
 
 /// Validate a single ingest entity; returns `Err(human-message)` on any failure.
@@ -793,7 +1055,9 @@ fn validate_ingest_req(e: &KgIngestReq) -> Result<(), String> {
         return Err(format!("claims array exceeds {MAX_KG_CLAIMS} entries"));
     }
     if e.relations.len() > MAX_KG_RELATIONS {
-        return Err(format!("relations array exceeds {MAX_KG_RELATIONS} entries"));
+        return Err(format!(
+            "relations array exceeds {MAX_KG_RELATIONS} entries"
+        ));
     }
     if e.label_vec.len() > MAX_KG_VEC_DIMS {
         return Err(format!("labelVec exceeds {MAX_KG_VEC_DIMS} dimensions"));
@@ -801,9 +1065,20 @@ fn validate_ingest_req(e: &KgIngestReq) -> Result<(), String> {
     if e.label_vec.iter().any(|f| !f.is_finite()) {
         return Err("labelVec contains non-finite values (NaN/Inf)".into());
     }
-    for v in [&e.qid, &e.kind, &e.label_ja, &e.label_en, &e.license,
-              &e.extractor, &e.valid_from, &e.valid_to, &e.ingested_at, &e.source_id]
-        .into_iter().flatten()
+    for v in [
+        &e.qid,
+        &e.kind,
+        &e.label_ja,
+        &e.label_en,
+        &e.license,
+        &e.extractor,
+        &e.valid_from,
+        &e.valid_to,
+        &e.ingested_at,
+        &e.source_id,
+    ]
+    .into_iter()
+    .flatten()
     {
         if v.len() > MAX_KG_FIELD_LEN {
             return Err(format!("field value exceeds {MAX_KG_FIELD_LEN} bytes"));
@@ -850,7 +1125,7 @@ pub struct KgCommitReq {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KgCommitResp {
-    pub ok:         bool,
+    pub ok: bool,
     pub commit_cid: String,
     pub elapsed_ms: u128,
 }
@@ -871,28 +1146,40 @@ pub struct KgCommitResp {
 /// Restricted to operator DID — only the node operator may seal a commit.
 pub async fn kg_commit(
     State(state): State<Arc<KotobaState>>,
-    headers:      HeaderMap,
-    Json(req):    Json<KgCommitReq>,
+    headers: HeaderMap,
+    Json(req): Json<KgCommitReq>,
 ) -> impl IntoResponse {
     use std::time::Instant;
-    if let Err((code, msg)) = crate::graph_auth::require_operator_auth(&headers, &state.operator_did) {
+    if let Err((code, msg)) =
+        crate::graph_auth::require_operator_auth(&headers, &state.operator_did)
+    {
         return (code, Json(serde_json::json!({"ok": false, "error": msg}))).into_response();
     }
-    let t0     = Instant::now();
-    let graph  = kg_graph_cid();
-    let author = req.author.clone().unwrap_or_else(|| state.operator_did.clone());
-    let seq    = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let t0 = Instant::now();
+    let graph = kg_graph_cid();
+    let author = req
+        .author
+        .clone()
+        .unwrap_or_else(|| state.operator_did.clone());
+    let seq = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
     match state.quad_store.commit(&author, graph, seq).await {
         Ok(cid) => Json(KgCommitResp {
-            ok:         true,
+            ok: true,
             commit_cid: cid.to_multibase(),
             elapsed_ms: t0.elapsed().as_millis(),
-        }).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "ok": false, "error": format!("commit failed: {e}"),
-        }))).into_response(),
+        })
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "ok": false, "error": format!("commit failed: {e}"),
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -902,47 +1189,67 @@ pub async fn kg_commit(
 /// Publishes a retract event to the Journal for each quad (WAL + GossipSub).
 pub async fn kg_delete(
     State(state): State<Arc<KotobaState>>,
-    headers:      HeaderMap,
-    Json(req):    Json<KgDeleteReq>,
+    headers: HeaderMap,
+    Json(req): Json<KgDeleteReq>,
 ) -> impl IntoResponse {
     // Delete is irreversible and there is no per-entity ownership model, so
     // restrict to the operator DID to prevent any authenticated user from
     // wiping arbitrary entities.
-    if let Err((code, msg)) = crate::graph_auth::require_operator_auth(&headers, &state.operator_did) {
+    if let Err((code, msg)) =
+        crate::graph_auth::require_operator_auth(&headers, &state.operator_did)
+    {
         return (code, Json(serde_json::json!({"ok": false, "error": msg}))).into_response();
     }
     if req.id.is_empty() || req.id.len() > MAX_KG_ID_LEN {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "ok": false, "error": format!("id must be 1–{MAX_KG_ID_LEN} bytes"),
-        }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "ok": false, "error": format!("id must be 1–{MAX_KG_ID_LEN} bytes"),
+            })),
+        )
+            .into_response();
     }
-    let graph   = kg_graph_cid();
+    let graph = kg_graph_cid();
     let subject = KotobaCid::from_bytes(req.id.as_bytes());
 
-    let quads = state.quad_store
+    let quads = state
+        .quad_store
         .get_entity_quads(Some(&graph), &subject)
         .await;
 
     let retracted = quads.len();
 
     for quad in quads {
-        state.journal_retract(&quad).await;
-        state.quad_store.retract(quad).await;
+        let graph_cid = quad.graph.clone();
+        let datom = KqeDatom::from_legacy_quad(quad, false);
+        state.retract_datom_compat(graph_cid, datom).await;
     }
 
-    (StatusCode::OK, Json(serde_json::json!({
-        "ok":            true,
-        "id":            req.id,
-        "retractedCount": retracted,
-    }))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "ok":            true,
+            "id":            req.id,
+            "retractedCount": retracted,
+        })),
+    )
+        .into_response()
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
     let len = a.len().min(b.len());
-    let dot: f32 = a[..len].iter().zip(b[..len].iter()).map(|(x, y)| x * y).sum();
-    let na:  f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let nb:  f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na * nb) }
+    let dot: f32 = a[..len]
+        .iter()
+        .zip(b[..len].iter())
+        .map(|(x, y)| x * y)
+        .sum();
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na * nb)
+    }
 }
 
 // ── kg.query ──────────────────────────────────────────────────────────────────
@@ -951,7 +1258,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 #[serde(rename_all = "camelCase")]
 pub struct KgQueryReq {
     /// "sparql" or "cypher"
-    pub lang:  String,
+    pub lang: String,
     /// Query string
     pub query: String,
     /// CACAO delegation chain for private graphs (DAG-CBOR, base64-standard encoded).
@@ -966,40 +1273,58 @@ pub struct KgQueryReq {
 /// Both compilers enforce binary-relation arity (exactly 2 RETURN variables).
 /// Results are returned as `[{ "a": "<cid>", "b": "<cid>" }]` pairs where
 /// the variable names come from the compiled output_relation.
-const MAX_KG_QUERY_PROG_LEN: usize = 65_536;  // 64 KiB — SPARQL/Cypher compile DoS guard
+const MAX_KG_QUERY_PROG_LEN: usize = 65_536; // 64 KiB — SPARQL/Cypher compile DoS guard
 
 pub async fn kg_query(
     State(state): State<Arc<KotobaState>>,
-    headers:      HeaderMap,
-    Json(req):    Json<KgQueryReq>,
+    headers: HeaderMap,
+    Json(req): Json<KgQueryReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    use std::time::Instant;
-    use kotoba_kqe::cypher::CypherCompiler;
     use kotoba_graph::sparql::SparqlCompiler;
+    use kotoba_kqe::cypher::CypherCompiler;
+    use std::time::Instant;
 
     const MAX_KG_LANG_LEN: usize = 16;
     const MAX_KG_QUERY_RESULT_LIMIT: usize = 10_000;
     if req.lang.len() > MAX_KG_LANG_LEN {
-        return Err((StatusCode::BAD_REQUEST,
-            format!("lang field too long ({} bytes, limit {MAX_KG_LANG_LEN})", req.lang.len())));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "lang field too long ({} bytes, limit {MAX_KG_LANG_LEN})",
+                req.lang.len()
+            ),
+        ));
     }
     if req.query.is_empty() || req.query.len() > MAX_KG_QUERY_PROG_LEN {
-        return Err((StatusCode::BAD_REQUEST,
-            format!("query must be 1–{MAX_KG_QUERY_PROG_LEN} bytes")));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("query must be 1–{MAX_KG_QUERY_PROG_LEN} bytes"),
+        ));
     }
     if !matches!(req.lang.as_str(), "sparql" | "cypher") {
-        return Err((StatusCode::BAD_REQUEST,
-            "lang must be 'sparql' or 'cypher'".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "lang must be 'sparql' or 'cypher'".to_string(),
+        ));
     }
-    let result_limit = req.limit.unwrap_or(MAX_KG_LIMIT).min(MAX_KG_QUERY_RESULT_LIMIT);
+    let result_limit = req
+        .limit
+        .unwrap_or(MAX_KG_LIMIT)
+        .min(MAX_KG_QUERY_RESULT_LIMIT);
 
-    let t0        = Instant::now();
+    let t0 = Instant::now();
     let graph_cid = kg_graph_cid();
 
     // ── Read-access gate ─────────────────────────────────────────────────────
     let visibility = state.graph_visibility(&graph_cid).await;
-    check_read_access(&visibility, &headers, req.cacao_b64.as_deref(), Some(&state.operator_did), Some(&state.nonce_store))
-        .map_err(AccessDenied::into_response)?;
+    check_read_access(
+        &visibility,
+        &headers,
+        req.cacao_b64.as_deref(),
+        Some(&state.operator_did),
+        Some(&state.nonce_store),
+    )
+    .map_err(AccessDenied::into_response)?;
 
     // Compile query to DatalogProgram
     let (program, output_relation) = match req.lang.as_str() {
@@ -1013,29 +1338,43 @@ pub async fn kg_query(
                 .map_err(|e| (StatusCode::BAD_REQUEST, format!("Cypher compile: {e}")))?;
             (compiled.program, compiled.output_relation)
         }
-        other => return Err((StatusCode::BAD_REQUEST, format!("unknown lang: {other}; use sparql or cypher"))),
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("unknown lang: {other}; use sparql or cypher"),
+            ))
+        }
     };
 
     // Evaluate Datalog program against IPFS-backed cold storage (hot+cold union).
     // This path loads facts via ProllyTree scans on the configured BlockStore —
     // which can be Kubo HTTP (KOTOBA_IPFS_ENDPOINT) or a multi-peer
     // DistributedBlockStore. Falls back to hot arrangement if not yet committed.
-    let derived = state.quad_store
+    let derived = state
+        .quad_store
         .evaluate_datalog_cold(&graph_cid, &program)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("datalog eval: {e}")))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("datalog eval: {e}"),
+            )
+        })?;
 
     // Collect derived facts for the output_relation, bounded by result_limit.
-    let results: Vec<serde_json::Value> = derived.iter()
-        .filter(|d| d.quad.predicate == output_relation && d.is_assert())
+    let results: Vec<serde_json::Value> = derived
+        .iter()
+        .filter(|d| d.attribute() == output_relation && d.is_assert())
         .take(result_limit)
-        .map(|d| serde_json::json!({
-            "a": d.quad.subject.to_multibase(),
-            "b": match &d.quad.object {
-                QuadObject::Cid(c) => c.to_multibase(),
-                other              => format!("{other:?}"),
-            },
-        }))
+        .map(|d| {
+            serde_json::json!({
+                "a": d.entity().to_multibase(),
+                "b": match d.value() {
+                    kotoba_kqe::Value::Cid(c) => c.to_multibase(),
+                    other              => format!("{other:?}"),
+                },
+            })
+        })
         .collect();
 
     Ok(Json(serde_json::json!({
@@ -1054,20 +1393,20 @@ pub async fn kg_query(
 pub struct SparqlReq {
     /// SPARQL query string (max 64 KiB).  Auto-detects SELECT / DESCRIBE /
     /// CONSTRUCT / ASK from the leading keyword.
-    pub query:     String,
+    pub query: String,
     /// Optional named graph CID (multibase).  Defaults to the kg-graph CID.
-    pub graph:     Option<String>,
+    pub graph: Option<String>,
     /// CACAO delegation chain (DAG-CBOR + base64) for private graphs.
     pub cacao_b64: Option<String>,
     /// Maximum results to materialise (defaults to 10000).
-    pub limit:     Option<usize>,
+    pub limit: Option<usize>,
     /// For DESCRIBE only: number of hops to traverse along `QuadObject::Cid`
     /// edges starting from the matched seed subjects.  When > 0 dispatches to
     /// `sparql_describe_n_hop` instead of the single-level `sparql_describe`,
     /// returning the entire reachable subgraph deduplicated by entity.
     /// Useful for "multi-pop" social-graph / citation-chain expansion.
     #[serde(default)]
-    pub max_hops:  usize,
+    pub max_hops: usize,
 }
 
 /// POST /xrpc/ai.gftd.apps.kotoba.graph.sparql
@@ -1084,39 +1423,63 @@ pub struct SparqlReq {
 /// honours CACAO gating per the graph's visibility policy.
 pub async fn kg_sparql(
     State(state): State<Arc<KotobaState>>,
-    headers:      HeaderMap,
-    Json(req):    Json<SparqlReq>,
+    headers: HeaderMap,
+    Json(req): Json<SparqlReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     use std::time::Instant;
 
     const MAX_SPARQL_RESULT_LIMIT: usize = 100_000;
     if req.query.is_empty() || req.query.len() > MAX_KG_QUERY_PROG_LEN {
-        return Err((StatusCode::BAD_REQUEST,
-            format!("query must be 1–{MAX_KG_QUERY_PROG_LEN} bytes")));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("query must be 1–{MAX_KG_QUERY_PROG_LEN} bytes"),
+        ));
     }
     let limit = req.limit.unwrap_or(10_000).min(MAX_SPARQL_RESULT_LIMIT);
 
     // Resolve target graph CID.
     let graph_cid = match req.graph.as_deref() {
-        None    => kg_graph_cid(),
+        None => kg_graph_cid(),
         Some(s) => kotoba_core::cid::KotobaCid::from_multibase(s)
             .ok_or((StatusCode::BAD_REQUEST, format!("invalid graph CID: {s}")))?,
     };
 
     // CACAO / visibility gate.
-    let visibility = state.graph_visibility(&graph_cid).await;
-    check_read_access(&visibility, &headers, req.cacao_b64.as_deref(),
-        Some(&state.operator_did), Some(&state.nonce_store))
+    if let Some(cacao_b64) = req.cacao_b64.as_deref() {
+        crate::graph_auth::verify_cacao_graph_operation(
+            cacao_b64,
+            &graph_cid.to_multibase(),
+            kotoba_auth::CacaoPayload::OP_GRAPH_QUERY,
+            Some(&state.operator_did),
+            Some(&state.nonce_store),
+        )
         .map_err(AccessDenied::into_response)?;
+    } else {
+        let visibility = state.graph_visibility(&graph_cid).await;
+        check_read_access(
+            &visibility,
+            &headers,
+            None,
+            Some(&state.operator_did),
+            Some(&state.nonce_store),
+        )
+        .map_err(AccessDenied::into_response)?;
+    }
 
     // Detect the SPARQL query form from the leading keyword.
-    let t0   = Instant::now();
+    let t0 = Instant::now();
     let head = req.query.trim_start();
-    let upper: String = head.chars().take(10).collect::<String>().to_ascii_uppercase();
+    let upper: String = head
+        .chars()
+        .take(10)
+        .collect::<String>()
+        .to_ascii_uppercase();
     let qs = &state.quad_store;
 
     let response = if upper.starts_with("ASK") {
-        let result = qs.sparql_ask(&graph_cid, &req.query).await
+        let result = qs
+            .sparql_ask(&graph_cid, &req.query)
+            .await
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("ASK eval: {e}")))?;
         serde_json::json!({
             "ok":        true,
@@ -1132,10 +1495,11 @@ pub async fn kg_sparql(
         let quads = if max_hops == 0 {
             qs.sparql_describe(&graph_cid, &req.query).await
         } else {
-            qs.sparql_describe_n_hop(&graph_cid, &req.query, max_hops).await
-        }.map_err(|e| (StatusCode::BAD_REQUEST, format!("DESCRIBE eval: {e}")))?;
-        let materialised: Vec<_> = quads.into_iter().take(limit)
-            .map(quad_to_json).collect();
+            qs.sparql_describe_n_hop(&graph_cid, &req.query, max_hops)
+                .await
+        }
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("DESCRIBE eval: {e}")))?;
+        let materialised: Vec<_> = quads.into_iter().take(limit).map(quad_to_json).collect();
         serde_json::json!({
             "ok":        true,
             "form":      "describe",
@@ -1145,10 +1509,11 @@ pub async fn kg_sparql(
             "elapsedMs": t0.elapsed().as_millis(),
         })
     } else if upper.starts_with("CONSTRUCT") {
-        let quads = qs.sparql_construct(&graph_cid, &req.query).await
+        let quads = qs
+            .sparql_construct(&graph_cid, &req.query)
+            .await
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("CONSTRUCT eval: {e}")))?;
-        let materialised: Vec<_> = quads.into_iter().take(limit)
-            .map(quad_to_json).collect();
+        let materialised: Vec<_> = quads.into_iter().take(limit).map(quad_to_json).collect();
         serde_json::json!({
             "ok":        true,
             "form":      "construct",
@@ -1157,10 +1522,11 @@ pub async fn kg_sparql(
             "elapsedMs": t0.elapsed().as_millis(),
         })
     } else if upper.starts_with("SELECT") {
-        let quads = qs.cold_query_sparql_bgp(&graph_cid, &req.query).await
+        let quads = qs
+            .cold_query_sparql_bgp(&graph_cid, &req.query)
+            .await
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("SELECT eval: {e}")))?;
-        let materialised: Vec<_> = quads.into_iter().take(limit)
-            .map(quad_to_json).collect();
+        let materialised: Vec<_> = quads.into_iter().take(limit).map(quad_to_json).collect();
         serde_json::json!({
             "ok":        true,
             "form":      "select",
@@ -1169,13 +1535,15 @@ pub async fn kg_sparql(
             "elapsedMs": t0.elapsed().as_millis(),
         })
     } else {
-        return Err((StatusCode::BAD_REQUEST,
-            "query must start with SELECT, DESCRIBE, CONSTRUCT, or ASK".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "query must start with SELECT, DESCRIBE, CONSTRUCT, or ASK".to_string(),
+        ));
     };
     Ok(Json(response))
 }
 
-fn quad_to_json(q: kotoba_kqe::quad::Quad) -> serde_json::Value {
+fn quad_to_json(q: kotoba_kqe::quad::LegacyQuad) -> serde_json::Value {
     serde_json::json!({
         "graph":     q.graph.to_multibase(),
         "subject":   q.subject.to_multibase(),
@@ -1194,8 +1562,8 @@ fn quad_to_json(q: kotoba_kqe::quad::Quad) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kotoba_kqe::quad::QuadObject;
     use kotoba_core::cid::KotobaCid;
+    use kotoba_kqe::quad::LegacyQuadObject;
 
     // ── kg_graph_cid ──────────────────────────────────────────────────────────
 
@@ -1228,14 +1596,20 @@ mod tests {
 
     #[test]
     fn obj_to_json_bool() {
-        assert_eq!(obj_to_json(&QuadObject::Bool(true)),  serde_json::json!(true));
-        assert_eq!(obj_to_json(&QuadObject::Bool(false)), serde_json::json!(false));
+        assert_eq!(
+            obj_to_json(&QuadObject::Bool(true)),
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            obj_to_json(&QuadObject::Bool(false)),
+            serde_json::json!(false)
+        );
     }
 
     #[test]
     fn obj_to_json_cid_is_multibase_string() {
         let cid = KotobaCid::from_bytes(b"test-cid");
-        let v   = obj_to_json(&QuadObject::Cid(cid.clone()));
+        let v = obj_to_json(&QuadObject::Cid(cid.clone()));
         assert_eq!(v.as_str().unwrap(), cid.to_multibase());
     }
 
@@ -1256,7 +1630,9 @@ mod tests {
     #[test]
     fn blake3_pseudo_vector_values_in_minus1_plus1() {
         let v = blake3_pseudo_vector("test", 128);
-        for x in &v { assert!(*x >= -1.0 && *x <= 1.0, "value out of range: {x}"); }
+        for x in &v {
+            assert!(*x >= -1.0 && *x <= 1.0, "value out of range: {x}");
+        }
     }
 
     #[test]
@@ -1279,7 +1655,10 @@ mod tests {
     fn cosine_identical_vectors_is_one() {
         let v = vec![1.0f32, 2.0, 3.0];
         let s = cosine(&v, &v);
-        assert!((s - 1.0).abs() < 1e-6, "cosine of identical vectors must be 1.0, got {s}");
+        assert!(
+            (s - 1.0).abs() < 1e-6,
+            "cosine of identical vectors must be 1.0, got {s}"
+        );
     }
 
     #[test]
@@ -1287,7 +1666,10 @@ mod tests {
         let a = vec![1.0f32, 0.0];
         let b = vec![0.0f32, 1.0];
         let s = cosine(&a, &b);
-        assert!(s.abs() < 1e-6, "cosine of orthogonal vectors must be 0.0, got {s}");
+        assert!(
+            s.abs() < 1e-6,
+            "cosine of orthogonal vectors must be 0.0, got {s}"
+        );
     }
 
     #[test]
@@ -1302,7 +1684,10 @@ mod tests {
         let a = vec![1.0f32, 0.0];
         let b = vec![-1.0f32, 0.0];
         let s = cosine(&a, &b);
-        assert!((s + 1.0).abs() < 1e-6, "cosine of opposite vectors must be -1.0, got {s}");
+        assert!(
+            (s + 1.0).abs() < 1e-6,
+            "cosine of opposite vectors must be -1.0, got {s}"
+        );
     }
 
     #[test]
@@ -1333,9 +1718,15 @@ mod tests {
     #[test]
     fn kg_query_result_limit_constant_is_sane() {
         // MAX_KG_QUERY_RESULT_LIMIT (10000) is ≥ MAX_KG_LIMIT (1000) and ≤ MAX_DERIVED_FACTS.
-        assert!(10_000 >= MAX_KG_LIMIT, "result limit must be ≥ default kg limit");
+        assert!(
+            10_000 >= MAX_KG_LIMIT,
+            "result limit must be ≥ default kg limit"
+        );
         // A response of 10k rows should remain reasonable in size.
-        assert!(10_000 <= 100_000, "result limit should be bounded for response safety");
+        assert!(
+            10_000 <= 100_000,
+            "result limit should be bounded for response safety"
+        );
     }
 
     #[test]
@@ -1346,7 +1737,10 @@ mod tests {
 
         // Caller-supplied value is capped at MAX_KG_QUERY_RESULT_LIMIT.
         let caller_huge = Some(999_999usize).unwrap_or(MAX_KG_LIMIT).min(10_000);
-        assert_eq!(caller_huge, 10_000, "oversized limit must be capped at 10_000");
+        assert_eq!(
+            caller_huge, 10_000,
+            "oversized limit must be capped at 10_000"
+        );
 
         // Caller-supplied small value passes through unchanged.
         let caller_small = Some(42usize).unwrap_or(MAX_KG_LIMIT).min(10_000);

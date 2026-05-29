@@ -1,23 +1,35 @@
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use bytes::Bytes;
-use kotoba_core::named_graph::{GraphVisibility, NamedGraph};
-use kotoba_core::cid::KotobaCid;
-use kotoba_dht::{
-    neighborhood::Neighborhood,
-    node_id::NodeId,
+use kotoba_auth::{
+    CompositeDidResolver, DidDocument, DidDocumentFetcher, DidDocumentResolver, DidResolverError,
+    InMemoryDidResolver, LayeredDidResolver, VerificationMethod, ATPROTO_PDS_SERVICE,
+    DIDCOMM_MESSAGING_SERVICE, DID_CONTEXT_V1, KOTOBA_NODE_SERVICE,
 };
-use kotoba_kse::{sync_window::SyncWindow, AgentIdentity, Journal, KseStore, PreKeyRegistry, Shelf, Topic, Vault};
-use kotoba_kqe::quad::Quad;
-use kotoba_graph::QuadStore;
-use kotoba_kse::SecureVault;
-use kotoba_store::IpfsPinClient;
-use kotoba_runtime::{host::InferenceFn, UdfExecutor, WasmExecutor};
-use kotoba_ingest::embed_client::{EmbedClient, HttpEmbedClient};
-use kotoba_vm::{distributed::DistributedPregelRunner, InvokeRouter};
+use kotoba_core::cid::KotobaCid;
+use kotoba_core::named_graph::{GraphVisibility, NamedGraph};
 use kotoba_core::store::BlockStore;
 use kotoba_crypto::AgentCrypto;
+use kotoba_datomic::distributed::DistributedDatomReader;
+use kotoba_dht::{neighborhood::Neighborhood, node_id::NodeId};
+use kotoba_graph::QuadStore;
+use kotoba_ingest::embed_client::{EmbedClient, HttpEmbedClient};
+use kotoba_ipfs::{
+    InMemoryIpnsRegistry, IpnsRecord, IpnsRegistry, KuboIpnsRegistry, SignedIpnsRegistry,
+};
+use kotoba_kqe::{quad::LegacyQuad as Quad, Datom as KqeDatom, Value as KqeValue};
+use kotoba_kse::SecureVault;
+use kotoba_kse::{
+    sync_window::SyncWindow, AgentIdentity, Journal, KseStore, PreKeyRegistry, Shelf, Topic, Vault,
+};
+#[cfg(feature = "wasm-runtime")]
+use kotoba_runtime::{UdfExecutor, WasmExecutor};
+use kotoba_store::IpfsPinClient;
+#[cfg(feature = "wasm-runtime")]
+use kotoba_vm::{distributed::DistributedPregelRunner, InvokeRouter};
+
+pub type InferenceFn = Arc<dyn Fn(&str, usize) -> anyhow::Result<String> + Send + Sync + 'static>;
 
 /// Participation role for this KOTOBA node (ADR-2605260005).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,14 +43,13 @@ pub enum NodeRole {
 impl NodeRole {
     /// Parse comma-separated `KOTOBA_NODE_ROLES` env var. Defaults to `[Pin, Compute]`.
     pub fn from_env() -> Vec<Self> {
-        let val = std::env::var("KOTOBA_NODE_ROLES")
-            .unwrap_or_else(|_| "pin,compute".to_string());
+        let val = std::env::var("KOTOBA_NODE_ROLES").unwrap_or_else(|_| "pin,compute".to_string());
         let mut roles = Vec::new();
         for part in val.split(',') {
             match part.trim().to_ascii_lowercase().as_str() {
-                "pin"     => roles.push(NodeRole::Pin),
+                "pin" => roles.push(NodeRole::Pin),
                 "compute" => roles.push(NodeRole::Compute),
-                other     => tracing::warn!(role = other, "unknown KOTOBA_NODE_ROLES value, ignoring"),
+                other => tracing::warn!(role = other, "unknown KOTOBA_NODE_ROLES value, ignoring"),
             }
         }
         if roles.is_empty() {
@@ -50,51 +61,197 @@ impl NodeRole {
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            NodeRole::Pin     => "pin",
+            NodeRole::Pin => "pin",
             NodeRole::Compute => "compute",
         }
     }
 }
 
+#[derive(Clone, Default)]
+pub struct HttpDidDocumentFetcher;
+
+impl HttpDidDocumentFetcher {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl DidDocumentFetcher for HttpDidDocumentFetcher {
+    fn fetch(&self, url: &str) -> Result<Vec<u8>, DidResolverError> {
+        let original_url = url.to_string();
+        let thread_url = original_url.clone();
+        std::thread::spawn(move || {
+            let client = reqwest::blocking::Client::builder()
+                .connect_timeout(std::time::Duration::from_millis(500))
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_default();
+            let resp = client
+                .get(&thread_url)
+                .send()
+                .map_err(|e| DidResolverError::Fetch {
+                    url: thread_url.clone(),
+                    message: e.to_string(),
+                })?;
+            let status = resp.status();
+            if !status.is_success() {
+                return Err(DidResolverError::Fetch {
+                    url: thread_url,
+                    message: format!("HTTP {status}"),
+                });
+            }
+            Ok(resp
+                .bytes()
+                .map_err(|e| DidResolverError::Fetch {
+                    url: thread_url,
+                    message: e.to_string(),
+                })?
+                .to_vec())
+        })
+        .join()
+        .map_err(|_| DidResolverError::Fetch {
+            url: original_url,
+            message: "fetch thread panicked".to_string(),
+        })?
+    }
+}
+
+#[derive(Clone)]
+pub struct DistributedDidResolver {
+    block_store: Arc<dyn BlockStore + Send + Sync>,
+    ipns_registry: Arc<dyn IpnsRegistry>,
+    ipns_names: Vec<String>,
+}
+
+impl DistributedDidResolver {
+    pub fn new(
+        block_store: Arc<dyn BlockStore + Send + Sync>,
+        ipns_registry: Arc<dyn IpnsRegistry>,
+        ipns_names: Vec<String>,
+    ) -> Self {
+        Self {
+            block_store,
+            ipns_registry,
+            ipns_names,
+        }
+    }
+}
+
+impl DidDocumentResolver for DistributedDidResolver {
+    fn resolve(&self, did: &str) -> Result<DidDocument, DidResolverError> {
+        let reader = DistributedDatomReader::new(&*self.block_store, &*self.ipns_registry);
+        let did_ipns_name = did_document_ipns_name(did);
+        let mut ipns_names = Vec::with_capacity(self.ipns_names.len() + 1);
+        ipns_names.push(did_ipns_name);
+        ipns_names.extend(self.ipns_names.iter().cloned());
+        ipns_names.dedup();
+        for ipns_name in &ipns_names {
+            let db =
+                reader
+                    .current_db_for_name(ipns_name)
+                    .map_err(|e| DidResolverError::Fetch {
+                        url: format!("ipns://{ipns_name}"),
+                        message: e.to_string(),
+                    })?;
+            let Some(db) = db else {
+                continue;
+            };
+            if let Some(doc) = DidDocument::from_datoms(did, &db.datoms()) {
+                return Ok(doc);
+            }
+        }
+        Err(DidResolverError::NotFound(did.to_owned()))
+    }
+}
+
+fn distributed_graph_ipns_name(graph_cid: &KotobaCid) -> String {
+    format!("k51-kotoba-{}", graph_cid.to_multibase())
+}
+
+pub(crate) fn did_document_ipns_name(did: &str) -> String {
+    let did_cid = KotobaCid::from_bytes(did.as_bytes());
+    format!("k51-kotoba-did-{}", did_cid.to_multibase())
+}
+
+fn did_document_resolver_ipns_names() -> Vec<String> {
+    if let Ok(raw) = std::env::var("KOTOBA_DID_DOCUMENT_GRAPHS") {
+        let names = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                if value.starts_with("k51-") {
+                    value.to_string()
+                } else {
+                    format!("k51-kotoba-{value}")
+                }
+            })
+            .collect::<Vec<_>>();
+        if !names.is_empty() {
+            return names;
+        }
+    }
+
+    [
+        NamedGraph::public().cid,
+        NamedGraph::authenticated().cid,
+        NamedGraph::new("kotobase-kg-v1", GraphVisibility::Authenticated).cid,
+    ]
+    .iter()
+    .map(distributed_graph_ipns_name)
+    .collect()
+}
+
 /// Shared server state — Arc-wrapped and injected into every axum handler.
 pub struct KotobaState {
-    pub version:       &'static str,
+    pub version: &'static str,
     // ── Node identity / participation (ADR-2605260005) ────────────────────
     /// Operator DID derived from `KOTOBA_AGENT_DID` (or ephemeral did:key).
-    pub operator_did:  String,
+    pub operator_did: String,
     /// Participation roles for this node (Pin, Compute, or both).
-    pub node_roles:    Vec<NodeRole>,
+    pub node_roles: Vec<NodeRole>,
     /// Shared agent identity — constructed once in `new()` and reused in
     /// `init_crypto()` to prevent double-generation in ephemeral mode.
-    identity:          Arc<AgentIdentity>,
+    identity: Arc<AgentIdentity>,
     // ── KSE ──────────────────────────────────────────────────────────────
-    pub journal:       Arc<Journal>,
-    pub shelf:         Arc<Shelf>,
+    pub journal: Arc<Journal>,
+    pub shelf: Arc<Shelf>,
     /// Content-addressed private blob vault (no GossipSub, no CACAO required).
-    pub vault:         Arc<Vault>,
+    pub vault: Arc<Vault>,
     // ── KDHT ─────────────────────────────────────────────────────────────
-    pub neighborhood:  Arc<tokio::sync::RwLock<Neighborhood>>,
+    pub neighborhood: Arc<tokio::sync::RwLock<Neighborhood>>,
     pub local_node_id: NodeId,
     // ── KVM / Runtime ────────────────────────────────────────────────────
-    pub executor:      Arc<WasmExecutor>,
-    pub udf:           Arc<UdfExecutor>,
-    pub router:        Arc<InvokeRouter>,
+    #[cfg(feature = "wasm-runtime")]
+    pub executor: Arc<WasmExecutor>,
+    #[cfg(feature = "wasm-runtime")]
+    pub udf: Arc<UdfExecutor>,
+    #[cfg(feature = "wasm-runtime")]
+    pub router: Arc<InvokeRouter>,
     // ── P2P / Gossip ─────────────────────────────────────────────────────
     /// GossipSub outbound channel — `Some(tx)` when the swarm actor is running.
-    pub gossip_tx:        Option<tokio::sync::mpsc::Sender<(String, Vec<u8>)>>,
+    pub gossip_tx: Option<tokio::sync::mpsc::Sender<(String, Vec<u8>)>>,
     // ── Distributed Pregel ───────────────────────────────────────────────
     /// Pregel runner — `Some` after swarm is attached.
     /// Lock to inject messages or trigger a superstep from XRPC handlers.
-    pub pregel_runner:    Option<Arc<tokio::sync::Mutex<DistributedPregelRunner>>>,
+    #[cfg(feature = "wasm-runtime")]
+    pub pregel_runner: Option<Arc<tokio::sync::Mutex<DistributedPregelRunner>>>,
     // ── Inference ────────────────────────────────────────────────────────
     /// Gemma 4 E2B inference engine, loaded at startup when `KOTOBA_LOAD_GEMMA` is set.
     pub inference_engine: Option<InferenceFn>,
     // ── BlockStore ───────────────────────────────────────────────────────
     /// Content-addressed block store (BudgetedBlockStore<MemoryBlockStore> hot + optional B2 cold).
     pub block_store: Arc<dyn BlockStore + Send + Sync>,
+    // ── Distributed Datomic Head Registry ─────────────────────────────────
+    /// Mutable graph/database heads.  This is the IPNS boundary for ProllyTree
+    /// Datom commits; production can replace the in-memory registry with Kubo
+    /// name publish/resolve without changing XRPC semantics.
+    pub ipns_registry: Arc<dyn IpnsRegistry>,
+    /// DID resolver abstraction for did:key, did:web, and did:plc controller checks.
+    pub did_resolver: Arc<dyn DidDocumentResolver>,
     // ── QuadStore ────────────────────────────────────────────────────────────
     /// Quad write/read with ProllyTree commit + 3-index Journal publish.
-    pub quad_store:  Arc<QuadStore>,
+    pub quad_store: Arc<QuadStore>,
     // ── kotobase Pinning ─────────────────────────────────────────────────────────
     /// Optional kotobase.gftd.ai XRPC pin client (KOTOBA_PIN_TOKEN).
     pub ipfs_pin: Arc<IpfsPinClient>,
@@ -134,6 +291,13 @@ pub struct KotobaState {
 }
 
 impl KotobaState {
+    fn public_http_endpoint_from_env() -> String {
+        std::env::var("KOTOBA_PUBLIC_ENDPOINT").unwrap_or_else(|_| {
+            let port = std::env::var("KOTOBA_PORT").unwrap_or_else(|_| "8080".into());
+            format!("http://localhost:{port}")
+        })
+    }
+
     pub fn new(inference_engine: Option<InferenceFn>) -> anyhow::Result<Self> {
         // Hot block cache — BudgetedBlockStore<MemoryBlockStore>.
         // Capacity: KOTOBA_HOT_CACHE_BYTES (default 256 MiB) or
@@ -158,7 +322,9 @@ impl KotobaState {
             // Endpoint from KOTOBA_IPFS_ENDPOINT (default: http://localhost:5001).
             // Set KOTOBA_IPFS=off to disable (in-memory only mode for tests/dev).
             let ipfs_off = std::env::var("KOTOBA_IPFS")
-                .map(|v| v.eq_ignore_ascii_case("off") || v == "0" || v.eq_ignore_ascii_case("false"))
+                .map(|v| {
+                    v.eq_ignore_ascii_case("off") || v == "0" || v.eq_ignore_ascii_case("false")
+                })
                 .unwrap_or(false);
             if !ipfs_off {
                 let cold = kotoba_store::KuboBlockStore::from_env();
@@ -175,7 +341,8 @@ impl KotobaState {
                 if !peers_str.trim().is_empty() {
                     let local: Arc<dyn BlockStore + Send + Sync> = Arc::new(tiered);
                     let dist = kotoba_store::DistributedBlockStore::from_peers_str(
-                        &peers_str, Arc::clone(&local),
+                        &peers_str,
+                        Arc::clone(&local),
                     );
                     tracing::info!(
                         hot_cache_mib = hot_cache_bytes / (1024 * 1024),
@@ -201,6 +368,39 @@ impl KotobaState {
             }
         };
 
+        let raw_ipns_registry: Arc<dyn IpnsRegistry> = match std::env::var("KOTOBA_IPNS") {
+            Ok(mode) if mode.eq_ignore_ascii_case("kubo") => {
+                tracing::info!(
+                    "IPNS Registry: Kubo /api/v0/name publish/resolve enabled via KOTOBA_IPNS=kubo"
+                );
+                Arc::new(KuboIpnsRegistry::from_env())
+            }
+            _ => {
+                tracing::info!(
+                    "IPNS Registry: in-memory graph heads (set KOTOBA_IPNS=kubo for Kubo name publish)"
+                );
+                Arc::new(InMemoryIpnsRegistry::new())
+            }
+        };
+        let ipns_registry: Arc<dyn IpnsRegistry> = match std::env::var(
+            "KOTOBA_IPNS_REQUIRE_SIGNATURE",
+        ) {
+            Ok(v)
+                if v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off") =>
+            {
+                tracing::warn!(
+                        "IPNS Registry: signature-required policy disabled via KOTOBA_IPNS_REQUIRE_SIGNATURE"
+                    );
+                raw_ipns_registry
+            }
+            _ => {
+                tracing::info!(
+                        "IPNS Registry: signature-required policy enabled for distributed Datomic heads"
+                    );
+                Arc::new(SignedIpnsRegistry::new(raw_ipns_registry))
+            }
+        };
+
         // Journal — Merkle WAL backed by block_store; head pointer in a sibling JSON file.
         let journal = Arc::new(match &store_path {
             Some(path) => {
@@ -209,7 +409,9 @@ impl KotobaState {
                 Journal::with_block_store(Arc::clone(&block_store), head_path)
             }
             None => {
-                tracing::info!("KSE Journal: in-memory only (set KOTOBA_STORE_PATH for persistence)");
+                tracing::info!(
+                    "KSE Journal: in-memory only (set KOTOBA_STORE_PATH for persistence)"
+                );
                 Journal::new()
             }
         });
@@ -218,9 +420,9 @@ impl KotobaState {
         // Agent identity — constructed once; reused in init_crypto() to avoid
         // double-generation of ephemeral keys (each call to generate_ephemeral()
         // produces a different random keypair and DID).
-        let identity    = Arc::new(AgentIdentity::from_env());
+        let identity = Arc::new(AgentIdentity::from_env());
         let operator_did = identity.did.clone();
-        let node_roles   = NodeRole::from_env();
+        let node_roles = NodeRole::from_env();
         tracing::info!(
             did        = %operator_did,
             ephemeral  = identity.ephemeral,
@@ -231,32 +433,42 @@ impl KotobaState {
         // KDHT — NodeId = blake3(Ed25519 verifying key) — safe to expose publicly.
         // MUST NOT use signing_key.to_bytes() (private key seed) here.
         let local_node_id = NodeId::from_pubkey(&identity.verifying_key().to_bytes());
-        let neighborhood  = Arc::new(tokio::sync::RwLock::new(
-            Neighborhood::new(local_node_id.clone()),
-        ));
+        let neighborhood = Arc::new(tokio::sync::RwLock::new(Neighborhood::new(
+            local_node_id.clone(),
+        )));
 
         // Runtime — wire the inference engine into InvokeRouter / WasmExecutor
-        let gateway_url = std::env::var("KOTOBA_GATEWAY_URL")
-            .unwrap_or_else(|_| "http://localhost:9000".into());
-
-        let (executor, router) = match &inference_engine {
-            Some(engine) => (
-                Arc::new(WasmExecutor::with_inference(10_000_000, engine.clone())?),
-                Arc::new(InvokeRouter::with_inference(10_000_000, &gateway_url, engine.clone())?),
-            ),
-            None => (
-                Arc::new(WasmExecutor::new(10_000_000)?),
-                Arc::new(InvokeRouter::new(10_000_000, gateway_url)?),
-            ),
+        // only when the heavy Wasmtime-backed runtime is explicitly enabled.
+        #[cfg(feature = "wasm-runtime")]
+        let (executor, udf, router) = {
+            let gateway_url = std::env::var("KOTOBA_GATEWAY_URL")
+                .unwrap_or_else(|_| "http://localhost:9000".into());
+            let (executor, router) = match &inference_engine {
+                Some(engine) => (
+                    Arc::new(WasmExecutor::with_inference(10_000_000, engine.clone())?),
+                    Arc::new(InvokeRouter::with_inference(
+                        10_000_000,
+                        &gateway_url,
+                        engine.clone(),
+                    )?),
+                ),
+                None => (
+                    Arc::new(WasmExecutor::new(10_000_000)?),
+                    Arc::new(InvokeRouter::new(10_000_000, gateway_url)?),
+                ),
+            };
+            (executor, Arc::new(UdfExecutor::new()?), router)
         };
-        let udf = Arc::new(UdfExecutor::new()?);
 
         // IPFS pin client — always initialised; pins against KOTOBA_IPFS_ENDPOINT (default localhost:5001)
         let ipfs_pin = IpfsPinClient::from_env();
         tracing::info!("IPFS pin client ready (KOTOBA_IPFS_ENDPOINT)");
 
         // QuadStore — wraps Journal + BlockStore; provides ProllyTree commit path
-        let quad_store = Arc::new(QuadStore::new(Arc::clone(&journal), Arc::clone(&block_store)));
+        let quad_store = Arc::new(QuadStore::new(
+            Arc::clone(&journal),
+            Arc::clone(&block_store),
+        ));
 
         // Vault — content-addressed private blob store; backed by block_store.
         let vault = Arc::new(if store_path.is_some() {
@@ -278,7 +490,8 @@ impl KotobaState {
         // KseStore — for agent key-ref pointer storage; backed by LocalFileSystem if
         // KOTOBA_STORE_PATH is set, otherwise None (crypto will be ephemeral).
         let kse_store: Option<KseStore> = store_path.as_ref().and_then(|path| {
-            let dir = std::path::Path::new(path.as_str()).parent()
+            let dir = std::path::Path::new(path.as_str())
+                .parent()
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| std::path::PathBuf::from("."));
             std::fs::create_dir_all(&dir).ok()?;
@@ -288,11 +501,23 @@ impl KotobaState {
         });
 
         // CC embed client — optional; enables vector search over Common Crawl data
-        let cc_embed_client: Option<Arc<dyn EmbedClient>> =
-            HttpEmbedClient::from_env().ok().map(|c| Arc::new(c) as Arc<dyn EmbedClient>);
+        let cc_embed_client: Option<Arc<dyn EmbedClient>> = HttpEmbedClient::from_env()
+            .ok()
+            .map(|c| Arc::new(c) as Arc<dyn EmbedClient>);
         if cc_embed_client.is_some() {
             tracing::info!("CC embed client enabled (KOTOBA_EMBED_URL)");
         }
+
+        let did_resolver: Arc<dyn DidDocumentResolver> = Arc::new(LayeredDidResolver::new(vec![
+            Arc::new(DistributedDidResolver::new(
+                Arc::clone(&block_store),
+                Arc::clone(&ipns_registry),
+                did_document_resolver_ipns_names(),
+            )),
+            Arc::new(CompositeDidResolver::with_default_methods(Arc::new(
+                HttpDidDocumentFetcher::new(),
+            ))),
+        ]));
 
         // Named graph registry — pre-populate well-known graphs.
         //
@@ -304,12 +529,12 @@ impl KotobaState {
         // (require_kg_write_auth in kg.rs) — the visibility only governs reads.
         let graph_registry = {
             let mut map: HashMap<KotobaCid, (String, GraphVisibility)> = HashMap::new();
-            let pub_g  = NamedGraph::public();
+            let pub_g = NamedGraph::public();
             let auth_g = NamedGraph::authenticated();
-            let kg_g   = NamedGraph::new("kotobase-kg-v1", GraphVisibility::Authenticated);
-            map.insert(pub_g.cid.clone(),  (pub_g.name.clone(),  pub_g.visibility));
+            let kg_g = NamedGraph::new("kotobase-kg-v1", GraphVisibility::Authenticated);
+            map.insert(pub_g.cid.clone(), (pub_g.name.clone(), pub_g.visibility));
             map.insert(auth_g.cid.clone(), (auth_g.name.clone(), auth_g.visibility));
-            map.insert(kg_g.cid.clone(),   (kg_g.name.clone(),   kg_g.visibility));
+            map.insert(kg_g.cid.clone(), (kg_g.name.clone(), kg_g.visibility));
             Arc::new(tokio::sync::RwLock::new(map))
         };
 
@@ -323,21 +548,27 @@ impl KotobaState {
             vault,
             neighborhood,
             local_node_id,
+            #[cfg(feature = "wasm-runtime")]
             executor,
+            #[cfg(feature = "wasm-runtime")]
             udf,
+            #[cfg(feature = "wasm-runtime")]
             router,
-            gossip_tx:        None,
-            pregel_runner:    None,
+            gossip_tx: None,
+            #[cfg(feature = "wasm-runtime")]
+            pregel_runner: None,
             inference_engine,
             block_store,
+            ipns_registry,
+            did_resolver,
             quad_store,
             ipfs_pin,
             secure_vault,
-            crypto:            None,
+            crypto: None,
             kse_store,
-            agent_sessions:    Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            agent_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             cc_embed_client,
-            pre_key_registry:  None,
+            pre_key_registry: None,
             graph_registry,
             nonce_store: Arc::new(crate::nonce_store::NonceStore::new()),
             http_client: reqwest::Client::builder()
@@ -381,8 +612,20 @@ impl KotobaState {
 
     /// Returns a reference to the crypto engine, or errors if not initialised.
     pub fn crypto_required(&self) -> anyhow::Result<Arc<dyn AgentCrypto>> {
-        self.crypto.clone()
+        self.crypto
+            .clone()
             .ok_or_else(|| anyhow::anyhow!("crypto not initialised — call init_crypto() first"))
+    }
+
+    /// Sign a Kotoba-managed IPNS head record with this node's stable DID key.
+    pub fn sign_ipns_record(&self, record: &mut IpnsRecord) -> anyhow::Result<()> {
+        record
+            .sign_ed25519(&self.identity.signing_key)
+            .map_err(|e| anyhow::anyhow!("ipns record sign: {e}"))
+    }
+
+    pub fn ipns_signing_key(&self) -> ed25519_dalek::SigningKey {
+        self.identity.signing_key.clone()
     }
 
     /// Replay Journal WAL into the in-memory QuadStore Arrangement.
@@ -401,6 +644,7 @@ impl KotobaState {
     }
 
     /// Attach the distributed Pregel runner after swarm setup.
+    #[cfg(feature = "wasm-runtime")]
     pub fn attach_pregel(mut self, runner: DistributedPregelRunner) -> Self {
         self.pregel_runner = Some(Arc::new(tokio::sync::Mutex::new(runner)));
         self
@@ -448,54 +692,133 @@ impl KotobaState {
         registry.insert(graph.cid.clone(), (graph.name.clone(), graph.visibility));
     }
 
+    pub fn local_auth_did_document(&self) -> DidDocument {
+        let did = self.operator_did.clone();
+        let key_id = format!("{did}#agent-ed25519");
+        let public_key_multibase = multibase::encode(
+            multibase::Base::Base58Btc,
+            self.identity.verifying_key().to_bytes(),
+        );
+        DidDocument {
+            context: vec![DID_CONTEXT_V1.to_string()],
+            id: did.clone(),
+            verification_method: vec![VerificationMethod {
+                id: key_id.clone(),
+                key_type: "Ed25519VerificationKey2020".to_string(),
+                controller: did.clone(),
+                public_key_multibase,
+            }],
+            authentication: vec![key_id.clone()],
+            assertion_method: vec![key_id.clone()],
+            capability_invocation: vec![key_id.clone()],
+            capability_delegation: vec![key_id],
+            service: vec![],
+        }
+    }
+
+    pub async fn local_did_document(&self) -> DidDocument {
+        let did = self.operator_did.clone();
+        let mut doc = self.local_auth_did_document();
+
+        let kotoba_endpoint = std::env::var("KOTOBA_NODE_ENDPOINT")
+            .or_else(|_| std::env::var("KOTOBA_PUBLIC_ENDPOINT"))
+            .unwrap_or_else(|_| "/ip4/127.0.0.1/tcp/4001".to_string());
+        doc.push_single_service("kotoba-node", KOTOBA_NODE_SERVICE, kotoba_endpoint);
+
+        let didcomm_endpoint = std::env::var("KOTOBA_DIDCOMM_ENDPOINT")
+            .unwrap_or_else(|_| format!("didcomm://{}", did));
+        doc.push_single_service("didcomm", DIDCOMM_MESSAGING_SERVICE, didcomm_endpoint);
+
+        let atproto_pds_endpoint = std::env::var("KOTOBA_ATPROTO_PDS_ENDPOINT")
+            .unwrap_or_else(|_| Self::public_http_endpoint_from_env());
+        doc.push_single_service("atproto-pds", ATPROTO_PDS_SERVICE, atproto_pds_endpoint);
+
+        let memberships = self
+            .graph_registry
+            .read()
+            .await
+            .keys()
+            .map(|cid| format!("kotoba://graph/{}", cid.to_multibase()))
+            .collect::<Vec<_>>();
+        doc.push_graph_membership_service(memberships);
+        doc
+    }
+
+    pub async fn did_ed25519_key_matches(&self, did: &str, public_key_multibase: &str) -> bool {
+        if did == self.operator_did {
+            let resolver = InMemoryDidResolver::new();
+            resolver.insert(self.operator_did.clone(), self.local_did_document().await);
+            return resolver
+                .ed25519_key_matches_multibase(did, public_key_multibase)
+                .unwrap_or(false);
+        }
+        self.did_resolver
+            .ed25519_key_matches_multibase(did, public_key_multibase)
+            .unwrap_or(false)
+    }
+
     /// Write node registration Quads to the `kotoba/network/nodes` graph (ADR-2605260005).
     ///
     /// Called once at startup (from `main.rs`) and re-callable via the
     /// `kotoba_node_register` MCP tool to refresh the registration timestamp.
     pub async fn register_node(&self) {
-        use kotoba_kqe::quad::QuadObject;
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        let graph_cid   = KotobaCid::from_bytes(b"kotoba/network/nodes");
+        let graph_cid = KotobaCid::from_bytes(b"kotoba/network/nodes");
         let subject_cid = KotobaCid::from_bytes(self.operator_did.as_bytes());
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
 
-        let endpoint = std::env::var("KOTOBA_PUBLIC_ENDPOINT").unwrap_or_else(|_| {
-            let port = std::env::var("KOTOBA_PORT").unwrap_or_else(|_| "8080".into());
-            format!("http://localhost:{port}")
-        });
+        let endpoint = Self::public_http_endpoint_from_env();
         let node_id_hex = hex::encode(self.local_node_id.0);
 
-        let mut quads = vec![
-            Quad { graph: graph_cid.clone(), subject: subject_cid.clone(),
-                predicate: "node/did".to_string(),
-                object: QuadObject::Text(self.operator_did.clone()) },
-            Quad { graph: graph_cid.clone(), subject: subject_cid.clone(),
-                predicate: "node/version".to_string(),
-                object: QuadObject::Text(self.version.to_string()) },
-            Quad { graph: graph_cid.clone(), subject: subject_cid.clone(),
-                predicate: "node/endpoint".to_string(),
-                object: QuadObject::Text(endpoint) },
-            Quad { graph: graph_cid.clone(), subject: subject_cid.clone(),
-                predicate: "node/node_id_hex".to_string(),
-                object: QuadObject::Text(node_id_hex) },
-            Quad { graph: graph_cid.clone(), subject: subject_cid.clone(),
-                predicate: "node/registered_at".to_string(),
-                object: QuadObject::Integer(ts) },
+        let mut datoms = vec![
+            KqeDatom::assert(
+                subject_cid.clone(),
+                "node/did".to_string(),
+                KqeValue::Text(self.operator_did.clone()),
+                graph_cid.clone(),
+            ),
+            KqeDatom::assert(
+                subject_cid.clone(),
+                "node/version".to_string(),
+                KqeValue::Text(self.version.to_string()),
+                graph_cid.clone(),
+            ),
+            KqeDatom::assert(
+                subject_cid.clone(),
+                "node/endpoint".to_string(),
+                KqeValue::Text(endpoint),
+                graph_cid.clone(),
+            ),
+            KqeDatom::assert(
+                subject_cid.clone(),
+                "node/node_id_hex".to_string(),
+                KqeValue::Text(node_id_hex),
+                graph_cid.clone(),
+            ),
+            KqeDatom::assert(
+                subject_cid.clone(),
+                "node/registered_at".to_string(),
+                KqeValue::Integer(ts),
+                graph_cid.clone(),
+            ),
         ];
 
         for role in &self.node_roles {
             let predicate = format!("node/role/{}", role.as_str());
-            quads.push(Quad { graph: graph_cid.clone(), subject: subject_cid.clone(),
-                predicate, object: QuadObject::Bool(true) });
+            datoms.push(KqeDatom::assert(
+                subject_cid.clone(),
+                predicate,
+                KqeValue::Bool(true),
+                graph_cid.clone(),
+            ));
         }
 
-        for quad in &quads {
-            self.journal_assert(quad).await;
-            self.quad_store.assert(quad.clone()).await;
+        for datom in datoms {
+            self.assert_datom_compat(graph_cid.clone(), datom).await;
         }
         tracing::info!(
             did   = %self.operator_did,
@@ -526,31 +849,131 @@ impl KotobaState {
         // Gossip on a coarse topic so peers can subscribe once and receive all asserts.
         // Channel carries raw KSE names (no "kotoba/" prefix); KotobaSwarm::publish adds it.
         if let Some(tx) = &self.gossip_tx {
-            tx.try_send(("quad/assert".to_string(), payload.clone())).ok();
+            tx.try_send(("quad/assert".to_string(), payload.clone()))
+                .ok();
         }
 
         let entry = self.journal.publish(topic, Bytes::from(payload)).await;
         entry.cid.to_multibase()
     }
 
+    /// Publish a Datom assert through the legacy Quad journal projection.
+    ///
+    /// The journal protocol remains Quad-shaped for backward-compatible peers,
+    /// but callers that already operate on Datoms should not have to project
+    /// back to Quad at the call site.
+    pub async fn journal_assert_datom(&self, graph_cid: &KotobaCid, datom: &KqeDatom) -> String {
+        self.journal_assert(&datom_journal_quad(graph_cid, datom))
+            .await
+    }
+
+    /// Compatibility journal assert plus Datom-native graph-store apply.
+    pub async fn assert_datom_compat(&self, graph_cid: KotobaCid, mut datom: KqeDatom) -> String {
+        datom.op = true;
+        let journal_cid = self.journal_assert_datom(&graph_cid, &datom).await;
+        let tx_cid = KotobaCid::from_multibase(&journal_cid)
+            .unwrap_or_else(|| KotobaCid::from_bytes(journal_cid.as_bytes()));
+        datom.tx = tx_cid;
+        self.quad_store
+            .apply_journaled_datom(graph_cid, datom)
+            .await;
+        journal_cid
+    }
+
+    /// Compatibility write for legacy Quad API callers.
+    ///
+    /// The Journal still receives the Quad wire payload, while the graph store
+    /// receives a Datom whose transaction is the Journal entry CID.
+    pub async fn assert_quad_compat(&self, quad: Quad) -> String {
+        let graph_cid = quad.graph.clone();
+        let journal_cid = self.journal_assert(&quad).await;
+        let tx_cid = KotobaCid::from_multibase(&journal_cid)
+            .unwrap_or_else(|| KotobaCid::from_bytes(journal_cid.as_bytes()));
+        let mut datom = KqeDatom::from_legacy_quad(quad, true);
+        datom.tx = tx_cid;
+        self.quad_store
+            .apply_journaled_datom(graph_cid, datom)
+            .await;
+        journal_cid
+    }
+
+    /// Apply a legacy Quad caller through the Datom-native graph-store path
+    /// while preserving `QuadStore`'s 4-index legacy Journal publication.
+    pub async fn assert_quad_store_datom(&self, quad: Quad) {
+        let graph_cid = quad.graph.clone();
+        let datom = KqeDatom::from_legacy_quad(quad, true);
+        self.quad_store.assert_datom(graph_cid, datom).await;
+    }
+
     /// Publish a Quad retract to the KSE Journal.
     pub async fn journal_retract(&self, quad: &Quad) -> String {
-        let topic   = Topic(format!("kotoba/retract/{}/{}/{}", quad.graph, quad.subject, quad.predicate));
+        let topic = Topic(format!(
+            "kotoba/retract/{}/{}/{}",
+            quad.graph, quad.subject, quad.predicate
+        ));
         // All handlers construct QuadObject::{Text,Bytes,Cid,...} — never Float.
         let payload = serde_json::to_vec(quad)
             .expect("Quad serialization: Float(NaN/Inf) must not reach journal_retract");
 
         // Gossip retract events on a coarse topic as well.
         if let Some(tx) = &self.gossip_tx {
-            tx.try_send(("quad/retract".to_string(), payload.clone())).ok();
+            tx.try_send(("quad/retract".to_string(), payload.clone()))
+                .ok();
         }
 
         let entry = self.journal.publish(topic, Bytes::from(payload)).await;
         entry.cid.to_multibase()
     }
+
+    /// Publish a Datom retract through the legacy Quad journal projection.
+    pub async fn journal_retract_datom(&self, graph_cid: &KotobaCid, datom: &KqeDatom) -> String {
+        self.journal_retract(&datom_journal_quad(graph_cid, datom))
+            .await
+    }
+
+    /// Compatibility journal retract plus Datom-native graph-store apply.
+    pub async fn retract_datom_compat(&self, graph_cid: KotobaCid, mut datom: KqeDatom) -> String {
+        datom.op = false;
+        let journal_cid = self.journal_retract_datom(&graph_cid, &datom).await;
+        let tx_cid = KotobaCid::from_multibase(&journal_cid)
+            .unwrap_or_else(|| KotobaCid::from_bytes(journal_cid.as_bytes()));
+        datom.tx = tx_cid;
+        self.quad_store
+            .apply_journaled_datom(graph_cid, datom)
+            .await;
+        journal_cid
+    }
+
+    /// Compatibility retract for legacy Quad API callers.
+    pub async fn retract_quad_compat(&self, quad: Quad) -> String {
+        let graph_cid = quad.graph.clone();
+        let journal_cid = self.journal_retract(&quad).await;
+        let tx_cid = KotobaCid::from_multibase(&journal_cid)
+            .unwrap_or_else(|| KotobaCid::from_bytes(journal_cid.as_bytes()));
+        let mut datom = KqeDatom::from_legacy_quad(quad, false);
+        datom.tx = tx_cid;
+        self.quad_store
+            .apply_journaled_datom(graph_cid, datom)
+            .await;
+        journal_cid
+    }
+
+    /// Apply a legacy Quad retract through the Datom-native graph-store path.
+    pub async fn retract_quad_store_datom(&self, quad: Quad) {
+        let graph_cid = quad.graph.clone();
+        let datom = KqeDatom::from_legacy_quad(quad, false);
+        self.quad_store.retract_datom(graph_cid, datom).await;
+    }
 }
 
-
+fn datom_journal_quad(graph_cid: &KotobaCid, datom: &KqeDatom) -> Quad {
+    Quad {
+        graph: graph_cid.clone(),
+        subject: datom.e.clone(),
+        predicate: datom.a.clone(),
+        object: datom.v.clone().into(),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -589,10 +1012,14 @@ mod tests {
     #[test]
     fn kotoba_state_new_populates_operator_did() {
         let state = KotobaState::new(None).expect("new");
-        assert!(!state.operator_did.is_empty(), "operator_did must not be empty");
+        assert!(
+            !state.operator_did.is_empty(),
+            "operator_did must not be empty"
+        );
         assert!(
             state.operator_did.starts_with("did:"),
-            "operator_did must be a DID: {}", state.operator_did
+            "operator_did must be a DID: {}",
+            state.operator_did
         );
     }
 
@@ -606,8 +1033,10 @@ mod tests {
         let a = KotobaState::new(None).expect("a");
         let b = KotobaState::new(None).expect("b");
         // ephemeral → each call generates a fresh key → different NodeIds
-        assert_ne!(a.local_node_id.0, b.local_node_id.0,
-            "ephemeral NodeIds must differ across restarts");
+        assert_ne!(
+            a.local_node_id.0, b.local_node_id.0,
+            "ephemeral NodeIds must differ across restarts"
+        );
     }
 
     #[tokio::test]
@@ -617,14 +1046,92 @@ mod tests {
 
         use kotoba_core::cid::KotobaCid;
         let graph_cid = KotobaCid::from_bytes(b"kotoba/network/nodes");
-        let arrangement = state.quad_store.arrangement(&graph_cid).await
+        let arrangement = state
+            .quad_store
+            .arrangement(&graph_cid)
+            .await
             .expect("kotoba/network/nodes graph should exist after register_node");
 
         let subject_cid = KotobaCid::from_bytes(state.operator_did.as_bytes());
-        let objects = arrangement.get_objects(&subject_cid, "node/did");
-        assert!(!objects.is_empty(), "node/did quad should exist");
-        let objects_ts = arrangement.get_objects(&subject_cid, "node/registered_at");
-        assert!(!objects_ts.is_empty(), "node/registered_at quad should exist");
+        let values = arrangement.get_values(&subject_cid, "node/did");
+        assert!(!values.is_empty(), "node/did datom should exist");
+        let registered_at_values = arrangement.get_values(&subject_cid, "node/registered_at");
+        assert!(
+            !registered_at_values.is_empty(),
+            "node/registered_at datom should exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_did_document_advertises_kotoba_protocol_services() {
+        std::env::set_var("KOTOBA_ATPROTO_PDS_ENDPOINT", "https://pds.example.com");
+        let state = KotobaState::new(None).expect("new");
+        let doc = state.local_did_document().await;
+        std::env::remove_var("KOTOBA_ATPROTO_PDS_ENDPOINT");
+
+        assert_eq!(doc.id, state.operator_did);
+        assert!(doc.ed25519_public_key().is_some());
+        assert!(doc.kotoba_endpoint().is_some());
+        assert!(doc.didcomm_endpoint().is_some());
+        assert_eq!(doc.atproto_pds_endpoint(), Some("https://pds.example.com"));
+        assert!(doc
+            .graph_memberships()
+            .iter()
+            .all(|scope| scope.starts_with("kotoba://graph/")));
+
+        std::env::remove_var("KOTOBA_ATPROTO_PDS_ENDPOINT");
+        std::env::set_var("KOTOBA_PUBLIC_ENDPOINT", "https://kotoba.example.com");
+        let state = KotobaState::new(None).expect("new");
+        let doc = state.local_did_document().await;
+        std::env::remove_var("KOTOBA_PUBLIC_ENDPOINT");
+
+        assert_eq!(
+            doc.atproto_pds_endpoint(),
+            Some("https://kotoba.example.com")
+        );
+    }
+
+    #[test]
+    fn distributed_did_resolver_reads_document_from_ipns_datomic_head() {
+        let store: Arc<dyn BlockStore + Send + Sync> =
+            Arc::new(kotoba_store::MemoryBlockStore::new());
+        let ipns: Arc<dyn IpnsRegistry> = Arc::new(InMemoryIpnsRegistry::new());
+        let did = "did:plc:distributedagent";
+        let graph = KotobaCid::from_bytes(format!("did-document-registry:{did}").as_bytes());
+        let ipns_name = did_document_ipns_name(did);
+
+        let mut doc = DidDocument::empty(did);
+        doc.push_single_service(
+            "didcomm",
+            DIDCOMM_MESSAGING_SERVICE,
+            "didcomm://mediator/distributedagent",
+        );
+        let tx_cid = KotobaCid::from_bytes(b"did-resolver-datomic-tx");
+        let writer = kotoba_datomic::distributed::DistributedCommitWriter::new(&*store, &*ipns);
+        writer
+            .commit_datoms(kotoba_datomic::distributed::CommitDatomsRequest {
+                ipns_name: ipns_name.clone(),
+                graph,
+                datoms: doc.to_datoms(tx_cid.clone()),
+                expected_parent: None,
+                tx_cid: Some(tx_cid),
+                author: "did:key:zWriter".to_string(),
+                seq: 1,
+                valid_until: "2026-05-29T00:00:00Z".to_string(),
+                ttl_secs: Some(60),
+                cacao_proof_cid: None,
+                ipns_controller_did: None,
+                ipns_signing_key: None,
+            })
+            .expect("commit DID document datoms");
+
+        let resolver = DistributedDidResolver::new(store, ipns, vec![]);
+        let resolved = resolver.resolve(did).unwrap();
+
+        assert_eq!(
+            resolved.didcomm_endpoint(),
+            Some("didcomm://mediator/distributedagent")
+        );
     }
 
     #[test]
@@ -652,17 +1159,21 @@ mod tests {
         // Two calls produce different ephemeral identities — confirming Arc reuse
         // within a single state (not across states)
         let state2 = KotobaState::new(None).expect("new2");
-        assert_ne!(state.local_node_id.0, state2.local_node_id.0,
-            "distinct states have distinct ephemeral NodeIds");
-        assert_ne!(state.operator_did, state2.operator_did,
-            "distinct states have distinct ephemeral DIDs");
+        assert_ne!(
+            state.local_node_id.0, state2.local_node_id.0,
+            "distinct states have distinct ephemeral NodeIds"
+        );
+        assert_ne!(
+            state.operator_did, state2.operator_did,
+            "distinct states have distinct ephemeral DIDs"
+        );
     }
 
     #[test]
     fn require_operator_auth_accepts_tenant_jwt_with_operator_did() {
         // Simulate what tenant_jwt(&s.operator_did) produces in e2e tests.
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
         use axum::http::HeaderMap;
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
         std::env::set_var("KOTOBA_NO_KEYCHAIN", "1");
         std::env::remove_var("KOTOBA_AGENT_ED25519_HEX");
@@ -671,10 +1182,9 @@ mod tests {
         let state = KotobaState::new(None).expect("new");
         let did = &state.operator_did;
 
-        let header  = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
-        let payload = URL_SAFE_NO_PAD.encode(
-            format!(r#"{{"sub":"{did}","exp":9999999999}}"#).as_bytes()
-        );
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let payload =
+            URL_SAFE_NO_PAD.encode(format!(r#"{{"sub":"{did}","exp":9999999999}}"#).as_bytes());
         let tok = format!("{header}.{payload}.fakesig");
 
         let mut headers = HeaderMap::new();
@@ -684,8 +1194,10 @@ mod tests {
         );
 
         let result = crate::graph_auth::require_operator_auth(&headers, did);
-        assert!(result.is_ok(),
-            "require_operator_auth must accept tenant_jwt with operator_did; got err: {result:?}");
+        assert!(
+            result.is_ok(),
+            "require_operator_auth must accept tenant_jwt with operator_did; got err: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -698,8 +1210,13 @@ mod tests {
         let state = KotobaState::new(None).expect("new");
         let did_before = state.operator_did.clone();
         let state = state.init_crypto().await.expect("init_crypto");
-        assert_eq!(state.operator_did, did_before,
-            "operator_did must be unchanged after init_crypto");
-        assert!(state.crypto_required().is_ok(), "crypto must be initialized");
+        assert_eq!(
+            state.operator_did, did_before,
+            "operator_did must be unchanged after init_crypto"
+        );
+        assert!(
+            state.crypto_required().is_ok(),
+            "crypto must be initialized"
+        );
     }
 }

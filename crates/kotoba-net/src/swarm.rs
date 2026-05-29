@@ -1,8 +1,9 @@
 use anyhow::Result;
 use futures::StreamExt;
 use libp2p::{
-    gossipsub, identify, kad, ping, request_response,
+    gossipsub, identify,
     identity::Keypair,
+    kad, ping, request_response,
     swarm::{Swarm, SwarmEvent},
     Multiaddr, PeerId,
 };
@@ -22,21 +23,23 @@ pub struct KotobaSwarm {
 #[derive(Debug)]
 pub enum KotobaNetEvent {
     GossipMessage {
-        topic:  String,
-        data:   Vec<u8>,
+        topic: String,
+        data: Vec<u8>,
         source: Option<PeerId>,
     },
     PeerConnected(PeerId),
     PeerDisconnected(PeerId),
-    RoutingUpdated { peer: PeerId },
+    RoutingUpdated {
+        peer: PeerId,
+    },
     ListenAddr(Multiaddr),
     BitswapRequest {
-        peer:    PeerId,
+        peer: PeerId,
         request: BitswapRequest,
         channel: request_response::ResponseChannel<BitswapResponse>,
     },
     BitswapResponse {
-        peer:     PeerId,
+        peer: PeerId,
         response: BitswapResponse,
     },
 }
@@ -66,10 +69,8 @@ impl KotobaSwarm {
         )
         .map_err(|e| anyhow::anyhow!("gossipsub init: {e:?}"))?;
 
-        let kademlia = kad::Behaviour::new(
-            local_peer_id,
-            kad::store::MemoryStore::new(local_peer_id),
-        );
+        let kademlia =
+            kad::Behaviour::new(local_peer_id, kad::store::MemoryStore::new(local_peer_id));
 
         let identify = identify::Behaviour::new(identify::Config::new(
             KOTOBA_SYNC_PROTOCOL.to_string(),
@@ -83,7 +84,13 @@ impl KotobaSwarm {
             request_response::Config::default(),
         );
 
-        let behaviour = KotobaBehaviour { gossipsub, kademlia, identify, ping, bitswap };
+        let behaviour = KotobaBehaviour {
+            gossipsub,
+            kademlia,
+            identify,
+            ping,
+            bitswap,
+        };
 
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
@@ -93,7 +100,10 @@ impl KotobaSwarm {
 
         swarm.listen_on(listen_addr)?;
 
-        Ok(Self { swarm, local_peer_id })
+        Ok(Self {
+            swarm,
+            local_peer_id,
+        })
     }
 
     /// Subscribe to a GossipSub topic mapped from a KSE topic name.
@@ -104,11 +114,7 @@ impl KotobaSwarm {
     }
 
     /// Publish bytes to a GossipSub topic.
-    pub fn publish(
-        &mut self,
-        kse_topic: &str,
-        data: Vec<u8>,
-    ) -> Result<gossipsub::MessageId> {
+    pub fn publish(&mut self, kse_topic: &str, data: Vec<u8>) -> Result<gossipsub::MessageId> {
         let topic = gossipsub::IdentTopic::new(crate::gossipsub::gossipsub_topic(kse_topic));
         let id = self.swarm.behaviour_mut().gossipsub.publish(topic, data)?;
         Ok(id)
@@ -129,37 +135,58 @@ impl KotobaSwarm {
     }
 
     /// Request a block from a specific peer.
-    pub fn want_block(&mut self, peer: PeerId, cid: [u8; 36]) -> request_response::OutboundRequestId {
-        self.swarm.behaviour_mut().bitswap.send_request(&peer, BitswapRequest {
-            want_have:  vec![],
-            want_block: vec![cid],
-            want_since: vec![],
-        })
+    pub fn want_block(
+        &mut self,
+        peer: PeerId,
+        cid: [u8; 36],
+    ) -> request_response::OutboundRequestId {
+        self.swarm.behaviour_mut().bitswap.send_request(
+            &peer,
+            BitswapRequest {
+                want_have: vec![],
+                want_block: vec![cid],
+                want_since: vec![],
+            },
+        )
     }
 
     /// Check if a peer has a block (no data transfer).
-    pub fn want_have(&mut self, peer: PeerId, cid: [u8; 36]) -> request_response::OutboundRequestId {
-        self.swarm.behaviour_mut().bitswap.send_request(&peer, BitswapRequest {
-            want_have:  vec![cid],
-            want_block: vec![],
-            want_since: vec![],
-        })
+    pub fn want_have(
+        &mut self,
+        peer: PeerId,
+        cid: [u8; 36],
+    ) -> request_response::OutboundRequestId {
+        self.swarm.behaviour_mut().bitswap.send_request(
+            &peer,
+            BitswapRequest {
+                want_have: vec![cid],
+                want_block: vec![],
+                want_since: vec![],
+            },
+        )
     }
 
     /// Request a selective-sync delta: all commits in `graph_cid` since `head_cid`.
     /// `head_cid = None` means fresh agent — peer should return the full commit chain.
     pub fn want_since(
         &mut self,
-        peer:      PeerId,
+        peer: PeerId,
         graph_cid: [u8; 36],
         since_seq: u64,
-        head_cid:  Option<[u8; 36]>,
+        head_cid: Option<[u8; 36]>,
     ) -> request_response::OutboundRequestId {
-        self.swarm.behaviour_mut().bitswap.send_request(&peer, BitswapRequest {
-            want_have:  vec![],
-            want_block: vec![],
-            want_since: vec![WantSince { graph_cid, since_seq, head_cid }],
-        })
+        self.swarm.behaviour_mut().bitswap.send_request(
+            &peer,
+            BitswapRequest {
+                want_have: vec![],
+                want_block: vec![],
+                want_since: vec![WantSince {
+                    graph_cid,
+                    since_seq,
+                    head_cid,
+                }],
+            },
+        )
     }
 
     /// Poll the swarm for the next user-visible event.
@@ -172,8 +199,8 @@ impl KotobaSwarm {
                     gossipsub::Event::Message { message, .. },
                 )) => {
                     return Some(KotobaNetEvent::GossipMessage {
-                        topic:  message.topic.to_string(),
-                        data:   message.data,
+                        topic: message.topic.to_string(),
+                        data: message.data,
                         source: message.source,
                     });
                 }
@@ -216,10 +243,17 @@ impl KotobaSwarm {
                 SwarmEvent::Behaviour(KotobaBehaviourEvent::Bitswap(
                     request_response::Event::Message {
                         peer,
-                        message: request_response::Message::Request { request, channel, .. },
+                        message:
+                            request_response::Message::Request {
+                                request, channel, ..
+                            },
                     },
                 )) => {
-                    return Some(KotobaNetEvent::BitswapRequest { peer, request, channel });
+                    return Some(KotobaNetEvent::BitswapRequest {
+                        peer,
+                        request,
+                        channel,
+                    });
                 }
 
                 // Bitswap: response received from a peer
@@ -260,14 +294,14 @@ impl KotobaSwarm {
     /// Gossip a Pregel message to all peers subscribed to the pregel topic.
     pub fn send_pregel_message(
         &mut self,
-        src:     &str,
-        dst:     &str,
+        src: &str,
+        dst: &str,
         payload: &[u8],
     ) -> Result<gossipsub::MessageId> {
-        use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
         let msg = crate::pregel_msg::PregelNetMessage {
-            src:         src.to_string(),
-            dst:         dst.to_string(),
+            src: src.to_string(),
+            dst: dst.to_string(),
             payload_b64: B64.encode(payload),
         };
         let data = serde_json::to_vec(&msg)?;
@@ -276,7 +310,9 @@ impl KotobaSwarm {
 
     /// Try to parse an incoming `KotobaNetEvent` as a `PregelNetMessage`.
     /// Returns `None` if the event is not a Pregel gossip message.
-    pub fn parse_pregel_event(event: &KotobaNetEvent) -> Option<crate::pregel_msg::PregelNetMessage> {
+    pub fn parse_pregel_event(
+        event: &KotobaNetEvent,
+    ) -> Option<crate::pregel_msg::PregelNetMessage> {
         if let KotobaNetEvent::GossipMessage { topic, data, .. } = event {
             let full_topic =
                 crate::gossipsub::gossipsub_topic(crate::pregel_msg::PREGEL_GOSSIP_TOPIC);
@@ -300,11 +336,8 @@ mod tests {
         swarm.subscribe("kotoba/hello/greet").expect("subscribe");
 
         // Wait for the OS-assigned listen address
-        let event = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            swarm.next_event(),
-        )
-        .await;
+        let event =
+            tokio::time::timeout(std::time::Duration::from_secs(3), swarm.next_event()).await;
 
         match event {
             Ok(Some(KotobaNetEvent::ListenAddr(addr))) => {
@@ -337,28 +370,22 @@ mod tests {
         swarm2.subscribe("test/ping").unwrap();
 
         // Collect swarm1's actual listen address
-        let listen_addr = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            async {
-                loop {
-                    if let Some(KotobaNetEvent::ListenAddr(a)) = swarm1.next_event().await {
-                        return a;
-                    }
+        let listen_addr = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if let Some(KotobaNetEvent::ListenAddr(a)) = swarm1.next_event().await {
+                    return a;
                 }
-            },
-        )
+            }
+        })
         .await;
 
         if let Ok(addr) = listen_addr {
             swarm2.add_peer(swarm1.local_peer_id, addr);
 
             // Brief window to observe a connection event (smoke only)
-            tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                swarm2.next_event(),
-            )
-            .await
-            .ok();
+            tokio::time::timeout(std::time::Duration::from_secs(2), swarm2.next_event())
+                .await
+                .ok();
         }
         // Passes as long as no panic — full gossip delivery is integration-test territory
     }
@@ -375,8 +402,8 @@ mod tests {
     #[test]
     fn parse_pregel_event_returns_none_for_wrong_topic() {
         let event = KotobaNetEvent::GossipMessage {
-            topic:  "kotoba/unrelated/topic".to_string(),
-            data:   b"{}".to_vec(),
+            topic: "kotoba/unrelated/topic".to_string(),
+            data: b"{}".to_vec(),
             source: None,
         };
         assert!(KotobaSwarm::parse_pregel_event(&event).is_none());
@@ -386,8 +413,8 @@ mod tests {
     fn parse_pregel_event_returns_none_for_invalid_json() {
         let full_topic = crate::gossipsub::gossipsub_topic(crate::pregel_msg::PREGEL_GOSSIP_TOPIC);
         let event = KotobaNetEvent::GossipMessage {
-            topic:  full_topic,
-            data:   b"not-valid-json".to_vec(),
+            topic: full_topic,
+            data: b"not-valid-json".to_vec(),
             source: None,
         };
         assert!(KotobaSwarm::parse_pregel_event(&event).is_none());
@@ -395,16 +422,16 @@ mod tests {
 
     #[test]
     fn parse_pregel_event_succeeds_for_valid_message() {
-        use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
         let full_topic = crate::gossipsub::gossipsub_topic(crate::pregel_msg::PREGEL_GOSSIP_TOPIC);
         let msg = crate::pregel_msg::PregelNetMessage {
-            src:         "node-A".to_string(),
-            dst:         "node-B".to_string(),
+            src: "node-A".to_string(),
+            dst: "node-B".to_string(),
             payload_b64: B64.encode(b"hello pregel"),
         };
         let data = serde_json::to_vec(&msg).unwrap();
         let event = KotobaNetEvent::GossipMessage {
-            topic:  full_topic,
+            topic: full_topic,
             data,
             source: None,
         };
@@ -441,11 +468,16 @@ mod tests {
     fn kotoba_net_event_gossip_message_fields() {
         let peer = PeerId::random();
         let event = KotobaNetEvent::GossipMessage {
-            topic:  "kotoba/test".to_string(),
-            data:   vec![1, 2, 3],
+            topic: "kotoba/test".to_string(),
+            data: vec![1, 2, 3],
             source: Some(peer),
         };
-        if let KotobaNetEvent::GossipMessage { topic, data, source } = event {
+        if let KotobaNetEvent::GossipMessage {
+            topic,
+            data,
+            source,
+        } = event
+        {
             assert_eq!(topic, "kotoba/test");
             assert_eq!(data, vec![1u8, 2, 3]);
             assert_eq!(source, Some(peer));

@@ -1,0 +1,5177 @@
+//! Distributed Datomic commit writer.
+//!
+//! This module is the write-path bridge from Datomic-compatible tx data to the
+//! IPFS/IPLD/IPNS substrate.  It deliberately writes Datom indexes directly,
+//! without going through the legacy Quad projection.
+
+use crate::{
+    current_datoms, edn_to_kqe_value, plan_datom_lookup_for_triple, Datom, DatomicError, Db,
+    LogEntry, Value,
+};
+use kotoba_core::cid::KotobaCid;
+use kotoba_core::prolly::ProllyTree;
+use kotoba_core::store::BlockStore;
+use kotoba_edn::Keyword;
+use kotoba_ipfs::{IpnsName, IpnsRecord, IpnsRegistry, IpnsRegistryError};
+use kotoba_kqe::Datom as KqeDatom;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+pub const ROOT_EAVT: &str = "eavt";
+pub const ROOT_AEVT: &str = "aevt";
+pub const ROOT_AVET: &str = "avet";
+pub const ROOT_VAET: &str = "vaet";
+pub const ROOT_TEA: &str = "tea";
+const DISTRIBUTED_RULE_RECURSION_LIMIT: usize = 64;
+
+#[derive(Debug, thiserror::Error)]
+pub enum DistributedCommitError {
+    #[error("datom conversion: {0}")]
+    Datom(#[from] DatomicError),
+    #[error("cbor encode: {0}")]
+    Cbor(String),
+    #[error("edn decode: {0}")]
+    Edn(String),
+    #[error("block store: {0}")]
+    Store(#[from] anyhow::Error),
+    #[error("ipns: {0}")]
+    Ipns(#[from] IpnsRegistryError),
+    #[error("ipns signature: {0}")]
+    IpnsSignature(String),
+    #[error("stale parent for {name}: expected {expected:?}, current {current:?}")]
+    StaleParent {
+        name: String,
+        expected: Option<String>,
+        current: Option<String>,
+    },
+    #[error("commit CID is not an IPFS CID: {0}")]
+    InvalidCommitCid(String),
+    #[error("commit not found: {0}")]
+    MissingCommit(String),
+    #[error("missing index root {root} in commit {commit}")]
+    MissingIndexRoot { commit: String, root: &'static str },
+}
+
+/// DAG-CBOR commit block for a Datomic database/graph head.
+///
+/// The CID is derived from the encoded payload and is not serialized.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DistributedDatomCommit {
+    #[serde(skip)]
+    pub cid: KotobaCid,
+    /// Stable graph/database identity.  The mutable pointer to this commit is
+    /// the IPNS name, while this CID scopes Datomic facts and authorization.
+    pub graph: KotobaCid,
+    pub tx_cid: KotobaCid,
+    pub prev: Option<KotobaCid>,
+    pub author: String,
+    pub seq: u64,
+    pub ts: u64,
+    /// Covering ProllyTree roots: eavt/aevt/avet/vaet/tea.
+    pub index_roots: HashMap<String, KotobaCid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cacao_proof_cid: Option<KotobaCid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitReport {
+    pub commit: DistributedDatomCommit,
+    pub ipns_record: IpnsRecord,
+    pub datom_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistributedTxRangeEntry {
+    pub commit: DistributedDatomCommit,
+    pub datoms: Vec<Datom>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DatomIndexLookup {
+    All,
+    Entity(KotobaCid),
+    EntityAttribute { entity: KotobaCid, attr: String },
+    Attribute(String),
+    AttributeValue { attr: String, value: Value },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LookupRefResolution {
+    NotLookupRef,
+    Missing,
+    Resolved(KotobaCid),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredDatom {
+    e: String,
+    a: String,
+    v_edn: String,
+    t: String,
+    added: bool,
+}
+
+pub struct DistributedDatomReader<'a, R>
+where
+    R: IpnsRegistry + ?Sized,
+{
+    store: &'a dyn BlockStore,
+    ipns: &'a R,
+}
+
+impl<'a, R> DistributedDatomReader<'a, R>
+where
+    R: IpnsRegistry + ?Sized,
+{
+    pub fn new(store: &'a dyn BlockStore, ipns: &'a R) -> Self {
+        Self { store, ipns }
+    }
+
+    pub fn resolve_head(
+        &self,
+        ipns_name: &str,
+    ) -> Result<Option<DistributedDatomCommit>, DistributedCommitError> {
+        let record = match self.ipns.resolve(&IpnsName::new(ipns_name.to_string())) {
+            Ok(record) => record,
+            Err(IpnsRegistryError::NotFound(_)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let cid = KotobaCid::from_multibase(&record.value)
+            .ok_or_else(|| DistributedCommitError::InvalidCommitCid(record.value.clone()))?;
+        DistributedDatomCommit::load(&cid, self.store)
+    }
+
+    pub fn history_for_name(&self, ipns_name: &str) -> Result<Vec<Datom>, DistributedCommitError> {
+        let Some(head) = self.resolve_head(ipns_name)? else {
+            return Ok(vec![]);
+        };
+        self.history_from_head(&head.cid)
+    }
+
+    pub fn current_db_for_name(
+        &self,
+        ipns_name: &str,
+    ) -> Result<Option<Db>, DistributedCommitError> {
+        let Some(head) = self.resolve_head(ipns_name)? else {
+            return Ok(None);
+        };
+        self.current_db_from_head(&head.cid).map(Some)
+    }
+
+    pub fn tx_range_for_name(
+        &self,
+        ipns_name: &str,
+        start: Option<&KotobaCid>,
+        end: Option<&KotobaCid>,
+    ) -> Result<Vec<DistributedTxRangeEntry>, DistributedCommitError> {
+        let Some(head) = self.resolve_head(ipns_name)? else {
+            return Ok(vec![]);
+        };
+        self.tx_range_from_head(&head.cid, start, end)
+    }
+
+    pub fn log_for_name(&self, ipns_name: &str) -> Result<Vec<LogEntry>, DistributedCommitError> {
+        let Some(head) = self.resolve_head(ipns_name)? else {
+            return Ok(vec![]);
+        };
+        self.log_from_head(&head.cid)
+    }
+
+    pub fn log_from_head(&self, head: &KotobaCid) -> Result<Vec<LogEntry>, DistributedCommitError> {
+        let chain = self.commit_chain_from_head(head)?;
+        let mut entries = Vec::new();
+        for commit in chain.into_iter().rev() {
+            entries.push(LogEntry {
+                tx: commit.tx_cid.clone(),
+                datoms: datoms_from_commit(&commit, self.store)?,
+            });
+        }
+        Ok(entries)
+    }
+
+    pub fn tx_range_from_head(
+        &self,
+        head: &KotobaCid,
+        start: Option<&KotobaCid>,
+        end: Option<&KotobaCid>,
+    ) -> Result<Vec<DistributedTxRangeEntry>, DistributedCommitError> {
+        let chain = self.commit_chain_from_head(head)?;
+        if let Some(start) = start {
+            if !chain.iter().any(|commit| &commit.tx_cid == start) {
+                return Err(DatomicError::Query(format!(
+                    "txRange start transaction not found: {}",
+                    start.to_multibase()
+                ))
+                .into());
+            }
+        }
+        if let Some(end) = end {
+            if !chain.iter().any(|commit| &commit.tx_cid == end) {
+                return Err(DatomicError::Query(format!(
+                    "txRange end transaction not found: {}",
+                    end.to_multibase()
+                ))
+                .into());
+            }
+        }
+
+        let mut in_range = start.is_none();
+        let mut entries = Vec::new();
+        for commit in chain.into_iter().rev() {
+            if let Some(end) = end {
+                if &commit.tx_cid == end {
+                    break;
+                }
+            }
+            if !in_range {
+                if Some(&commit.tx_cid) == start {
+                    in_range = true;
+                } else {
+                    continue;
+                }
+            }
+            let datoms = datoms_from_commit(&commit, self.store)?;
+            entries.push(DistributedTxRangeEntry { commit, datoms });
+        }
+        Ok(entries)
+    }
+
+    pub fn history_from_head(
+        &self,
+        head: &KotobaCid,
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        let chain = self.commit_chain_from_head(head)?;
+        let mut datoms = Vec::new();
+        for commit in chain.into_iter().rev() {
+            datoms.extend(datoms_from_commit(&commit, self.store)?);
+        }
+        Ok(datoms)
+    }
+
+    pub fn history_for_entity(
+        &self,
+        head: &KotobaCid,
+        entity: &KotobaCid,
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        self.history_from_index_prefix(head, ROOT_EAVT, &entity.0)
+    }
+
+    pub fn current_for_entity(
+        &self,
+        head: &KotobaCid,
+        entity: &KotobaCid,
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        Ok(current_datoms(&self.history_for_entity(head, entity)?))
+    }
+
+    pub fn history_for_entity_attribute(
+        &self,
+        head: &KotobaCid,
+        entity: &KotobaCid,
+        attr: &str,
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        let mut out = Vec::new();
+        for attr in attr_lookup_variants(attr) {
+            extend_unique_datoms(
+                &mut out,
+                self.history_from_index_prefix(
+                    head,
+                    ROOT_EAVT,
+                    &eavt_entity_attr_prefix(entity, attr),
+                )?,
+            );
+        }
+        Ok(out)
+    }
+
+    pub fn current_for_entity_attribute(
+        &self,
+        head: &KotobaCid,
+        entity: &KotobaCid,
+        attr: &str,
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        Ok(current_datoms(
+            &self.history_for_entity_attribute(head, entity, attr)?,
+        ))
+    }
+
+    pub fn history_for_attribute(
+        &self,
+        head: &KotobaCid,
+        attr: &str,
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        let mut out = Vec::new();
+        for attr in attr_lookup_variants(attr) {
+            extend_unique_datoms(
+                &mut out,
+                self.history_from_index_prefix(head, ROOT_AEVT, &attr_prefix(attr))?,
+            );
+        }
+        Ok(out)
+    }
+
+    pub fn current_for_attribute(
+        &self,
+        head: &KotobaCid,
+        attr: &str,
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        Ok(current_datoms(&self.history_for_attribute(head, attr)?))
+    }
+
+    pub fn history_for_attribute_value(
+        &self,
+        head: &KotobaCid,
+        attr: &str,
+        value: &Value,
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        let mut out = Vec::new();
+        for attr in attr_lookup_variants(attr) {
+            extend_unique_datoms(
+                &mut out,
+                self.history_from_index_prefix(head, ROOT_AVET, &avet_prefix(attr, value))?,
+            );
+        }
+        Ok(out)
+    }
+
+    pub fn current_for_attribute_value(
+        &self,
+        head: &KotobaCid,
+        attr: &str,
+        value: &Value,
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        Ok(current_datoms(
+            &self.history_for_attribute_value(head, attr, value)?,
+        ))
+    }
+
+    pub fn history_for_lookup(
+        &self,
+        head: &KotobaCid,
+        lookup: &DatomIndexLookup,
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        match lookup {
+            DatomIndexLookup::All => self.history_from_head(head),
+            DatomIndexLookup::Entity(entity) => self.history_for_entity(head, entity),
+            DatomIndexLookup::EntityAttribute { entity, attr } => {
+                self.history_for_entity_attribute(head, entity, attr)
+            }
+            DatomIndexLookup::Attribute(attr) => self.history_for_attribute(head, attr),
+            DatomIndexLookup::AttributeValue { attr, value } => {
+                self.history_for_attribute_value(head, attr, value)
+            }
+        }
+    }
+
+    pub fn current_for_lookup(
+        &self,
+        head: &KotobaCid,
+        lookup: &DatomIndexLookup,
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        Ok(current_datoms(&self.history_for_lookup(head, lookup)?))
+    }
+
+    pub fn current_for_index_components(
+        &self,
+        head: &KotobaCid,
+        root_name: &'static str,
+        components: &[Value],
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        let datoms = match index_components_prefix(root_name, components)? {
+            Some(prefix) => {
+                current_datoms(&self.history_from_index_prefix(head, root_name, &prefix)?)
+            }
+            None => self.current_db_from_head(head)?.datoms(),
+        };
+        Ok(datoms
+            .into_iter()
+            .filter(|datom| datom_matches_index_components(datom, root_name, components))
+            .collect())
+    }
+
+    pub fn current_for_index_components_as_of_tx(
+        &self,
+        head: &KotobaCid,
+        tx_cid: &KotobaCid,
+        root_name: &'static str,
+        components: &[Value],
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        let Some(as_of_head) = self.head_cid_as_of_tx(head, tx_cid)? else {
+            return Err(DatomicError::Query(format!(
+                "as-of transaction not found: {}",
+                tx_cid.to_multibase()
+            ))
+            .into());
+        };
+        self.current_for_index_components(&as_of_head, root_name, components)
+    }
+
+    pub fn current_for_index_components_since_tx(
+        &self,
+        head: &KotobaCid,
+        tx_cid: &KotobaCid,
+        root_name: &'static str,
+        components: &[Value],
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        let datoms =
+            self.history_from_index_prefix_since_tx(head, tx_cid, root_name, components)?;
+        Ok(current_datoms(&datoms)
+            .into_iter()
+            .filter(|datom| datom_matches_index_components(datom, root_name, components))
+            .collect())
+    }
+
+    pub fn current_for_triple(
+        &self,
+        head: &KotobaCid,
+        triple: &Value,
+        binding: &BTreeMap<String, Value>,
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        let seq = triple
+            .as_seq()
+            .ok_or_else(|| DatomicError::Query("triple clause must be vector/list".into()))?;
+        let seq = crate::data_pattern_terms(seq).ok_or_else(|| {
+            DatomicError::Query(format!(
+                "triple clause must have 3 terms or source plus 3 terms, got {}",
+                seq.len()
+            ))
+        })?;
+        let lookup_ref = self.resolve_lookup_ref_entity_term(head, &seq[0], binding)?;
+        let lookup = match &lookup_ref {
+            LookupRefResolution::Resolved(entity) => match resolved_attr_term(&seq[1], binding) {
+                Some(attr) => DatomIndexLookup::EntityAttribute {
+                    entity: entity.clone(),
+                    attr,
+                },
+                None => DatomIndexLookup::Entity(entity.clone()),
+            },
+            LookupRefResolution::Missing => return Ok(vec![]),
+            LookupRefResolution::NotLookupRef => plan_datom_lookup_for_triple(triple, binding)?,
+        };
+        let candidates = self.current_for_lookup(head, &lookup)?;
+        Ok(candidates
+            .into_iter()
+            .filter(|datom| datom_matches_triple(datom, seq, binding, &lookup_ref))
+            .collect())
+    }
+
+    pub fn bindings_for_triples(
+        &self,
+        head: &KotobaCid,
+        triples: &[Value],
+        initial_bindings: Vec<BTreeMap<String, Value>>,
+    ) -> Result<Vec<BTreeMap<String, Value>>, DistributedCommitError> {
+        let mut bindings = initial_bindings;
+        for triple in triples {
+            let seq = triple
+                .as_seq()
+                .ok_or_else(|| DatomicError::Query("triple clause must be vector/list".into()))?;
+            let Some(seq) = crate::data_pattern_terms(seq) else {
+                return Err(DatomicError::Query(format!(
+                    "triple clause must have 3 terms or source plus 3 terms, got {}",
+                    seq.len()
+                ))
+                .into());
+            };
+            let mut next_bindings = Vec::new();
+            for binding in bindings {
+                let lookup_ref = self.resolve_lookup_ref_entity_term(head, &seq[0], &binding)?;
+                for datom in self.current_for_triple(head, triple, &binding)? {
+                    let mut next = binding.clone();
+                    if bind_datom_to_triple(&datom, seq, &binding, &lookup_ref, &mut next) {
+                        next_bindings.push(next);
+                    }
+                }
+            }
+            bindings = next_bindings;
+            if bindings.is_empty() {
+                break;
+            }
+        }
+        Ok(bindings)
+    }
+
+    pub fn q_triples(
+        &self,
+        head: &KotobaCid,
+        query: &Value,
+    ) -> Result<Vec<Vec<Value>>, DistributedCommitError> {
+        self.q_triples_with_inputs(head, query, &[])
+    }
+
+    pub fn db_from_head(&self, head: &KotobaCid) -> Result<Db, DistributedCommitError> {
+        self.current_db_from_head(head)
+    }
+
+    pub fn db_as_of_tx(
+        &self,
+        head: &KotobaCid,
+        tx_cid: &KotobaCid,
+    ) -> Result<Db, DistributedCommitError> {
+        let Some(as_of_head) = self.head_cid_as_of_tx(head, tx_cid)? else {
+            return Err(DatomicError::Query(format!(
+                "as-of transaction not found: {}",
+                tx_cid.to_multibase()
+            ))
+            .into());
+        };
+        self.current_db_from_head(&as_of_head)
+    }
+
+    pub fn db_since_tx(
+        &self,
+        head: &KotobaCid,
+        tx_cid: &KotobaCid,
+    ) -> Result<Db, DistributedCommitError> {
+        self.since_db_from_head(head, tx_cid)
+    }
+
+    pub fn history_db_from_head(&self, head: &KotobaCid) -> Result<Db, DistributedCommitError> {
+        self.history_db_from_head_cid(head)
+    }
+
+    pub fn history_db_as_of_tx(
+        &self,
+        head: &KotobaCid,
+        tx_cid: &KotobaCid,
+    ) -> Result<Db, DistributedCommitError> {
+        let Some(as_of_head) = self.head_cid_as_of_tx(head, tx_cid)? else {
+            return Err(DatomicError::Query(format!(
+                "as-of transaction not found: {}",
+                tx_cid.to_multibase()
+            ))
+            .into());
+        };
+        self.history_db_from_head_cid(&as_of_head)
+    }
+
+    pub fn history_db_since_tx(
+        &self,
+        head: &KotobaCid,
+        tx_cid: &KotobaCid,
+    ) -> Result<Db, DistributedCommitError> {
+        self.since_db_from_head(head, tx_cid)
+    }
+
+    pub fn q_triples_with_inputs(
+        &self,
+        head: &KotobaCid,
+        query: &Value,
+        inputs: &[Value],
+    ) -> Result<Vec<Vec<Value>>, DistributedCommitError> {
+        let query = crate::query_map(query)?;
+        let find = query_vec(&query, ":find")?;
+        let where_clauses = query_vec(&query, ":where")?;
+        let find_items = parse_distributed_find_items(find)?;
+        let rules = match query.get(&query_key(":in")) {
+            Some(in_forms) => distributed_rules_from_inputs(in_forms, inputs)?,
+            None => Vec::new(),
+        };
+        let initial_bindings = match query.get(&query_key(":in")) {
+            Some(in_forms) => bind_query_inputs(in_forms, inputs)?,
+            None => vec![BTreeMap::new()],
+        };
+        let bindings = self.bindings_for_where(head, where_clauses, initial_bindings, &rules)?;
+        let pull_db = find_items
+            .iter()
+            .any(|item| matches!(item, DistributedFindItem::Pull { .. }))
+            .then(|| self.current_db_from_head(head))
+            .transpose()?;
+        if find_items.iter().any(DistributedFindItem::is_aggregate) {
+            let with_items = query
+                .get(&query_key(":with"))
+                .map(query_value_vec)
+                .transpose()?
+                .unwrap_or_default();
+            return aggregate_distributed_rows(
+                &find_items,
+                &with_items,
+                bindings,
+                pull_db.as_ref(),
+            )
+            .and_then(|rows| crate::query_result_window(&query, find, rows).map_err(Into::into));
+        }
+        let mut rows = BTreeSet::new();
+        for binding in bindings {
+            let mut row = Vec::new();
+            for item in &find_items {
+                row.push(resolve_distributed_find_item(
+                    item,
+                    &binding,
+                    pull_db.as_ref(),
+                )?);
+            }
+            rows.insert(row);
+        }
+        crate::query_result_window(&query, find, rows.into_iter().collect()).map_err(Into::into)
+    }
+
+    pub fn q_triples_as_of_tx(
+        &self,
+        head: &KotobaCid,
+        tx_cid: &KotobaCid,
+        query: &Value,
+    ) -> Result<Vec<Vec<Value>>, DistributedCommitError> {
+        self.q_triples_as_of_tx_with_inputs(head, tx_cid, query, &[])
+    }
+
+    pub fn q_triples_as_of_tx_with_inputs(
+        &self,
+        head: &KotobaCid,
+        tx_cid: &KotobaCid,
+        query: &Value,
+        inputs: &[Value],
+    ) -> Result<Vec<Vec<Value>>, DistributedCommitError> {
+        let Some(as_of_head) = self.head_cid_as_of_tx(head, tx_cid)? else {
+            return Err(DatomicError::Query(format!(
+                "as-of transaction not found: {}",
+                tx_cid.to_multibase()
+            ))
+            .into());
+        };
+        self.q_triples_with_inputs(&as_of_head, query, inputs)
+    }
+
+    pub fn q_triples_since_tx(
+        &self,
+        head: &KotobaCid,
+        tx_cid: &KotobaCid,
+        query: &Value,
+    ) -> Result<Vec<Vec<Value>>, DistributedCommitError> {
+        self.q_triples_since_tx_with_inputs(head, tx_cid, query, &[])
+    }
+
+    pub fn q_triples_since_tx_with_inputs(
+        &self,
+        head: &KotobaCid,
+        tx_cid: &KotobaCid,
+        query: &Value,
+        inputs: &[Value],
+    ) -> Result<Vec<Vec<Value>>, DistributedCommitError> {
+        let db = self.since_db_from_head(head, tx_cid)?;
+        crate::q(query.clone(), &db, inputs).map_err(Into::into)
+    }
+
+    fn current_db_from_head(&self, head: &KotobaCid) -> Result<Db, DistributedCommitError> {
+        let history_db = self.history_db_from_head_cid(head)?;
+        let history_datoms = history_db.datoms();
+        let datoms = current_datoms(&history_datoms);
+        Ok(Db::from_datoms(datoms, history_db.basis_t))
+    }
+
+    fn history_db_from_head_cid(&self, head: &KotobaCid) -> Result<Db, DistributedCommitError> {
+        let chain = self.commit_chain_from_head(head)?;
+        let basis_t = chain.first().map(|commit| commit.tx_cid.clone());
+        let mut history = Vec::new();
+        for commit in chain.into_iter().rev() {
+            history.extend(datoms_from_commit(&commit, self.store)?);
+        }
+        Ok(Db::from_datoms(history, basis_t))
+    }
+
+    fn head_cid_as_of_tx(
+        &self,
+        head: &KotobaCid,
+        tx_cid: &KotobaCid,
+    ) -> Result<Option<KotobaCid>, DistributedCommitError> {
+        Ok(self
+            .commit_chain_from_head(head)?
+            .into_iter()
+            .find(|commit| &commit.tx_cid == tx_cid)
+            .map(|commit| commit.cid))
+    }
+
+    fn since_db_from_head(
+        &self,
+        head: &KotobaCid,
+        tx_cid: &KotobaCid,
+    ) -> Result<Db, DistributedCommitError> {
+        let chain = self.commit_chain_from_head(head)?;
+        if !chain.iter().any(|commit| &commit.tx_cid == tx_cid) {
+            return Err(DatomicError::Query(format!(
+                "since transaction not found: {}",
+                tx_cid.to_multibase()
+            ))
+            .into());
+        }
+        let basis_t = chain.first().map(|commit| commit.tx_cid.clone());
+        let mut seen = false;
+        let mut datoms = Vec::new();
+        for commit in chain.into_iter().rev() {
+            if commit.tx_cid == *tx_cid {
+                seen = true;
+                continue;
+            }
+            if seen {
+                datoms.extend(datoms_from_commit(&commit, self.store)?);
+            }
+        }
+        Ok(Db::from_datoms(datoms, basis_t))
+    }
+
+    fn bindings_for_where(
+        &self,
+        head: &KotobaCid,
+        clauses: &[Value],
+        bindings: Vec<BTreeMap<String, Value>>,
+        rules: &[DistributedQueryRule],
+    ) -> Result<Vec<BTreeMap<String, Value>>, DistributedCommitError> {
+        self.bindings_for_where_at_depth(head, clauses, bindings, rules, 0)
+    }
+
+    fn bindings_for_where_at_depth(
+        &self,
+        head: &KotobaCid,
+        clauses: &[Value],
+        mut bindings: Vec<BTreeMap<String, Value>>,
+        rules: &[DistributedQueryRule],
+        rule_depth: usize,
+    ) -> Result<Vec<BTreeMap<String, Value>>, DistributedCommitError> {
+        for clause in clauses {
+            bindings = self.eval_where_clause(head, clause, bindings, rules, rule_depth)?;
+            if bindings.is_empty() {
+                break;
+            }
+        }
+        Ok(bindings)
+    }
+
+    fn eval_where_clause(
+        &self,
+        head: &KotobaCid,
+        clause: &Value,
+        bindings: Vec<BTreeMap<String, Value>>,
+        rules: &[DistributedQueryRule],
+        rule_depth: usize,
+    ) -> Result<Vec<BTreeMap<String, Value>>, DistributedCommitError> {
+        let seq = clause.as_seq().ok_or_else(|| {
+            DatomicError::Query("distributed q_triples where clause must be a vector/list".into())
+        })?;
+        if matches!(seq.first().and_then(Value::as_symbol), Some(symbol) if symbol.name == "not") {
+            return self.eval_not_clause(head, seq, bindings, rules, rule_depth);
+        }
+        if matches!(seq.first().and_then(Value::as_symbol), Some(symbol) if symbol.name == "not-join")
+        {
+            return self.eval_not_join_clause(head, seq, bindings, rules, rule_depth);
+        }
+        if matches!(seq.first().and_then(Value::as_symbol), Some(symbol) if symbol.name == "or") {
+            return self.eval_or_clause(head, seq, bindings, rules, rule_depth);
+        }
+        if matches!(seq.first().and_then(Value::as_symbol), Some(symbol) if symbol.name == "or-join")
+        {
+            return self.eval_or_join_clause(head, seq, bindings, rules, rule_depth);
+        }
+        if let Some(rule_name) = distributed_rule_invocation_name(seq, rules) {
+            return self.eval_rule_invocation(
+                rule_name,
+                &seq[1..],
+                head,
+                rules,
+                bindings,
+                rule_depth,
+            );
+        }
+        if seq.len() == 2 {
+            if let Some(expr) = seq[0].as_seq() {
+                return self.eval_function_binding(head, expr, &seq[1], bindings);
+            }
+        }
+        if crate::data_pattern_terms(seq).is_some() {
+            return self.bindings_for_triples(head, std::slice::from_ref(clause), bindings);
+        }
+        if seq.len() == 1 {
+            if let Some(pred) = seq[0].as_seq() {
+                return self.eval_predicate(head, pred, bindings);
+            }
+        }
+        Err(DatomicError::UnsupportedOperation(kotoba_edn::to_string(clause)).into())
+    }
+
+    fn eval_not_clause(
+        &self,
+        head: &KotobaCid,
+        not_clause: &[Value],
+        bindings: Vec<BTreeMap<String, Value>>,
+        rules: &[DistributedQueryRule],
+        rule_depth: usize,
+    ) -> Result<Vec<BTreeMap<String, Value>>, DistributedCommitError> {
+        if not_clause.len() < 2 {
+            return Err(
+                DatomicError::UnsupportedOperation(kotoba_edn::to_string(&Value::List(
+                    not_clause.to_vec(),
+                )))
+                .into(),
+            );
+        }
+        let inner_clauses = &not_clause[1..];
+        let mut out = Vec::new();
+        for binding in bindings {
+            let probe = self.bindings_for_where_at_depth(
+                head,
+                inner_clauses,
+                vec![binding.clone()],
+                rules,
+                rule_depth,
+            )?;
+            if probe.is_empty() {
+                out.push(binding);
+            }
+        }
+        Ok(out)
+    }
+
+    fn eval_not_join_clause(
+        &self,
+        head: &KotobaCid,
+        not_join_clause: &[Value],
+        bindings: Vec<BTreeMap<String, Value>>,
+        rules: &[DistributedQueryRule],
+        rule_depth: usize,
+    ) -> Result<Vec<BTreeMap<String, Value>>, DistributedCommitError> {
+        if not_join_clause.len() < 3 {
+            return Err(
+                DatomicError::UnsupportedOperation(kotoba_edn::to_string(&Value::List(
+                    not_join_clause.to_vec(),
+                )))
+                .into(),
+            );
+        }
+        let join_vars = query_join_vars(&not_join_clause[1])?;
+        let inner_clauses = &not_join_clause[2..];
+        let mut out = Vec::new();
+        for binding in bindings {
+            let seed = project_query_binding(&binding, &join_vars)?;
+            let probe = self.bindings_for_where_at_depth(
+                head,
+                inner_clauses,
+                vec![seed],
+                rules,
+                rule_depth,
+            )?;
+            if probe.is_empty() {
+                out.push(binding);
+            }
+        }
+        Ok(out)
+    }
+
+    fn eval_or_clause(
+        &self,
+        head: &KotobaCid,
+        or_clause: &[Value],
+        bindings: Vec<BTreeMap<String, Value>>,
+        rules: &[DistributedQueryRule],
+        rule_depth: usize,
+    ) -> Result<Vec<BTreeMap<String, Value>>, DistributedCommitError> {
+        if or_clause.len() < 2 {
+            return Err(
+                DatomicError::UnsupportedOperation(kotoba_edn::to_string(&Value::List(
+                    or_clause.to_vec(),
+                )))
+                .into(),
+            );
+        }
+        let mut out = BTreeSet::new();
+        for binding in bindings {
+            for branch in &or_clause[1..] {
+                for next in
+                    self.eval_or_branch(head, branch, vec![binding.clone()], rules, rule_depth)?
+                {
+                    out.insert(next);
+                }
+            }
+        }
+        Ok(out.into_iter().collect())
+    }
+
+    fn eval_or_join_clause(
+        &self,
+        head: &KotobaCid,
+        or_join_clause: &[Value],
+        bindings: Vec<BTreeMap<String, Value>>,
+        rules: &[DistributedQueryRule],
+        rule_depth: usize,
+    ) -> Result<Vec<BTreeMap<String, Value>>, DistributedCommitError> {
+        if or_join_clause.len() < 3 {
+            return Err(
+                DatomicError::UnsupportedOperation(kotoba_edn::to_string(&Value::List(
+                    or_join_clause.to_vec(),
+                )))
+                .into(),
+            );
+        }
+        let join_vars = query_join_vars(&or_join_clause[1])?;
+        let mut out = BTreeSet::new();
+        for binding in bindings {
+            let seed = project_query_binding(&binding, &join_vars)?;
+            for branch in &or_join_clause[2..] {
+                for branch_binding in
+                    self.eval_or_branch(head, branch, vec![seed.clone()], rules, rule_depth)?
+                {
+                    if let Some(merged) = merge_query_bindings(&binding, &branch_binding) {
+                        out.insert(merged);
+                    }
+                }
+            }
+        }
+        Ok(out.into_iter().collect())
+    }
+
+    fn eval_or_branch(
+        &self,
+        head: &KotobaCid,
+        branch: &Value,
+        bindings: Vec<BTreeMap<String, Value>>,
+        rules: &[DistributedQueryRule],
+        rule_depth: usize,
+    ) -> Result<Vec<BTreeMap<String, Value>>, DistributedCommitError> {
+        let seq = branch.as_seq().ok_or_else(|| {
+            DatomicError::UnsupportedOperation(format!(
+                "distributed or branch must be a clause: {}",
+                kotoba_edn::to_string(branch)
+            ))
+        })?;
+        if matches!(seq.first().and_then(Value::as_symbol), Some(symbol) if symbol.name == "and") {
+            self.bindings_for_where_at_depth(head, &seq[1..], bindings, rules, rule_depth)
+        } else {
+            self.eval_where_clause(head, branch, bindings, rules, rule_depth)
+        }
+    }
+
+    fn eval_rule_invocation(
+        &self,
+        name: &str,
+        call_args: &[Value],
+        head: &KotobaCid,
+        rules: &[DistributedQueryRule],
+        bindings: Vec<BTreeMap<String, Value>>,
+        rule_depth: usize,
+    ) -> Result<Vec<BTreeMap<String, Value>>, DistributedCommitError> {
+        if rule_depth >= DISTRIBUTED_RULE_RECURSION_LIMIT {
+            return Err(
+                DatomicError::Query("distributed rule recursion limit exceeded".into()).into(),
+            );
+        }
+        let matching_rules = rules
+            .iter()
+            .filter(|rule| rule.name == name && rule.args.len() == call_args.len())
+            .collect::<Vec<_>>();
+        let mut out = BTreeSet::new();
+        for binding in bindings {
+            for rule in &matching_rules {
+                let mut seed = binding.clone();
+                let mut seed_matches = true;
+                for (call_arg, rule_arg) in call_args.iter().zip(&rule.args) {
+                    if let Some(value) = resolve_query_value(call_arg, &binding) {
+                        if !bind_term(rule_arg, value, &mut seed) {
+                            seed_matches = false;
+                            break;
+                        }
+                    }
+                }
+                if !seed_matches {
+                    continue;
+                }
+                let rule_bindings = self.bindings_for_where_at_depth(
+                    head,
+                    &rule.clauses,
+                    vec![seed],
+                    rules,
+                    rule_depth + 1,
+                )?;
+                for rule_binding in rule_bindings {
+                    let mut next = binding.clone();
+                    let mut keep = true;
+                    for (call_arg, rule_arg) in call_args.iter().zip(&rule.args) {
+                        let value = required_query_value(rule_arg, &rule_binding)?;
+                        if !bind_term(call_arg, value, &mut next) {
+                            keep = false;
+                            break;
+                        }
+                    }
+                    if keep {
+                        out.insert(next);
+                    }
+                }
+            }
+        }
+        Ok(out.into_iter().collect())
+    }
+
+    fn eval_predicate(
+        &self,
+        head: &KotobaCid,
+        pred: &[Value],
+        bindings: Vec<BTreeMap<String, Value>>,
+    ) -> Result<Vec<BTreeMap<String, Value>>, DistributedCommitError> {
+        if pred.len() == 4
+            && matches!(pred[0].as_symbol(), Some(symbol) if symbol.name == "missing?")
+        {
+            return self.eval_missing_predicate(head, pred, bindings);
+        }
+        if pred.len() == 2 {
+            let op = pred[0]
+                .as_symbol()
+                .map(|symbol| symbol.to_qualified())
+                .or_else(|| pred[0].as_keyword().map(|keyword| keyword.to_qualified()))
+                .ok_or_else(|| DatomicError::Query("predicate op must be symbol".into()))?;
+            let mut out = Vec::new();
+            for binding in bindings {
+                let value = required_query_value(&pred[1], &binding)?;
+                if crate::query_unary_predicate(&op, &value)? {
+                    out.push(binding);
+                }
+            }
+            return Ok(out);
+        }
+        if pred.len() < 3 {
+            return Err(
+                DatomicError::UnsupportedOperation(kotoba_edn::to_string(&Value::Vector(
+                    pred.to_vec(),
+                )))
+                .into(),
+            );
+        }
+        let op = pred[0]
+            .as_symbol()
+            .map(|symbol| symbol.to_qualified())
+            .or_else(|| pred[0].as_keyword().map(|keyword| keyword.to_qualified()))
+            .ok_or_else(|| DatomicError::Query("predicate op must be symbol".into()))?;
+        let mut out = Vec::new();
+        for binding in bindings {
+            let values = pred[1..]
+                .iter()
+                .map(|term| required_query_value(term, &binding))
+                .collect::<Result<Vec<_>, _>>()?;
+            if crate::query_variadic_predicate(&op, &values)? {
+                out.push(binding);
+            }
+        }
+        Ok(out)
+    }
+
+    fn eval_missing_predicate(
+        &self,
+        head: &KotobaCid,
+        pred: &[Value],
+        bindings: Vec<BTreeMap<String, Value>>,
+    ) -> Result<Vec<BTreeMap<String, Value>>, DistributedCommitError> {
+        if !crate::is_query_source_symbol(&pred[1]) {
+            return Err(DatomicError::Query("missing? first argument must be $".into()).into());
+        }
+        let attr = attr_string(&pred[3]).ok_or(DatomicError::AttributeMustBeKeyword)?;
+        let mut out = Vec::new();
+        for binding in bindings {
+            let entity = required_query_value(&pred[2], &binding)?;
+            let Some(eid) = entity_value_to_cid(&entity) else {
+                return Err(DatomicError::Query(format!(
+                    "missing? entity must resolve to a CID string or #cid, got {}",
+                    kotoba_edn::to_string(&entity)
+                ))
+                .into());
+            };
+            if self
+                .current_for_entity_attribute(head, &eid, &attr)?
+                .is_empty()
+            {
+                out.push(binding);
+            }
+        }
+        Ok(out)
+    }
+
+    fn eval_function_binding(
+        &self,
+        head: &KotobaCid,
+        expr: &[Value],
+        target: &Value,
+        bindings: Vec<BTreeMap<String, Value>>,
+    ) -> Result<Vec<BTreeMap<String, Value>>, DistributedCommitError> {
+        let op = expr
+            .first()
+            .and_then(Value::as_symbol)
+            .map(|symbol| symbol.to_qualified())
+            .ok_or_else(|| DatomicError::Query("function op must be a symbol".into()))?;
+        let args = &expr[1..];
+        let mut out = Vec::new();
+        for binding in bindings {
+            let value = self.eval_query_function(head, &op, args, &binding)?;
+            let mut next = binding;
+            if bind_function_target(target, value, &mut next)? {
+                out.push(next);
+            }
+        }
+        Ok(out)
+    }
+
+    fn eval_query_function(
+        &self,
+        head: &KotobaCid,
+        op: &str,
+        args: &[Value],
+        binding: &BTreeMap<String, Value>,
+    ) -> Result<Value, DistributedCommitError> {
+        match op {
+            "ground" => {
+                if args.len() != 1 {
+                    return Err(DatomicError::Query("ground expects one argument".into()).into());
+                }
+                Ok(args[0].clone())
+            }
+            "identity" => {
+                if args.len() != 1 {
+                    return Err(DatomicError::Query("identity expects one argument".into()).into());
+                }
+                required_query_value(&args[0], binding)
+            }
+            "name" => {
+                if args.len() != 1 {
+                    return Err(DatomicError::Query("name expects one argument".into()).into());
+                }
+                crate::pull_name_value(required_query_value(&args[0], binding)?).map_err(Into::into)
+            }
+            "namespace" => {
+                if args.len() != 1 {
+                    return Err(DatomicError::Query("namespace expects one argument".into()).into());
+                }
+                crate::pull_namespace_value(required_query_value(&args[0], binding)?)
+                    .map_err(Into::into)
+            }
+            "str" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .map(crate::query_str_value),
+            "subs" | "clojure.core/subs" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_subs_value(values).map_err(Into::into)),
+            "split" | "clojure.string/split" | "str/split" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_split_value(values).map_err(Into::into)),
+            "join" | "clojure.string/join" | "str/join" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_join_value(values).map_err(Into::into)),
+            "replace" | "clojure.string/replace" | "str/replace" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_replace_value(values).map_err(Into::into)),
+            "lower-case"
+            | "clojure.string/lower-case"
+            | "str/lower-case"
+            | "upper-case"
+            | "clojure.string/upper-case"
+            | "str/upper-case" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_string_case_value(op, values).map_err(Into::into)),
+            "trim"
+            | "clojure.string/trim"
+            | "str/trim"
+            | "triml"
+            | "clojure.string/triml"
+            | "str/triml"
+            | "trimr"
+            | "clojure.string/trimr"
+            | "str/trimr" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_trim_value(op, values).map_err(Into::into)),
+            "keyword" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_keyword_value(values).map_err(Into::into)),
+            "get" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_get_value(values).map_err(Into::into)),
+            "get-in" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_get_in_value(values).map_err(Into::into)),
+            "assoc-in" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_assoc_in_value(values).map_err(Into::into)),
+            "update" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_update_value(values).map_err(Into::into)),
+            "update-in" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_update_in_value(values).map_err(Into::into)),
+            "vector" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::Vector),
+            "list" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::List),
+            "hash-set" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .map(crate::query_hash_set_value),
+            "hash-map" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_hash_map_value(values).map_err(Into::into)),
+            "count" => {
+                if args.len() != 1 {
+                    return Err(DatomicError::Query("count expects one argument".into()).into());
+                }
+                crate::query_count_value(required_query_value(&args[0], binding)?)
+                    .map_err(Into::into)
+            }
+            "not-empty" => {
+                if args.len() != 1 {
+                    return Err(DatomicError::Query("not-empty expects one argument".into()).into());
+                }
+                crate::query_not_empty_value(required_query_value(&args[0], binding)?)
+                    .map_err(Into::into)
+            }
+            "seq" | "first" | "last" | "rest" | "next" => {
+                if args.len() != 1 {
+                    return Err(DatomicError::Query(format!("{op} expects one argument")).into());
+                }
+                crate::query_collection_value(op, required_query_value(&args[0], binding)?)
+                    .map_err(Into::into)
+            }
+            "nth" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_nth_value(values).map_err(Into::into)),
+            "cons" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_cons_value(values).map_err(Into::into)),
+            "take" | "drop" | "subvec" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| {
+                    crate::query_collection_slice_value(op, values).map_err(Into::into)
+                }),
+            "reverse" | "sort" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| {
+                    crate::query_collection_order_value(op, values).map_err(Into::into)
+                }),
+            "conj" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_conj_value(values).map_err(Into::into)),
+            "assoc" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_assoc_value(values).map_err(Into::into)),
+            "dissoc" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_dissoc_value(values).map_err(Into::into)),
+            "disj" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_disj_value(values).map_err(Into::into)),
+            "+" | "-" | "*" | "quot" | "rem" | "mod" | "min" | "max" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_arithmetic_value(op, values).map_err(Into::into)),
+            "tuple" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::Vector),
+            "untuple" => {
+                if args.len() != 1 {
+                    return Err(DatomicError::Query("untuple expects one argument".into()).into());
+                }
+                let tuple = required_query_value(&args[0], binding)?;
+                match tuple {
+                    Value::Vector(values) | Value::List(values) => Ok(Value::Vector(values)),
+                    other => Err(DatomicError::Query(format!(
+                        "untuple expects a tuple value, got {}",
+                        kotoba_edn::to_string(&other)
+                    ))
+                    .into()),
+                }
+            }
+            "get-else" => {
+                if args.len() != 4 || !crate::is_query_source_symbol(&args[0]) {
+                    return Err(DatomicError::Query(
+                        "get-else expects ($ entity attr default)".into(),
+                    )
+                    .into());
+                }
+                let entity = required_query_value(&args[1], binding)?;
+                let Some(eid) = entity_value_to_cid(&entity) else {
+                    return Err(DatomicError::Query(format!(
+                        "get-else entity must resolve to a CID string or #cid, got {}",
+                        kotoba_edn::to_string(&entity)
+                    ))
+                    .into());
+                };
+                let attr = attr_string(&args[2]).ok_or(DatomicError::AttributeMustBeKeyword)?;
+                Ok(self
+                    .db_value_from_head(head, &eid, &attr)?
+                    .unwrap_or_else(|| args[3].clone()))
+            }
+            "get-some" => {
+                if args.len() < 3 || !crate::is_query_source_symbol(&args[0]) {
+                    return Err(
+                        DatomicError::Query("get-some expects ($ entity attr+)".into()).into(),
+                    );
+                }
+                let entity = required_query_value(&args[1], binding)?;
+                let Some(eid) = entity_value_to_cid(&entity) else {
+                    return Err(DatomicError::Query(format!(
+                        "get-some entity must resolve to a CID string or #cid, got {}",
+                        kotoba_edn::to_string(&entity)
+                    ))
+                    .into());
+                };
+                for attr_arg in &args[2..] {
+                    let attr = attr_string(attr_arg).ok_or(DatomicError::AttributeMustBeKeyword)?;
+                    if let Some(value) = self.db_value_from_head(head, &eid, &attr)? {
+                        return Ok(Value::Vector(vec![attr_value(&attr), value]));
+                    }
+                }
+                Ok(Value::Nil)
+            }
+            other => Err(DatomicError::UnsupportedOperation(other.into()).into()),
+        }
+    }
+
+    fn db_value_from_head(
+        &self,
+        head: &KotobaCid,
+        eid: &KotobaCid,
+        attr: &str,
+    ) -> Result<Option<Value>, DistributedCommitError> {
+        Ok(self
+            .current_for_entity_attribute(head, eid, attr)?
+            .into_iter()
+            .next()
+            .map(|datom| datom.v))
+    }
+
+    fn resolve_lookup_ref_entity_term(
+        &self,
+        head: &KotobaCid,
+        term: &Value,
+        binding: &BTreeMap<String, Value>,
+    ) -> Result<LookupRefResolution, DistributedCommitError> {
+        let Some((attr, value)) = lookup_ref_parts(term, binding) else {
+            return Ok(LookupRefResolution::NotLookupRef);
+        };
+        let Some(datom) = self
+            .current_for_attribute_value(head, &attr, &value)?
+            .into_iter()
+            .next()
+        else {
+            return Ok(LookupRefResolution::Missing);
+        };
+        Ok(LookupRefResolution::Resolved(datom.e))
+    }
+
+    fn commit_chain_from_head(
+        &self,
+        head: &KotobaCid,
+    ) -> Result<Vec<DistributedDatomCommit>, DistributedCommitError> {
+        let mut chain = Vec::new();
+        let mut current = Some(head.clone());
+        while let Some(cid) = current {
+            let Some(commit) = DistributedDatomCommit::load(&cid, self.store)? else {
+                return Err(DistributedCommitError::MissingCommit(cid.to_multibase()));
+            };
+            current = commit.prev.clone();
+            chain.push(commit);
+        }
+        Ok(chain)
+    }
+
+    fn history_from_index_prefix(
+        &self,
+        head: &KotobaCid,
+        root_name: &'static str,
+        prefix: &[u8],
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        let chain = self.commit_chain_from_head(head)?;
+        let mut datoms = Vec::new();
+        for commit in chain.into_iter().rev() {
+            datoms.extend(datoms_from_index_prefix(
+                &commit, root_name, prefix, self.store,
+            )?);
+        }
+        Ok(datoms)
+    }
+
+    fn history_from_index_prefix_since_tx(
+        &self,
+        head: &KotobaCid,
+        tx_cid: &KotobaCid,
+        root_name: &'static str,
+        components: &[Value],
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        let chain = self.commit_chain_from_head(head)?;
+        if !chain.iter().any(|commit| &commit.tx_cid == tx_cid) {
+            return Err(DatomicError::Query(format!(
+                "since transaction not found: {}",
+                tx_cid.to_multibase()
+            ))
+            .into());
+        }
+        let prefix = index_components_prefix(root_name, components)?;
+        let mut seen = false;
+        let mut datoms = Vec::new();
+        for commit in chain.into_iter().rev() {
+            if commit.tx_cid == *tx_cid {
+                seen = true;
+                continue;
+            }
+            if !seen {
+                continue;
+            }
+            match &prefix {
+                Some(prefix) => datoms.extend(datoms_from_index_prefix(
+                    &commit, root_name, prefix, self.store,
+                )?),
+                None => datoms.extend(datoms_from_commit(&commit, self.store)?),
+            }
+        }
+        Ok(datoms)
+    }
+}
+
+pub struct DistributedCommitWriter<'a, R>
+where
+    R: IpnsRegistry + ?Sized,
+{
+    store: &'a dyn BlockStore,
+    ipns: &'a R,
+}
+
+impl<'a, R> DistributedCommitWriter<'a, R>
+where
+    R: IpnsRegistry + ?Sized,
+{
+    pub fn new(store: &'a dyn BlockStore, ipns: &'a R) -> Self {
+        Self { store, ipns }
+    }
+
+    pub fn commit_datoms(
+        &self,
+        req: CommitDatomsRequest,
+    ) -> Result<CommitReport, DistributedCommitError> {
+        let name = IpnsName::new(req.ipns_name.clone());
+        let current = match self.ipns.resolve(&name) {
+            Ok(record) => Some(record),
+            Err(IpnsRegistryError::NotFound(_)) => None,
+            Err(e) => return Err(e.into()),
+        };
+        let current_value = current.as_ref().map(|r| r.value.clone());
+        let expected = req.expected_parent.as_ref().map(KotobaCid::to_multibase);
+        if current_value != expected {
+            return Err(DistributedCommitError::StaleParent {
+                name: req.ipns_name,
+                expected,
+                current: current_value,
+            });
+        }
+
+        let roots = build_datom_roots(&req.datoms, self.store)?;
+        let root_seed = roots
+            .get(ROOT_EAVT)
+            .cloned()
+            .unwrap_or_else(KotobaCid::default);
+        let tx_cid = req.tx_cid.unwrap_or_else(|| {
+            derive_tx_cid(
+                &req.graph,
+                &root_seed,
+                req.expected_parent.as_ref(),
+                req.seq,
+            )
+        });
+        let commit = DistributedDatomCommit::seal(
+            req.graph,
+            tx_cid,
+            req.expected_parent,
+            req.author,
+            req.seq,
+            roots,
+            req.cacao_proof_cid,
+        )?;
+        commit.persist(self.store)?;
+
+        let commit_ipfs_cid = kotoba_ipfs::parse_cid(&commit.cid.to_multibase())
+            .map_err(|e| DistributedCommitError::InvalidCommitCid(e.to_string()))?;
+        let mut ipns_record = IpnsRecord::new(
+            name.0.clone(),
+            &commit_ipfs_cid,
+            current.map(|r| r.sequence + 1).unwrap_or(1),
+            req.valid_until,
+        );
+        ipns_record.ttl_secs = req.ttl_secs;
+        ipns_record.controller_did = req.ipns_controller_did;
+        if let Some(signing_key) = &req.ipns_signing_key {
+            ipns_record
+                .sign_ed25519(signing_key)
+                .map_err(|e| DistributedCommitError::IpnsSignature(e.to_string()))?;
+        }
+        self.ipns.publish(ipns_record.clone())?;
+
+        Ok(CommitReport {
+            commit,
+            ipns_record,
+            datom_count: req.datoms.len(),
+        })
+    }
+}
+
+pub struct CommitDatomsRequest {
+    pub ipns_name: String,
+    pub graph: KotobaCid,
+    pub datoms: Vec<Datom>,
+    pub expected_parent: Option<KotobaCid>,
+    pub tx_cid: Option<KotobaCid>,
+    pub author: String,
+    pub seq: u64,
+    pub valid_until: String,
+    pub ttl_secs: Option<u64>,
+    pub cacao_proof_cid: Option<KotobaCid>,
+    pub ipns_controller_did: Option<String>,
+    pub ipns_signing_key: Option<ed25519_dalek::SigningKey>,
+}
+
+impl DistributedDatomCommit {
+    pub fn seal(
+        graph: KotobaCid,
+        tx_cid: KotobaCid,
+        prev: Option<KotobaCid>,
+        author: String,
+        seq: u64,
+        index_roots: HashMap<String, KotobaCid>,
+        cacao_proof_cid: Option<KotobaCid>,
+    ) -> Result<Self, DistributedCommitError> {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut commit = Self {
+            cid: KotobaCid::default(),
+            graph,
+            tx_cid,
+            prev,
+            author,
+            seq,
+            ts,
+            index_roots,
+            cacao_proof_cid,
+        };
+        commit.cid = commit.derived_cid()?;
+        Ok(commit)
+    }
+
+    pub fn derived_cid(&self) -> Result<KotobaCid, DistributedCommitError> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(self, &mut bytes)
+            .map_err(|e| DistributedCommitError::Cbor(e.to_string()))?;
+        Ok(KotobaCid::from_bytes(&bytes))
+    }
+
+    pub fn persist(&self, store: &dyn BlockStore) -> Result<KotobaCid, DistributedCommitError> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(self, &mut bytes)
+            .map_err(|e| DistributedCommitError::Cbor(e.to_string()))?;
+        let cid = KotobaCid::from_bytes(&bytes);
+        if cid != self.cid {
+            return Err(DistributedCommitError::Store(anyhow::anyhow!(
+                "commit CID mismatch"
+            )));
+        }
+        store.put(&cid, &bytes)?;
+        Ok(cid)
+    }
+
+    pub fn load(
+        cid: &KotobaCid,
+        store: &dyn BlockStore,
+    ) -> Result<Option<Self>, DistributedCommitError> {
+        let Some(bytes) = store.get(cid)? else {
+            return Ok(None);
+        };
+        let mut commit: Self = ciborium::from_reader(&bytes[..])
+            .map_err(|e| DistributedCommitError::Cbor(e.to_string()))?;
+        commit.cid = cid.clone();
+        Ok(Some(commit))
+    }
+}
+
+fn build_datom_roots(
+    datoms: &[Datom],
+    store: &dyn BlockStore,
+) -> Result<HashMap<String, KotobaCid>, DistributedCommitError> {
+    let mut eavt = Vec::with_capacity(datoms.len());
+    let mut aevt = Vec::with_capacity(datoms.len());
+    let mut avet = Vec::with_capacity(datoms.len());
+    let mut vaet = Vec::new();
+    let mut tea = Vec::with_capacity(datoms.len());
+
+    for datom in datoms {
+        let kqe = indexable_kqe_datom(datom);
+        let value = encode_stored_datom(datom)?;
+        eavt.push((kqe.eavt_key(), value.clone()));
+        aevt.push((kqe.aevt_key(), value.clone()));
+        avet.push((kqe.avet_key(), value.clone()));
+        if let Some(key) = vaet_key_for_datom(datom) {
+            vaet.push((key, value.clone()));
+        }
+        tea.push((kqe.tea_key(), value));
+    }
+
+    let roots = [
+        (ROOT_EAVT, eavt),
+        (ROOT_AEVT, aevt),
+        (ROOT_AVET, avet),
+        (ROOT_VAET, vaet),
+        (ROOT_TEA, tea),
+    ]
+    .into_iter()
+    .map(|(name, entries)| {
+        ProllyTree::build_tree(entries, store)
+            .map(|root| (name.to_string(), root))
+            .map_err(DistributedCommitError::Store)
+    })
+    .collect::<Result<HashMap<_, _>, _>>()?;
+
+    Ok(roots)
+}
+
+fn datoms_from_commit(
+    commit: &DistributedDatomCommit,
+    store: &dyn BlockStore,
+) -> Result<Vec<Datom>, DistributedCommitError> {
+    let root = commit.index_roots.get(ROOT_TEA).ok_or_else(|| {
+        DistributedCommitError::MissingIndexRoot {
+            commit: commit.cid.to_multibase(),
+            root: ROOT_TEA,
+        }
+    })?;
+    let entries =
+        ProllyTree::scan_prefix(root, &[], store).map_err(DistributedCommitError::Store)?;
+    entries
+        .into_iter()
+        .map(|(_, value)| decode_stored_datom(&value))
+        .collect()
+}
+
+fn datoms_from_index_prefix(
+    commit: &DistributedDatomCommit,
+    root_name: &'static str,
+    prefix: &[u8],
+    store: &dyn BlockStore,
+) -> Result<Vec<Datom>, DistributedCommitError> {
+    let root = commit.index_roots.get(root_name).ok_or_else(|| {
+        DistributedCommitError::MissingIndexRoot {
+            commit: commit.cid.to_multibase(),
+            root: root_name,
+        }
+    })?;
+    let entries =
+        ProllyTree::scan_prefix(root, prefix, store).map_err(DistributedCommitError::Store)?;
+    entries
+        .into_iter()
+        .map(|(_, value)| decode_stored_datom(&value))
+        .collect()
+}
+
+fn indexable_kqe_datom(datom: &Datom) -> KqeDatom {
+    datom.to_kqe().unwrap_or_else(|_| KqeDatom {
+        e: datom.e.clone(),
+        a: datom.a.clone(),
+        v: kotoba_kqe::Value::Text(kotoba_edn::to_string(&datom.v)),
+        tx: datom.t.clone(),
+        op: datom.added,
+    })
+}
+
+fn encode_stored_datom(datom: &Datom) -> Result<Vec<u8>, DistributedCommitError> {
+    let stored = StoredDatom {
+        e: datom.e.to_multibase(),
+        a: datom.a.clone(),
+        v_edn: kotoba_edn::to_string(&datom.v),
+        t: datom.t.to_multibase(),
+        added: datom.added,
+    };
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&stored, &mut bytes)
+        .map_err(|e| DistributedCommitError::Cbor(e.to_string()))?;
+    Ok(bytes)
+}
+
+fn decode_stored_datom(bytes: &[u8]) -> Result<Datom, DistributedCommitError> {
+    let stored: StoredDatom =
+        ciborium::from_reader(bytes).map_err(|e| DistributedCommitError::Cbor(e.to_string()))?;
+    let e = KotobaCid::from_multibase(&stored.e)
+        .ok_or_else(|| DistributedCommitError::InvalidCommitCid(stored.e.clone()))?;
+    let t = KotobaCid::from_multibase(&stored.t)
+        .ok_or_else(|| DistributedCommitError::InvalidCommitCid(stored.t.clone()))?;
+    let v =
+        kotoba_edn::parse(&stored.v_edn).map_err(|e| DistributedCommitError::Edn(e.to_string()))?;
+    Ok(if stored.added {
+        Datom::assert(e, stored.a, v, t)
+    } else {
+        Datom::retract(e, stored.a, v, t)
+    })
+}
+
+fn derive_tx_cid(
+    graph: &KotobaCid,
+    eavt_root: &KotobaCid,
+    prev: Option<&KotobaCid>,
+    seq: u64,
+) -> KotobaCid {
+    let mut seed = b"kotoba-datomic-tx:v1\n".to_vec();
+    seed.extend_from_slice(&graph.0);
+    seed.extend_from_slice(&eavt_root.0);
+    if let Some(prev) = prev {
+        seed.extend_from_slice(&prev.0);
+    }
+    seed.extend_from_slice(&seq.to_be_bytes());
+    KotobaCid::from_bytes(&seed)
+}
+
+fn attr_prefix(attr: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(attr.len() + 1);
+    out.extend_from_slice(attr.as_bytes());
+    out.push(0);
+    out
+}
+
+fn attr_lookup_variants(attr: &str) -> Vec<&str> {
+    match attr.strip_prefix(':') {
+        Some(stripped) if !stripped.is_empty() => vec![attr, stripped],
+        _ => vec![attr],
+    }
+}
+
+fn extend_unique_datoms(out: &mut Vec<Datom>, datoms: Vec<Datom>) {
+    for datom in datoms {
+        if !out.contains(&datom) {
+            out.push(datom);
+        }
+    }
+}
+
+fn eavt_entity_attr_prefix(entity: &KotobaCid, attr: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(entity.0.len() + attr.len() + 1);
+    out.extend_from_slice(&entity.0);
+    out.extend_from_slice(&attr_prefix(attr));
+    out
+}
+
+fn kqe_value(value: &Value) -> kotoba_kqe::Value {
+    edn_to_kqe_value(value)
+        .unwrap_or_else(|_| kotoba_kqe::Value::Text(kotoba_edn::to_string(value)))
+}
+
+fn prefix_datoms_entity(value: &Value) -> KotobaCid {
+    match value {
+        Value::String(s) => {
+            KotobaCid::from_multibase(s).unwrap_or_else(|| KotobaCid::from_bytes(s.as_bytes()))
+        }
+        Value::Integer(i) => KotobaCid::from_bytes(i.to_string().as_bytes()),
+        Value::Keyword(keyword) => {
+            KotobaCid::from_bytes(format!(":{}", keyword.to_qualified()).as_bytes())
+        }
+        Value::Tagged { tag, value } if tag.to_qualified() == "cid" => value
+            .as_string()
+            .and_then(KotobaCid::from_multibase)
+            .unwrap_or_else(|| KotobaCid::from_bytes(kotoba_edn::to_string(value).as_bytes())),
+        _ => KotobaCid::from_bytes(kotoba_edn::to_string(value).as_bytes()),
+    }
+}
+
+fn prefix_datoms_attr(value: &Value) -> Result<String, DistributedCommitError> {
+    attr_string(value)
+        .ok_or(DatomicError::AttributeMustBeKeyword)
+        .map_err(DistributedCommitError::Datom)
+}
+
+fn truncate_tx_op(mut key: Vec<u8>) -> Vec<u8> {
+    key.truncate(key.len().saturating_sub(36 + 1));
+    key
+}
+
+fn truncate_op(mut key: Vec<u8>) -> Vec<u8> {
+    key.truncate(key.len().saturating_sub(1));
+    key
+}
+
+fn index_components_prefix(
+    root_name: &'static str,
+    components: &[Value],
+) -> Result<Option<Vec<u8>>, DistributedCommitError> {
+    if components.len() > 4 {
+        return Err(DatomicError::Query(format!(
+            "{root_name} index supports at most 4 components"
+        ))
+        .into());
+    }
+    if components.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    let zero = KotobaCid::default();
+    Ok(Some(match root_name {
+        ROOT_EAVT => {
+            let e = prefix_datoms_entity(&components[0]);
+            match components.len() {
+                1 => e.0.to_vec(),
+                2 => eavt_entity_attr_prefix(&e, &prefix_datoms_attr(&components[1])?),
+                3 => truncate_tx_op(
+                    KqeDatom {
+                        e,
+                        a: prefix_datoms_attr(&components[1])?,
+                        v: kqe_value(&components[2]),
+                        tx: zero,
+                        op: true,
+                    }
+                    .eavt_key(),
+                ),
+                4 => truncate_op(
+                    KqeDatom {
+                        e,
+                        a: prefix_datoms_attr(&components[1])?,
+                        v: kqe_value(&components[2]),
+                        tx: prefix_datoms_entity(&components[3]),
+                        op: true,
+                    }
+                    .eavt_key(),
+                ),
+                _ => unreachable!(),
+            }
+        }
+        ROOT_AEVT => {
+            let a = prefix_datoms_attr(&components[0])?;
+            match components.len() {
+                1 => attr_prefix(&a),
+                2 => {
+                    let mut prefix = attr_prefix(&a);
+                    prefix.extend_from_slice(&prefix_datoms_entity(&components[1]).0);
+                    prefix
+                }
+                3 => truncate_tx_op(
+                    KqeDatom {
+                        e: prefix_datoms_entity(&components[1]),
+                        a,
+                        v: kqe_value(&components[2]),
+                        tx: zero,
+                        op: true,
+                    }
+                    .aevt_key(),
+                ),
+                4 => truncate_op(
+                    KqeDatom {
+                        e: prefix_datoms_entity(&components[1]),
+                        a,
+                        v: kqe_value(&components[2]),
+                        tx: prefix_datoms_entity(&components[3]),
+                        op: true,
+                    }
+                    .aevt_key(),
+                ),
+                _ => unreachable!(),
+            }
+        }
+        ROOT_AVET => {
+            let a = prefix_datoms_attr(&components[0])?;
+            match components.len() {
+                1 => attr_prefix(&a),
+                2 => avet_prefix(&a, &components[1]),
+                3 => {
+                    let mut prefix = avet_prefix(&a, &components[1]);
+                    prefix.extend_from_slice(&prefix_datoms_entity(&components[2]).0);
+                    prefix
+                }
+                4 => truncate_op(
+                    KqeDatom {
+                        e: prefix_datoms_entity(&components[2]),
+                        a,
+                        v: kqe_value(&components[1]),
+                        tx: prefix_datoms_entity(&components[3]),
+                        op: true,
+                    }
+                    .avet_key(),
+                ),
+                _ => unreachable!(),
+            }
+        }
+        ROOT_VAET => {
+            let Some(v) = vaet_ref_value(&components[0]) else {
+                return Ok(Some(vec![0]));
+            };
+            match components.len() {
+                1 => vaet_prefix_for_parts(v, None, None, None),
+                2 => {
+                    vaet_prefix_for_parts(v, Some(prefix_datoms_attr(&components[1])?), None, None)
+                }
+                3 => vaet_prefix_for_parts(
+                    v,
+                    Some(prefix_datoms_attr(&components[1])?),
+                    Some(prefix_datoms_entity(&components[2])),
+                    None,
+                ),
+                4 => vaet_prefix_for_parts(
+                    v,
+                    Some(prefix_datoms_attr(&components[1])?),
+                    Some(prefix_datoms_entity(&components[2])),
+                    Some(prefix_datoms_entity(&components[3])),
+                ),
+                _ => unreachable!(),
+            }
+        }
+        _ => {
+            return Err(DatomicError::Query(format!("unsupported datom index {root_name}")).into())
+        }
+    }))
+}
+
+fn datom_matches_index_components(
+    datom: &Datom,
+    root_name: &'static str,
+    components: &[Value],
+) -> bool {
+    components
+        .iter()
+        .enumerate()
+        .all(|(position, component)| match (root_name, position) {
+            (ROOT_EAVT, 0) => datom.e == prefix_datoms_entity(component),
+            (ROOT_EAVT, 1) => {
+                prefix_datoms_attr(component).is_ok_and(|a| attr_matches(&datom.a, &a))
+            }
+            (ROOT_EAVT, 2) => datom.v == *component,
+            (ROOT_EAVT, 3) => datom.t == prefix_datoms_entity(component),
+            (ROOT_AEVT, 0) => {
+                prefix_datoms_attr(component).is_ok_and(|a| attr_matches(&datom.a, &a))
+            }
+            (ROOT_AEVT, 1) => datom.e == prefix_datoms_entity(component),
+            (ROOT_AEVT, 2) => datom.v == *component,
+            (ROOT_AEVT, 3) => datom.t == prefix_datoms_entity(component),
+            (ROOT_AVET, 0) => {
+                prefix_datoms_attr(component).is_ok_and(|a| attr_matches(&datom.a, &a))
+            }
+            (ROOT_AVET, 1) => datom.v == *component,
+            (ROOT_AVET, 2) => datom.e == prefix_datoms_entity(component),
+            (ROOT_AVET, 3) => datom.t == prefix_datoms_entity(component),
+            (ROOT_VAET, 0) => datom.v == *component,
+            (ROOT_VAET, 1) => {
+                prefix_datoms_attr(component).is_ok_and(|a| attr_matches(&datom.a, &a))
+            }
+            (ROOT_VAET, 2) => datom.e == prefix_datoms_entity(component),
+            (ROOT_VAET, 3) => datom.t == prefix_datoms_entity(component),
+            _ => false,
+        })
+}
+
+fn avet_prefix(attr: &str, value: &Value) -> Vec<u8> {
+    let v = kqe_value(value);
+    let datom = KqeDatom {
+        e: KotobaCid::default(),
+        a: attr.to_string(),
+        v,
+        tx: KotobaCid::default(),
+        op: true,
+    };
+    let mut key = datom.avet_key();
+    key.truncate(key.len().saturating_sub(36 + 36 + 1));
+    key
+}
+
+fn vaet_key_for_datom(datom: &Datom) -> Option<Vec<u8>> {
+    let value = vaet_ref_value(&datom.v)?;
+    KqeDatom {
+        e: datom.e.clone(),
+        a: datom.a.clone(),
+        v: value,
+        tx: datom.t.clone(),
+        op: datom.added,
+    }
+    .vaet_key()
+}
+
+fn vaet_ref_value(value: &Value) -> Option<kotoba_kqe::Value> {
+    match value {
+        Value::String(s) => KotobaCid::from_multibase(s).map(kotoba_kqe::Value::Cid),
+        Value::Tagged { tag, value } if tag.to_qualified() == "cid" => value
+            .as_string()
+            .and_then(KotobaCid::from_multibase)
+            .map(kotoba_kqe::Value::Cid),
+        _ => None,
+    }
+}
+
+fn vaet_prefix_for_parts(
+    v: kotoba_kqe::Value,
+    attr: Option<String>,
+    entity: Option<KotobaCid>,
+    tx: Option<KotobaCid>,
+) -> Vec<u8> {
+    let has_attr = attr.is_some();
+    let has_entity = entity.is_some();
+    let has_tx = tx.is_some();
+    let datom = KqeDatom {
+        e: entity.unwrap_or_default(),
+        a: attr.unwrap_or_default(),
+        v,
+        tx: tx.unwrap_or_default(),
+        op: true,
+    };
+    let mut key = datom.vaet_key().unwrap_or_default();
+    if has_tx {
+        truncate_op(key)
+    } else if has_entity {
+        truncate_tx_op(key)
+    } else if has_attr {
+        key.truncate(key.len().saturating_sub(36 + 36 + 1));
+        key
+    } else {
+        key.truncate(key.len().saturating_sub(1 + 36 + 36 + 1));
+        key
+    }
+}
+
+fn datom_matches_triple(
+    datom: &Datom,
+    triple: &[Value],
+    binding: &BTreeMap<String, Value>,
+    lookup_ref: &LookupRefResolution,
+) -> bool {
+    if !(3..=5).contains(&triple.len()) {
+        return false;
+    }
+    entity_term_matches(&triple[0], &datom.e, binding, lookup_ref)
+        && term_matches(&triple[1], &attr_value(&datom.a), binding)
+        && term_matches(&triple[2], &datom.v, binding)
+        && triple
+            .get(3)
+            .is_none_or(|term| term_matches(term, &cid_value(&datom.t), binding))
+        && triple
+            .get(4)
+            .is_none_or(|term| term_matches(term, &Value::Bool(datom.added), binding))
+}
+
+fn entity_term_matches(
+    term: &Value,
+    entity: &KotobaCid,
+    binding: &BTreeMap<String, Value>,
+    lookup_ref: &LookupRefResolution,
+) -> bool {
+    match lookup_ref {
+        LookupRefResolution::Resolved(resolved) => resolved == entity,
+        LookupRefResolution::Missing => false,
+        LookupRefResolution::NotLookupRef => term_matches(term, &cid_value(entity), binding),
+    }
+}
+
+fn term_matches(term: &Value, value: &Value, binding: &BTreeMap<String, Value>) -> bool {
+    match variable_name(term) {
+        Some(var) => binding.get(var).is_none_or(|bound| bound == value),
+        None => term == value,
+    }
+}
+
+fn bind_datom_to_triple(
+    datom: &Datom,
+    triple: &[Value],
+    binding: &BTreeMap<String, Value>,
+    lookup_ref: &LookupRefResolution,
+    next: &mut BTreeMap<String, Value>,
+) -> bool {
+    bind_entity_term(&triple[0], &datom.e, binding, lookup_ref, next)
+        && bind_term(&triple[1], attr_value(&datom.a), next)
+        && bind_term(&triple[2], datom.v.clone(), next)
+        && triple
+            .get(3)
+            .is_none_or(|term| bind_term(term, cid_value(&datom.t), next))
+        && triple
+            .get(4)
+            .is_none_or(|term| bind_term(term, Value::Bool(datom.added), next))
+}
+
+fn bind_entity_term(
+    term: &Value,
+    entity: &KotobaCid,
+    binding: &BTreeMap<String, Value>,
+    lookup_ref: &LookupRefResolution,
+    next: &mut BTreeMap<String, Value>,
+) -> bool {
+    if !entity_term_matches(term, entity, binding, lookup_ref) {
+        return false;
+    }
+    if matches!(lookup_ref, LookupRefResolution::Resolved(_)) {
+        return true;
+    }
+    bind_term(term, cid_value(entity), next)
+}
+
+fn bind_term(term: &Value, value: Value, binding: &mut BTreeMap<String, Value>) -> bool {
+    match variable_name(term) {
+        Some(var) => match binding.get(var) {
+            Some(bound) => bound == &value,
+            None => {
+                binding.insert(var.to_string(), value);
+                true
+            }
+        },
+        None => term == &value,
+    }
+}
+
+fn bind_function_target(
+    target: &Value,
+    value: Value,
+    binding: &mut BTreeMap<String, Value>,
+) -> Result<bool, DistributedCommitError> {
+    let Some(targets) = target.as_seq() else {
+        return Ok(bind_term(target, value, binding));
+    };
+    let values = value.as_seq().ok_or_else(|| {
+        DatomicError::Query(format!(
+            "tuple binding target requires tuple value, got {}",
+            kotoba_edn::to_string(&value)
+        ))
+    })?;
+    if targets.len() != values.len() {
+        return Err(DatomicError::Query(format!(
+            "tuple binding target width {} does not match value width {}",
+            targets.len(),
+            values.len()
+        ))
+        .into());
+    }
+    let mut next = binding.clone();
+    for (target, value) in targets.iter().zip(values.iter()) {
+        if !bind_term(target, value.clone(), &mut next) {
+            return Ok(false);
+        }
+    }
+    *binding = next;
+    Ok(true)
+}
+
+fn lookup_ref_parts(term: &Value, binding: &BTreeMap<String, Value>) -> Option<(String, Value)> {
+    let value = match variable_name(term) {
+        Some(var) => binding.get(var).unwrap_or(term),
+        None => term,
+    };
+    let items = value.as_seq()?;
+    if items.len() != 2 {
+        return None;
+    }
+    let attr = attr_string(&items[0])?;
+    let value = resolve_query_value(&items[1], binding)?;
+    Some((attr, value))
+}
+
+fn attr_string(value: &Value) -> Option<String> {
+    value
+        .as_keyword()
+        .map(|k| format!(":{}", k.to_qualified()))
+        .or_else(|| value.as_string().map(str::to_string))
+}
+
+fn resolved_attr_term(term: &Value, binding: &BTreeMap<String, Value>) -> Option<String> {
+    let value = match variable_name(term) {
+        Some(var) => binding.get(var),
+        None => Some(term),
+    };
+    value.and_then(attr_string)
+}
+
+fn resolve_query_value(term: &Value, binding: &BTreeMap<String, Value>) -> Option<Value> {
+    match variable_name(term) {
+        Some(var) => binding.get(var).cloned(),
+        None => Some(term.clone()),
+    }
+}
+
+fn resolve_find_value(
+    term: &Value,
+    binding: &BTreeMap<String, Value>,
+) -> Result<Value, DistributedCommitError> {
+    match variable_name(term) {
+        Some(var) => binding
+            .get(var)
+            .cloned()
+            .ok_or_else(|| DatomicError::Query(format!("unbound variable {var}")).into()),
+        None => Ok(term.clone()),
+    }
+}
+
+fn required_query_value(
+    term: &Value,
+    binding: &BTreeMap<String, Value>,
+) -> Result<Value, DistributedCommitError> {
+    resolve_query_value(term, binding).ok_or_else(|| {
+        DatomicError::Query(format!("unbound variable {}", kotoba_edn::to_string(term))).into()
+    })
+}
+
+#[derive(Debug, Clone)]
+enum DistributedFindItem {
+    Value(Value),
+    Pull { entity: Value, pattern: Value },
+    Count(Value),
+    CountDistinct(Value),
+    Sum(Value),
+    Min(Value),
+    Max(Value),
+    Avg(Value),
+}
+
+impl DistributedFindItem {
+    fn is_aggregate(&self) -> bool {
+        matches!(
+            self,
+            Self::Count(_)
+                | Self::CountDistinct(_)
+                | Self::Sum(_)
+                | Self::Min(_)
+                | Self::Max(_)
+                | Self::Avg(_)
+        )
+    }
+}
+
+fn parse_distributed_find_item(
+    value: &Value,
+) -> Result<DistributedFindItem, DistributedCommitError> {
+    let Some(seq) = value.as_seq() else {
+        return Ok(DistributedFindItem::Value(value.clone()));
+    };
+    if seq.len() == 2 && matches!(seq[0].as_symbol(), Some(symbol) if symbol.name == "count") {
+        return Ok(DistributedFindItem::Count(seq[1].clone()));
+    }
+    if seq.len() == 2
+        && matches!(seq[0].as_symbol(), Some(symbol) if symbol.name == "count-distinct")
+    {
+        return Ok(DistributedFindItem::CountDistinct(seq[1].clone()));
+    }
+    if seq.len() == 2 && matches!(seq[0].as_symbol(), Some(symbol) if symbol.name == "sum") {
+        return Ok(DistributedFindItem::Sum(seq[1].clone()));
+    }
+    if seq.len() == 2 && matches!(seq[0].as_symbol(), Some(symbol) if symbol.name == "min") {
+        return Ok(DistributedFindItem::Min(seq[1].clone()));
+    }
+    if seq.len() == 2 && matches!(seq[0].as_symbol(), Some(symbol) if symbol.name == "max") {
+        return Ok(DistributedFindItem::Max(seq[1].clone()));
+    }
+    if seq.len() == 2 && matches!(seq[0].as_symbol(), Some(symbol) if symbol.name == "avg") {
+        return Ok(DistributedFindItem::Avg(seq[1].clone()));
+    }
+    if seq.len() == 3 && matches!(seq[0].as_symbol(), Some(symbol) if symbol.name == "pull") {
+        return Ok(DistributedFindItem::Pull {
+            entity: seq[1].clone(),
+            pattern: seq[2].clone(),
+        });
+    }
+    Err(DatomicError::UnsupportedOperation(format!(
+        "distributed q_triples only supports plain find values and pull expressions, got {}",
+        kotoba_edn::to_string(value)
+    ))
+    .into())
+}
+
+fn parse_distributed_find_items(
+    find: &[Value],
+) -> Result<Vec<DistributedFindItem>, DistributedCommitError> {
+    if let Some((last, elems)) = find.split_last() {
+        if matches!(last.as_symbol(), Some(symbol) if symbol.name == "..." || symbol.name == ".") {
+            return elems.iter().map(parse_distributed_find_item).collect();
+        }
+    }
+    if find.len() == 1 {
+        if let Some(tuple) = find[0].as_seq() {
+            if !is_distributed_find_expression(tuple) {
+                return tuple.iter().map(parse_distributed_find_item).collect();
+            }
+        }
+    }
+    find.iter().map(parse_distributed_find_item).collect()
+}
+
+fn is_distributed_find_expression(seq: &[Value]) -> bool {
+    matches!(
+        seq.first().and_then(Value::as_symbol),
+        Some(symbol)
+            if matches!(
+                symbol.name.as_str(),
+                "pull" | "count" | "count-distinct" | "sum" | "min" | "max" | "avg"
+            )
+    )
+}
+
+fn resolve_distributed_find_item(
+    item: &DistributedFindItem,
+    binding: &BTreeMap<String, Value>,
+    pull_db: Option<&Db>,
+) -> Result<Value, DistributedCommitError> {
+    match item {
+        DistributedFindItem::Value(value)
+        | DistributedFindItem::Count(value)
+        | DistributedFindItem::CountDistinct(value)
+        | DistributedFindItem::Sum(value)
+        | DistributedFindItem::Min(value)
+        | DistributedFindItem::Max(value)
+        | DistributedFindItem::Avg(value) => Ok(match variable_name(value) {
+            Some(var) => binding.get(var).cloned().unwrap_or(Value::Nil),
+            None => value.clone(),
+        }),
+        DistributedFindItem::Pull { entity, pattern } => {
+            let entity = resolve_find_value(entity, binding)?;
+            let Some(eid) = entity_value_to_cid(&entity) else {
+                return Err(DatomicError::Query(format!(
+                    "pull entity must resolve to a CID string or #cid, got {}",
+                    kotoba_edn::to_string(&entity)
+                ))
+                .into());
+            };
+            let db = pull_db
+                .ok_or_else(|| DatomicError::Query("missing distributed pull database".into()))?;
+            db.pull(pattern.clone(), eid).map_err(Into::into)
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum DistributedAggregateValue {
+    Count(i64),
+    CountDistinct(BTreeSet<Value>),
+    Sum(i64),
+    Min(Option<i64>),
+    Max(Option<i64>),
+    Avg { sum: i64, count: i64 },
+}
+
+impl DistributedAggregateValue {
+    fn for_find_item(item: &DistributedFindItem) -> Option<Self> {
+        match item {
+            DistributedFindItem::Value(_) | DistributedFindItem::Pull { .. } => None,
+            DistributedFindItem::Count(_) => Some(Self::Count(0)),
+            DistributedFindItem::CountDistinct(_) => Some(Self::CountDistinct(BTreeSet::new())),
+            DistributedFindItem::Sum(_) => Some(Self::Sum(0)),
+            DistributedFindItem::Min(_) => Some(Self::Min(None)),
+            DistributedFindItem::Max(_) => Some(Self::Max(None)),
+            DistributedFindItem::Avg(_) => Some(Self::Avg { sum: 0, count: 0 }),
+        }
+    }
+
+    fn push(&mut self, value: Value) -> Result<(), DistributedCommitError> {
+        if matches!(value, Value::Nil) {
+            return Ok(());
+        }
+        match self {
+            Self::Count(count) => *count += 1,
+            Self::CountDistinct(values) => {
+                values.insert(value);
+            }
+            Self::Sum(sum) => *sum += aggregate_query_integer(&value)?,
+            Self::Min(min) => {
+                let value = aggregate_query_integer(&value)?;
+                *min = Some(min.map_or(value, |current| current.min(value)));
+            }
+            Self::Max(max) => {
+                let value = aggregate_query_integer(&value)?;
+                *max = Some(max.map_or(value, |current| current.max(value)));
+            }
+            Self::Avg { sum, count } => {
+                *sum += aggregate_query_integer(&value)?;
+                *count += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn result(&self) -> Value {
+        match self {
+            Self::Count(count) => Value::Integer(*count),
+            Self::CountDistinct(values) => Value::Integer(values.len() as i64),
+            Self::Sum(sum) => Value::Integer(*sum),
+            Self::Min(min) => min.map(Value::Integer).unwrap_or(Value::Nil),
+            Self::Max(max) => max.map(Value::Integer).unwrap_or(Value::Nil),
+            Self::Avg { sum, count } => {
+                if *count == 0 {
+                    Value::Nil
+                } else {
+                    Value::float(*sum as f64 / *count as f64)
+                }
+            }
+        }
+    }
+}
+
+fn aggregate_query_integer(value: &Value) -> Result<i64, DistributedCommitError> {
+    match value {
+        Value::Integer(value) => Ok(*value),
+        other => Err(DatomicError::Query(format!(
+            "aggregate value must be an integer, got {}",
+            kotoba_edn::to_string(other)
+        ))
+        .into()),
+    }
+}
+
+fn aggregate_distributed_rows(
+    find_items: &[DistributedFindItem],
+    with_items: &[Value],
+    bindings: Vec<BTreeMap<String, Value>>,
+    pull_db: Option<&Db>,
+) -> Result<Vec<Vec<Value>>, DistributedCommitError> {
+    let group_positions = find_items
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, item)| (!item.is_aggregate()).then_some(idx))
+        .collect::<Vec<_>>();
+    let aggregate_positions = find_items
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, item)| item.is_aggregate().then_some(idx))
+        .collect::<Vec<_>>();
+    let aggregate_template = aggregate_positions
+        .iter()
+        .filter_map(|idx| DistributedAggregateValue::for_find_item(&find_items[*idx]))
+        .collect::<Vec<_>>();
+    let mut groups: BTreeMap<Vec<Value>, Vec<DistributedAggregateValue>> = BTreeMap::new();
+    let mut seen_with_rows = BTreeSet::new();
+
+    for binding in &bindings {
+        let key = group_positions
+            .iter()
+            .map(|idx| resolve_distributed_find_item(&find_items[*idx], binding, pull_db))
+            .collect::<Result<Vec<_>, _>>()?;
+        if !with_items.is_empty() {
+            let mut with_key = key.clone();
+            for item in with_items {
+                with_key.push(required_query_value(item, binding)?);
+            }
+            for find_idx in &aggregate_positions {
+                with_key.push(resolve_distributed_find_item(
+                    &find_items[*find_idx],
+                    binding,
+                    pull_db,
+                )?);
+            }
+            if !seen_with_rows.insert(with_key) {
+                continue;
+            }
+        }
+        let aggregates = groups
+            .entry(key)
+            .or_insert_with(|| aggregate_template.clone());
+        for (aggregate_idx, find_idx) in aggregate_positions.iter().enumerate() {
+            aggregates[aggregate_idx].push(resolve_distributed_find_item(
+                &find_items[*find_idx],
+                binding,
+                pull_db,
+            )?)?;
+        }
+    }
+
+    let mut rows = BTreeSet::new();
+    for (key, aggregates) in groups {
+        let mut row = Vec::with_capacity(find_items.len());
+        let mut key_idx = 0;
+        let mut aggregate_idx = 0;
+        for item in find_items {
+            if item.is_aggregate() {
+                row.push(aggregates[aggregate_idx].result());
+                aggregate_idx += 1;
+            } else {
+                row.push(key[key_idx].clone());
+                key_idx += 1;
+            }
+        }
+        rows.insert(row);
+    }
+    Ok(rows.into_iter().collect())
+}
+
+fn entity_value_to_cid(value: &Value) -> Option<KotobaCid> {
+    match value {
+        Value::String(value) => KotobaCid::from_multibase(value)
+            .or_else(|| Some(KotobaCid::from_bytes(value.as_bytes()))),
+        Value::Tagged { tag, value } if tag.to_qualified() == "cid" => {
+            value.as_string().and_then(KotobaCid::from_multibase)
+        }
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DistributedQueryRule {
+    name: String,
+    args: Vec<Value>,
+    clauses: Vec<Value>,
+}
+
+fn distributed_rules_from_inputs(
+    in_forms: &Value,
+    inputs: &[Value],
+) -> Result<Vec<DistributedQueryRule>, DistributedCommitError> {
+    let forms = in_forms
+        .as_vector()
+        .ok_or_else(|| DatomicError::Query(":in must be a vector".into()))?;
+    let mut input_idx = 0;
+    for form in forms {
+        if crate::is_query_source_symbol(form) {
+            if inputs
+                .get(input_idx)
+                .is_some_and(crate::is_query_source_symbol)
+            {
+                input_idx += 1;
+            }
+            continue;
+        }
+        if matches!(form.as_symbol(), Some(symbol) if symbol.name == "%") {
+            let rules = inputs
+                .get(input_idx)
+                .ok_or_else(|| DatomicError::Query("not enough query inputs".into()))?;
+            return parse_distributed_query_rules(rules);
+        }
+        input_idx += 1;
+    }
+    Ok(Vec::new())
+}
+
+fn parse_distributed_query_rules(
+    value: &Value,
+) -> Result<Vec<DistributedQueryRule>, DistributedCommitError> {
+    let rules = match value {
+        Value::Vector(values) | Value::List(values) => values,
+        other => {
+            return Err(DatomicError::Query(format!(
+                "rules input must be a vector or list, got {}",
+                kotoba_edn::to_string(other)
+            ))
+            .into());
+        }
+    };
+    rules
+        .iter()
+        .map(|rule| {
+            let seq = rule.as_seq().ok_or_else(|| {
+                DatomicError::Query(format!(
+                    "rule must be a vector/list, got {}",
+                    kotoba_edn::to_string(rule)
+                ))
+            })?;
+            let Some((head, clauses)) = seq.split_first() else {
+                return Err(DatomicError::Query("rule cannot be empty".into()).into());
+            };
+            let head = head
+                .as_seq()
+                .ok_or_else(|| DatomicError::Query("rule head must be a list/vector".into()))?;
+            let (name, args) = distributed_rule_head(head)?;
+            Ok(DistributedQueryRule {
+                name,
+                args: args.to_vec(),
+                clauses: clauses.to_vec(),
+            })
+        })
+        .collect()
+}
+
+fn distributed_rule_head(head: &[Value]) -> Result<(String, &[Value]), DistributedCommitError> {
+    let Some((name, args)) = head.split_first() else {
+        return Err(DatomicError::Query("rule head cannot be empty".into()).into());
+    };
+    let name = name
+        .as_symbol()
+        .map(|symbol| symbol.to_qualified())
+        .ok_or_else(|| DatomicError::Query("rule head name must be a symbol".into()))?;
+    Ok((name, args))
+}
+
+fn distributed_rule_invocation_name<'a>(
+    seq: &[Value],
+    rules: &'a [DistributedQueryRule],
+) -> Option<&'a str> {
+    let name = seq.first()?.as_symbol()?.to_qualified();
+    rules
+        .iter()
+        .find(|rule| rule.name == name && rule.args.len() == seq.len().saturating_sub(1))
+        .map(|rule| rule.name.as_str())
+}
+
+fn query_join_vars(value: &Value) -> Result<Vec<String>, DistributedCommitError> {
+    let vars = value
+        .as_vector()
+        .ok_or_else(|| DatomicError::Query("not-join variables must be a vector".into()))?;
+    vars.iter()
+        .map(|value| {
+            variable_name(value).map(str::to_string).ok_or_else(|| {
+                DatomicError::Query(format!(
+                    "not-join variable must be a query variable, got {}",
+                    kotoba_edn::to_string(value)
+                ))
+                .into()
+            })
+        })
+        .collect()
+}
+
+fn project_query_binding(
+    binding: &BTreeMap<String, Value>,
+    vars: &[String],
+) -> Result<BTreeMap<String, Value>, DistributedCommitError> {
+    let mut out = BTreeMap::new();
+    for var in vars {
+        let Some(value) = binding.get(var) else {
+            return Err(DatomicError::Query(format!("unbound not-join variable {var}")).into());
+        };
+        out.insert(var.clone(), value.clone());
+    }
+    Ok(out)
+}
+
+fn merge_query_bindings(
+    left: &BTreeMap<String, Value>,
+    right: &BTreeMap<String, Value>,
+) -> Option<BTreeMap<String, Value>> {
+    let mut out = left.clone();
+    for (key, value) in right {
+        match out.get(key) {
+            Some(existing) if existing != value => return None,
+            Some(_) => {}
+            None => {
+                out.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    Some(out)
+}
+
+fn query_vec<'a>(
+    query: &'a BTreeMap<Value, Value>,
+    key: &str,
+) -> Result<&'a [Value], DistributedCommitError> {
+    query
+        .get(&query_key(key))
+        .map(query_value_vec)
+        .transpose()?
+        .ok_or_else(|| DatomicError::Query(format!("missing {key} vector")).into())
+}
+
+fn query_value_vec(value: &Value) -> Result<&[Value], DistributedCommitError> {
+    value
+        .as_vector()
+        .ok_or_else(|| DatomicError::Query("query value must be a vector".into()).into())
+}
+
+fn bind_query_inputs(
+    in_forms: &Value,
+    inputs: &[Value],
+) -> Result<Vec<BTreeMap<String, Value>>, DistributedCommitError> {
+    let forms = in_forms
+        .as_vector()
+        .ok_or_else(|| DatomicError::Query(":in must be a vector".into()))?;
+    let mut bindings = vec![BTreeMap::new()];
+    let mut input_idx = 0;
+    for form in forms {
+        if crate::is_query_source_symbol(form) {
+            if inputs
+                .get(input_idx)
+                .is_some_and(crate::is_query_source_symbol)
+            {
+                input_idx += 1;
+            }
+            continue;
+        }
+        if matches!(form.as_symbol(), Some(symbol) if symbol.name == "%") {
+            input_idx += 1;
+            continue;
+        }
+        if let Some(var) = collection_binding_var(form) {
+            let values = inputs
+                .get(input_idx)
+                .ok_or_else(|| DatomicError::Query("not enough query inputs".into()))?;
+            input_idx += 1;
+            let values = input_collection_values(values)?;
+            let mut expanded = Vec::new();
+            for binding in &bindings {
+                for value in &values {
+                    let mut next = binding.clone();
+                    next.insert(var.to_string(), value.clone());
+                    expanded.push(next);
+                }
+            }
+            bindings = expanded;
+            continue;
+        }
+        if let Some(terms) = relation_binding_terms(form) {
+            let value = inputs
+                .get(input_idx)
+                .ok_or_else(|| DatomicError::Query("not enough query inputs".into()))?;
+            input_idx += 1;
+            let tuples = input_relation_tuples(value, terms.len())?;
+            let mut expanded = Vec::new();
+            for binding in &bindings {
+                for tuple in &tuples {
+                    let mut next = binding.clone();
+                    let mut keep = true;
+                    for (term, value) in terms.iter().zip(tuple) {
+                        if !bind_term(term, value.clone(), &mut next) {
+                            keep = false;
+                            break;
+                        }
+                    }
+                    if keep {
+                        expanded.push(next);
+                    }
+                }
+            }
+            bindings = expanded;
+            continue;
+        }
+        if let Some(terms) = tuple_binding_terms(form) {
+            let value = inputs
+                .get(input_idx)
+                .ok_or_else(|| DatomicError::Query("not enough query inputs".into()))?;
+            input_idx += 1;
+            let tuple = input_tuple_values(value, terms.len())?;
+            for binding in bindings.iter_mut() {
+                for (term, value) in terms.iter().zip(&tuple) {
+                    if !bind_term(term, value.clone(), binding) {
+                        return Err(DatomicError::Query(format!(
+                            "tuple binding value conflicts with existing binding for {}",
+                            kotoba_edn::to_string(term)
+                        ))
+                        .into());
+                    }
+                }
+            }
+            continue;
+        }
+        let Some(var) = variable_name(form) else {
+            return Err(DatomicError::UnsupportedOperation(format!(
+                "distributed q_triples only supports scalar, tuple, relation, and collection :in variables, got {}",
+                kotoba_edn::to_string(form)
+            ))
+            .into());
+        };
+        let value = inputs
+            .get(input_idx)
+            .cloned()
+            .ok_or_else(|| DatomicError::Query("not enough query inputs".into()))?;
+        input_idx += 1;
+        for binding in bindings.iter_mut() {
+            binding.insert(var.to_string(), value.clone());
+        }
+    }
+    Ok(bindings)
+}
+
+fn relation_binding_terms(form: &Value) -> Option<&[Value]> {
+    let outer = form.as_seq()?;
+    if outer.len() == 1 {
+        let terms = outer[0].as_seq()?;
+        if terms.len() > 1 {
+            return Some(terms);
+        }
+    }
+    None
+}
+
+fn input_relation_tuples(
+    value: &Value,
+    width: usize,
+) -> Result<Vec<Vec<Value>>, DistributedCommitError> {
+    let rows = match value {
+        Value::Vector(values) | Value::List(values) => values.clone(),
+        Value::Set(values) => values.iter().cloned().collect(),
+        other => {
+            return Err(DatomicError::Query(format!(
+                "relation binding input must be a vector, list, or set, got {}",
+                kotoba_edn::to_string(other)
+            ))
+            .into());
+        }
+    };
+    rows.into_iter()
+        .map(|row| input_tuple_values(&row, width))
+        .collect()
+}
+
+fn tuple_binding_terms(form: &Value) -> Option<&[Value]> {
+    let terms = form.as_seq()?;
+    if terms.len() > 1
+        && !matches!(terms.last().and_then(Value::as_symbol), Some(symbol) if symbol.name == "...")
+        && !terms.iter().any(|term| term.as_seq().is_some())
+    {
+        return Some(terms);
+    }
+    None
+}
+
+fn input_tuple_values(value: &Value, width: usize) -> Result<Vec<Value>, DistributedCommitError> {
+    let tuple = value.as_seq().ok_or_else(|| {
+        DatomicError::Query(format!(
+            "tuple binding input must be a vector or list, got {}",
+            kotoba_edn::to_string(value)
+        ))
+    })?;
+    if tuple.len() != width {
+        return Err(DatomicError::Query(format!(
+            "tuple binding width {} does not match expected {width}",
+            tuple.len()
+        ))
+        .into());
+    }
+    Ok(tuple.to_vec())
+}
+
+fn collection_binding_var(form: &Value) -> Option<&str> {
+    let seq = form.as_seq()?;
+    if seq.len() == 2 && matches!(seq[1].as_symbol(), Some(symbol) if symbol.name == "...") {
+        variable_name(&seq[0])
+    } else {
+        None
+    }
+}
+
+fn input_collection_values(value: &Value) -> Result<Vec<Value>, DistributedCommitError> {
+    match value {
+        Value::Vector(values) | Value::List(values) => Ok(values.clone()),
+        Value::Set(values) => Ok(values.iter().cloned().collect()),
+        other => Err(DatomicError::Query(format!(
+            "collection binding input must be a vector, list, or set, got {}",
+            kotoba_edn::to_string(other)
+        ))
+        .into()),
+    }
+}
+
+fn query_key(key: &str) -> Value {
+    let key = key.trim_start_matches(':');
+    match key.split_once('/') {
+        Some((ns, name)) => Value::Keyword(Keyword::namespaced(ns, name)),
+        None => Value::Keyword(Keyword::bare(key)),
+    }
+}
+
+fn variable_name(value: &Value) -> Option<&str> {
+    value
+        .as_symbol()
+        .and_then(|s| s.name.strip_prefix('?').map(|_| s.name.as_str()))
+}
+
+fn cid_value(cid: &KotobaCid) -> Value {
+    Value::String(cid.to_multibase())
+}
+
+fn attr_value(attr: &str) -> Value {
+    if attr.starts_with(':') || (attr.contains('/') && !attr.contains("://")) {
+        Value::Keyword(Keyword::parse(attr.strip_prefix(':').unwrap_or(attr)))
+    } else {
+        Value::String(attr.to_string())
+    }
+}
+
+fn attr_matches(stored: &str, query: &str) -> bool {
+    stored == query
+        || stored.strip_prefix(':') == Some(query)
+        || query.strip_prefix(':') == Some(stored)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::EdnValue;
+    use ed25519_dalek::SigningKey;
+    use kotoba_ipfs::{InMemoryIpnsRegistry, SignedIpnsRegistry};
+    use kotoba_store::MemoryBlockStore;
+    use std::sync::Arc;
+
+    fn datom(e: &[u8], a: &str, v: &str, tx: &[u8]) -> Datom {
+        Datom::assert(
+            KotobaCid::from_bytes(e),
+            a.to_string(),
+            EdnValue::string(v),
+            KotobaCid::from_bytes(tx),
+        )
+    }
+
+    fn request(ipns_name: &str, graph: KotobaCid, datoms: Vec<Datom>) -> CommitDatomsRequest {
+        CommitDatomsRequest {
+            ipns_name: ipns_name.to_string(),
+            graph,
+            datoms,
+            expected_parent: None,
+            tx_cid: None,
+            author: "did:key:zWriter".to_string(),
+            seq: 1,
+            valid_until: "2026-05-29T00:00:00Z".to_string(),
+            ttl_secs: Some(60),
+            cacao_proof_cid: None,
+            ipns_controller_did: None,
+            ipns_signing_key: None,
+        }
+    }
+
+    #[test]
+    fn commit_datoms_writes_five_roots_and_ipns_head() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let req = request(
+            "k51-kotoba-db",
+            graph.clone(),
+            vec![datom(b"alice", "person/name", "Alice", b"tx1")],
+        );
+
+        let report = writer.commit_datoms(req).unwrap();
+        assert_eq!(report.datom_count, 1);
+        for name in [ROOT_EAVT, ROOT_AEVT, ROOT_AVET, ROOT_VAET, ROOT_TEA] {
+            let root = report.commit.index_roots.get(name).expect("root present");
+            assert!(store.has(root), "{name} root must be persisted");
+        }
+        assert!(store.has(&report.commit.cid));
+        let resolved = ipns.resolve(&IpnsName::new("k51-kotoba-db")).unwrap();
+        assert_eq!(resolved.value, report.commit.cid.to_multibase());
+    }
+
+    #[test]
+    fn stale_parent_is_rejected_before_new_head_publish() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let first = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph.clone(),
+                vec![datom(b"alice", "person/name", "Alice", b"tx1")],
+            ))
+            .unwrap();
+
+        let stale = writer.commit_datoms(request(
+            "k51-kotoba-db",
+            graph,
+            vec![datom(b"bob", "person/name", "Bob", b"tx2")],
+        ));
+        assert!(matches!(
+            stale.unwrap_err(),
+            DistributedCommitError::StaleParent { .. }
+        ));
+        let resolved = ipns.resolve(&IpnsName::new("k51-kotoba-db")).unwrap();
+        assert_eq!(resolved.value, first.commit.cid.to_multibase());
+    }
+
+    #[test]
+    fn matching_parent_advances_ipns_sequence() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let first = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph.clone(),
+                vec![datom(b"alice", "person/name", "Alice", b"tx1")],
+            ))
+            .unwrap();
+
+        let mut second_req = request(
+            "k51-kotoba-db",
+            graph,
+            vec![datom(b"bob", "person/name", "Bob", b"tx2")],
+        );
+        second_req.expected_parent = Some(first.commit.cid.clone());
+        second_req.seq = 2;
+        let second = writer.commit_datoms(second_req).unwrap();
+
+        assert_eq!(second.commit.prev, Some(first.commit.cid));
+        assert_eq!(second.ipns_record.sequence, 2);
+    }
+
+    #[test]
+    fn signed_ipns_registry_requires_signed_distributed_head_publish() {
+        let store = MemoryBlockStore::new();
+        let ipns = SignedIpnsRegistry::new(Arc::new(InMemoryIpnsRegistry::new()));
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+
+        let err = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![datom(b"alice", "person/name", "Alice", b"tx1")],
+            ))
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            DistributedCommitError::Ipns(IpnsRegistryError::MissingPublicKey)
+        ));
+    }
+
+    #[test]
+    fn signed_distributed_head_roundtrips_through_ipns_reader() {
+        let store = MemoryBlockStore::new();
+        let ipns = SignedIpnsRegistry::new(Arc::new(InMemoryIpnsRegistry::new()));
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let mut req = request(
+            "k51-kotoba-db",
+            graph.clone(),
+            vec![datom(b"alice", "person/name", "Alice", b"tx1")],
+        );
+        req.ipns_controller_did = Some("did:key:zWriter".to_string());
+        req.ipns_signing_key = Some(SigningKey::from_bytes(&[9; 32]));
+
+        let report = writer.commit_datoms(req).unwrap();
+
+        assert!(report.ipns_record.signature_verified());
+        assert_eq!(
+            report.ipns_record.controller_did.as_deref(),
+            Some("did:key:zWriter")
+        );
+        let reader = DistributedDatomReader::new(&store, &ipns);
+        let head = reader.resolve_head("k51-kotoba-db").unwrap().unwrap();
+        assert_eq!(head.cid, report.commit.cid);
+        assert_eq!(head.graph, graph);
+        let db = reader
+            .current_db_for_name("k51-kotoba-db")
+            .unwrap()
+            .unwrap();
+        assert_eq!(db.basis_t, Some(report.commit.tx_cid));
+        assert_eq!(
+            db.datoms()
+                .iter()
+                .find(|datom| datom.a == "person/name")
+                .map(|datom| &datom.v),
+            Some(&EdnValue::string("Alice"))
+        );
+    }
+
+    #[test]
+    fn reader_queries_distributed_head_as_of_transaction() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let first = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph.clone(),
+                vec![datom(b"alice", ":person/name", "Alice", b"tx1")],
+            ))
+            .unwrap();
+        let mut second_req = request(
+            "k51-kotoba-db",
+            graph,
+            vec![datom(b"bob", ":person/name", "Bob", b"tx2")],
+        );
+        second_req.expected_parent = Some(first.commit.cid.clone());
+        second_req.seq = 2;
+        let second = writer.commit_datoms(second_req).unwrap();
+        let query = kotoba_edn::parse(
+            r#"{:find [?name]
+                :where [[?e :person/name ?name]]}"#,
+        )
+        .unwrap();
+        let reader = DistributedDatomReader::new(&store, &ipns);
+
+        let current_rows = reader.q_triples(&second.commit.cid, &query).unwrap();
+        assert_eq!(
+            current_rows,
+            vec![
+                vec![EdnValue::String("Alice".into())],
+                vec![EdnValue::String("Bob".into())],
+            ]
+        );
+
+        let as_of_rows = reader
+            .q_triples_as_of_tx(&second.commit.cid, &first.commit.tx_cid, &query)
+            .unwrap();
+        assert_eq!(as_of_rows, vec![vec![EdnValue::String("Alice".into())]]);
+    }
+
+    #[test]
+    fn reader_q_triples_supports_string_iri_attribute_terms() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![
+                    datom(
+                        b"tx",
+                        "https://w3id.org/security#allowedAction",
+                        "vc:issue",
+                        b"tx1",
+                    ),
+                    datom(
+                        b"tx",
+                        "https://w3id.org/security#invocationTarget",
+                        "kotoba://graph/example",
+                        b"tx1",
+                    ),
+                ],
+            ))
+            .unwrap();
+        let query = kotoba_edn::parse(
+            r#"{:find [?action ?target]
+               :where [[?tx "https://w3id.org/security#allowedAction" ?action]
+                       [?tx "https://w3id.org/security#invocationTarget" ?target]]}"#,
+        )
+        .unwrap();
+
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &query)
+            .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![vec![
+                EdnValue::String("vc:issue".into()),
+                EdnValue::String("kotoba://graph/example".into())
+            ]]
+        );
+    }
+
+    #[test]
+    fn reader_q_triples_matches_legacy_namespaced_attrs_without_leading_colon() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![datom(b"message", "didcomm/thread", "thread-1", b"tx1")],
+            ))
+            .unwrap();
+        let query = kotoba_edn::parse(r#"{:find [?thread] :where [[?e :didcomm/thread ?thread]]}"#)
+            .unwrap();
+
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &query)
+            .unwrap();
+
+        assert_eq!(rows, vec![vec![EdnValue::String("thread-1".into())]]);
+    }
+
+    #[test]
+    fn reader_scans_current_datoms_by_distributed_index_components() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let first = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph.clone(),
+                vec![datom(b"alice", ":person/name", "Alice", b"tx1")],
+            ))
+            .unwrap();
+        let mut second_req = request(
+            "k51-kotoba-db",
+            graph,
+            vec![datom(b"bob", ":person/name", "Bob", b"tx2")],
+        );
+        second_req.expected_parent = Some(first.commit.cid.clone());
+        second_req.seq = 2;
+        let second = writer.commit_datoms(second_req).unwrap();
+        let reader = DistributedDatomReader::new(&store, &ipns);
+
+        let by_attr_value = reader
+            .current_for_index_components(
+                &second.commit.cid,
+                ROOT_AVET,
+                &[
+                    kotoba_edn::parse(":person/name").unwrap(),
+                    EdnValue::String("Bob".into()),
+                ],
+            )
+            .unwrap();
+        assert_eq!(by_attr_value.len(), 1);
+        assert_eq!(by_attr_value[0].e, KotobaCid::from_bytes(b"bob"));
+
+        let by_entity_attr = reader
+            .current_for_index_components(
+                &second.commit.cid,
+                ROOT_EAVT,
+                &[
+                    EdnValue::String(KotobaCid::from_bytes(b"alice").to_multibase()),
+                    kotoba_edn::parse(":person/name").unwrap(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(by_entity_attr.len(), 1);
+        assert_eq!(by_entity_attr[0].v, EdnValue::String("Alice".into()));
+    }
+
+    #[test]
+    fn reader_scans_vaet_only_for_ref_cid_values() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let alice = KotobaCid::from_bytes(b"alice");
+        let bob = KotobaCid::from_bytes(b"bob");
+        let tx = KotobaCid::from_bytes(b"tx1");
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![
+                    Datom::assert(
+                        alice.clone(),
+                        ":person/friend".into(),
+                        EdnValue::String(bob.to_multibase()),
+                        tx.clone(),
+                    ),
+                    Datom::assert(
+                        alice.clone(),
+                        ":person/name".into(),
+                        EdnValue::String("Alice".into()),
+                        tx.clone(),
+                    ),
+                ],
+            ))
+            .unwrap();
+        let reader = DistributedDatomReader::new(&store, &ipns);
+
+        let all_vaet = reader
+            .current_for_index_components(&report.commit.cid, ROOT_VAET, &[])
+            .unwrap();
+        assert_eq!(all_vaet.len(), 1);
+        assert_eq!(all_vaet[0].a, ":person/friend");
+
+        let by_ref_attr_entity_tx = reader
+            .current_for_index_components(
+                &report.commit.cid,
+                ROOT_VAET,
+                &[
+                    EdnValue::String(bob.to_multibase()),
+                    kotoba_edn::parse(":person/friend").unwrap(),
+                    EdnValue::String(alice.to_multibase()),
+                    EdnValue::String(tx.to_multibase()),
+                ],
+            )
+            .unwrap();
+        assert_eq!(by_ref_attr_entity_tx, all_vaet);
+
+        let non_ref_value = reader
+            .current_for_index_components(
+                &report.commit.cid,
+                ROOT_VAET,
+                &[EdnValue::String("Alice".into())],
+            )
+            .unwrap();
+        assert!(non_ref_value.is_empty());
+    }
+
+    #[test]
+    fn reader_queries_distributed_history_since_transaction() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let first = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph.clone(),
+                vec![datom(b"alice", ":person/name", "Alice", b"tx1")],
+            ))
+            .unwrap();
+        let mut second_req = request(
+            "k51-kotoba-db",
+            graph,
+            vec![datom(b"bob", ":person/name", "Bob", b"tx2")],
+        );
+        second_req.expected_parent = Some(first.commit.cid.clone());
+        second_req.seq = 2;
+        let second = writer.commit_datoms(second_req).unwrap();
+        let query = kotoba_edn::parse(
+            r#"{:find [?name]
+                :where [[?e :person/name ?name]]}"#,
+        )
+        .unwrap();
+
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples_since_tx(&second.commit.cid, &first.commit.tx_cid, &query)
+            .unwrap();
+        assert_eq!(rows, vec![vec![EdnValue::String("Bob".into())]]);
+    }
+
+    #[test]
+    fn reader_rebuilds_history_from_ipns_head_chain() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let first_datom = datom(b"alice", "person/name", "Alice", b"tx1");
+        let second_datom = datom(b"bob", "person/name", "Bob", b"tx2");
+        let first = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph.clone(),
+                vec![first_datom.clone()],
+            ))
+            .unwrap();
+
+        let mut second_req = request("k51-kotoba-db", graph, vec![second_datom.clone()]);
+        second_req.expected_parent = Some(first.commit.cid.clone());
+        second_req.seq = 2;
+        writer.commit_datoms(second_req).unwrap();
+
+        let reader = DistributedDatomReader::new(&store, &ipns);
+        let history = reader.history_for_name("k51-kotoba-db").unwrap();
+        assert_eq!(history, vec![first_datom, second_datom]);
+    }
+
+    #[test]
+    fn reader_logs_distributed_commits_as_transaction_entries() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let entity = KotobaCid::from_bytes(b"alice");
+        let tx1 = KotobaCid::from_bytes(b"tx1");
+        let tx2 = KotobaCid::from_bytes(b"tx2");
+        let asserted = Datom::assert(
+            entity.clone(),
+            "person/name".into(),
+            EdnValue::String("Alice".into()),
+            tx1.clone(),
+        );
+        let mut first_req = request("k51-kotoba-db", graph.clone(), vec![asserted.clone()]);
+        first_req.tx_cid = Some(tx1.clone());
+        let first = writer.commit_datoms(first_req).unwrap();
+
+        let retracted = Datom::retract(
+            entity,
+            "person/name".into(),
+            EdnValue::String("Alice".into()),
+            tx2.clone(),
+        );
+        let mut second_req = request("k51-kotoba-db", graph, vec![retracted.clone()]);
+        second_req.expected_parent = Some(first.commit.cid.clone());
+        second_req.tx_cid = Some(tx2.clone());
+        second_req.seq = 2;
+        let second = writer.commit_datoms(second_req).unwrap();
+
+        let reader = DistributedDatomReader::new(&store, &ipns);
+        let entries = reader.log_from_head(&second.commit.cid).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].tx, first.commit.tx_cid);
+        assert_eq!(entries[0].datoms, vec![asserted]);
+        assert_eq!(entries[1].tx, second.commit.tx_cid);
+        assert_eq!(entries[1].datoms, vec![retracted.clone()]);
+        assert!(entries[1].datoms.iter().any(|datom| !datom.added));
+
+        assert_eq!(reader.log_for_name("k51-kotoba-db").unwrap(), entries);
+        assert!(reader.log_for_name("k51-missing-db").unwrap().is_empty());
+    }
+
+    #[test]
+    fn reader_projects_distributed_history_db_with_retract_tombstones() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let entity = KotobaCid::from_bytes(b"alice");
+        let asserted = Datom::assert(
+            entity.clone(),
+            "person/name".into(),
+            EdnValue::String("Alice".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let first = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph.clone(),
+                vec![asserted.clone()],
+            ))
+            .unwrap();
+        let retracted = Datom::retract(
+            entity,
+            "person/name".into(),
+            EdnValue::String("Alice".into()),
+            KotobaCid::from_bytes(b"tx2"),
+        );
+        let mut second_req = request("k51-kotoba-db", graph, vec![retracted.clone()]);
+        second_req.expected_parent = Some(first.commit.cid.clone());
+        second_req.seq = 2;
+        let second = writer.commit_datoms(second_req).unwrap();
+
+        let reader = DistributedDatomReader::new(&store, &ipns);
+        let history_db = reader.history_db_from_head(&second.commit.cid).unwrap();
+        assert_eq!(history_db.basis_t, Some(second.commit.tx_cid.clone()));
+        assert_eq!(
+            history_db.history().datoms(),
+            &[asserted.clone(), retracted]
+        );
+        let history_rows = crate::q_history(
+            kotoba_edn::parse(
+                r#"{:find [?name ?added]
+                   :in [$history]
+                   :where [[$history ?e :person/name ?name ?tx ?added]]}"#,
+            )
+            .unwrap(),
+            &history_db.history(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            history_rows,
+            vec![
+                vec![EdnValue::String("Alice".into()), EdnValue::Bool(false)],
+                vec![EdnValue::String("Alice".into()), EdnValue::Bool(true)]
+            ]
+        );
+
+        let current_db = reader.db_from_head(&second.commit.cid).unwrap();
+        assert_eq!(current_db.datoms(), &[] as &[Datom]);
+
+        let as_of_db = reader
+            .history_db_as_of_tx(&second.commit.cid, &first.commit.tx_cid)
+            .unwrap();
+        assert_eq!(as_of_db.history().datoms(), &[asserted]);
+    }
+
+    #[test]
+    fn reader_scans_distributed_indexes_by_entity_attribute_and_value() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let alice_name = datom(b"alice", "person/name", "Alice", b"tx1");
+        let alice_role = datom(b"alice", "person/role", "admin", b"tx1");
+        let bob_name = datom(b"bob", "person/name", "Bob", b"tx1");
+
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![alice_name.clone(), alice_role.clone(), bob_name.clone()],
+            ))
+            .unwrap();
+
+        let reader = DistributedDatomReader::new(&store, &ipns);
+        let alice = KotobaCid::from_bytes(b"alice");
+        assert_eq!(
+            reader
+                .current_for_entity(&report.commit.cid, &alice)
+                .unwrap(),
+            vec![alice_name.clone(), alice_role.clone()]
+        );
+        assert_eq!(
+            reader
+                .current_for_entity_attribute(&report.commit.cid, &alice, "person/role")
+                .unwrap(),
+            vec![alice_role.clone()]
+        );
+        assert_eq!(
+            reader
+                .current_for_attribute(&report.commit.cid, "person/name")
+                .unwrap(),
+            vec![alice_name.clone(), bob_name.clone()]
+        );
+        assert_eq!(
+            reader
+                .current_for_attribute_value(
+                    &report.commit.cid,
+                    "person/role",
+                    &EdnValue::String("admin".into())
+                )
+                .unwrap(),
+            vec![alice_role.clone()]
+        );
+        assert_eq!(
+            reader
+                .current_for_lookup(
+                    &report.commit.cid,
+                    &DatomIndexLookup::EntityAttribute {
+                        entity: alice,
+                        attr: "person/name".into(),
+                    },
+                )
+                .unwrap(),
+            vec![alice_name]
+        );
+        assert_eq!(
+            reader
+                .current_for_lookup(
+                    &report.commit.cid,
+                    &DatomIndexLookup::AttributeValue {
+                        attr: "person/name".into(),
+                        value: EdnValue::String("Bob".into()),
+                    },
+                )
+                .unwrap(),
+            vec![bob_name]
+        );
+    }
+
+    #[test]
+    fn reader_evaluates_single_triple_via_planned_index() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let alice_name = Datom::assert(
+            KotobaCid::from_bytes(b"alice"),
+            ":person/name".into(),
+            EdnValue::String("Alice".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let bob_name = Datom::assert(
+            KotobaCid::from_bytes(b"bob"),
+            ":person/name".into(),
+            EdnValue::String("Bob".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![alice_name.clone(), bob_name.clone()],
+            ))
+            .unwrap();
+
+        let reader = DistributedDatomReader::new(&store, &ipns);
+        let triple = kotoba_edn::parse(r#"[?e :person/name "Bob"]"#).unwrap();
+        assert_eq!(
+            reader
+                .current_for_triple(&report.commit.cid, &triple, &BTreeMap::new())
+                .unwrap(),
+            vec![bob_name.clone()]
+        );
+
+        let mut binding = BTreeMap::new();
+        binding.insert("?e".into(), EdnValue::String(bob_name.e.to_multibase()));
+        let triple = kotoba_edn::parse(r#"[?e :person/name ?name]"#).unwrap();
+        assert_eq!(
+            reader
+                .current_for_triple(&report.commit.cid, &triple, &binding)
+                .unwrap(),
+            vec![bob_name]
+        );
+    }
+
+    #[test]
+    fn reader_resolves_lookup_ref_entity_position_via_distributed_index() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let alice_email = Datom::assert(
+            KotobaCid::from_bytes(b"alice"),
+            ":person/email".into(),
+            EdnValue::String("a@example.com".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let alice_name = Datom::assert(
+            KotobaCid::from_bytes(b"alice"),
+            ":person/name".into(),
+            EdnValue::String("Alice".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let bob_name = Datom::assert(
+            KotobaCid::from_bytes(b"bob"),
+            ":person/name".into(),
+            EdnValue::String("Bob".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![alice_email, alice_name.clone(), bob_name],
+            ))
+            .unwrap();
+
+        let reader = DistributedDatomReader::new(&store, &ipns);
+        let triple =
+            kotoba_edn::parse(r#"[[:person/email "a@example.com"] :person/name ?name]"#).unwrap();
+        assert_eq!(
+            reader
+                .current_for_triple(&report.commit.cid, &triple, &BTreeMap::new())
+                .unwrap(),
+            vec![alice_name.clone()]
+        );
+
+        let mut binding = BTreeMap::new();
+        binding.insert("?email".into(), EdnValue::String("a@example.com".into()));
+        let triple = kotoba_edn::parse(r#"[[:person/email ?email] :person/name ?name]"#).unwrap();
+        assert_eq!(
+            reader
+                .current_for_triple(&report.commit.cid, &triple, &binding)
+                .unwrap(),
+            vec![alice_name]
+        );
+    }
+
+    #[test]
+    fn reader_joins_multiple_triples_with_planned_distributed_indexes() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let alice_name = Datom::assert(
+            KotobaCid::from_bytes(b"alice"),
+            ":person/name".into(),
+            EdnValue::String("Alice".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let alice_role = Datom::assert(
+            KotobaCid::from_bytes(b"alice"),
+            ":person/role".into(),
+            EdnValue::Keyword(Keyword::parse("admin")),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let bob_name = Datom::assert(
+            KotobaCid::from_bytes(b"bob"),
+            ":person/name".into(),
+            EdnValue::String("Bob".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let bob_role = Datom::assert(
+            KotobaCid::from_bytes(b"bob"),
+            ":person/role".into(),
+            EdnValue::Keyword(Keyword::parse("guest")),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![alice_name, alice_role, bob_name, bob_role],
+            ))
+            .unwrap();
+
+        let reader = DistributedDatomReader::new(&store, &ipns);
+        let triples = vec![
+            kotoba_edn::parse(r#"[?e :person/name ?name]"#).unwrap(),
+            kotoba_edn::parse(r#"[?e :person/role :admin]"#).unwrap(),
+        ];
+        let bindings = reader
+            .bindings_for_triples(&report.commit.cid, &triples, vec![BTreeMap::new()])
+            .unwrap();
+
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(
+            bindings[0].get("?name"),
+            Some(&EdnValue::String("Alice".into()))
+        );
+        assert_eq!(
+            bindings[0].get("?e"),
+            Some(&EdnValue::String(
+                KotobaCid::from_bytes(b"alice").to_multibase()
+            ))
+        );
+    }
+
+    #[test]
+    fn reader_projects_triple_only_query_rows_from_distributed_indexes() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let alice_name = Datom::assert(
+            KotobaCid::from_bytes(b"alice"),
+            ":person/name".into(),
+            EdnValue::String("Alice".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let alice_role = Datom::assert(
+            KotobaCid::from_bytes(b"alice"),
+            ":person/role".into(),
+            EdnValue::Keyword(Keyword::parse("admin")),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let bob_name = Datom::assert(
+            KotobaCid::from_bytes(b"bob"),
+            ":person/name".into(),
+            EdnValue::String("Bob".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let bob_role = Datom::assert(
+            KotobaCid::from_bytes(b"bob"),
+            ":person/role".into(),
+            EdnValue::Keyword(Keyword::parse("guest")),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![alice_name, alice_role, bob_name, bob_role],
+            ))
+            .unwrap();
+
+        let query = kotoba_edn::parse(
+            r#"{:find [?name]
+                :where [[?e :person/name ?name]
+                        [?e :person/role :admin]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &query)
+            .unwrap();
+
+        assert_eq!(rows, vec![vec![EdnValue::String("Alice".into())]]);
+    }
+
+    #[test]
+    fn reader_projects_triple_only_query_with_scalar_inputs() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let alice_name = Datom::assert(
+            KotobaCid::from_bytes(b"alice"),
+            ":person/name".into(),
+            EdnValue::String("Alice".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let alice_role = Datom::assert(
+            KotobaCid::from_bytes(b"alice"),
+            ":person/role".into(),
+            EdnValue::Keyword(Keyword::parse("admin")),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let bob_name = Datom::assert(
+            KotobaCid::from_bytes(b"bob"),
+            ":person/name".into(),
+            EdnValue::String("Bob".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let bob_role = Datom::assert(
+            KotobaCid::from_bytes(b"bob"),
+            ":person/role".into(),
+            EdnValue::Keyword(Keyword::parse("guest")),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![alice_name, alice_role, bob_name, bob_role],
+            ))
+            .unwrap();
+
+        let query = kotoba_edn::parse(
+            r#"{:find [?name]
+                :in [$ ?role]
+                :where [[?e :person/name ?name]
+                        [?e :person/role ?role]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples_with_inputs(
+                &report.commit.cid,
+                &query,
+                &[EdnValue::Keyword(Keyword::parse("guest"))],
+            )
+            .unwrap();
+
+        assert_eq!(rows, vec![vec![EdnValue::String("Bob".into())]]);
+    }
+
+    #[test]
+    fn reader_projects_triple_only_query_with_collection_inputs() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let alice_name = Datom::assert(
+            KotobaCid::from_bytes(b"alice"),
+            ":person/name".into(),
+            EdnValue::String("Alice".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let alice_role = Datom::assert(
+            KotobaCid::from_bytes(b"alice"),
+            ":person/role".into(),
+            EdnValue::Keyword(Keyword::parse("admin")),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let bob_name = Datom::assert(
+            KotobaCid::from_bytes(b"bob"),
+            ":person/name".into(),
+            EdnValue::String("Bob".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let bob_role = Datom::assert(
+            KotobaCid::from_bytes(b"bob"),
+            ":person/role".into(),
+            EdnValue::Keyword(Keyword::parse("guest")),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let eve_name = Datom::assert(
+            KotobaCid::from_bytes(b"eve"),
+            ":person/name".into(),
+            EdnValue::String("Eve".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let eve_role = Datom::assert(
+            KotobaCid::from_bytes(b"eve"),
+            ":person/role".into(),
+            EdnValue::Keyword(Keyword::parse("auditor")),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![
+                    alice_name, alice_role, bob_name, bob_role, eve_name, eve_role,
+                ],
+            ))
+            .unwrap();
+
+        let query = kotoba_edn::parse(
+            r#"{:find [?name]
+                :in [$ [?role ...]]
+                :where [[?e :person/name ?name]
+                        [?e :person/role ?role]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples_with_inputs(
+                &report.commit.cid,
+                &query,
+                &[EdnValue::Vector(vec![
+                    EdnValue::Keyword(Keyword::parse("admin")),
+                    EdnValue::Keyword(Keyword::parse("auditor")),
+                ])],
+            )
+            .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![
+                vec![EdnValue::String("Alice".into())],
+                vec![EdnValue::String("Eve".into())]
+            ]
+        );
+
+        let named_source_query = kotoba_edn::parse(
+            r#"{:find [?name]
+                :in [$db [?role ...]]
+                :where [[?e :person/name ?name]
+                        [?e :person/role ?role]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples_with_inputs(
+                &report.commit.cid,
+                &named_source_query,
+                &[EdnValue::Vector(vec![EdnValue::Keyword(Keyword::parse(
+                    "admin",
+                ))])],
+            )
+            .unwrap();
+        assert_eq!(rows, vec![vec![EdnValue::String("Alice".into())]]);
+
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples_with_inputs(
+                &report.commit.cid,
+                &named_source_query,
+                &[
+                    EdnValue::Symbol(kotoba_edn::Symbol::bare("$db")),
+                    EdnValue::Vector(vec![EdnValue::Keyword(Keyword::parse("auditor"))]),
+                ],
+            )
+            .unwrap();
+        assert_eq!(rows, vec![vec![EdnValue::String("Eve".into())]]);
+
+        let source_pattern_query = kotoba_edn::parse(
+            r#"{:find [?name]
+                :in [$db]
+                :where [[$db ?e :person/role :admin]
+                        [$db ?e :person/name ?name]
+                        [(missing? $db ?e :person/ban-reason)]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples_with_inputs(&report.commit.cid, &source_pattern_query, &[])
+            .unwrap();
+        assert_eq!(rows, vec![vec![EdnValue::String("Alice".into())]]);
+
+        let source_added_pattern_query = kotoba_edn::parse(
+            r#"{:find [?name ?tx ?added]
+                :in [$db]
+                :where [[$db ?e :person/role :admin ?tx ?added]
+                        [$db ?e :person/name ?name ?tx ?added]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples_with_inputs(&report.commit.cid, &source_added_pattern_query, &[])
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                EdnValue::String("Alice".into()),
+                cid_value(&KotobaCid::from_bytes(b"tx1")),
+                EdnValue::Bool(true)
+            ]]
+        );
+
+        let vector_query = kotoba_edn::parse(
+            r#"[:find ?name
+                :in $db [?role ...]
+                :where [$db ?e :person/name ?name]
+                       [$db ?e :person/role ?role]]"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples_with_inputs(
+                &report.commit.cid,
+                &vector_query,
+                &[EdnValue::Vector(vec![
+                    EdnValue::Keyword(Keyword::parse("admin")),
+                    EdnValue::Keyword(Keyword::parse("auditor")),
+                ])],
+            )
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                vec![EdnValue::String("Alice".into())],
+                vec![EdnValue::String("Eve".into())]
+            ]
+        );
+
+        let tx_pattern_query = kotoba_edn::parse(
+            r#"{:find [?name ?tx]
+                :where [[?e :person/role :admin ?tx]
+                        [?e :person/name ?name ?tx]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples_with_inputs(&report.commit.cid, &tx_pattern_query, &[])
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                EdnValue::String("Alice".into()),
+                cid_value(&KotobaCid::from_bytes(b"tx1"))
+            ]]
+        );
+
+        let source_tx_pattern_query = kotoba_edn::parse(
+            r#"[:find ?name ?tx
+                :in $db
+                :where [$db ?e :person/name ?name ?tx]
+                       [$db ?e :person/role :auditor ?tx]]"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples_with_inputs(&report.commit.cid, &source_tx_pattern_query, &[])
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                EdnValue::String("Eve".into()),
+                cid_value(&KotobaCid::from_bytes(b"tx1"))
+            ]]
+        );
+
+        let named_source_function_query = kotoba_edn::parse(
+            r#"{:find [?name ?role ?found]
+                :in [$db]
+                :where [[$db ?e :person/name ?name]
+                        [(get-else $db ?e :person/role :guest) ?role]
+                        [(= ?role :admin)]
+                        [(get-some $db ?e :person/email :person/role) ?found]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples_with_inputs(&report.commit.cid, &named_source_function_query, &[])
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                EdnValue::String("Alice".into()),
+                EdnValue::Keyword(Keyword::parse("admin")),
+                EdnValue::Vector(vec![
+                    EdnValue::Keyword(Keyword::parse("person/role")),
+                    EdnValue::Keyword(Keyword::parse("admin"))
+                ])
+            ]]
+        );
+    }
+
+    #[test]
+    fn reader_projects_triple_only_query_with_tuple_inputs() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let alice_name = Datom::assert(
+            KotobaCid::from_bytes(b"alice"),
+            ":person/name".into(),
+            EdnValue::String("Alice".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let alice_role = Datom::assert(
+            KotobaCid::from_bytes(b"alice"),
+            ":person/role".into(),
+            EdnValue::Keyword(Keyword::parse("admin")),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let alice_status = Datom::assert(
+            KotobaCid::from_bytes(b"alice"),
+            ":person/status".into(),
+            EdnValue::Keyword(Keyword::parse("active")),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let bob_name = Datom::assert(
+            KotobaCid::from_bytes(b"bob"),
+            ":person/name".into(),
+            EdnValue::String("Bob".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let bob_role = Datom::assert(
+            KotobaCid::from_bytes(b"bob"),
+            ":person/role".into(),
+            EdnValue::Keyword(Keyword::parse("admin")),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let bob_status = Datom::assert(
+            KotobaCid::from_bytes(b"bob"),
+            ":person/status".into(),
+            EdnValue::Keyword(Keyword::parse("suspended")),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![
+                    alice_name,
+                    alice_role,
+                    alice_status,
+                    bob_name,
+                    bob_role,
+                    bob_status,
+                ],
+            ))
+            .unwrap();
+
+        let query = kotoba_edn::parse(
+            r#"{:find [?name]
+                :in [$ [?role ?status]]
+                :where [[?e :person/name ?name]
+                        [?e :person/role ?role]
+                        [?e :person/status ?status]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples_with_inputs(
+                &report.commit.cid,
+                &query,
+                &[EdnValue::Vector(vec![
+                    EdnValue::Keyword(Keyword::parse("admin")),
+                    EdnValue::Keyword(Keyword::parse("active")),
+                ])],
+            )
+            .unwrap();
+
+        assert_eq!(rows, vec![vec![EdnValue::String("Alice".into())]]);
+    }
+
+    #[test]
+    fn reader_projects_triple_only_query_with_relation_inputs() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let alice_name = Datom::assert(
+            KotobaCid::from_bytes(b"alice"),
+            ":person/name".into(),
+            EdnValue::String("Alice".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let alice_role = Datom::assert(
+            KotobaCid::from_bytes(b"alice"),
+            ":person/role".into(),
+            EdnValue::Keyword(Keyword::parse("admin")),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let alice_status = Datom::assert(
+            KotobaCid::from_bytes(b"alice"),
+            ":person/status".into(),
+            EdnValue::Keyword(Keyword::parse("active")),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let bob_name = Datom::assert(
+            KotobaCid::from_bytes(b"bob"),
+            ":person/name".into(),
+            EdnValue::String("Bob".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let bob_role = Datom::assert(
+            KotobaCid::from_bytes(b"bob"),
+            ":person/role".into(),
+            EdnValue::Keyword(Keyword::parse("guest")),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let bob_status = Datom::assert(
+            KotobaCid::from_bytes(b"bob"),
+            ":person/status".into(),
+            EdnValue::Keyword(Keyword::parse("active")),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let eve_name = Datom::assert(
+            KotobaCid::from_bytes(b"eve"),
+            ":person/name".into(),
+            EdnValue::String("Eve".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let eve_role = Datom::assert(
+            KotobaCid::from_bytes(b"eve"),
+            ":person/role".into(),
+            EdnValue::Keyword(Keyword::parse("auditor")),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let eve_status = Datom::assert(
+            KotobaCid::from_bytes(b"eve"),
+            ":person/status".into(),
+            EdnValue::Keyword(Keyword::parse("active")),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![
+                    alice_name,
+                    alice_role,
+                    alice_status,
+                    bob_name,
+                    bob_role,
+                    bob_status,
+                    eve_name,
+                    eve_role,
+                    eve_status,
+                ],
+            ))
+            .unwrap();
+
+        let query = kotoba_edn::parse(
+            r#"{:find [?name]
+                :in [$ [[?role ?status]]]
+                :where [[?e :person/name ?name]
+                        [?e :person/role ?role]
+                        [?e :person/status ?status]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples_with_inputs(
+                &report.commit.cid,
+                &query,
+                &[EdnValue::Vector(vec![
+                    EdnValue::Vector(vec![
+                        EdnValue::Keyword(Keyword::parse("admin")),
+                        EdnValue::Keyword(Keyword::parse("active")),
+                    ]),
+                    EdnValue::Vector(vec![
+                        EdnValue::Keyword(Keyword::parse("auditor")),
+                        EdnValue::Keyword(Keyword::parse("active")),
+                    ]),
+                ])],
+            )
+            .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![
+                vec![EdnValue::String("Alice".into())],
+                vec![EdnValue::String("Eve".into())]
+            ]
+        );
+    }
+
+    #[test]
+    fn reader_projects_pull_find_expression_from_distributed_head() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let alice_name = Datom::assert(
+            KotobaCid::from_bytes(b"alice"),
+            ":person/name".into(),
+            EdnValue::String("Alice".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let alice_friend = Datom::assert(
+            KotobaCid::from_bytes(b"alice"),
+            ":person/friend".into(),
+            EdnValue::String("bob".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let bob_name = Datom::assert(
+            KotobaCid::from_bytes(b"bob"),
+            ":person/name".into(),
+            EdnValue::String("Bob".into()),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let bob_role = Datom::assert(
+            KotobaCid::from_bytes(b"bob"),
+            ":person/role".into(),
+            EdnValue::Keyword(Keyword::parse("guest")),
+            KotobaCid::from_bytes(b"tx1"),
+        );
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![alice_name, alice_friend, bob_name, bob_role],
+            ))
+            .unwrap();
+
+        let query = kotoba_edn::parse(
+            r#"{:find [(pull ?e [:person/name {:person/friend [:person/name :person/role]}])]
+                :where [[?e :person/name "Alice"]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &query)
+            .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        let pulled = rows[0][0].as_map().unwrap();
+        assert_eq!(
+            pulled.get(&EdnValue::Keyword(Keyword::namespaced("person", "name"))),
+            Some(&EdnValue::String("Alice".into()))
+        );
+        let friend = pulled
+            .get(&EdnValue::Keyword(Keyword::namespaced("person", "friend")))
+            .and_then(EdnValue::as_map)
+            .unwrap();
+        assert_eq!(
+            friend.get(&EdnValue::Keyword(Keyword::namespaced("person", "name"))),
+            Some(&EdnValue::String("Bob".into()))
+        );
+        assert_eq!(
+            friend.get(&EdnValue::Keyword(Keyword::namespaced("person", "role"))),
+            Some(&EdnValue::Keyword(Keyword::parse("guest")))
+        );
+    }
+
+    #[test]
+    fn reader_filters_distributed_query_with_not_and_not_join() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"alice"),
+                        ":person/name".into(),
+                        EdnValue::String("Alice".into()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"alice"),
+                        ":person/role".into(),
+                        EdnValue::Keyword(Keyword::parse("role/admin")),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"bob"),
+                        ":person/name".into(),
+                        EdnValue::String("Bob".into()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"bob"),
+                        ":person/role".into(),
+                        EdnValue::Keyword(Keyword::parse("guest")),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"bob"),
+                        ":person/ban-reason".into(),
+                        EdnValue::String("spam".into()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"eve"),
+                        ":person/name".into(),
+                        EdnValue::String("Eve".into()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"eve"),
+                        ":person/role".into(),
+                        EdnValue::Keyword(Keyword::parse("guest")),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                ],
+            ))
+            .unwrap();
+
+        let not_query = kotoba_edn::parse(
+            r#"{:find [?name]
+                :where [[?e :person/role :guest]
+                        (not [?e :person/ban-reason ?reason])
+                        [?e :person/name ?name]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &not_query)
+            .unwrap();
+        assert_eq!(rows, vec![vec![EdnValue::String("Eve".into())]]);
+
+        let not_join_query = kotoba_edn::parse(
+            r#"{:find [?name]
+                :where [[?e :person/role :guest]
+                        (not-join [?e] [?e :person/ban-reason ?reason])
+                        [?e :person/name ?name]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &not_join_query)
+            .unwrap();
+        assert_eq!(rows, vec![vec![EdnValue::String("Eve".into())]]);
+    }
+
+    #[test]
+    fn reader_branches_distributed_query_with_or_and_or_join() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"alice"),
+                        ":person/name".into(),
+                        EdnValue::String("Alice".into()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"alice"),
+                        ":person/role".into(),
+                        EdnValue::Keyword(Keyword::parse("admin")),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"bob"),
+                        ":person/name".into(),
+                        EdnValue::String("Bob".into()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"bob"),
+                        ":person/role".into(),
+                        EdnValue::Keyword(Keyword::parse("guest")),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"eve"),
+                        ":person/name".into(),
+                        EdnValue::String("Eve".into()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"eve"),
+                        ":person/role".into(),
+                        EdnValue::Keyword(Keyword::parse("auditor")),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"eve"),
+                        ":person/verified".into(),
+                        EdnValue::Bool(true),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                ],
+            ))
+            .unwrap();
+
+        let or_query = kotoba_edn::parse(
+            r#"{:find [?name]
+                :where [[?e :person/name ?name]
+                        (or [?e :person/role :admin]
+                            (and [?e :person/role :auditor]
+                                 [?e :person/verified true]))]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &or_query)
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                vec![EdnValue::String("Alice".into())],
+                vec![EdnValue::String("Eve".into())],
+            ]
+        );
+
+        let or_join_query = kotoba_edn::parse(
+            r#"{:find [?name]
+                :where [[?e :person/name ?name]
+                        (or-join [?e]
+                          [?e :person/role :admin]
+                          (and [?e :person/role :auditor]
+                               [?e :person/verified true]))]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &or_join_query)
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                vec![EdnValue::String("Alice".into())],
+                vec![EdnValue::String("Eve".into())],
+            ]
+        );
+    }
+
+    #[test]
+    fn reader_evaluates_distributed_predicates_and_function_bindings() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"alice"),
+                        ":person/name".into(),
+                        EdnValue::String("Alice".into()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"alice"),
+                        ":person/role".into(),
+                        EdnValue::Keyword(Keyword::parse("role/admin")),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"alice"),
+                        ":person/age".into(),
+                        EdnValue::Integer(36),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"alice"),
+                        ":atproto/uri".into(),
+                        EdnValue::String("at://did:plc:alice/app.bsky.feed.post/r1".into()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"vc1"),
+                        ":credential/claims".into(),
+                        EdnValue::Map(BTreeMap::from([
+                            (
+                                EdnValue::Keyword(Keyword::parse("claim/type")),
+                                EdnValue::String("VerifiableCredential".into()),
+                            ),
+                            (
+                                EdnValue::Keyword(Keyword::parse("claim/status")),
+                                EdnValue::String("active".into()),
+                            ),
+                            (
+                                EdnValue::Keyword(Keyword::parse("claim/verified")),
+                                EdnValue::Bool(true),
+                            ),
+                            (
+                                EdnValue::Keyword(Keyword::parse("claim/score")),
+                                EdnValue::Integer(42),
+                            ),
+                            (
+                                EdnValue::Keyword(Keyword::parse("claim/tags")),
+                                EdnValue::Vector(vec![
+                                    EdnValue::Keyword(Keyword::parse("vc")),
+                                    EdnValue::Keyword(Keyword::parse("ipld")),
+                                ]),
+                            ),
+                            (
+                                EdnValue::Keyword(Keyword::parse("claim/subject")),
+                                EdnValue::Map(BTreeMap::from([
+                                    (
+                                        EdnValue::Keyword(Keyword::parse("subject/id")),
+                                        EdnValue::String("did:example:alice".into()),
+                                    ),
+                                    (
+                                        EdnValue::Keyword(Keyword::parse("subject/roles")),
+                                        EdnValue::Vector(vec![
+                                            EdnValue::Keyword(Keyword::parse("issuer")),
+                                            EdnValue::Keyword(Keyword::parse("holder")),
+                                        ]),
+                                    ),
+                                ])),
+                            ),
+                        ])),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"bob"),
+                        ":person/name".into(),
+                        EdnValue::String("Bob".into()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"bob"),
+                        ":person/role".into(),
+                        EdnValue::Keyword(Keyword::parse("guest")),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"bob"),
+                        ":person/age".into(),
+                        EdnValue::Integer(21),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"bob"),
+                        ":person/ban-reason".into(),
+                        EdnValue::String("spam".into()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                ],
+            ))
+            .unwrap();
+
+        let query = kotoba_edn::parse(
+            r#"{:find [?name ?copy ?role ?found ?roleName ?roleNamespace ?resource ?rebuilt ?uri ?collection ?rkey ?splitCollection ?splitRkey ?nthCollection ?lastRkey ?joinedUri ?normalizedUri ?scheme ?trimmedScheme]
+                :where [[(ground :guest) ?guest]
+                        [?e :person/name ?name]
+                        [?e :person/age ?age]
+                        [(>= ?age 30)]
+                        [(not= ?name "Bob")]
+                        [(missing? $ ?e :person/ban-reason)]
+                        [(identity ?name) ?copy]
+                        [(get-else $ ?e :person/role ?guest) ?role]
+                        [(contains? #{:role/admin :role/moderator} ?role)]
+                        [(get-some $ ?e :person/email :person/role) ?found]
+                        [(name ?role) ?roleName]
+                        [(namespace ?role) ?roleNamespace]
+                        [(str "kotoba://role/" ?roleName) ?resource]
+                        [(keyword "role" ?roleName) ?rebuilt]
+                        [?e :atproto/uri ?uri]
+                        [(clojure.string/starts-with? ?uri "at://")]
+                        [(clojure.string/includes? ?uri "/app.bsky.feed.post/")]
+                        [(str/ends-with? ?uri "/r1")]
+                        [(subs ?uri 19 37) ?collection]
+                        [(clojure.core/subs ?uri 38) ?rkey]
+                        [(clojure.string/split ?uri "/") ?uriParts]
+                        [(get ?uriParts 3) ?splitCollection]
+                        [(get ?uriParts 4) ?splitRkey]
+                        [(nth ?uriParts 3) ?nthCollection]
+                        [(last ?uriParts) ?lastRkey]
+                        [(clojure.string/join "/" ?uriParts) ?joinedUri]
+                        [(= ?joinedUri ?uri)]
+                        [(clojure.string/replace ?uri "at://" "at-uri://") ?normalizedUri]
+                        [(upper-case "at") ?upperScheme]
+                        [(clojure.string/lower-case ?upperScheme) ?scheme]
+                        [(str/trim "  at  ") ?trimmedScheme]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &query)
+            .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![vec![
+                EdnValue::String("Alice".into()),
+                EdnValue::String("Alice".into()),
+                EdnValue::Keyword(Keyword::parse("role/admin")),
+                EdnValue::Vector(vec![
+                    EdnValue::Keyword(Keyword::parse("person/role")),
+                    EdnValue::Keyword(Keyword::parse("role/admin")),
+                ]),
+                EdnValue::String("admin".into()),
+                EdnValue::String("role".into()),
+                EdnValue::String("kotoba://role/admin".into()),
+                EdnValue::Keyword(Keyword::parse("role/admin")),
+                EdnValue::String("at://did:plc:alice/app.bsky.feed.post/r1".into()),
+                EdnValue::String("app.bsky.feed.post".into()),
+                EdnValue::String("r1".into()),
+                EdnValue::String("app.bsky.feed.post".into()),
+                EdnValue::String("r1".into()),
+                EdnValue::String("app.bsky.feed.post".into()),
+                EdnValue::String("r1".into()),
+                EdnValue::String("at://did:plc:alice/app.bsky.feed.post/r1".into()),
+                EdnValue::String("at-uri://did:plc:alice/app.bsky.feed.post/r1".into()),
+                EdnValue::String("at".into()),
+                EdnValue::String("at".into()),
+            ]]
+        );
+
+        let window_query = kotoba_edn::parse(
+            r#"{:find [?name]
+                :where [[?e :person/name ?name]]
+                :order-by [[?name :desc]]
+                :offset 1
+                :limit 1}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &window_query)
+            .unwrap();
+        assert_eq!(rows, vec![vec![EdnValue::String("Alice".into())]]);
+
+        let get_query = kotoba_edn::parse(
+            r#"{:find [?type ?status ?verified ?score ?nextScore ?adjustedScore ?doubleScore ?quotScore ?remScore ?modScore ?negativeMod ?minScore ?maxScore ?tagCount ?subject ?generatedStatus ?summaryCount ?fallback ?nonEmptyTags]
+                :where [[?e :credential/claims ?claims]
+                        [(map? ?claims)]
+                        [(coll? ?claims)]
+                        [(get ?claims :claim/type) ?type]
+                        [(string? ?type)]
+                        [(get ?claims :claim/status) ?status]
+                        [(get ?claims :claim/verified) ?verified]
+                        [(boolean? ?verified)]
+                        [(true? ?verified)]
+                        [(get ?claims :claim/score) ?score]
+                        [(integer? ?score)]
+                        [(number? ?score)]
+                        [(update ?claims :claim/score + 1) ?updatedScoreClaims]
+                        [(get ?updatedScoreClaims :claim/score) ?updatedScore]
+                        [(= ?updatedScore 43)]
+                        [(+ ?score 1) ?nextScore]
+                        [(- ?nextScore 2) ?adjustedScore]
+                        [(* ?score 2) ?doubleScore]
+                        [(quot ?score 2) ?quotScore]
+                        [(rem ?score 2) ?remScore]
+                        [(zero? ?remScore)]
+                        [(mod ?score 5) ?modScore]
+                        [(mod -3 5) ?negativeMod]
+                        [(neg? -1)]
+                        [(min ?score 50) ?minScore]
+                        [(max ?score 10) ?maxScore]
+                        [(pos? ?score)]
+                        [(< 0 ?score ?nextScore 100)]
+                        [(<= 42 ?score ?score ?nextScore)]
+                        [(> 100 ?doubleScore ?score 0)]
+                        [(>= 84 ?doubleScore ?score 42)]
+                        [(= ?score 42 42)]
+                        [(not= ?score ?nextScore ?score)]
+                        [(get ?claims :claim/tags) ?tags]
+                        [(vector? ?tags)]
+                        [(seq ?tags) ?seqTags]
+                        [(some? ?seqTags)]
+                        [(first ?tags) ?seqFirstTag]
+                        [(= ?seqFirstTag :vc)]
+                        [(rest ?tags) ?restTags]
+                        [(= ?restTags [:ipld])]
+                        [(next ?tags) ?nextTags]
+                        [(= ?nextTags [:ipld])]
+                        [(next [:vc]) ?singleNext]
+                        [(nil? ?singleNext)]
+                        [(conj ?tags :dag-cbor) ?extendedTags]
+                        [(= ?extendedTags [:vc :ipld :dag-cbor])]
+                        [(cons :json-ld ?tags) ?wireTags]
+                        [(= ?wireTags [:json-ld :vc :ipld])]
+                        [(hash-map :claim/type ?type) ?baseSummary]
+                        [(vector :claim/status ?status) ?statusPair]
+                        [(conj ?baseSummary ?statusPair) ?summary2]
+                        [(= ?summary2 {:claim/type "VerifiableCredential" :claim/status "active"})]
+                        [(assoc ?summary2 :claim/format :dag-cbor) ?summary3]
+                        [(= ?summary3 {:claim/type "VerifiableCredential" :claim/status "active" :claim/format :dag-cbor})]
+                        [(dissoc ?summary3 :claim/format) ?summary4]
+                        [(= ?summary4 ?summary2)]
+                        [(assoc ?tags 2 :dag-cbor) ?assocTags]
+                        [(= ?assocTags [:vc :ipld :dag-cbor])]
+                        [(take 1 ?assocTags) ?firstAssocTag]
+                        [(= ?firstAssocTag [:vc])]
+                        [(drop 1 ?assocTags) ?tailAssocTags]
+                        [(= ?tailAssocTags [:ipld :dag-cbor])]
+                        [(subvec ?assocTags 1 3) ?middleAssocTags]
+                        [(= ?middleAssocTags [:ipld :dag-cbor])]
+                        [(reverse ?assocTags) ?reverseAssocTags]
+                        [(= ?reverseAssocTags [:dag-cbor :ipld :vc])]
+                        [(sort ?reverseAssocTags) ?sortedAssocTags]
+                        [(= ?sortedAssocTags [:dag-cbor :ipld :vc])]
+                        [(count ?tags) ?tagCount]
+                        [(not-empty ?tags) ?nonEmptyTags]
+                        [(some? ?nonEmptyTags)]
+                        [(vector) ?emptyTags]
+                        [(empty? ?emptyTags)]
+                        [(vector :vc :ipld) ?expectedTags]
+                        [(= ?tags ?expectedTags)]
+                        [(get-in ?claims [:claim/subject :subject/id]) ?subject]
+                        [(string? ?subject)]
+                        [(assoc-in ?claims [:claim/subject :subject/verified] true) ?verifiedClaims]
+                        [(get-in ?verifiedClaims [:claim/subject :subject/verified]) ?subjectVerified]
+                        [(true? ?subjectVerified)]
+                        [(update-in ?claims [:claim/subject :subject/roles] conj :verifier) ?roleUpdatedClaims]
+                        [(get-in ?roleUpdatedClaims [:claim/subject :subject/roles]) ?updatedRoles]
+                        [(= ?updatedRoles [:issuer :holder :verifier])]
+                        [(hash-map :claim/type ?type :claim/status ?status) ?summary]
+                        [(map? ?summary)]
+                        [(get ?summary :claim/status) ?generatedStatus]
+                        [(count ?summary) ?summaryCount]
+                        [(get ?claims :claim/missing) ?missing]
+                        [(nil? ?missing)]
+                        [(get ?claims :claim/missing "fallback") ?fallback]
+                        [(some? ?fallback)]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &get_query)
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                EdnValue::String("VerifiableCredential".into()),
+                EdnValue::String("active".into()),
+                EdnValue::Bool(true),
+                EdnValue::Integer(42),
+                EdnValue::Integer(43),
+                EdnValue::Integer(41),
+                EdnValue::Integer(84),
+                EdnValue::Integer(21),
+                EdnValue::Integer(0),
+                EdnValue::Integer(2),
+                EdnValue::Integer(2),
+                EdnValue::Integer(42),
+                EdnValue::Integer(42),
+                EdnValue::Integer(2),
+                EdnValue::String("did:example:alice".into()),
+                EdnValue::String("active".into()),
+                EdnValue::Integer(2),
+                EdnValue::String("fallback".into()),
+                EdnValue::Vector(vec![
+                    EdnValue::Keyword(Keyword::parse("vc")),
+                    EdnValue::Keyword(Keyword::parse("ipld")),
+                ]),
+            ]]
+        );
+
+        let tuple_query = kotoba_edn::parse(
+            r#"{:find [?pair ?name2 ?role2]
+                :where [[?e :person/name ?name]
+                        [?e :person/role ?role]
+                        [(tuple ?name ?role) ?pair]
+                        [(untuple ?pair) [?name2 ?role2]]
+                        [(= ?name2 "Alice")]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &tuple_query)
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                EdnValue::Vector(vec![
+                    EdnValue::String("Alice".into()),
+                    EdnValue::Keyword(Keyword::parse("role/admin")),
+                ]),
+                EdnValue::String("Alice".into()),
+                EdnValue::Keyword(Keyword::parse("role/admin")),
+            ]]
+        );
+    }
+
+    #[test]
+    fn reader_aggregates_distributed_query_rows() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"alice"),
+                        ":person/role".into(),
+                        EdnValue::Keyword(Keyword::parse("admin")),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"alice"),
+                        ":person/score".into(),
+                        EdnValue::Integer(10),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"bob"),
+                        ":person/role".into(),
+                        EdnValue::Keyword(Keyword::parse("guest")),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"bob"),
+                        ":person/score".into(),
+                        EdnValue::Integer(3),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"eve"),
+                        ":person/role".into(),
+                        EdnValue::Keyword(Keyword::parse("guest")),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"eve"),
+                        ":person/score".into(),
+                        EdnValue::Integer(8),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                ],
+            ))
+            .unwrap();
+
+        let grouped = kotoba_edn::parse(
+            r#"{:find [?role (count ?e) (sum ?score) (min ?score) (max ?score) (avg ?score)]
+                :where [[?e :person/role ?role]
+                        [?e :person/score ?score]]
+                :order-by [[(count ?e) :desc] [?role :asc]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &grouped)
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    EdnValue::Keyword(Keyword::parse("guest")),
+                    EdnValue::Integer(2),
+                    EdnValue::Integer(11),
+                    EdnValue::Integer(3),
+                    EdnValue::Integer(8),
+                    EdnValue::float(5.5),
+                ],
+                vec![
+                    EdnValue::Keyword(Keyword::parse("admin")),
+                    EdnValue::Integer(1),
+                    EdnValue::Integer(10),
+                    EdnValue::Integer(10),
+                    EdnValue::Integer(10),
+                    EdnValue::float(10.0),
+                ],
+            ]
+        );
+
+        let distinct = kotoba_edn::parse(
+            r#"{:find [(count ?role) (count-distinct ?role)]
+                :where [[?e :person/role ?role]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &distinct)
+            .unwrap();
+        assert_eq!(rows, vec![vec![EdnValue::Integer(3), EdnValue::Integer(2)]]);
+
+        let with_entity = kotoba_edn::parse(
+            r#"{:find [?role (count ?score)]
+                :with [?e]
+                :where [[?e :person/role ?role]
+                        [?e :person/score ?score]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &with_entity)
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    EdnValue::Keyword(Keyword::parse("admin")),
+                    EdnValue::Integer(1),
+                ],
+                vec![
+                    EdnValue::Keyword(Keyword::parse("guest")),
+                    EdnValue::Integer(2),
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn reader_evaluates_distributed_rule_inputs() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"alice"),
+                        ":person/name".into(),
+                        EdnValue::String("Alice".into()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"alice"),
+                        ":person/role".into(),
+                        EdnValue::Keyword(Keyword::parse("admin")),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"bob"),
+                        ":person/name".into(),
+                        EdnValue::String("Bob".into()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"bob"),
+                        ":person/role".into(),
+                        EdnValue::Keyword(Keyword::parse("guest")),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"eve"),
+                        ":person/name".into(),
+                        EdnValue::String("Eve".into()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"eve"),
+                        ":person/role".into(),
+                        EdnValue::Keyword(Keyword::parse("auditor")),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"eve"),
+                        ":person/verified".into(),
+                        EdnValue::Bool(true),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                ],
+            ))
+            .unwrap();
+
+        let query = kotoba_edn::parse(
+            r#"{:find [?name]
+                :in [$ %]
+                :where [(eligible ?e)
+                        [?e :person/name ?name]]}"#,
+        )
+        .unwrap();
+        let rules = kotoba_edn::parse(
+            r#"[
+              [(eligible ?e) [?e :person/role :admin]]
+              [(eligible ?e) [?e :person/role :auditor] [?e :person/verified true]]
+            ]"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples_with_inputs(&report.commit.cid, &query, &[rules])
+            .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![
+                vec![EdnValue::String("Alice".into())],
+                vec![EdnValue::String("Eve".into())],
+            ]
+        );
+    }
+
+    #[test]
+    fn reader_evaluates_recursive_distributed_rule_inputs() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"alice"),
+                        ":person/parent".into(),
+                        EdnValue::String(KotobaCid::from_bytes(b"bob").to_multibase()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"bob"),
+                        ":person/parent".into(),
+                        EdnValue::String(KotobaCid::from_bytes(b"carol").to_multibase()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"carol"),
+                        ":person/parent".into(),
+                        EdnValue::String(KotobaCid::from_bytes(b"dana").to_multibase()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"dana"),
+                        ":person/name".into(),
+                        EdnValue::String("Dana".into()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                ],
+            ))
+            .unwrap();
+
+        let query = kotoba_edn::parse(
+            r#"{:find [?name]
+                :in [$ %]
+                :where [(ancestor ?e ?ancestor)
+                        [?ancestor :person/name ?name]]}"#,
+        )
+        .unwrap();
+        let rules = kotoba_edn::parse(
+            r#"[
+              [(ancestor ?e ?ancestor) [?e :person/parent ?ancestor]]
+              [(ancestor ?e ?ancestor)
+               [?e :person/parent ?parent]
+               (ancestor ?parent ?ancestor)]
+            ]"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples_with_inputs(&report.commit.cid, &query, &[rules])
+            .unwrap();
+
+        assert_eq!(rows, vec![vec![EdnValue::String("Dana".into())]]);
+    }
+
+    #[test]
+    fn reader_accepts_distributed_find_collection_scalar_and_tuple_specs() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"alice"),
+                        ":person/name".into(),
+                        EdnValue::String("Alice".into()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"alice"),
+                        ":person/role".into(),
+                        EdnValue::Keyword(Keyword::parse("admin")),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"bob"),
+                        ":person/name".into(),
+                        EdnValue::String("Bob".into()),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"bob"),
+                        ":person/role".into(),
+                        EdnValue::Keyword(Keyword::parse("guest")),
+                        KotobaCid::from_bytes(b"tx1"),
+                    ),
+                ],
+            ))
+            .unwrap();
+
+        let collection_query = kotoba_edn::parse(
+            r#"{:find [?name ...]
+                :where [[?e :person/name ?name]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &collection_query)
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                vec![EdnValue::String("Alice".into())],
+                vec![EdnValue::String("Bob".into())],
+            ]
+        );
+
+        let tuple_query = kotoba_edn::parse(
+            r#"{:find [[?name ?role]]
+                :where [[?e :person/name ?name]
+                        [?e :person/role ?role]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &tuple_query)
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    EdnValue::String("Alice".into()),
+                    EdnValue::Keyword(Keyword::parse("admin")),
+                ],
+                vec![
+                    EdnValue::String("Bob".into()),
+                    EdnValue::Keyword(Keyword::parse("guest")),
+                ],
+            ]
+        );
+
+        let scalar_query = kotoba_edn::parse(
+            r#"{:find [?name .]
+                :where [[?e :person/role :admin]
+                        [?e :person/name ?name]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &scalar_query)
+            .unwrap();
+        assert_eq!(rows, vec![vec![EdnValue::String("Alice".into())]]);
+    }
+}

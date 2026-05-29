@@ -1,5 +1,5 @@
-use libp2p::{gossipsub, identify, kad, ping, request_response, swarm::NetworkBehaviour};
 use crate::bitswap::BitswapCodec;
+use libp2p::{gossipsub, identify, kad, ping, request_response, swarm::NetworkBehaviour};
 
 /// Combined NetworkBehaviour for KOTOBA nodes.
 ///
@@ -9,8 +9,8 @@ use crate::bitswap::BitswapCodec;
 #[derive(NetworkBehaviour)]
 pub struct KotobaBehaviour {
     pub gossipsub: gossipsub::Behaviour,
-    pub kademlia:  kad::Behaviour<kad::store::MemoryStore>,
-    pub identify:  identify::Behaviour,
-    pub ping:      ping::Behaviour,
-    pub bitswap:   request_response::Behaviour<BitswapCodec>,
+    pub kademlia: kad::Behaviour<kad::store::MemoryStore>,
+    pub identify: identify::Behaviour,
+    pub ping: ping::Behaviour,
+    pub bitswap: request_response::Behaviour<BitswapCodec>,
 }

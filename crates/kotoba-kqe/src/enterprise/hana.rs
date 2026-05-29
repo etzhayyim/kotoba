@@ -14,20 +14,21 @@
 
 use sqlparser::dialect::GenericDialect;
 
-use crate::schema::SchemaMap;
 use super::{
-    CompiledEnterpriseQuery, EnterpriseDialect, EnterpriseFeature,
-    sql_base::SchemaBasedSqlCompiler,
+    sql_base::SchemaBasedSqlCompiler, CompiledEnterpriseQuery, EnterpriseDialect, EnterpriseFeature,
 };
+use crate::schema::SchemaMap;
 
 pub struct HanaDialect;
 
 impl EnterpriseDialect for HanaDialect {
-    fn dialect_name(&self) -> &'static str { "hana" }
+    fn dialect_name(&self) -> &'static str {
+        "hana"
+    }
 
     fn compile(
         &self,
-        query:  &str,
+        query: &str,
         schema: &SchemaMap,
         output: &str,
     ) -> anyhow::Result<CompiledEnterpriseQuery> {
@@ -43,15 +44,15 @@ impl EnterpriseDialect for HanaDialect {
 
         let (prepped, pp_extra) = preprocess_hana(query);
 
-        let (program, mut pp) = SchemaBasedSqlCompiler::compile(
-            &prepped,
-            &GenericDialect {},
-            schema,
-            output,
-        )?;
+        let (program, mut pp) =
+            SchemaBasedSqlCompiler::compile(&prepped, &GenericDialect {}, schema, output)?;
 
-        if pp.limit.is_none() { pp.limit = pp_extra.limit; }
-        if pp.offset.is_none() { pp.offset = pp_extra.offset; }
+        if pp.limit.is_none() {
+            pp.limit = pp_extra.limit;
+        }
+        if pp.offset.is_none() {
+            pp.offset = pp_extra.offset;
+        }
 
         Ok(CompiledEnterpriseQuery {
             program,
@@ -97,7 +98,9 @@ fn preprocess_hana(sql: &str) -> (String, HanaExtra) {
     while let Some(start) = s.find("/*") {
         if let Some(end) = s[start..].find("*/") {
             s.replace_range(start..start + end + 2, " ");
-        } else { break; }
+        } else {
+            break;
+        }
     }
 
     (s, extra)
@@ -105,7 +108,7 @@ fn preprocess_hana(sql: &str) -> (String, HanaExtra) {
 
 #[derive(Default)]
 struct HanaExtra {
-    limit:  Option<usize>,
+    limit: Option<usize>,
     offset: Option<usize>,
 }
 
@@ -115,39 +118,54 @@ struct HanaExtra {
 mod tests {
     use super::*;
     use crate::schema::{AttrDef, SchemaMap, TableSchema};
-    use crate::{delta::Delta, quad::{Quad, QuadObject}};
+    use crate::{
+        datom::{Datom, Value},
+        delta::Delta,
+    };
     use kotoba_core::cid::KotobaCid;
 
-    fn cid(s: &str) -> KotobaCid { KotobaCid::from_bytes(s.as_bytes()) }
+    fn cid(s: &str) -> KotobaCid {
+        KotobaCid::from_bytes(s.as_bytes())
+    }
     fn fact(pred: &str, s: &str, o: &str) -> Delta {
-        Delta::assert(Quad {
-            graph: cid("g"), subject: cid(s), predicate: pred.to_string(),
-            object: QuadObject::Cid(cid(o)),
-        })
+        Delta::assert_datom(Datom::assert(
+            cid(s),
+            pred.to_string(),
+            Value::Cid(cid(o)),
+            cid("g"),
+        ))
     }
     fn has(d: &[Delta], pred: &str, s: &str, o: &str) -> bool {
-        d.iter().any(|x| x.quad.predicate == pred
-            && x.quad.subject == cid(s)
-            && matches!(&x.quad.object, QuadObject::Cid(c) if *c == cid(o)))
+        d.iter().any(|x| {
+            x.attribute() == pred
+                && x.entity() == &cid(s)
+                && matches!(x.value(), Value::Cid(c) if *c == cid(o))
+        })
     }
 
     #[test]
     fn hana_standard_select() {
         let mut schema = SchemaMap::new();
-        schema.add("sales", TableSchema::new("id")
-            .with_attr(AttrDef::scalar("region", "sales"))
-            .with_attr(AttrDef::numeric("revenue", "sales")));
+        schema.add(
+            "sales",
+            TableSchema::new("id")
+                .with_attr(AttrDef::scalar("region", "sales"))
+                .with_attr(AttrDef::numeric("revenue", "sales")),
+        );
 
-        let result = HanaDialect.compile(
-            "SELECT s.id, s.revenue FROM sales s WHERE s.region = 'APAC'",
-            &schema, "apac_rev",
-        ).unwrap();
+        let result = HanaDialect
+            .compile(
+                "SELECT s.id, s.revenue FROM sales s WHERE s.region = 'APAC'",
+                &schema,
+                "apac_rev",
+            )
+            .unwrap();
 
         let input = vec![
             fact("sales/revenue", "s1", "500"),
-            fact("sales/region",  "s1", "APAC"),
+            fact("sales/region", "s1", "APAC"),
             fact("sales/revenue", "s2", "300"),
-            fact("sales/region",  "s2", "EMEA"),
+            fact("sales/region", "s2", "EMEA"),
         ];
         let derived = result.program.evaluate_delta(&input);
         assert!(has(&derived, "apac_rev", "s1", "500"));
@@ -161,7 +179,8 @@ mod tests {
         // but the feature should be detected before the parse attempt
         let result = HanaDialect.compile(
             "SELECT s.id, s.name FROM sales s SERIES_GENERATE_INTEGER(1, 10)",
-            &schema, "out",
+            &schema,
+            "out",
         );
         // parse error expected for non-standard SERIES_GENERATE syntax
         // but feature detection happens before parse, so we just check the path

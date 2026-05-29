@@ -16,7 +16,7 @@ const SINGLE_THRESHOLD: usize = 128 * 1024; // 128 KB
 pub const FIXED_CHUNK_BYTES: usize = 512 * 1024; // 512 KB
 
 /// CDC target: average ~256 KB, min 128 KB, max 1 MB.
-const CDC_AVG_BITS: u32  = 18;  // 2^18 = 256 KB avg boundary probability
+const CDC_AVG_BITS: u32 = 18; // 2^18 = 256 KB avg boundary probability
 const CDC_MIN_BYTES: usize = 128 * 1024;
 const CDC_MAX_BYTES: usize = 1024 * 1024;
 
@@ -62,12 +62,15 @@ pub fn strategy_for(mime: &str, size: usize) -> ChunkStrategy {
             || m == "application/x-lz4"
             || m == "image/jpeg"
             || m == "image/png"
-            || m == "image/webp" => ChunkStrategy::FixedLen(FIXED_CHUNK_BYTES),
+            || m == "image/webp" =>
+        {
+            ChunkStrategy::FixedLen(FIXED_CHUNK_BYTES)
+        }
 
         // CBOR / dag-cbor → split on top-level CBOR item boundaries
-        "application/vnd.ipld.dag-cbor"
-        | "application/cbor"
-        | "application/x-cbor" => ChunkStrategy::CodecAware,
+        "application/vnd.ipld.dag-cbor" | "application/cbor" | "application/x-cbor" => {
+            ChunkStrategy::CodecAware
+        }
 
         // Everything else (text, JSON, HTML, code, …) → CDC
         _ => ChunkStrategy::ContentDefined,
@@ -143,7 +146,7 @@ fn cbor_chunks(data: &[u8]) -> Vec<Bytes> {
 fn cbor_item_len(data: &[u8], pos: usize) -> Option<usize> {
     let &first = data.get(pos)?;
     let major = first >> 5;
-    let info  = first & 0x1f;
+    let info = first & 0x1f;
 
     // Decode the "additional info" (argument) and its size in bytes.
     let (arg, arg_bytes): (u64, usize) = match info {
@@ -163,18 +166,21 @@ fn cbor_item_len(data: &[u8], pos: usize) -> Option<usize> {
             (u64::from_be_bytes(b.try_into().ok()?), 8)
         }
         31 => (0, 0), // indefinite-length marker
-        _  => return None,
+        _ => return None,
     };
     let header = 1 + arg_bytes;
 
     let total = match major {
-        0 | 1 | 7 => header,                              // uint, nint, simple/float
-        2 | 3 => {                                         // bstr, tstr
+        0 | 1 | 7 => header, // uint, nint, simple/float
+        2 | 3 => {
+            // bstr, tstr
             if info == 31 {
                 // indefinite-length: scan for 0xff break
                 let mut p = pos + header;
                 loop {
-                    if *data.get(p)? == 0xff { break p - pos + 2; }
+                    if *data.get(p)? == 0xff {
+                        break p - pos + 2;
+                    }
                     let chunk_len = cbor_item_len(data, p)?;
                     p += chunk_len;
                 }
@@ -187,11 +193,20 @@ fn cbor_item_len(data: &[u8], pos: usize) -> Option<usize> {
             if info == 31 {
                 let mut p = pos + header;
                 let mut n = 0u64;
-                while *data.get(p)? != 0xff { let l = cbor_item_len(data, p)?; p += l; n += 1; if n > 1_000_000 { return None; } }
+                while *data.get(p)? != 0xff {
+                    let l = cbor_item_len(data, p)?;
+                    p += l;
+                    n += 1;
+                    if n > 1_000_000 {
+                        return None;
+                    }
+                }
                 p - pos + 1
             } else {
                 let mut p = pos + header;
-                for _ in 0..arg { p += cbor_item_len(data, p)?; }
+                for _ in 0..arg {
+                    p += cbor_item_len(data, p)?;
+                }
                 p - pos
             }
         }
@@ -200,11 +215,20 @@ fn cbor_item_len(data: &[u8], pos: usize) -> Option<usize> {
             if info == 31 {
                 let mut p = pos + header;
                 let mut n = 0u64;
-                while *data.get(p)? != 0xff { let l = cbor_item_len(data, p)?; p += l; n += 1; if n > 2_000_000 { return None; } }
+                while *data.get(p)? != 0xff {
+                    let l = cbor_item_len(data, p)?;
+                    p += l;
+                    n += 1;
+                    if n > 2_000_000 {
+                        return None;
+                    }
+                }
                 p - pos + 1
             } else {
                 let mut p = pos + header;
-                for _ in 0..arg * 2 { p += cbor_item_len(data, p)?; }
+                for _ in 0..arg * 2 {
+                    p += cbor_item_len(data, p)?;
+                }
                 p - pos
             }
         }
@@ -247,11 +271,18 @@ mod tests {
         // 2 MB of pseudo-random-ish bytes to exercise CDC boundaries
         let mut data = Vec::with_capacity(2 * 1024 * 1024);
         let mut v: u8 = 0;
-        for _ in 0..data.capacity() { v = v.wrapping_mul(6).wrapping_add(1); data.push(v); }
+        for _ in 0..data.capacity() {
+            v = v.wrapping_mul(6).wrapping_add(1);
+            data.push(v);
+        }
         let strat = strategy_for("text/plain", data.len());
         assert_eq!(strat, ChunkStrategy::ContentDefined);
         let chunks = split(&data, &strat);
-        assert!(chunks.len() > 1, "expected multiple CDC chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() > 1,
+            "expected multiple CDC chunks, got {}",
+            chunks.len()
+        );
         let total: usize = chunks.iter().map(|c| c.len()).sum();
         assert_eq!(total, data.len());
     }
@@ -264,7 +295,12 @@ mod tests {
         ciborium::into_writer(&99u64, &mut buf).unwrap();
         ciborium::into_writer(&255u64, &mut buf).unwrap();
         // Repeat to exceed SINGLE_THRESHOLD
-        let repeated: Vec<u8> = buf.iter().cycle().take(SINGLE_THRESHOLD + buf.len()).cloned().collect();
+        let repeated: Vec<u8> = buf
+            .iter()
+            .cycle()
+            .take(SINGLE_THRESHOLD + buf.len())
+            .cloned()
+            .collect();
         let strat = strategy_for("application/cbor", repeated.len());
         assert_eq!(strat, ChunkStrategy::CodecAware);
         let chunks = split(&repeated, &strat);
@@ -276,13 +312,34 @@ mod tests {
     #[test]
     fn strategy_dispatch() {
         let big = 1_000_000;
-        assert_eq!(strategy_for("video/mp4",  big), ChunkStrategy::FixedLen(FIXED_CHUNK_BYTES));
-        assert_eq!(strategy_for("audio/mpeg", big), ChunkStrategy::FixedLen(FIXED_CHUNK_BYTES));
-        assert_eq!(strategy_for("image/jpeg", big), ChunkStrategy::FixedLen(FIXED_CHUNK_BYTES));
-        assert_eq!(strategy_for("text/plain", big), ChunkStrategy::ContentDefined);
-        assert_eq!(strategy_for("application/json", big), ChunkStrategy::ContentDefined);
-        assert_eq!(strategy_for("application/cbor", big), ChunkStrategy::CodecAware);
-        assert_eq!(strategy_for("application/vnd.ipld.dag-cbor", big), ChunkStrategy::CodecAware);
+        assert_eq!(
+            strategy_for("video/mp4", big),
+            ChunkStrategy::FixedLen(FIXED_CHUNK_BYTES)
+        );
+        assert_eq!(
+            strategy_for("audio/mpeg", big),
+            ChunkStrategy::FixedLen(FIXED_CHUNK_BYTES)
+        );
+        assert_eq!(
+            strategy_for("image/jpeg", big),
+            ChunkStrategy::FixedLen(FIXED_CHUNK_BYTES)
+        );
+        assert_eq!(
+            strategy_for("text/plain", big),
+            ChunkStrategy::ContentDefined
+        );
+        assert_eq!(
+            strategy_for("application/json", big),
+            ChunkStrategy::ContentDefined
+        );
+        assert_eq!(
+            strategy_for("application/cbor", big),
+            ChunkStrategy::CodecAware
+        );
+        assert_eq!(
+            strategy_for("application/vnd.ipld.dag-cbor", big),
+            ChunkStrategy::CodecAware
+        );
     }
 
     #[test]

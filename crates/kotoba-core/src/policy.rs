@@ -22,8 +22,14 @@ pub enum DataPolicy {
 }
 
 impl DataPolicy {
-    #[inline] pub fn is_open(&self) -> bool { matches!(self, DataPolicy::Open) }
-    #[inline] pub fn is_encrypted(&self) -> bool { !self.is_open() }
+    #[inline]
+    pub fn is_open(&self) -> bool {
+        matches!(self, DataPolicy::Open)
+    }
+    #[inline]
+    pub fn is_encrypted(&self) -> bool {
+        !self.is_open()
+    }
 }
 
 #[cfg(test)]
@@ -41,7 +47,10 @@ mod tests {
     fn encrypted_policy_is_encrypted() {
         let cid = KotobaCid::from_bytes(b"ct");
         let pol = KotobaCid::from_bytes(b"policy");
-        let p   = DataPolicy::Encrypted { ct_cid: cid, policy_cid: pol };
+        let p = DataPolicy::Encrypted {
+            ct_cid: cid,
+            policy_cid: pol,
+        };
         assert!(p.is_encrypted());
         assert!(!p.is_open());
     }
@@ -63,9 +72,12 @@ mod tests {
 
     #[test]
     fn cbor_roundtrip_encrypted() {
-        let ct  = KotobaCid::from_bytes(b"ct-data");
+        let ct = KotobaCid::from_bytes(b"ct-data");
         let pol = KotobaCid::from_bytes(b"policy-data");
-        let p   = DataPolicy::Encrypted { ct_cid: ct.clone(), policy_cid: pol.clone() };
+        let p = DataPolicy::Encrypted {
+            ct_cid: ct.clone(),
+            policy_cid: pol.clone(),
+        };
         let mut buf = Vec::new();
         ciborium::into_writer(&p, &mut buf).unwrap();
         let back: DataPolicy = ciborium::from_reader(buf.as_slice()).unwrap();
@@ -81,29 +93,41 @@ mod tests {
 
     #[test]
     fn encrypted_policy_clone_equals_original() {
-        let ct  = KotobaCid::from_bytes(b"ct");
+        let ct = KotobaCid::from_bytes(b"ct");
         let pol = KotobaCid::from_bytes(b"pol");
-        let p   = DataPolicy::Encrypted { ct_cid: ct, policy_cid: pol };
-        let q   = p.clone();
+        let p = DataPolicy::Encrypted {
+            ct_cid: ct,
+            policy_cid: pol,
+        };
+        let q = p.clone();
         assert_eq!(p, q);
     }
 
     #[test]
     fn encrypted_different_policy_cid_not_equal() {
-        let ct   = KotobaCid::from_bytes(b"ct");
+        let ct = KotobaCid::from_bytes(b"ct");
         let pol1 = KotobaCid::from_bytes(b"pol1");
         let pol2 = KotobaCid::from_bytes(b"pol2");
-        let p1   = DataPolicy::Encrypted { ct_cid: ct.clone(), policy_cid: pol1 };
-        let p2   = DataPolicy::Encrypted { ct_cid: ct,         policy_cid: pol2 };
+        let p1 = DataPolicy::Encrypted {
+            ct_cid: ct.clone(),
+            policy_cid: pol1,
+        };
+        let p2 = DataPolicy::Encrypted {
+            ct_cid: ct,
+            policy_cid: pol2,
+        };
         assert_ne!(p1, p2, "different policy_cid must not be equal");
     }
 
     #[test]
     fn open_and_encrypted_not_equal() {
         let p_open = DataPolicy::Open;
-        let ct     = KotobaCid::from_bytes(b"ct");
-        let pol    = KotobaCid::from_bytes(b"pol");
-        let p_enc  = DataPolicy::Encrypted { ct_cid: ct, policy_cid: pol };
+        let ct = KotobaCid::from_bytes(b"ct");
+        let pol = KotobaCid::from_bytes(b"pol");
+        let p_enc = DataPolicy::Encrypted {
+            ct_cid: ct,
+            policy_cid: pol,
+        };
         assert_ne!(p_open, p_enc);
     }
 
@@ -116,10 +140,16 @@ mod tests {
 
     #[test]
     fn encrypted_debug_contains_encrypted() {
-        let ct  = KotobaCid::from_bytes(b"ct");
+        let ct = KotobaCid::from_bytes(b"ct");
         let pol = KotobaCid::from_bytes(b"pol");
-        let p   = DataPolicy::Encrypted { ct_cid: ct, policy_cid: pol };
-        let s   = format!("{:?}", p);
-        assert!(s.contains("Encrypted"), "Debug for Encrypted variant should say 'Encrypted': {s}");
+        let p = DataPolicy::Encrypted {
+            ct_cid: ct,
+            policy_cid: pol,
+        };
+        let s = format!("{:?}", p);
+        assert!(
+            s.contains("Encrypted"),
+            "Debug for Encrypted variant should say 'Encrypted': {s}"
+        );
     }
 }

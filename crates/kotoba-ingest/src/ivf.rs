@@ -12,7 +12,8 @@
 //!   cc/ivf/n            — Integer(member_count)
 
 use kotoba_core::cid::KotobaCid;
-use kotoba_kqe::quad::{Quad, QuadObject};
+use kotoba_kqe::datom::{Datom, Value};
+use kotoba_kqe::quad::{LegacyQuad as Quad, LegacyQuadObject as QuadObject};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -26,9 +27,13 @@ fn l2_sq(a: &[f32], b: &[f32]) -> f32 {
 /// Cosine similarity.  Returns 0.0 if either vector is zero-norm.
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let na:  f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let nb:  f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na * nb) }
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na * nb)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -37,8 +42,8 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 
 #[derive(Debug, Clone)]
 pub struct IvfIndex {
-    k:        usize,
-    dim:      usize,
+    k: usize,
+    dim: usize,
     centroids: Vec<Vec<f32>>,
     model_id: String,
 }
@@ -48,8 +53,12 @@ impl IvfIndex {
     // Accessors
     // -----------------------------------------------------------------------
 
-    pub fn k(&self) -> usize   { self.k }
-    pub fn dim(&self) -> usize { self.dim }
+    pub fn k(&self) -> usize {
+        self.k
+    }
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
 
     // -----------------------------------------------------------------------
     // Build
@@ -62,13 +71,13 @@ impl IvfIndex {
     /// * `max_iter` — Lloyd iteration limit
     pub fn build(
         embeddings: &[(KotobaCid, Vec<f32>)],
-        k:          usize,
-        model_id:   &str,
-        max_iter:   usize,
+        k: usize,
+        model_id: &str,
+        max_iter: usize,
     ) -> Self {
         assert!(!embeddings.is_empty(), "embeddings must not be empty");
-        let n   = embeddings.len();
-        let k   = k.min(n);
+        let n = embeddings.len();
+        let k = k.min(n);
         let dim = embeddings[0].1.len();
 
         // --- farthest-first centroid initialisation ---
@@ -80,8 +89,14 @@ impl IvfIndex {
             // Pick the point with the largest minimum distance to existing centroids.
             let next = (0..n)
                 .max_by(|&i, &j| {
-                    let di = centroids.iter().map(|c| l2_sq(&embeddings[i].1, c)).fold(f32::INFINITY, f32::min);
-                    let dj = centroids.iter().map(|c| l2_sq(&embeddings[j].1, c)).fold(f32::INFINITY, f32::min);
+                    let di = centroids
+                        .iter()
+                        .map(|c| l2_sq(&embeddings[i].1, c))
+                        .fold(f32::INFINITY, f32::min);
+                    let dj = centroids
+                        .iter()
+                        .map(|c| l2_sq(&embeddings[j].1, c))
+                        .fold(f32::INFINITY, f32::min);
                     di.partial_cmp(&dj).unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .unwrap_or(0);
@@ -100,11 +115,13 @@ impl IvfIndex {
                     changed = true;
                 }
             }
-            if !changed { break; }
+            if !changed {
+                break;
+            }
 
             // Update step: recompute each centroid as the mean of its members.
-            let mut sums: Vec<Vec<f32>>  = vec![vec![0.0f32; dim]; k];
-            let mut counts: Vec<usize>   = vec![0usize; k];
+            let mut sums: Vec<Vec<f32>> = vec![vec![0.0f32; dim]; k];
+            let mut counts: Vec<usize> = vec![0usize; k];
             for (i, (_, v)) in embeddings.iter().enumerate() {
                 let ci = assignments[i];
                 counts[ci] += 1;
@@ -124,7 +141,12 @@ impl IvfIndex {
             }
         }
 
-        Self { k, dim, centroids, model_id: model_id.to_string() }
+        Self {
+            k,
+            dim,
+            centroids,
+            model_id: model_id.to_string(),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -152,7 +174,8 @@ impl IvfIndex {
     /// Return the indices of the `nprobe` nearest centroids, sorted by distance (closest first).
     pub fn nearest_centroids(&self, query: &[f32], nprobe: usize) -> Vec<usize> {
         let nprobe = nprobe.min(self.k);
-        let mut dists: Vec<(usize, f32)> = self.centroids
+        let mut dists: Vec<(usize, f32)> = self
+            .centroids
             .iter()
             .enumerate()
             .map(|(i, c)| (i, l2_sq(query, c)))
@@ -169,10 +192,10 @@ impl IvfIndex {
     /// by score descending.
     pub fn search(
         &self,
-        query:      &[f32],
+        query: &[f32],
         candidates: &[(usize, &[f32])],
-        nprobe:     usize,
-        top_k:      usize,
+        nprobe: usize,
+        top_k: usize,
     ) -> Vec<(f32, usize)> {
         let probe_set: std::collections::HashSet<usize> =
             self.nearest_centroids(query, nprobe).into_iter().collect();
@@ -200,40 +223,38 @@ impl IvfIndex {
     pub fn to_quads(&self, graph_cid: &KotobaCid, member_counts: &[usize]) -> Vec<Quad> {
         let mut quads = Vec::with_capacity(self.k * 5);
         for (k_idx, centroid) in self.centroids.iter().enumerate() {
-            let subject = KotobaCid::from_bytes(
-                format!("ivf-centroid:{}", k_idx).as_bytes(),
-            );
+            let subject = KotobaCid::from_bytes(format!("ivf-centroid:{}", k_idx).as_bytes());
             let n = member_counts.get(k_idx).copied().unwrap_or(0);
 
             quads.push(Quad {
-                graph:     graph_cid.clone(),
-                subject:   subject.clone(),
+                graph: graph_cid.clone(),
+                subject: subject.clone(),
                 predicate: "cc/ivf/centroid_id".to_string(),
-                object:    QuadObject::Integer(k_idx as i64),
+                object: QuadObject::Integer(k_idx as i64),
             });
             quads.push(Quad {
-                graph:     graph_cid.clone(),
-                subject:   subject.clone(),
+                graph: graph_cid.clone(),
+                subject: subject.clone(),
                 predicate: "cc/ivf/vector".to_string(),
-                object:    QuadObject::VectorF32(centroid.clone()),
+                object: QuadObject::VectorF32(centroid.clone()),
             });
             quads.push(Quad {
-                graph:     graph_cid.clone(),
-                subject:   subject.clone(),
+                graph: graph_cid.clone(),
+                subject: subject.clone(),
                 predicate: "cc/ivf/model".to_string(),
-                object:    QuadObject::Text(self.model_id.clone()),
+                object: QuadObject::Text(self.model_id.clone()),
             });
             quads.push(Quad {
-                graph:     graph_cid.clone(),
-                subject:   subject.clone(),
+                graph: graph_cid.clone(),
+                subject: subject.clone(),
                 predicate: "cc/ivf/k".to_string(),
-                object:    QuadObject::Integer(self.k as i64),
+                object: QuadObject::Integer(self.k as i64),
             });
             quads.push(Quad {
-                graph:     graph_cid.clone(),
-                subject:   subject.clone(),
+                graph: graph_cid.clone(),
+                subject: subject.clone(),
                 predicate: "cc/ivf/n".to_string(),
-                object:    QuadObject::Integer(n as i64),
+                object: QuadObject::Integer(n as i64),
             });
         }
         quads
@@ -248,7 +269,7 @@ impl IvfIndex {
 
         // Group quads by centroid_id → vector + model.
         let mut id_to_vector: BTreeMap<i64, Vec<f32>> = BTreeMap::new();
-        let mut model_id     = String::new();
+        let mut model_id = String::new();
         let mut total_k: Option<i64> = None;
 
         for q in quads {
@@ -283,14 +304,80 @@ impl IvfIndex {
         }
 
         let k = total_k.unwrap_or(id_to_vector.len() as i64) as usize;
-        if id_to_vector.is_empty() { return None; }
+        if id_to_vector.is_empty() {
+            return None;
+        }
 
         // Reconstruct centroids ordered by id.
         let centroids: Vec<Vec<f32>> = id_to_vector.into_values().collect();
         let dim = centroids.first()?.len();
-        if dim == 0 { return None; }
+        if dim == 0 {
+            return None;
+        }
 
-        Some(Self { k: k.max(centroids.len()), dim, centroids, model_id })
+        Some(Self {
+            k: k.max(centroids.len()),
+            dim,
+            centroids,
+            model_id,
+        })
+    }
+
+    /// Restore an `IvfIndex` from Datomic atomic facts.
+    ///
+    /// This is the Datom-native counterpart to `from_quads`; legacy Quad
+    /// restoration is kept only for compatibility with older persisted data.
+    pub fn from_datoms(datoms: &[Datom]) -> Option<Self> {
+        use std::collections::BTreeMap;
+
+        let mut id_to_vector: BTreeMap<i64, Vec<f32>> = BTreeMap::new();
+        let mut model_id = String::new();
+        let mut total_k: Option<i64> = None;
+
+        for datom in datoms.iter().filter(|d| d.op) {
+            match datom.a.as_str() {
+                "cc/ivf/centroid_id" => {
+                    if let Value::Integer(id) = &datom.v {
+                        id_to_vector.entry(*id).or_default();
+                    }
+                }
+                "cc/ivf/vector" => {
+                    if let Value::VectorF32(v) = &datom.v {
+                        let key = subject_to_centroid_id(&datom.e)?;
+                        id_to_vector.insert(key, v.clone());
+                    }
+                }
+                "cc/ivf/model" => {
+                    if let Value::Text(m) = &datom.v {
+                        model_id = m.clone();
+                    }
+                }
+                "cc/ivf/k" => {
+                    if let Value::Integer(v) = &datom.v {
+                        total_k = Some(*v);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let k = total_k.unwrap_or(id_to_vector.len() as i64) as usize;
+        if id_to_vector.is_empty() {
+            return None;
+        }
+
+        let centroids: Vec<Vec<f32>> = id_to_vector.into_values().collect();
+        let dim = centroids.first()?.len();
+        if dim == 0 {
+            return None;
+        }
+
+        Some(Self {
+            k: k.max(centroids.len()),
+            dim,
+            centroids,
+            model_id,
+        })
     }
 }
 
@@ -346,8 +433,14 @@ mod tests {
         let c1 = &idx.centroids[1];
         // One centroid x > 5, the other x < -5.
         let xs: Vec<f32> = vec![c0[0], c1[0]];
-        assert!(xs.iter().any(|&x| x > 5.0), "expected a centroid near (10, 0)");
-        assert!(xs.iter().any(|&x| x < -5.0), "expected a centroid near (-10, 0)");
+        assert!(
+            xs.iter().any(|&x| x > 5.0),
+            "expected a centroid near (10, 0)"
+        );
+        assert!(
+            xs.iter().any(|&x| x < -5.0),
+            "expected a centroid near (-10, 0)"
+        );
 
         // Every even-indexed point should land in the centroid with positive x.
         let pos_ci = if c0[0] > 0.0 { 0 } else { 1 };
@@ -380,13 +473,17 @@ mod tests {
         let cand_refs: Vec<(usize, &[f32])> =
             assigned.iter().map(|(ci, v)| (*ci, v.as_slice())).collect();
 
-        let query  = vec![10.0f32, 0.0];
+        let query = vec![10.0f32, 0.0];
         let result = idx.search(&query, &cand_refs, 2, 5);
         assert_eq!(result.len(), 5);
 
         // Scores should be in [0, 1] for non-negative vectors.
         for (score, _) in &result {
-            assert!(*score >= -1.0 && *score <= 1.0, "cosine score out of range: {}", score);
+            assert!(
+                *score >= -1.0 && *score <= 1.0,
+                "cosine score out of range: {}",
+                score
+            );
         }
 
         // Results should be sorted descending.
@@ -402,7 +499,7 @@ mod tests {
 
         let graph = KotobaCid::from_bytes(b"test-graph");
         let counts = vec![10usize, 10];
-        let quads  = idx.to_quads(&graph, &counts);
+        let quads = idx.to_quads(&graph, &counts);
 
         // Sanity: should produce 5 quads per centroid.
         assert_eq!(quads.len(), 2 * 5);
@@ -418,8 +515,34 @@ mod tests {
                 assert!(
                     (a - b).abs() < 1e-6,
                     "centroid component mismatch: {} vs {}",
-                    a, b
+                    a,
+                    b
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn to_quads_and_from_datoms_roundtrip() {
+        let pts = two_cluster_points(20);
+        let idx = IvfIndex::build(&pts, 2, "round-trip-model", 20);
+
+        let graph = KotobaCid::from_bytes(b"test-graph");
+        let counts = vec![10usize, 10];
+        let quads = idx.to_quads(&graph, &counts);
+        let datoms: Vec<_> = quads
+            .into_iter()
+            .map(|quad| kotoba_kqe::datom::Datom::from_legacy_quad(quad, true))
+            .collect();
+
+        let restored = IvfIndex::from_datoms(&datoms).expect("from_datoms must succeed");
+        assert_eq!(restored.k(), idx.k());
+        assert_eq!(restored.dim(), idx.dim());
+        assert_eq!(restored.model_id, idx.model_id);
+
+        for (orig, rest) in idx.centroids.iter().zip(restored.centroids.iter()) {
+            for (a, b) in orig.iter().zip(rest.iter()) {
+                assert!((a - b).abs() < 1e-6);
             }
         }
     }
@@ -476,7 +599,10 @@ mod tests {
     fn cosine_opposite_vectors() {
         let a = vec![1.0f32, 0.0];
         let b = vec![-1.0f32, 0.0];
-        assert!((cosine(&a, &b) + 1.0).abs() < 1e-6, "opposite vectors: cosine = -1");
+        assert!(
+            (cosine(&a, &b) + 1.0).abs() < 1e-6,
+            "opposite vectors: cosine = -1"
+        );
     }
 
     #[test]
@@ -497,7 +623,10 @@ mod tests {
         assert_eq!(idx.dim(), 3);
         let (ci, dist) = idx.assign(&[1.0, 2.0, 3.0]);
         assert_eq!(ci, 0);
-        assert!(dist < 1e-6, "assign to self should have zero l2_sq distance");
+        assert!(
+            dist < 1e-6,
+            "assign to self should have zero l2_sq distance"
+        );
     }
 
     #[test]
@@ -511,34 +640,49 @@ mod tests {
 
     #[test]
     fn from_quads_empty_returns_none() {
-        assert!(IvfIndex::from_quads(&[]).is_none(), "empty quads must return None");
+        assert!(
+            IvfIndex::from_quads(&[]).is_none(),
+            "empty quads must return None"
+        );
     }
 
     #[test]
     fn search_top_k_clamped_by_candidate_count() {
         let pts = two_cluster_points(6);
         let idx = IvfIndex::build(&pts, 2, "m", 10);
-        let assigned: Vec<(usize, Vec<f32>)> = pts.iter()
-            .map(|(_, v)| { let (ci, _) = idx.assign(v); (ci, v.clone()) })
+        let assigned: Vec<(usize, Vec<f32>)> = pts
+            .iter()
+            .map(|(_, v)| {
+                let (ci, _) = idx.assign(v);
+                (ci, v.clone())
+            })
             .collect();
         let cand_refs: Vec<(usize, &[f32])> =
             assigned.iter().map(|(ci, v)| (*ci, v.as_slice())).collect();
         // Ask for more results than candidates.
         let result = idx.search(&[10.0f32, 0.0], &cand_refs, 2, 1000);
-        assert!(result.len() <= cand_refs.len(),
-            "search cannot return more results than candidates");
+        assert!(
+            result.len() <= cand_refs.len(),
+            "search cannot return more results than candidates"
+        );
     }
 
     #[test]
     fn to_quads_produces_correct_predicates() {
         let pts = two_cluster_points(10);
-        let idx   = IvfIndex::build(&pts, 2, "pred-model", 10);
+        let idx = IvfIndex::build(&pts, 2, "pred-model", 10);
         let graph = KotobaCid::from_bytes(b"g");
         let quads = idx.to_quads(&graph, &[5, 5]);
         // Each centroid produces 5 quads: centroid_id, vector, model, k, n.
         let predicates: std::collections::HashSet<_> =
             quads.iter().map(|q| q.predicate.as_str()).collect();
-        for p in &["cc/ivf/centroid_id", "cc/ivf/vector", "cc/ivf/model", "cc/ivf/k", "cc/ivf/n"] {
+        for p in &[
+            "cc/ivf/centroid_id",
+            "cc/ivf/vector",
+            "cc/ivf/model",
+            "cc/ivf/k",
+            "cc/ivf/n",
+        ] {
             assert!(predicates.contains(p), "missing predicate: {p}");
         }
     }

@@ -1,0 +1,30 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.atproto.repo.write",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Project an AT Protocol repo write into Kotoba Datoms.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["graph", "uri"],
+          "properties": {
+            "graph": { "type": "string" },
+            "uri": { "type": "string" },
+            "operation": { "type": "string", "knownValues": ["create", "update", "delete"] },
+            "cid": { "type": "string" },
+            "record": { "type": "unknown" },
+            "cacao_b64": { "type": "string" },
+            "auth_presentation": { "type": "unknown" }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": { "type": "unknown" }
+      }
+    }
+  }
+}

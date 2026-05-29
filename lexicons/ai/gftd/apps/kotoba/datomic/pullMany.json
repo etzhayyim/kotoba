@@ -1,0 +1,33 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.datomic.pullMany",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Datomic pull-many against a Kotoba distributed Datom graph.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["graph", "entities"],
+          "properties": {
+            "graph": { "type": "string" },
+            "entities": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "pattern_edn": { "type": "string" },
+            "as_of": { "type": "string" },
+            "since": { "type": "string" },
+            "cacao_b64": { "type": "string" },
+            "presentation": { "type": "unknown" }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": { "type": "unknown" }
+      }
+    }
+  }
+}

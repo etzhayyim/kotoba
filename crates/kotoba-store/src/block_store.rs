@@ -32,18 +32,18 @@ mod tests {
     #[test]
     fn put_verified_succeeds_with_correct_cid() {
         let store = Arc::new(MemoryBlockStore::new());
-        let data  = b"hello kotoba";
-        let cid   = KotobaCid::from_bytes(data);
+        let data = b"hello kotoba";
+        let cid = KotobaCid::from_bytes(data);
         put_verified(&*store, &cid, data).unwrap();
         assert!(store.has(&cid));
     }
 
     #[test]
     fn put_verified_fails_with_wrong_cid() {
-        let store    = Arc::new(MemoryBlockStore::new());
-        let data     = b"real data";
-        let bad_cid  = KotobaCid::from_bytes(b"different data");
-        let result   = put_verified(&*store, &bad_cid, data);
+        let store = Arc::new(MemoryBlockStore::new());
+        let data = b"real data";
+        let bad_cid = KotobaCid::from_bytes(b"different data");
+        let result = put_verified(&*store, &bad_cid, data);
         assert!(result.is_err(), "must reject CID mismatch");
         // Block must NOT have been written
         assert!(!store.has(&bad_cid));
@@ -53,14 +53,17 @@ mod tests {
     fn store_error_is_displayable() {
         let err = StoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, "disk full"));
         let msg = err.to_string();
-        assert!(msg.contains("io error") || msg.contains("disk full"), "got: {msg}");
+        assert!(
+            msg.contains("io error") || msg.contains("disk full"),
+            "got: {msg}"
+        );
     }
 
     #[test]
     fn put_verified_empty_data() {
         let store = Arc::new(MemoryBlockStore::new());
-        let data  = b"";
-        let cid   = KotobaCid::from_bytes(data);
+        let data = b"";
+        let cid = KotobaCid::from_bytes(data);
         put_verified(&*store, &cid, data).unwrap();
         assert!(store.has(&cid), "empty data must be stored");
     }
@@ -109,9 +112,9 @@ mod tests {
     #[test]
     fn put_verified_wrong_cid_does_not_store_block() {
         // Supplying bad_cid for different data: neither bad_cid nor real_cid must be present.
-        let store    = Arc::new(MemoryBlockStore::new());
-        let data     = b"payload data";
-        let bad_cid  = KotobaCid::from_bytes(b"unrelated");
+        let store = Arc::new(MemoryBlockStore::new());
+        let data = b"payload data";
+        let bad_cid = KotobaCid::from_bytes(b"unrelated");
         let real_cid = KotobaCid::from_bytes(data);
         let _ = put_verified(&*store, &bad_cid, data);
         // bad_cid (mismatch) must NOT be in store.
@@ -122,7 +125,10 @@ mod tests {
 
     #[test]
     fn store_error_contains_io_message() {
-        let err = StoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, "no space left"));
+        let err = StoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "no space left",
+        ));
         assert!(err.to_string().contains("no space left") || err.to_string().contains("io error"));
     }
 
@@ -141,8 +147,8 @@ mod tests {
     fn put_verified_idempotent() {
         // Storing the same block twice must not error.
         let store = Arc::new(MemoryBlockStore::new());
-        let data  = b"idempotent block";
-        let cid   = KotobaCid::from_bytes(data);
+        let data = b"idempotent block";
+        let cid = KotobaCid::from_bytes(data);
         put_verified(&*store, &cid, data).unwrap();
         put_verified(&*store, &cid, data).unwrap();
         assert!(store.has(&cid));
@@ -151,8 +157,8 @@ mod tests {
     #[test]
     fn cid_multibase_roundtrip() {
         let data = b"multibase-test";
-        let cid  = KotobaCid::from_bytes(data);
-        let mb   = cid.to_multibase();
+        let cid = KotobaCid::from_bytes(data);
+        let mb = cid.to_multibase();
         assert!(!mb.is_empty(), "multibase encoding must be non-empty");
         let restored = KotobaCid::from_multibase(&mb);
         assert!(restored.is_some(), "multibase must parse back to CID");
@@ -163,17 +169,22 @@ mod tests {
     fn store_has_returns_false_for_unwritten_cid() {
         let store = Arc::new(MemoryBlockStore::new());
         let cid = KotobaCid::from_bytes(b"never-written");
-        assert!(!store.has(&cid), "has() must return false for unwritten CID");
+        assert!(
+            !store.has(&cid),
+            "has() must return false for unwritten CID"
+        );
     }
 
     #[test]
     fn put_verified_error_message_contains_cid_hex() {
-        let store    = Arc::new(MemoryBlockStore::new());
-        let data     = b"content";
-        let bad_cid  = KotobaCid::from_bytes(b"wrong");
-        let err      = put_verified(&*store, &bad_cid, data).unwrap_err();
-        let msg      = err.to_string();
-        assert!(msg.contains("mismatch") || msg.contains("cid"),
-            "error must mention cid mismatch, got: {msg}");
+        let store = Arc::new(MemoryBlockStore::new());
+        let data = b"content";
+        let bad_cid = KotobaCid::from_bytes(b"wrong");
+        let err = put_verified(&*store, &bad_cid, data).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mismatch") || msg.contains("cid"),
+            "error must mention cid mismatch, got: {msg}"
+        );
     }
 }

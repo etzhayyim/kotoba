@@ -108,10 +108,10 @@ pub struct KeyOpPolicy {
 
 #[derive(Debug, Clone)]
 struct PolicyEntry {
-    op:           KeyOpKind,
-    min_level:    AuthLevel,
+    op: KeyOpKind,
+    min_level: AuthLevel,
     /// How long the resulting `Authorization` is valid (seconds).
-    ttl_secs:     u64,
+    ttl_secs: u64,
     /// Maximum age of the `PasskeyAssertion` itself (seconds).
     max_age_secs: u64,
 }
@@ -120,14 +120,54 @@ impl Default for KeyOpPolicy {
     fn default() -> Self {
         Self {
             entries: vec![
-                PolicyEntry { op: KeyOpKind::WebLogin,         min_level: AuthLevel::UserPresence,          ttl_secs: 3600, max_age_secs: 60 },
-                PolicyEntry { op: KeyOpKind::SiweSign,         min_level: AuthLevel::UserVerified,          ttl_secs:  300, max_age_secs: 30 },
-                PolicyEntry { op: KeyOpKind::EthereumTxLow,    min_level: AuthLevel::UserVerified,          ttl_secs:  300, max_age_secs: 30 },
-                PolicyEntry { op: KeyOpKind::EthereumTxHigh,   min_level: AuthLevel::UserVerifiedHighValue, ttl_secs:   60, max_age_secs: 15 },
-                PolicyEntry { op: KeyOpKind::SignalKeyUnlock,   min_level: AuthLevel::UserVerified,          ttl_secs:  600, max_age_secs: 30 },
-                PolicyEntry { op: KeyOpKind::StorageKeyDecrypt, min_level: AuthLevel::UserPresence,          ttl_secs: 3600, max_age_secs: 60 },
-                PolicyEntry { op: KeyOpKind::AddDevice,         min_level: AuthLevel::UserVerifiedHighValue, ttl_secs:  120, max_age_secs: 15 },
-                PolicyEntry { op: KeyOpKind::RecoveryKeyAccess, min_level: AuthLevel::UserVerifiedHighValue, ttl_secs:  120, max_age_secs: 15 },
+                PolicyEntry {
+                    op: KeyOpKind::WebLogin,
+                    min_level: AuthLevel::UserPresence,
+                    ttl_secs: 3600,
+                    max_age_secs: 60,
+                },
+                PolicyEntry {
+                    op: KeyOpKind::SiweSign,
+                    min_level: AuthLevel::UserVerified,
+                    ttl_secs: 300,
+                    max_age_secs: 30,
+                },
+                PolicyEntry {
+                    op: KeyOpKind::EthereumTxLow,
+                    min_level: AuthLevel::UserVerified,
+                    ttl_secs: 300,
+                    max_age_secs: 30,
+                },
+                PolicyEntry {
+                    op: KeyOpKind::EthereumTxHigh,
+                    min_level: AuthLevel::UserVerifiedHighValue,
+                    ttl_secs: 60,
+                    max_age_secs: 15,
+                },
+                PolicyEntry {
+                    op: KeyOpKind::SignalKeyUnlock,
+                    min_level: AuthLevel::UserVerified,
+                    ttl_secs: 600,
+                    max_age_secs: 30,
+                },
+                PolicyEntry {
+                    op: KeyOpKind::StorageKeyDecrypt,
+                    min_level: AuthLevel::UserPresence,
+                    ttl_secs: 3600,
+                    max_age_secs: 60,
+                },
+                PolicyEntry {
+                    op: KeyOpKind::AddDevice,
+                    min_level: AuthLevel::UserVerifiedHighValue,
+                    ttl_secs: 120,
+                    max_age_secs: 15,
+                },
+                PolicyEntry {
+                    op: KeyOpKind::RecoveryKeyAccess,
+                    min_level: AuthLevel::UserVerifiedHighValue,
+                    ttl_secs: 120,
+                    max_age_secs: 15,
+                },
             ],
         }
     }
@@ -159,11 +199,11 @@ pub enum PasskeyGateError {
 /// to perform the key operation.
 #[derive(Debug, Clone)]
 pub struct Authorization {
-    pub op:         KeyOpKind,
+    pub op: KeyOpKind,
     /// Unix seconds after which this grant is invalid.
     pub expires_at: u64,
     /// Anti-replay nonce copied from the originating assertion.
-    pub nonce:      [u8; 16],
+    pub nonce: [u8; 16],
 }
 
 impl Authorization {
@@ -193,7 +233,10 @@ pub struct PasskeyGate {
 
 impl PasskeyGate {
     pub fn new(policy: KeyOpPolicy) -> Self {
-        Self { policy, expected_rp_id_hash: None }
+        Self {
+            policy,
+            expected_rp_id_hash: None,
+        }
     }
 
     /// Bind the gate to a specific RP ID hash (SHA-256 of the RP ID string).
@@ -209,10 +252,13 @@ impl PasskeyGate {
     /// describing which policy check failed.
     pub fn authorize(
         &self,
-        op:        KeyOpKind,
+        op: KeyOpKind,
         assertion: &PasskeyAssertion,
     ) -> Result<Authorization, PasskeyGateError> {
-        let entry = self.policy.entries.iter()
+        let entry = self
+            .policy
+            .entries
+            .iter()
             .find(|e| e.op == op)
             .ok_or(PasskeyGateError::NoPolicyEntry(op))?;
 
@@ -295,12 +341,12 @@ mod tests {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         PasskeyAssertion {
-            credential_id:   vec![0x01, 0x02],
+            credential_id: vec![0x01, 0x02],
             user_present,
             user_verified,
-            rp_id_hash:      [0u8; 32],
-            issued_at_secs:  now,
-            nonce:           [0xABu8; 16],
+            rp_id_hash: [0u8; 32],
+            issued_at_secs: now,
+            nonce: [0xABu8; 16],
         }
     }
 
@@ -369,14 +415,16 @@ mod tests {
     #[test]
     fn stale_assertion_rejected() {
         let old_assertion = PasskeyAssertion {
-            credential_id:  vec![0x01],
-            user_present:   true,
-            user_verified:  true,
-            rp_id_hash:     [0u8; 32],
-            issued_at_secs: 0,  // epoch — definitely stale
-            nonce:          [0u8; 16],
+            credential_id: vec![0x01],
+            user_present: true,
+            user_verified: true,
+            rp_id_hash: [0u8; 32],
+            issued_at_secs: 0, // epoch — definitely stale
+            nonce: [0u8; 16],
         };
-        let err = gate().authorize(KeyOpKind::WebLogin, &old_assertion).unwrap_err();
+        let err = gate()
+            .authorize(KeyOpKind::WebLogin, &old_assertion)
+            .unwrap_err();
         assert!(matches!(err, PasskeyGateError::StaleAssertion(_)));
     }
 
@@ -419,10 +467,10 @@ mod tests {
     #[test]
     fn key_hierarchy_json_roundtrip() {
         let kh = KeyHierarchy {
-            eth_account:           Some("0xDEAD".into()),
-            signal_identity_pub:   Some("base64pubkey".into()),
-            storage_dek_cid:       Some("bafydekref".into()),
-            recovery_key_cid:      Some("bafyrecovery".into()),
+            eth_account: Some("0xDEAD".into()),
+            signal_identity_pub: Some("base64pubkey".into()),
+            storage_dek_cid: Some("bafydekref".into()),
+            recovery_key_cid: Some("bafyrecovery".into()),
             passkey_credential_ids: vec!["cred1".into(), "cred2".into()],
         };
         let json = serde_json::to_string(&kh).unwrap();

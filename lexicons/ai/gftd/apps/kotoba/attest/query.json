@@ -1,0 +1,22 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.attest.query",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Query Kotoba attestation Verifiable Credential records by entity or attester DID.",
+      "parameters": {
+        "type": "params",
+        "properties": {
+          "entity_did": { "type": "string" },
+          "attester_did": { "type": "string" },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": { "type": "unknown" }
+      }
+    }
+  }
+}

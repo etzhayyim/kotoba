@@ -6,6 +6,7 @@ pub mod graph_auth;
 pub mod kg;
 pub mod kotobase_xrpc;
 pub mod mcp;
+#[cfg(feature = "p2p")]
 pub mod net_actor;
 pub mod nonce_store;
 pub mod pre_proxy;
@@ -13,16 +14,16 @@ pub mod server;
 pub mod signal_xrpc;
 pub mod xrpc;
 
-use std::sync::Arc;
 use axum::{
-    Router,
     extract::DefaultBodyLimit,
     middleware,
     routing::{get, post},
+    Router,
 };
+use std::sync::Arc;
 
-use tower_http::trace::TraceLayer;
 use crate::server::KotobaState;
+use tower_http::trace::TraceLayer;
 
 #[cfg(test)]
 mod tests {
@@ -31,9 +32,20 @@ mod tests {
     // ── NSID format invariants ─────────────────────────────────────────────
 
     const ALL_NSIDS: &[&str] = &[
+        NSID_DATOM_CREATE,
         NSID_QUAD_CREATE,
         NSID_QUAD_RETRACT,
         NSID_GRAPH_QUERY,
+        super::kg::NSID_KG_SPARQL,
+        NSID_DATOMIC_TRANSACT,
+        NSID_DATOMIC_DATOMS,
+        NSID_DATOMIC_PULL,
+        NSID_DATOMIC_Q,
+        NSID_DATOMIC_WITH,
+        NSID_DATOMIC_HISTORY,
+        NSID_DATOMIC_ENTITY,
+        NSID_DATOMIC_IDENT,
+        NSID_DATOMIC_ENTID,
         NSID_COMMIT_GET,
         NSID_COMMIT_STORE,
         NSID_INVOKE_RUN,
@@ -43,6 +55,7 @@ mod tests {
         NSID_LORA_APPLY,
         NSID_EMBED_CREATE,
         NSID_NODE_STATUS,
+        NSID_DID_DOCUMENT_PUBLISH,
         NSID_BLOCK_PUT,
         NSID_BLOCK_GET,
         NSID_AGENT_RUN,
@@ -198,8 +211,12 @@ mod tests {
 
 pub fn build_router(state: Arc<KotobaState>) -> Router {
     Router::new()
-        .route("/_app/meta",  get(xrpc::health))
-        .route("/health",     get(xrpc::health))
+        .route("/_app/meta", get(xrpc::health))
+        .route("/health", get(xrpc::health))
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_DATOM_CREATE),
+            post(xrpc::datom_create),
+        )
         .route(
             &format!("/xrpc/{}", xrpc::NSID_QUAD_CREATE),
             post(xrpc::quad_create),
@@ -243,6 +260,90 @@ pub fn build_router(state: Arc<KotobaState>) -> Router {
             post(xrpc::quad_retract),
         )
         .route(
+            &format!("/xrpc/{}", xrpc::NSID_DATOMIC_TRANSACT),
+            post(xrpc::datomic_transact),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_DATOMIC_DATOMS),
+            post(xrpc::datomic_datoms),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_DATOMIC_SEEK_DATOMS),
+            post(xrpc::datomic_seek_datoms),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_DATOMIC_INDEX_RANGE),
+            post(xrpc::datomic_index_range),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_DATOMIC_PULL),
+            post(xrpc::datomic_pull),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_DATOMIC_PULL_MANY),
+            post(xrpc::datomic_pull_many),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_DATOMIC_Q),
+            post(xrpc::datomic_q),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_DATOMIC_WITH),
+            post(xrpc::datomic_with),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_DATOMIC_HISTORY),
+            post(xrpc::datomic_history),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_DATOMIC_TX_RANGE),
+            post(xrpc::datomic_tx_range),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_DATOMIC_LOG),
+            post(xrpc::datomic_log),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_DATOMIC_BASIS_T),
+            post(xrpc::datomic_basis_t),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_DATOMIC_DB_STATS),
+            post(xrpc::datomic_db_stats),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_DATOMIC_ENTITY),
+            post(xrpc::datomic_entity),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_DATOMIC_IDENT),
+            post(xrpc::datomic_ident),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_DATOMIC_ENTID),
+            post(xrpc::datomic_entid),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_VC_ISSUE),
+            post(xrpc::vc_issue),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_VC_PRESENT),
+            post(xrpc::vc_present),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_DID_DOCUMENT_PUBLISH),
+            post(xrpc::did_document_publish),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_DIDCOMM_SEND),
+            post(xrpc::didcomm_send),
+        )
+        .route(
+            &format!("/xrpc/{}", xrpc::NSID_ATPROTO_REPO_WRITE),
+            post(xrpc::atproto_repo_write),
+        )
+        .route(
             &format!("/xrpc/{}", xrpc::NSID_WEIGHT_GET),
             get(xrpc::weight_get),
         )
@@ -283,26 +384,14 @@ pub fn build_router(state: Arc<KotobaState>) -> Router {
             &format!("/xrpc/{}", xrpc::NSID_VAULT_GET),
             get(xrpc::vault_get),
         )
-        .route(
-            &format!("/xrpc/{}", kg::NSID_KG_ENTITY),
-            get(kg::kg_entity),
-        )
+        .route(&format!("/xrpc/{}", kg::NSID_KG_ENTITY), get(kg::kg_entity))
         .route(
             &format!("/xrpc/{}", kg::NSID_KG_CATALOG),
             get(kg::kg_catalog),
         )
-        .route(
-            &format!("/xrpc/{}", kg::NSID_KG_EMBED),
-            post(kg::kg_embed),
-        )
-        .route(
-            &format!("/xrpc/{}", kg::NSID_KG_SEARCH),
-            get(kg::kg_search),
-        )
-        .route(
-            &format!("/xrpc/{}", kg::NSID_KG_QUERY),
-            post(kg::kg_query),
-        )
+        .route(&format!("/xrpc/{}", kg::NSID_KG_EMBED), post(kg::kg_embed))
+        .route(&format!("/xrpc/{}", kg::NSID_KG_SEARCH), get(kg::kg_search))
+        .route(&format!("/xrpc/{}", kg::NSID_KG_QUERY), post(kg::kg_query))
         .route(
             &format!("/xrpc/{}", kg::NSID_KG_SPARQL),
             post(kg::kg_sparql),
@@ -324,7 +413,10 @@ pub fn build_router(state: Arc<KotobaState>) -> Router {
             post(kg::kg_commit),
         )
         // MCP body limit: 50 MB to allow kotoba_wasm_run with large WASM payloads
-        .route("/mcp", post(mcp::mcp_handler).layer(DefaultBodyLimit::max(50 * 1024 * 1024)))
+        .route(
+            "/mcp",
+            post(mcp::mcp_handler).layer(DefaultBodyLimit::max(50 * 1024 * 1024)),
+        )
         // ── kotobase multi-tenant pinning service (ADR-2605260001) ──────────
         .route(
             &format!("/xrpc/{}", kotobase_xrpc::NSID_ACCOUNT_CREATE),
@@ -432,55 +524,56 @@ pub fn build_router(state: Arc<KotobaState>) -> Router {
 /// All configuration is read from environment variables (same as the binary).
 pub async fn run() -> anyhow::Result<()> {
     use std::sync::Arc;
-    use kotoba_net::KotobaSwarm;
-    use kotoba_vm::distributed::DistributedPregelRunner;
 
     tracing::info!(
         definition = "Datom[CID/T] × EAVT × Pregel[BSP] × Datalog[Δ] × LLM × WASM/WIT",
         "kotoba starting"
     );
 
-    let inference_engine: Option<kotoba_runtime::host::InferenceFn> =
-        if let Ok(_url) = std::env::var("KOTOBA_INFERENCE_URL") {
-            let model = std::env::var("KOTOBA_INFERENCE_MODEL")
-                .unwrap_or_else(|_| "gemma4:e4b".to_string());
-            tracing::info!(_url, model, "HTTP inference engine active");
-            let engine = kotoba_llm::HttpInferEngine::from_env()
-                .map_err(|e| anyhow::anyhow!("HttpInferEngine init failed: {e}"))?;
-            let engine = Arc::new(engine);
-            let fn_: kotoba_runtime::host::InferenceFn =
-                Arc::new(move |prompt: &str, max_tokens: usize| {
-                    engine.generate(prompt, max_tokens)
-                });
-            Some(fn_)
-        } else if std::env::var("KOTOBA_LOAD_GEMMA").is_ok() {
-            #[cfg(feature = "local-inference")]
-            {
-                use kotoba_llm::GemmaRunner;
-                tracing::info!("loading Gemma 2 2B IT from HuggingFace Hub (first run downloads ~5 GB)...");
-                let runner = Arc::new(std::sync::Mutex::new(
-                    GemmaRunner::load()
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Gemma load failed: {e}"))?,
-                ));
-                tracing::info!("Gemma 2 2B IT loaded");
-                let engine: kotoba_runtime::host::InferenceFn =
-                    Arc::new(move |prompt: &str, max_tokens: usize| {
-                        runner.lock().unwrap_or_else(|e| e.into_inner()).generate(prompt, max_tokens)
-                    });
-                Some(engine)
-            }
-            #[cfg(not(feature = "local-inference"))]
-            {
-                tracing::warn!(
-                    "KOTOBA_LOAD_GEMMA is set but the `local-inference` feature is not enabled.\n\
+    let inference_engine: Option<server::InferenceFn> = if let Ok(_url) =
+        std::env::var("KOTOBA_INFERENCE_URL")
+    {
+        let model =
+            std::env::var("KOTOBA_INFERENCE_MODEL").unwrap_or_else(|_| "gemma4:e4b".to_string());
+        tracing::info!(_url, model, "HTTP inference engine active");
+        let engine = kotoba_llm::HttpInferEngine::from_env()
+            .map_err(|e| anyhow::anyhow!("HttpInferEngine init failed: {e}"))?;
+        let engine = Arc::new(engine);
+        let fn_: server::InferenceFn =
+            Arc::new(move |prompt: &str, max_tokens: usize| engine.generate(prompt, max_tokens));
+        Some(fn_)
+    } else if std::env::var("KOTOBA_LOAD_GEMMA").is_ok() {
+        #[cfg(feature = "local-inference")]
+        {
+            use kotoba_llm::GemmaRunner;
+            tracing::info!(
+                "loading Gemma 2 2B IT from HuggingFace Hub (first run downloads ~5 GB)..."
+            );
+            let runner = Arc::new(std::sync::Mutex::new(
+                GemmaRunner::load()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Gemma load failed: {e}"))?,
+            ));
+            tracing::info!("Gemma 2 2B IT loaded");
+            let engine: server::InferenceFn = Arc::new(move |prompt: &str, max_tokens: usize| {
+                runner
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .generate(prompt, max_tokens)
+            });
+            Some(engine)
+        }
+        #[cfg(not(feature = "local-inference"))]
+        {
+            tracing::warn!(
+                "KOTOBA_LOAD_GEMMA is set but the `local-inference` feature is not enabled.\n\
                      Rebuild with: cargo build -p kotoba-server --features local-inference"
-                );
-                None
-            }
-        } else {
+            );
             None
-        };
+        }
+    } else {
+        None
+    };
 
     let state = server::KotobaState::new(inference_engine)?;
     let state = state.init_crypto().await?;
@@ -522,11 +615,15 @@ pub async fn run() -> anyhow::Result<()> {
         });
     }
 
-    let (pregel_inbound_tx, pregel_outbound_rx, pregel_runner) =
-        DistributedPregelRunner::channel_pair(1024);
-    let state = state.attach_pregel(pregel_runner);
-
+    #[cfg(feature = "p2p")]
     let state = if std::env::var("KOTOBA_NO_SWARM").is_err() {
+        use kotoba_net::KotobaSwarm;
+        use kotoba_vm::distributed::DistributedPregelRunner;
+
+        let (pregel_inbound_tx, pregel_outbound_rx, pregel_runner) =
+            DistributedPregelRunner::channel_pair(1024);
+        let state = state.attach_pregel(pregel_runner);
+
         let listen_port: u16 = std::env::var("KOTOBA_P2P_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
@@ -539,7 +636,9 @@ pub async fn run() -> anyhow::Result<()> {
                     let mut bootstrapped = false;
                     for entry in peers_str.split(',') {
                         let entry = entry.trim();
-                        if entry.is_empty() { continue; }
+                        if entry.is_empty() {
+                            continue;
+                        }
                         if let Some((pid_str, addr_str)) = entry.split_once('@') {
                             match (
                                 pid_str.trim().parse::<kotoba_net::PeerId>(),
@@ -564,9 +663,9 @@ pub async fn run() -> anyhow::Result<()> {
                 let (publish_tx, publish_rx) =
                     tokio::sync::mpsc::channel::<(String, Vec<u8>)>(1024);
 
-                let journal_arc     = Arc::clone(&state.journal);
+                let journal_arc = Arc::clone(&state.journal);
                 let block_store_arc = Arc::clone(&state.block_store);
-                let quad_store_arc  = Arc::clone(&state.quad_store);
+                let quad_store_arc = Arc::clone(&state.quad_store);
 
                 tokio::spawn(net_actor::run(
                     swarm,
@@ -590,6 +689,13 @@ pub async fn run() -> anyhow::Result<()> {
         tracing::info!("KOTOBA_NO_SWARM set — skipping p2p swarm");
         state
     };
+    #[cfg(not(feature = "p2p"))]
+    let state = {
+        if std::env::var("KOTOBA_NO_SWARM").is_err() {
+            tracing::info!("p2p swarm disabled at compile time; rebuild with --features p2p to enable libp2p networking");
+        }
+        state
+    };
 
     if std::env::var("KOTOBA_GMAIL_CLIENT_ID").is_ok() {
         if let Some(ref crypto) = state.crypto {
@@ -601,19 +707,25 @@ pub async fn run() -> anyhow::Result<()> {
     }
 
     if std::env::var("KOTOBA_JETSTREAM").is_ok() {
-        let journal_arc    = Arc::clone(&state.journal);
+        let journal_arc = Arc::clone(&state.journal);
         let quad_store_arc = Arc::clone(&state.quad_store);
-        tokio::spawn(kotoba_graph::run_jetstream_client(journal_arc, quad_store_arc));
+        tokio::spawn(kotoba_graph::run_jetstream_client(
+            journal_arc,
+            quad_store_arc,
+        ));
         tracing::info!("Jetstream client started");
     }
 
     if std::env::var("KOTOBA_SUBSCRIBE_REPOS").is_ok() {
-        let journal_arc     = Arc::clone(&state.journal);
-        let quad_store_arc  = Arc::clone(&state.quad_store);
+        let journal_arc = Arc::clone(&state.journal);
+        let quad_store_arc = Arc::clone(&state.quad_store);
         let block_store_arc = Arc::clone(&state.block_store);
-        let gossip_tx       = state.gossip_tx.clone();
+        let gossip_tx = state.gossip_tx.clone();
         tokio::spawn(kotoba_graph::run_subscribe_repos(
-            journal_arc, quad_store_arc, block_store_arc, gossip_tx,
+            journal_arc,
+            quad_store_arc,
+            block_store_arc,
+            gossip_tx,
         ));
         tracing::info!("subscribeRepos firehose client started");
     }

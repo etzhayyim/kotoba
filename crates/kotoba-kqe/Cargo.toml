@@ -9,6 +9,7 @@ description = "Kotoba Query Engine: Datalog, Arrangement, Delta, MV"
 kotoba-core.workspace = true
 tokio.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 sqlparser.workspace = true
@@ -16,7 +17,6 @@ anyhow.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-serde_json.workspace = true
 
 [[bench]]
 name = "arrangement"

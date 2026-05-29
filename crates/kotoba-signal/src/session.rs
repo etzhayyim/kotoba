@@ -1,9 +1,9 @@
+use serde::{Deserialize, Serialize};
 /// Session = lifecycle wrapper around X3DH + Double Ratchet.
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use x25519_dalek::StaticSecret;
-use serde::{Deserialize, Serialize};
 
 use crate::{
     identity::IdentityKeyPair,
@@ -15,19 +15,21 @@ use crate::{
 
 /// An established 1:1 session between two peers.
 pub struct Session {
-    pub peer_did:   String,
-    pub device_id:  String,
-    pub ratchet:    RatchetState,
+    pub peer_did: String,
+    pub device_id: String,
+    pub ratchet: RatchetState,
 }
 
 impl Session {
     /// Sender: establish a new session from a PreKeyBundle.
     pub fn initiate(
-        local_ik:  &IdentityKeyPair,
-        bundle:    &PreKeyBundle,
+        local_ik: &IdentityKeyPair,
+        bundle: &PreKeyBundle,
     ) -> Result<(Self, Vec<u8>), SignalError> {
         let out = x3dh_init_sender(local_ik, bundle)?;
-        let ep = out.ephemeral_public.expect("sender always has ephemeral public");
+        let ep = out
+            .ephemeral_public
+            .expect("sender always has ephemeral public");
 
         let spk_pub: [u8; 32] = bundle
             .signed_prekey
@@ -37,7 +39,7 @@ impl Session {
 
         let ratchet = RatchetState::init_sender(out.shared_secret, spk_pub);
         let session = Session {
-            peer_did:  bundle.did.clone(),
+            peer_did: bundle.did.clone(),
             device_id: bundle.device_id.clone(),
             ratchet,
         };
@@ -46,13 +48,13 @@ impl Session {
 
     /// Receiver: establish a session from an incoming initial message.
     pub fn accept(
-        local_ik:        &IdentityKeyPair,
-        signed_prekey:   &SignedPreKey,
+        local_ik: &IdentityKeyPair,
+        signed_prekey: &SignedPreKey,
         one_time_prekey: Option<&PreKey>,
-        sender_ik_pub:   &crate::identity::IdentityKey,
-        ephemeral_pub:   &[u8; 32],
-        sender_did:      &str,
-        sender_device:   &str,
+        sender_ik_pub: &crate::identity::IdentityKey,
+        ephemeral_pub: &[u8; 32],
+        sender_did: &str,
+        sender_device: &str,
     ) -> Result<Self, SignalError> {
         let out = x3dh_init_receiver(
             local_ik,
@@ -68,7 +70,7 @@ impl Session {
         let ratchet = RatchetState::init_receiver(out.shared_secret, spk_priv);
 
         Ok(Session {
-            peer_did:  sender_did.to_string(),
+            peer_did: sender_did.to_string(),
             device_id: sender_device.to_string(),
             ratchet,
         })
@@ -87,19 +89,24 @@ impl Session {
 
 pub trait SessionStore: Send + Sync {
     fn load_session(
-        &self, peer_did: &str, device_id: &str,
+        &self,
+        peer_did: &str,
+        device_id: &str,
     ) -> impl std::future::Future<Output = Option<SerializedSession>> + Send;
 
     fn store_session(
-        &self, peer_did: &str, device_id: &str, session: SerializedSession,
+        &self,
+        peer_did: &str,
+        device_id: &str,
+        session: SerializedSession,
     ) -> impl std::future::Future<Output = ()> + Send;
 }
 
 /// Serializable session snapshot (ratchet state is persisted as opaque bytes).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerializedSession {
-    pub peer_did:   String,
-    pub device_id:  String,
+    pub peer_did: String,
+    pub device_id: String,
     /// CBOR or JSON blob of ratchet state (implementation-defined).
     pub state_blob: Vec<u8>,
 }
@@ -112,7 +119,9 @@ pub struct InMemorySessionStore {
 }
 
 impl InMemorySessionStore {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     fn session_key(peer_did: &str, device_id: &str) -> String {
         format!("{peer_did}:{device_id}")
@@ -142,8 +151,8 @@ mod tests {
 
     fn make_session(peer_did: &str, device_id: &str) -> SerializedSession {
         SerializedSession {
-            peer_did:   peer_did.to_string(),
-            device_id:  device_id.to_string(),
+            peer_did: peer_did.to_string(),
+            device_id: device_id.to_string(),
             state_blob: b"opaque-ratchet-state".to_vec(),
         }
     }
@@ -156,29 +165,40 @@ mod tests {
 
     #[tokio::test]
     async fn store_and_load_roundtrip() {
-        let store   = InMemorySessionStore::new();
+        let store = InMemorySessionStore::new();
         let session = make_session("did:key:zA", "device-1");
-        store.store_session("did:key:zA", "device-1", session.clone()).await;
+        store
+            .store_session("did:key:zA", "device-1", session.clone())
+            .await;
         let loaded = store.load_session("did:key:zA", "device-1").await;
         assert!(loaded.is_some());
         let loaded = loaded.unwrap();
-        assert_eq!(loaded.peer_did,   session.peer_did);
-        assert_eq!(loaded.device_id,  session.device_id);
+        assert_eq!(loaded.peer_did, session.peer_did);
+        assert_eq!(loaded.device_id, session.device_id);
         assert_eq!(loaded.state_blob, session.state_blob);
     }
 
     #[tokio::test]
     async fn different_devices_are_isolated() {
         let store = InMemorySessionStore::new();
-        store.store_session("did:key:zA", "device-1", make_session("did:key:zA", "device-1")).await;
+        store
+            .store_session(
+                "did:key:zA",
+                "device-1",
+                make_session("did:key:zA", "device-1"),
+            )
+            .await;
         assert!(store.load_session("did:key:zA", "device-2").await.is_none());
     }
 
     #[tokio::test]
     async fn overwrite_session_updates_blob() {
         let store = InMemorySessionStore::new();
-        let s1    = make_session("did:key:zA", "d1");
-        let s2    = SerializedSession { state_blob: b"updated-blob".to_vec(), ..s1.clone() };
+        let s1 = make_session("did:key:zA", "d1");
+        let s2 = SerializedSession {
+            state_blob: b"updated-blob".to_vec(),
+            ..s1.clone()
+        };
         store.store_session("did:key:zA", "d1", s1).await;
         store.store_session("did:key:zA", "d1", s2.clone()).await;
         let loaded = store.load_session("did:key:zA", "d1").await.unwrap();
@@ -187,10 +207,10 @@ mod tests {
 
     #[test]
     fn serialized_session_json_roundtrip() {
-        let s    = make_session("did:key:zA", "dev");
+        let s = make_session("did:key:zA", "dev");
         let json = serde_json::to_string(&s).unwrap();
         let back: SerializedSession = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.peer_did,   s.peer_did);
+        assert_eq!(back.peer_did, s.peer_did);
         assert_eq!(back.state_blob, s.state_blob);
     }
 
@@ -198,7 +218,7 @@ mod tests {
     fn serialized_session_clone_is_independent() {
         let s = make_session("did:key:zB", "dev-2");
         let c = s.clone();
-        assert_eq!(c.peer_did,  s.peer_did);
+        assert_eq!(c.peer_did, s.peer_did);
         assert_eq!(c.device_id, s.device_id);
         assert_eq!(c.state_blob, s.state_blob);
     }
@@ -228,7 +248,7 @@ mod tests {
 
     #[tokio::test]
     async fn store_clone_shares_state() {
-        let store  = InMemorySessionStore::new();
+        let store = InMemorySessionStore::new();
         let cloned = store.clone();
         let s = make_session("did:key:zC", "dev-c");
         store.store_session("did:key:zC", "dev-c", s).await;
@@ -240,8 +260,8 @@ mod tests {
     #[test]
     fn serialized_session_empty_blob() {
         let s = SerializedSession {
-            peer_did:   "did:key:zA".to_string(),
-            device_id:  "d1".to_string(),
+            peer_did: "did:key:zA".to_string(),
+            device_id: "d1".to_string(),
             state_blob: vec![],
         };
         let json = serde_json::to_string(&s).unwrap();

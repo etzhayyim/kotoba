@@ -20,28 +20,28 @@
 //! | MDX (OLAP)           | mdx         | hand-written parser     |
 //! | HiveQL               | hiveql      | HiveDialect             |
 
-pub mod sql_base;
-pub mod oracle;
-pub mod tsql;
-pub mod hana;
-pub mod db2;
-pub mod teradata;
-pub mod snowflake;
 pub mod bigquery;
-pub mod presto;
-pub mod mdx;
+pub mod db2;
+pub mod hana;
 pub mod hiveql;
+pub mod mdx;
+pub mod oracle;
+pub mod presto;
+pub mod snowflake;
+pub mod sql_base;
+pub mod teradata;
+pub mod tsql;
 
-pub use oracle::OracleDialect;
-pub use tsql::TSqlDialect;
-pub use hana::HanaDialect;
-pub use db2::Db2Dialect;
-pub use teradata::TeradataDialect;
-pub use snowflake::SnowflakeDialect;
 pub use bigquery::BigQueryDialect;
-pub use presto::PrestoDialect;
-pub use mdx::MdxDialect;
+pub use db2::Db2Dialect;
+pub use hana::HanaDialect;
 pub use hiveql::HiveQlDialect;
+pub use mdx::MdxDialect;
+pub use oracle::OracleDialect;
+pub use presto::PrestoDialect;
+pub use snowflake::SnowflakeDialect;
+pub use teradata::TeradataDialect;
+pub use tsql::TSqlDialect;
 
 use crate::datalog::DatalogProgram;
 use crate::schema::SchemaMap;
@@ -68,11 +68,11 @@ pub enum EnterpriseFeature {
 #[derive(Debug, Default, Clone)]
 pub struct PostProcess {
     /// Maximum rows (TOP N / LIMIT / FETCH FIRST N ROWS ONLY / ROWNUM <= N).
-    pub limit:    Option<usize>,
+    pub limit: Option<usize>,
     /// Skip first N rows (OFFSET).
-    pub offset:   Option<usize>,
+    pub offset: Option<usize>,
     /// Percentage-based row cap (TOP N PERCENT / TABLESAMPLE BERNOULLI(N)).
-    pub percent:  Option<f64>,
+    pub percent: Option<f64>,
     /// Column names for deterministic ordering (ascending).
     pub order_by: Vec<String>,
     /// Reservoir sampling target (SAMPLE N / TABLESAMPLE(BUCKET …)).
@@ -83,11 +83,11 @@ pub struct PostProcess {
 
 #[allow(dead_code)]
 pub struct CompiledEnterpriseQuery {
-    pub program:         DatalogProgram,
+    pub program: DatalogProgram,
     pub output_relation: String,
-    pub dialect:         &'static str,
-    pub features:        Vec<EnterpriseFeature>,
-    pub post_process:    PostProcess,
+    pub dialect: &'static str,
+    pub features: Vec<EnterpriseFeature>,
+    pub post_process: PostProcess,
 }
 
 // ── EnterpriseDialect trait ───────────────────────────────────────────────────
@@ -101,7 +101,7 @@ pub trait EnterpriseDialect {
     /// `output` is the head predicate of the generated Datalog rule.
     fn compile(
         &self,
-        query:  &str,
+        query: &str,
         schema: &SchemaMap,
         output: &str,
     ) -> anyhow::Result<CompiledEnterpriseQuery>;
@@ -124,9 +124,9 @@ mod tests {
     #[test]
     fn post_process_limit_and_offset_set() {
         let pp = PostProcess {
-            limit:    Some(100),
-            offset:   Some(10),
-            percent:  None,
+            limit: Some(100),
+            offset: Some(10),
+            percent: None,
             order_by: vec!["name".to_string()],
             sample_n: None,
         };
@@ -184,15 +184,18 @@ mod tests {
 
     #[test]
     fn enterprise_feature_olap_window_ne_hierarchical() {
-        assert_ne!(EnterpriseFeature::OlapWindow, EnterpriseFeature::HierarchicalQuery);
+        assert_ne!(
+            EnterpriseFeature::OlapWindow,
+            EnterpriseFeature::HierarchicalQuery
+        );
     }
 
     #[test]
     fn post_process_percent_and_sample_n() {
         let pp = PostProcess {
-            limit:    None,
-            offset:   None,
-            percent:  Some(25.0),
+            limit: None,
+            offset: None,
+            percent: Some(25.0),
             order_by: vec![],
             sample_n: Some(500),
         };
@@ -203,9 +206,9 @@ mod tests {
     #[test]
     fn post_process_clone() {
         let pp = PostProcess {
-            limit:    Some(10),
-            offset:   Some(5),
-            percent:  Some(50.0),
+            limit: Some(10),
+            offset: Some(5),
+            percent: Some(50.0),
             order_by: vec!["col".to_string()],
             sample_n: Some(100),
         };
@@ -219,9 +222,9 @@ mod tests {
     #[test]
     fn post_process_order_by_multiple_columns() {
         let pp = PostProcess {
-            limit:    None,
-            offset:   None,
-            percent:  None,
+            limit: None,
+            offset: None,
+            percent: None,
             order_by: vec!["a".to_string(), "b".to_string(), "c".to_string()],
             sample_n: None,
         };

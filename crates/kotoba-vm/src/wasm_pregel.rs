@@ -17,12 +17,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use kotoba_runtime::{WasmExecutor, InvokeResult, RuntimeError};
 use kotoba_runtime::executor::SerializedQuad;
+use kotoba_runtime::{InvokeResult, RuntimeError, WasmExecutor};
 
-use crate::pregel::{
-    ComputeFn, ComputeOutput, Message, PregelGraph, SuperstepResult, VertexId,
-};
+use crate::pregel::{ComputeFn, ComputeOutput, Message, PregelGraph, SuperstepResult, VertexId};
 
 // ---------------------------------------------------------------------------
 // Vertex state (CBOR-serialised, persisted in PregelGraph)
@@ -30,32 +28,42 @@ use crate::pregel::{
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct WasmVertexState {
-    accumulated_quads:    Vec<SerializedQuadOwned>,
+    accumulated_quads: Vec<SerializedQuadOwned>,
     accumulated_retracts: Vec<SerializedQuadOwned>,
     accumulated_publishes: Vec<(String, Vec<u8>)>,
-    total_gas_used:       u64,
-    final_output_cbor:    Vec<u8>,
+    total_gas_used: u64,
+    final_output_cbor: Vec<u8>,
 }
 
 /// Owned mirror of `SerializedQuad` with Serialize/Deserialize
 /// (the runtime type re-derives them, but we need the owned form here).
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct SerializedQuadOwned {
-    pub graph:       String,
-    pub subject:     String,
-    pub predicate:   String,
+    pub graph: String,
+    pub subject: String,
+    pub predicate: String,
     pub object_cbor: Vec<u8>,
 }
 
 impl From<SerializedQuad> for SerializedQuadOwned {
     fn from(q: SerializedQuad) -> Self {
-        Self { graph: q.graph, subject: q.subject, predicate: q.predicate, object_cbor: q.object_cbor }
+        Self {
+            graph: q.graph,
+            subject: q.subject,
+            predicate: q.predicate,
+            object_cbor: q.object_cbor,
+        }
     }
 }
 
 impl From<SerializedQuadOwned> for SerializedQuad {
     fn from(q: SerializedQuadOwned) -> Self {
-        SerializedQuad { graph: q.graph, subject: q.subject, predicate: q.predicate, object_cbor: q.object_cbor }
+        SerializedQuad {
+            graph: q.graph,
+            subject: q.subject,
+            predicate: q.predicate,
+            object_cbor: q.object_cbor,
+        }
     }
 }
 
@@ -65,12 +73,12 @@ impl From<SerializedQuadOwned> for SerializedQuad {
 
 pub struct WasmRunResult {
     pub superstep_results: Vec<SuperstepResult>,
-    pub assert_quads:       Vec<SerializedQuad>,
-    pub retract_quads:      Vec<SerializedQuad>,
-    pub pending_publishes:  Vec<(String, Vec<u8>)>,
-    pub final_output_cbor:  Vec<u8>,
-    pub total_gas_used:     u64,
-    pub supersteps_run:     u32,
+    pub assert_quads: Vec<SerializedQuad>,
+    pub retract_quads: Vec<SerializedQuad>,
+    pub pending_publishes: Vec<(String, Vec<u8>)>,
+    pub final_output_cbor: Vec<u8>,
+    pub total_gas_used: u64,
+    pub supersteps_run: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -78,26 +86,26 @@ pub struct WasmRunResult {
 // ---------------------------------------------------------------------------
 
 pub struct WasmPregelRunner {
-    executor:       Arc<WasmExecutor>,
-    program_cid:    String,
-    wasm_bytes:     Arc<Vec<u8>>,
-    agent_did:      String,
+    executor: Arc<WasmExecutor>,
+    program_cid: String,
+    wasm_bytes: Arc<Vec<u8>>,
+    agent_did: String,
     max_supersteps: u32,
 }
 
 impl WasmPregelRunner {
     pub fn new(
-        executor:       Arc<WasmExecutor>,
-        program_cid:    impl Into<String>,
-        wasm_bytes:     Vec<u8>,
-        agent_did:      impl Into<String>,
+        executor: Arc<WasmExecutor>,
+        program_cid: impl Into<String>,
+        wasm_bytes: Vec<u8>,
+        agent_did: impl Into<String>,
         max_supersteps: u32,
     ) -> Self {
         Self {
             executor,
             program_cid: program_cid.into(),
-            wasm_bytes:  Arc::new(wasm_bytes),
-            agent_did:   agent_did.into(),
+            wasm_bytes: Arc::new(wasm_bytes),
+            agent_did: agent_did.into(),
             max_supersteps,
         }
     }
@@ -109,10 +117,10 @@ impl WasmPregelRunner {
     /// signals `"status": "continue"` in its output CBOR the output becomes
     /// the ctx_cbor for the next superstep. Otherwise the vertex votes halt.
     pub fn run(&self, initial_ctx_cbor: Vec<u8>) -> Result<WasmRunResult, RuntimeError> {
-        let executor     = Arc::clone(&self.executor);
-        let program_cid  = Arc::new(self.program_cid.clone());
-        let wasm_bytes   = Arc::clone(&self.wasm_bytes);
-        let agent_did    = Arc::new(self.agent_did.clone());
+        let executor = Arc::clone(&self.executor);
+        let program_cid = Arc::new(self.program_cid.clone());
+        let wasm_bytes = Arc::clone(&self.wasm_bytes);
+        let agent_did = Arc::new(self.agent_did.clone());
 
         let compute: ComputeFn = Box::new(move |vertex, inbox| {
             // Extract ctx_cbor from inbox (message payload carries it)
@@ -126,7 +134,7 @@ impl WasmPregelRunner {
                 // No message → nothing to do, halt immediately
                 return ComputeOutput {
                     new_state: vertex.state.clone(),
-                    messages:  vec![],
+                    messages: vec![],
                     vote_halt: true,
                 };
             }
@@ -135,8 +143,7 @@ impl WasmPregelRunner {
             let mut state: WasmVertexState = if vertex.state.is_empty() {
                 WasmVertexState::default()
             } else {
-                ciborium::from_reader(vertex.state.as_slice())
-                    .unwrap_or_default()
+                ciborium::from_reader(vertex.state.as_slice()).unwrap_or_default()
             };
 
             // Invoke WASM guest
@@ -150,7 +157,7 @@ impl WasmPregelRunner {
             );
 
             let invoke: InvokeResult = match result {
-                Ok(r)  => r,
+                Ok(r) => r,
                 Err(e) => {
                     // On error: encode {"err": "..."} as CBOR (matches Python handle_invoke format)
                     let err_cbor = ciborium::Value::Map(vec![(
@@ -162,7 +169,11 @@ impl WasmPregelRunner {
                     state.final_output_cbor = err_buf;
                     let mut buf = Vec::new();
                     let _ = ciborium::into_writer(&state, &mut buf);
-                    return ComputeOutput { new_state: buf, messages: vec![], vote_halt: true };
+                    return ComputeOutput {
+                        new_state: buf,
+                        messages: vec![],
+                        vote_halt: true,
+                    };
                 }
             };
 
@@ -171,15 +182,23 @@ impl WasmPregelRunner {
             // one over that limit so the caller can detect the overflow and reject.
             const MAX_ACCUMULATED_QUADS: usize = 10_001;
             state.total_gas_used += invoke.gas_used;
-            state.accumulated_quads.extend(invoke.assert_quads.into_iter().map(Into::into));
-            state.accumulated_retracts.extend(invoke.retract_quads.into_iter().map(Into::into));
+            state
+                .accumulated_quads
+                .extend(invoke.assert_quads.into_iter().map(Into::into));
+            state
+                .accumulated_retracts
+                .extend(invoke.retract_quads.into_iter().map(Into::into));
             state.accumulated_publishes.extend(invoke.pending_publishes);
             // Vote halt immediately if quad budget is exceeded (no point continuing).
             if state.accumulated_quads.len() >= MAX_ACCUMULATED_QUADS {
                 state.final_output_cbor = br#"{"status":"quota_exceeded"}"#.to_vec();
                 let mut buf = Vec::new();
                 let _ = ciborium::into_writer(&state, &mut buf);
-                return ComputeOutput { new_state: buf, messages: vec![], vote_halt: true };
+                return ComputeOutput {
+                    new_state: buf,
+                    messages: vec![],
+                    vote_halt: true,
+                };
             }
 
             // Decide continuation: check for "status": "continue" in output CBOR
@@ -187,8 +206,8 @@ impl WasmPregelRunner {
 
             let (messages, vote_halt) = if should_continue {
                 let next_msg = Message {
-                    src:     vertex.id.clone(),
-                    dst:     vertex.id.clone(),
+                    src: vertex.id.clone(),
+                    dst: vertex.id.clone(),
                     payload: invoke.output_cbor.clone(),
                 };
                 (vec![next_msg], false)
@@ -200,21 +219,25 @@ impl WasmPregelRunner {
             let mut new_state_bytes = Vec::new();
             let _ = ciborium::into_writer(&state, &mut new_state_bytes);
 
-            ComputeOutput { new_state: new_state_bytes, messages, vote_halt }
+            ComputeOutput {
+                new_state: new_state_bytes,
+                messages,
+                vote_halt,
+            }
         });
 
         // Build graph: one vertex, seeded with initial_ctx_cbor
-        let mut graph  = PregelGraph::new();
-        let vertex_id  = VertexId::from("wasm::program");
+        let mut graph = PregelGraph::new();
+        let vertex_id = VertexId::from("wasm::program");
         graph.add_vertex(vertex_id.clone(), Vec::new());
         graph.inject_message(Message {
-            src:     VertexId::from("__init__"),
-            dst:     vertex_id.clone(),
+            src: VertexId::from("__init__"),
+            dst: vertex_id.clone(),
             payload: initial_ctx_cbor,
         });
 
         let superstep_results = graph.run(&compute, self.max_supersteps);
-        let supersteps_run    = superstep_results.len() as u32;
+        let supersteps_run = superstep_results.len() as u32;
 
         // Extract final accumulated state from the vertex
         let final_state: WasmVertexState = graph
@@ -225,11 +248,19 @@ impl WasmPregelRunner {
 
         Ok(WasmRunResult {
             superstep_results,
-            assert_quads:      final_state.accumulated_quads.into_iter().map(Into::into).collect(),
-            retract_quads:     final_state.accumulated_retracts.into_iter().map(Into::into).collect(),
+            assert_quads: final_state
+                .accumulated_quads
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            retract_quads: final_state
+                .accumulated_retracts
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             pending_publishes: final_state.accumulated_publishes,
             final_output_cbor: final_state.final_output_cbor,
-            total_gas_used:    final_state.total_gas_used,
+            total_gas_used: final_state.total_gas_used,
             supersteps_run,
         })
     }
@@ -241,7 +272,7 @@ fn decode_status_continue(cbor: &[u8]) -> bool {
         return false;
     }
     let val: ciborium::Value = match ciborium::from_reader(cbor) {
-        Ok(v)  => v,
+        Ok(v) => v,
         Err(_) => return false,
     };
     if let ciborium::Value::Map(pairs) = val {
@@ -295,7 +326,9 @@ mod tests {
     /// Skips if cargo-component or wasm32-wasip2 is unavailable.
     #[test]
     fn wasm_pregel_single_superstep() {
-        let Some(wasm_bytes) = build_guest_component() else { return };
+        let Some(wasm_bytes) = build_guest_component() else {
+            return;
+        };
 
         let executor = Arc::new(WasmExecutor::new(10_000_000).expect("executor"));
         let runner = WasmPregelRunner::new(
@@ -310,12 +343,19 @@ mod tests {
         let result = runner.run(ctx_cbor).expect("WasmPregelRunner::run failed");
 
         // The existing echo-assert guest returns {"status":"ok"} → halts after 1 superstep
-        assert_eq!(result.supersteps_run, 1,
-            "expected 1 superstep, got {}", result.supersteps_run);
+        assert_eq!(
+            result.supersteps_run, 1,
+            "expected 1 superstep, got {}",
+            result.supersteps_run
+        );
 
         // Guest asserts 1 quad
-        assert_eq!(result.assert_quads.len(), 1,
-            "expected 1 assert quad, got {}", result.assert_quads.len());
+        assert_eq!(
+            result.assert_quads.len(),
+            1,
+            "expected 1 assert quad, got {}",
+            result.assert_quads.len()
+        );
         assert_eq!(result.assert_quads[0].predicate, "kotoba/task");
         assert_eq!(result.assert_quads[0].graph, "pregel-graph");
 
@@ -329,7 +369,9 @@ mod tests {
             let status = pairs.iter().find_map(|(k, v)| {
                 if k == &ciborium::Value::Text("status".into()) {
                     v.as_text().map(|s| s.to_string())
-                } else { None }
+                } else {
+                    None
+                }
             });
             assert_eq!(status.as_deref(), Some("ok"));
         } else {
@@ -339,7 +381,9 @@ mod tests {
 
     #[test]
     fn wasm_pregel_gas_exhaustion() {
-        let Some(wasm_bytes) = build_guest_component() else { return };
+        let Some(wasm_bytes) = build_guest_component() else {
+            return;
+        };
 
         // Only 5 gas — assert-quad costs 10, guest must fail
         let executor = Arc::new(WasmExecutor::new(5).expect("executor"));
@@ -355,7 +399,9 @@ mod tests {
         // Gas exhaustion surfaces as a RuntimeError trapped in the closure;
         // the runner records the error in vertex state and votes halt — so run() succeeds
         // but the output CBOR contains an error status, not "ok".
-        let result = runner.run(ctx_cbor).expect("run should not propagate RuntimeError");
+        let result = runner
+            .run(ctx_cbor)
+            .expect("run should not propagate RuntimeError");
         assert_eq!(result.supersteps_run, 1);
         // No quads asserted (gas killed before kqe.assert-quad returned)
         // final_output_cbor is the error bytes written by the closure
@@ -371,9 +417,12 @@ mod tests {
 
         let status = Command::new("cargo")
             .args([
-                "component", "build",
-                "--manifest-path", "crates/kotoba-guest/Cargo.toml",
-                "--target", "wasm32-wasip2",
+                "component",
+                "build",
+                "--manifest-path",
+                "crates/kotoba-guest/Cargo.toml",
+                "--target",
+                "wasm32-wasip2",
                 "--release",
                 "--quiet",
             ])
@@ -413,9 +462,9 @@ mod tests {
     fn make_ctx_cbor(graph: &str, args: &[u8]) -> Vec<u8> {
         use std::collections::BTreeMap;
         let mut map: BTreeMap<&str, ciborium::Value> = BTreeMap::new();
-        map.insert("graph",       ciborium::Value::Text(graph.to_string()));
+        map.insert("graph", ciborium::Value::Text(graph.to_string()));
         map.insert("session_cid", ciborium::Value::Null);
-        map.insert("args_cbor",   ciborium::Value::Bytes(args.to_vec()));
+        map.insert("args_cbor", ciborium::Value::Bytes(args.to_vec()));
         let mut buf = Vec::new();
         ciborium::into_writer(&map, &mut buf).expect("cbor encode");
         buf
@@ -476,21 +525,21 @@ mod tests {
     fn serialized_quad_owned_from_serialized_quad_roundtrip() {
         use kotoba_runtime::executor::SerializedQuad;
         let sq = SerializedQuad {
-            graph:       "g".to_string(),
-            subject:     "s".to_string(),
-            predicate:   "p".to_string(),
+            graph: "g".to_string(),
+            subject: "s".to_string(),
+            predicate: "p".to_string(),
             object_cbor: vec![1, 2, 3],
         };
         let owned: SerializedQuadOwned = sq.into();
-        assert_eq!(owned.graph,       "g");
-        assert_eq!(owned.subject,     "s");
-        assert_eq!(owned.predicate,   "p");
+        assert_eq!(owned.graph, "g");
+        assert_eq!(owned.subject, "s");
+        assert_eq!(owned.predicate, "p");
         assert_eq!(owned.object_cbor, vec![1, 2, 3]);
 
         let back: SerializedQuad = owned.into();
-        assert_eq!(back.graph,       "g");
-        assert_eq!(back.subject,     "s");
-        assert_eq!(back.predicate,   "p");
+        assert_eq!(back.graph, "g");
+        assert_eq!(back.subject, "s");
+        assert_eq!(back.predicate, "p");
         assert_eq!(back.object_cbor, vec![1, 2, 3]);
     }
 
@@ -500,13 +549,16 @@ mod tests {
         let result = WasmRunResult {
             superstep_results: vec![],
             assert_quads: vec![SerializedQuad {
-                graph: "g".into(), subject: "s".into(), predicate: "p".into(), object_cbor: vec![],
+                graph: "g".into(),
+                subject: "s".into(),
+                predicate: "p".into(),
+                object_cbor: vec![],
             }],
-            retract_quads:     vec![],
+            retract_quads: vec![],
             pending_publishes: vec![("topic".into(), vec![0x42])],
             final_output_cbor: vec![0xF6],
-            total_gas_used:    1234,
-            supersteps_run:    3,
+            total_gas_used: 1234,
+            supersteps_run: 3,
         };
         assert_eq!(result.supersteps_run, 3);
         assert_eq!(result.total_gas_used, 1234);

@@ -18,7 +18,7 @@ use crate::program::ProgramStore;
 ///   JS/TS  — jco componentize --world kotoba-udf
 ///   Go     — TinyGo + wit-bindgen-go
 pub struct UdfExecutor {
-    engine:   KotobaEngine,
+    engine: KotobaEngine,
     programs: ProgramStore,
 }
 
@@ -33,10 +33,11 @@ impl UdfExecutor {
     pub fn eval(
         &self,
         program_cid: &str,
-        wasm_bytes:  &[u8],
-        rows_cbor:   Vec<Vec<u8>>,
+        wasm_bytes: &[u8],
+        rows_cbor: Vec<Vec<u8>>,
     ) -> Result<Vec<Vec<u8>>, RuntimeError> {
-        let component = self.programs
+        let component = self
+            .programs
             .get_or_compile(program_cid, wasm_bytes)
             .map_err(RuntimeError::CompileFailed)?;
 
@@ -63,13 +64,7 @@ impl UdfExecutor {
         let val_rows = Val::List(
             rows_cbor
                 .into_iter()
-                .map(|row| {
-                    Val::List(
-                        row.into_iter()
-                            .map(Val::U8)
-                            .collect::<Vec<_>>(),
-                    )
-                })
+                .map(|row| Val::List(row.into_iter().map(Val::U8).collect::<Vec<_>>()))
                 .collect::<Vec<_>>(),
         );
 
@@ -90,7 +85,9 @@ impl UdfExecutor {
                             if let Val::List(bytes) = row_val {
                                 bytes
                                     .iter()
-                                    .filter_map(|v| if let Val::U8(b) = v { Some(*b) } else { None })
+                                    .filter_map(
+                                        |v| if let Val::U8(b) = v { Some(*b) } else { None },
+                                    )
                                     .collect::<Vec<u8>>()
                             } else {
                                 vec![]
@@ -99,7 +96,9 @@ impl UdfExecutor {
                         .collect();
                     Ok(rows)
                 } else {
-                    Err(RuntimeError::GuestError("unexpected eval output type".into()))
+                    Err(RuntimeError::GuestError(
+                        "unexpected eval output type".into(),
+                    ))
                 }
             }
             Val::Result(Err(Some(inner))) => {

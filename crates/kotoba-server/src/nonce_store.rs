@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const MAX_NONCES: usize = 16_384;
 
 pub struct NonceStore {
-    inner: DashMap<String, u64>,   // nonce → expiry_unix
+    inner: DashMap<String, u64>, // nonce → expiry_unix
     /// Approximate live-entry counter — DashMap::len() walks all shards so
     /// caching it lets the hot path avoid the global scan on every call.
     size: AtomicUsize,
@@ -31,7 +31,10 @@ impl Default for NonceStore {
 
 impl NonceStore {
     pub fn new() -> Self {
-        Self { inner: DashMap::new(), size: AtomicUsize::new(0) }
+        Self {
+            inner: DashMap::new(),
+            size: AtomicUsize::new(0),
+        }
     }
 
     /// Check that `nonce` has not been seen before and register it until `expiry_unix`.
@@ -122,7 +125,7 @@ mod tests {
         let store = NonceStore::new();
         // Insert with expiry in the past
         assert!(store.check_and_register("old-nonce", 1)); // exp = 1970-01-01
-        // Should be accepted again since the old entry is expired
+                                                           // Should be accepted again since the old entry is expired
         assert!(store.check_and_register("old-nonce", now_secs() + 3600));
     }
 
@@ -171,9 +174,15 @@ mod tests {
         }
         // All nonces are live — purge removes nothing.  Hard cap must fire.
         let accepted = store.check_and_register("overflow-nonce", future);
-        assert!(!accepted, "hard cap must reject when all stored nonces are still live");
+        assert!(
+            !accepted,
+            "hard cap must reject when all stored nonces are still live"
+        );
         // Verify the store did not grow beyond MAX_NONCES.
         let len = store.inner.len();
-        assert_eq!(len, MAX_NONCES, "map must not exceed MAX_NONCES after hard-cap rejection");
+        assert_eq!(
+            len, MAX_NONCES,
+            "map must not exceed MAX_NONCES after hard-cap rejection"
+        );
     }
 }

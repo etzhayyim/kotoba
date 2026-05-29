@@ -1,3 +1,8 @@
+use anyhow::Result;
+use bytes::Bytes;
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use kotoba_core::{cid::KotobaCid, store::BlockStore};
+use kotoba_store::{BudgetedBlockStore, MemoryBlockStore, TieredBlockStore};
 /// TieredBlockStore benchmarks — hot/cold + simulated network latency.
 ///
 /// Network model (realistic RTT assumptions, single-hop):
@@ -10,32 +15,37 @@
 ///
 /// Simulated by a `SimulatedLatencyBlockStore` wrapper using `std::thread::sleep`.
 use std::time::Duration;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use kotoba_core::{cid::KotobaCid, store::BlockStore};
-use kotoba_store::{BudgetedBlockStore, MemoryBlockStore, TieredBlockStore};
-use bytes::Bytes;
-use anyhow::Result;
 
 // ─── Latency simulation ───────────────────────────────────────────────────────
 
 struct SimulatedLatencyBlockStore {
-    inner:   MemoryBlockStore,
+    inner: MemoryBlockStore,
     get_rtt: Duration,
     put_rtt: Duration,
 }
 
 impl SimulatedLatencyBlockStore {
     fn new(get_rtt: Duration, put_rtt: Duration) -> Self {
-        Self { inner: MemoryBlockStore::new(), get_rtt, put_rtt }
+        Self {
+            inner: MemoryBlockStore::new(),
+            get_rtt,
+            put_rtt,
+        }
     }
 
     /// kubo/HTTP LAN: GET ~1 ms, PUT ~2 ms
-    fn kubo_lan() -> Self { Self::new(ms(1), ms(2)) }
+    fn kubo_lan() -> Self {
+        Self::new(ms(1), ms(2))
+    }
     /// kubo/HTTP WAN: GET ~80 ms, PUT ~100 ms
-    fn kubo_wan() -> Self { Self::new(ms(80), ms(100)) }
+    fn kubo_wan() -> Self {
+        Self::new(ms(80), ms(100))
+    }
 }
 
-fn ms(n: u64) -> Duration { Duration::from_millis(n) }
+fn ms(n: u64) -> Duration {
+    Duration::from_millis(n)
+}
 
 impl BlockStore for SimulatedLatencyBlockStore {
     fn put(&self, cid: &KotobaCid, data: &[u8]) -> Result<()> {
@@ -56,8 +66,12 @@ impl BlockStore for SimulatedLatencyBlockStore {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-fn make_cid(n: u64) -> KotobaCid { KotobaCid::from_bytes(&n.to_le_bytes()) }
-fn make_block(n: u64) -> Vec<u8> { format!("block-data-{n:020}").into_bytes() }
+fn make_cid(n: u64) -> KotobaCid {
+    KotobaCid::from_bytes(&n.to_le_bytes())
+}
+fn make_block(n: u64) -> Vec<u8> {
+    format!("block-data-{n:020}").into_bytes()
+}
 
 // ─── Baselines (no-network, memory only) ─────────────────────────────────────
 
@@ -88,8 +102,8 @@ fn bench_single_cold_get(c: &mut Criterion) {
     group.sample_size(20);
 
     let scenarios: &[(&str, Duration, Duration)] = &[
-        ("kubo_lan_1ms",   ms(1),  ms(2)),
-        ("kubo_wan_80ms",  ms(80), ms(100)),
+        ("kubo_lan_1ms", ms(1), ms(2)),
+        ("kubo_wan_80ms", ms(80), ms(100)),
     ];
 
     for (name, get_rtt, put_rtt) in scenarios {
@@ -98,7 +112,11 @@ fn bench_single_cold_get(c: &mut Criterion) {
             SimulatedLatencyBlockStore::new(*get_rtt, *put_rtt),
         );
         for i in 0..100 {
-            store.cold().inner.put(&make_cid(i), &make_block(i)).unwrap();
+            store
+                .cold()
+                .inner
+                .put(&make_cid(i), &make_block(i))
+                .unwrap();
         }
 
         group.bench_function(*name, |b| {
@@ -125,21 +143,31 @@ fn bench_cold_vs_hot_amortization(c: &mut Criterion) {
         group.bench_function("kubo_lan/first_access_50", |b| {
             b.iter(|| {
                 let cold = SimulatedLatencyBlockStore::kubo_lan();
-                for i in 0..50 { cold.inner.put(&make_cid(i), &make_block(i)).unwrap(); }
+                for i in 0..50 {
+                    cold.inner.put(&make_cid(i), &make_block(i)).unwrap();
+                }
                 let s = TieredBlockStore::new(MemoryBlockStore::new(), cold);
-                for i in 0..50 { let _ = s.get(&make_cid(i)).unwrap(); }
+                for i in 0..50 {
+                    let _ = s.get(&make_cid(i)).unwrap();
+                }
             });
         });
 
         // Pre-warm hot tier then measure repeat hot-hit cost
         let cold2 = SimulatedLatencyBlockStore::kubo_lan();
-        for i in 0..50 { cold2.inner.put(&make_cid(i), &make_block(i)).unwrap(); }
+        for i in 0..50 {
+            cold2.inner.put(&make_cid(i), &make_block(i)).unwrap();
+        }
         let store2 = TieredBlockStore::new(MemoryBlockStore::new(), cold2);
-        for i in 0..50 { let _ = store2.get(&make_cid(i)).unwrap(); }
+        for i in 0..50 {
+            let _ = store2.get(&make_cid(i)).unwrap();
+        }
 
         group.bench_function("kubo_lan/repeat_access_hot_50", |b| {
             b.iter(|| {
-                for i in 0..50 { let _ = store2.get(&make_cid(i)).unwrap(); }
+                for i in 0..50 {
+                    let _ = store2.get(&make_cid(i)).unwrap();
+                }
             });
         });
     }
@@ -174,12 +202,18 @@ fn bench_cold_promote(c: &mut Criterion) {
         group.throughput(Throughput::Elements(n));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
             b.iter(|| {
-                let hot  = MemoryBlockStore::new();
+                let hot = MemoryBlockStore::new();
                 let cold = MemoryBlockStore::new();
-                for i in 0..n { cold.put(&make_cid(i), &make_block(i)).unwrap(); }
+                for i in 0..n {
+                    cold.put(&make_cid(i), &make_block(i)).unwrap();
+                }
                 let store = TieredBlockStore::new(hot, cold);
-                for i in 0..n { let _ = store.get(&make_cid(i)).unwrap(); }
-                for i in 0..n { assert!(store.has(&make_cid(i))); }
+                for i in 0..n {
+                    let _ = store.get(&make_cid(i)).unwrap();
+                }
+                for i in 0..n {
+                    assert!(store.has(&make_cid(i)));
+                }
             });
         });
     }

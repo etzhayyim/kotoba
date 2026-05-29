@@ -1,23 +1,23 @@
+use super::kvcache::KvCache;
 use kotoba_core::cid::KotobaCid;
 use kotoba_core::foreign::{ForeignBridge, ForeignCall, ForeignCallType};
-use super::kvcache::KvCache;
 
 /// InferenceRequest — maps to Invoke ChainEntry + CALL_FOREIGN(LlmInfer)
 /// Each token generation = one Pregel superstep
 /// Bonsai ADR-2605092500: Reasoning as Sap-Flow Walk in Vector Space
 pub struct InferenceRequest {
-    pub model_cid:    KotobaCid,
-    pub adapter_cid:  Option<KotobaCid>,   // LoRA
+    pub model_cid: KotobaCid,
+    pub adapter_cid: Option<KotobaCid>, // LoRA
     pub input_tokens: Vec<u32>,
-    pub max_tokens:   u32,
-    pub call_id:      u64,
-    pub ucan_cid:     KotobaCid,
+    pub max_tokens: u32,
+    pub call_id: u64,
+    pub ucan_cid: KotobaCid,
 }
 
 pub struct InferenceSession {
-    pub request:  InferenceRequest,
+    pub request: InferenceRequest,
     pub kv_cache: KvCache,
-    pub output:   Vec<u32>,
+    pub output: Vec<u32>,
 }
 
 impl InferenceSession {
@@ -35,13 +35,15 @@ impl InferenceSession {
             call_id: self.request.call_id,
             ucan_cid: self.request.ucan_cid.clone(),
             call_type: ForeignCallType::LlmInfer {
-                model_cid:   self.request.model_cid.clone(),
+                model_cid: self.request.model_cid.clone(),
                 adapter_cid: self.request.adapter_cid.clone(),
                 session_cid: Some(self.kv_cache.session_cid.clone()),
-                max_tokens:  self.request.max_tokens,
+                max_tokens: self.request.max_tokens,
             },
         };
-        let _result = bridge.call(call).await
+        let _result = bridge
+            .call(call)
+            .await
             .map_err(|e| InferError::Bridge(e.to_string()))?;
         Ok(vec![]) // token stream in full impl
     }
@@ -62,12 +64,12 @@ mod tests {
 
     fn make_request() -> InferenceRequest {
         InferenceRequest {
-            model_cid:    KotobaCid::from_bytes(b"model"),
-            adapter_cid:  None,
+            model_cid: KotobaCid::from_bytes(b"model"),
+            adapter_cid: None,
             input_tokens: vec![1, 2, 3],
-            max_tokens:   64,
-            call_id:      42,
-            ucan_cid:     KotobaCid::from_bytes(b"ucan"),
+            max_tokens: 64,
+            call_id: 42,
+            ucan_cid: KotobaCid::from_bytes(b"ucan"),
         }
     }
 
@@ -114,19 +116,22 @@ mod tests {
         let session_cid = KotobaCid::from_bytes(b"session");
         let session = InferenceSession::new(make_request(), session_cid);
         // KvCache starts with an empty Arrangement (no quads stored)
-        let quads = session.kv_cache.arrangement.get_by_predicate("kv/layer/0/seq/0");
+        let quads = session
+            .kv_cache
+            .arrangement
+            .get_by_attribute("kv/layer/0/seq/0");
         assert!(quads.is_empty(), "new session KV cache should be empty");
     }
 
     #[test]
     fn inference_request_with_adapter_cid() {
         let req = InferenceRequest {
-            model_cid:    KotobaCid::from_bytes(b"model"),
-            adapter_cid:  Some(KotobaCid::from_bytes(b"lora")),
+            model_cid: KotobaCid::from_bytes(b"model"),
+            adapter_cid: Some(KotobaCid::from_bytes(b"lora")),
             input_tokens: vec![10, 20],
-            max_tokens:   32,
-            call_id:      99,
-            ucan_cid:     KotobaCid::from_bytes(b"ucan"),
+            max_tokens: 32,
+            call_id: 99,
+            ucan_cid: KotobaCid::from_bytes(b"ucan"),
         };
         assert!(req.adapter_cid.is_some());
         assert_eq!(req.adapter_cid.unwrap(), KotobaCid::from_bytes(b"lora"));
@@ -136,12 +141,12 @@ mod tests {
     fn inference_request_model_cid_stable() {
         let cid = KotobaCid::from_bytes(b"gemma4-2b");
         let req = InferenceRequest {
-            model_cid:    cid.clone(),
-            adapter_cid:  None,
+            model_cid: cid.clone(),
+            adapter_cid: None,
             input_tokens: vec![],
-            max_tokens:   0,
-            call_id:      0,
-            ucan_cid:     KotobaCid::from_bytes(b"u"),
+            max_tokens: 0,
+            call_id: 0,
+            ucan_cid: KotobaCid::from_bytes(b"u"),
         };
         assert_eq!(req.model_cid, cid);
     }

@@ -1,0 +1,27 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.vc.issue",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Store a W3C Verifiable Credential as Kotoba Datoms.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["graph", "credential"],
+          "properties": {
+            "graph": { "type": "string" },
+            "credential": { "type": "unknown" },
+            "cacao_b64": { "type": "string" },
+            "auth_presentation": { "type": "unknown" }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": { "type": "unknown" }
+      }
+    }
+  }
+}

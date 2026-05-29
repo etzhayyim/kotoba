@@ -53,7 +53,10 @@ mod tests {
     fn gas_exceeded_display_contains_limit() {
         let e = RuntimeError::GasExceeded { limit: 10_000_000 };
         let s = e.to_string();
-        assert!(s.contains("10000000") || s.contains("10_000_000"), "got: {s}");
+        assert!(
+            s.contains("10000000") || s.contains("10_000_000"),
+            "got: {s}"
+        );
     }
 
     #[test]
@@ -100,6 +103,10 @@ mod tests {
         let mut sorted = variants.clone();
         sorted.sort();
         sorted.dedup();
-        assert_eq!(sorted.len(), variants.len(), "some variants share the same display: {variants:?}");
+        assert_eq!(
+            sorted.len(),
+            variants.len(),
+            "some variants share the same display: {variants:?}"
+        );
     }
 }

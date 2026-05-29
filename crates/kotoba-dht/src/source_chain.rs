@@ -1,5 +1,5 @@
 use kotoba_core::cid::KotobaCid;
-use kotoba_kqe::quad::Quad;
+use kotoba_kqe::{Datom, LegacyQuad};
 use serde::{Deserialize, Serialize};
 
 /// How to dispatch an Invoke ChainEntry
@@ -16,49 +16,53 @@ pub enum ProgramType {
 /// ChainContent — what a ChainEntry carries
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ChainContent {
-    Quad(Quad),
-    Commit { graph_cid: KotobaCid, prolly_root: KotobaCid },
+    Datom(Datom),
+    Quad(LegacyQuad),
+    Commit {
+        graph_cid: KotobaCid,
+        prolly_root: KotobaCid,
+    },
     Invoke {
-        program_cid:  KotobaCid,
+        program_cid: KotobaCid,
         program_type: ProgramType,
         input_topics: Vec<String>,
-        max_steps:    u32,
-        call_id:      u64,
+        max_steps: u32,
+        call_id: u64,
     },
     Result {
-        call_id:    u64,
-        status:     u8,   // 0=ok 1=halt 2=exceeded 3=error
+        call_id: u64,
+        status: u8, // 0=ok 1=halt 2=exceeded 3=error
         steps_used: u32,
     },
     Warrant {
-        accused:   Vec<u8>,  // accused NodeId
-        evidence:  KotobaCid,
-        rule_id:   u8,
+        accused: Vec<u8>, // accused NodeId
+        evidence: KotobaCid,
+        rule_id: u8,
     },
     /// LLM inference request (special Invoke subtype)
     Infer {
-        model_cid:    KotobaCid,
-        adapter_cid:  Option<KotobaCid>,  // LoRA
-        session_cid:  Option<KotobaCid>,  // KV-cache
-        max_tokens:   u32,
-        call_id:      u64,
+        model_cid: KotobaCid,
+        adapter_cid: Option<KotobaCid>, // LoRA
+        session_cid: Option<KotobaCid>, // KV-cache
+        max_tokens: u32,
+        call_id: u64,
     },
 }
 
 /// ChainEntry — signed, ordered, append-only fact (per-DID Source Chain)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainEntry {
-    pub cid:     KotobaCid,
-    pub prev:    Option<KotobaCid>,
-    pub agent:   String,         // DID
-    pub seq:     u64,
+    pub cid: KotobaCid,
+    pub prev: Option<KotobaCid>,
+    pub agent: String, // DID
+    pub seq: u64,
     pub content: ChainContent,
-    pub ts:      u64,
-    pub sig:     Vec<u8>,        // Ed25519 signature over signing_bytes()
+    pub ts: u64,
+    pub sig: Vec<u8>, // Ed25519 signature over signing_bytes()
     /// Access policy for this entry.  `Open` entries gossip as plaintext;
     /// `Encrypted` entries gossip only the `ct_cid` — PRE re-encryption on demand.
     #[serde(default, skip_serializing_if = "kotoba_core::DataPolicy::is_open")]
-    pub policy:  kotoba_core::DataPolicy,
+    pub policy: kotoba_core::DataPolicy,
 }
 
 /// Subset of ChainEntry fields that are covered by the Ed25519 signature.
@@ -67,12 +71,12 @@ pub struct ChainEntry {
 /// cryptographically detectable.
 #[derive(Serialize)]
 struct SigningPayload<'a> {
-    prev:    &'a Option<KotobaCid>,
-    agent:   &'a str,
-    seq:     u64,
+    prev: &'a Option<KotobaCid>,
+    agent: &'a str,
+    seq: u64,
     content: &'a ChainContent,
-    ts:      u64,
-    policy:  &'a kotoba_core::DataPolicy,
+    ts: u64,
+    policy: &'a kotoba_core::DataPolicy,
 }
 
 impl ChainEntry {
@@ -83,7 +87,14 @@ impl ChainEntry {
         content: ChainContent,
         sig: Vec<u8>,
     ) -> Self {
-        Self::new_with_policy(prev, agent, seq, content, sig, kotoba_core::DataPolicy::Open)
+        Self::new_with_policy(
+            prev,
+            agent,
+            seq,
+            content,
+            sig,
+            kotoba_core::DataPolicy::Open,
+        )
     }
 
     pub fn new_with_policy(
@@ -97,7 +108,16 @@ impl ChainEntry {
         let ts = now_ms();
         let payload = format!("{:?}{:?}{}{}", prev, content, seq, ts);
         let cid = KotobaCid::from_bytes(payload.as_bytes());
-        Self { cid, prev, agent, seq, content, ts, sig, policy }
+        Self {
+            cid,
+            prev,
+            agent,
+            seq,
+            content,
+            ts,
+            sig,
+            policy,
+        }
     }
 
     /// Canonical CBOR bytes that the agent signs.
@@ -107,12 +127,12 @@ impl ChainEntry {
     /// Field order is fixed by struct declaration order.
     pub fn signing_bytes(&self) -> Vec<u8> {
         let payload = SigningPayload {
-            prev:    &self.prev,
-            agent:   &self.agent,
-            seq:     self.seq,
+            prev: &self.prev,
+            agent: &self.agent,
+            seq: self.seq,
             content: &self.content,
-            ts:      self.ts,
-            policy:  &self.policy,
+            ts: self.ts,
+            policy: &self.policy,
         };
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&payload, &mut buf)
@@ -130,10 +150,11 @@ impl ChainEntry {
         let key_arr: [u8; 32] = pubkey_bytes
             .try_into()
             .map_err(|_| ChainError::InvalidSignature)?;
-        let verifying_key = VerifyingKey::from_bytes(&key_arr)
-            .map_err(|_| ChainError::InvalidSignature)?;
+        let verifying_key =
+            VerifyingKey::from_bytes(&key_arr).map_err(|_| ChainError::InvalidSignature)?;
 
-        let sig_arr: [u8; 64] = self.sig
+        let sig_arr: [u8; 64] = self
+            .sig
             .as_slice()
             .try_into()
             .map_err(|_| ChainError::InvalidSignature)?;
@@ -149,12 +170,15 @@ impl ChainEntry {
 #[derive(Debug, Default)]
 pub struct SourceChain {
     pub agent: String,
-    entries:   Vec<ChainEntry>,
+    entries: Vec<ChainEntry>,
 }
 
 impl SourceChain {
     pub fn new(agent: impl Into<String>) -> Self {
-        Self { agent: agent.into(), entries: Vec::new() }
+        Self {
+            agent: agent.into(),
+            entries: Vec::new(),
+        }
     }
 
     /// Append without signature verification.
@@ -165,7 +189,10 @@ impl SourceChain {
     pub(crate) fn append(&mut self, entry: ChainEntry) -> Result<(), ChainError> {
         let expected_seq = self.entries.len() as u64;
         if entry.seq != expected_seq {
-            return Err(ChainError::SeqMismatch { expected: expected_seq, got: entry.seq });
+            return Err(ChainError::SeqMismatch {
+                expected: expected_seq,
+                got: entry.seq,
+            });
         }
         let expected_prev = self.entries.last().map(|e| &e.cid);
         if entry.prev.as_ref() != expected_prev {
@@ -189,9 +216,15 @@ impl SourceChain {
         self.append(entry)
     }
 
-    pub fn head(&self) -> Option<&ChainEntry> { self.entries.last() }
-    pub fn len(&self) -> usize { self.entries.len() }
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn head(&self) -> Option<&ChainEntry> {
+        self.entries.last()
+    }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -218,7 +251,7 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{SigningKey, Signer};
+    use ed25519_dalek::{Signer, SigningKey};
 
     fn make_signed_entry(
         signing_key: &SigningKey,
@@ -239,7 +272,21 @@ mod tests {
     }
 
     fn dummy_content() -> ChainContent {
-        ChainContent::Result { call_id: 1, status: 0, steps_used: 10 }
+        ChainContent::Result {
+            call_id: 1,
+            status: 0,
+            steps_used: 10,
+        }
+    }
+
+    fn datom_content() -> ChainContent {
+        let tx = KotobaCid::from_bytes(b"tx");
+        ChainContent::Datom(Datom::assert(
+            KotobaCid::from_bytes(b"entity"),
+            "source/attr".to_string(),
+            kotoba_kqe::Value::Text("value".to_string()),
+            tx,
+        ))
     }
 
     #[test]
@@ -250,11 +297,21 @@ mod tests {
     }
 
     #[test]
+    fn source_chain_signs_native_datom_content() {
+        let sk = test_keypair();
+        let entry = make_signed_entry(&sk, None, "did:plc:alice", 0, datom_content());
+        assert!(entry.verify_sig(sk.verifying_key().as_bytes()).is_ok());
+        assert!(matches!(entry.content, ChainContent::Datom(_)));
+    }
+
+    #[test]
     fn verify_sig_wrong_key_fails() {
         let sk = test_keypair();
         let wrong_sk = SigningKey::from_bytes(&[99u8; 32]);
         let entry = make_signed_entry(&sk, None, "did:plc:alice", 0, dummy_content());
-        assert!(entry.verify_sig(wrong_sk.verifying_key().as_bytes()).is_err());
+        assert!(entry
+            .verify_sig(wrong_sk.verifying_key().as_bytes())
+            .is_err());
     }
 
     #[test]
@@ -272,7 +329,7 @@ mod tests {
         let mut entry = make_signed_entry(&sk, None, "did:plc:alice", 0, dummy_content());
         // Sign with Open policy, then flip to Encrypted — signature must not verify.
         entry.policy = kotoba_core::DataPolicy::Encrypted {
-            ct_cid:     kotoba_core::cid::KotobaCid::from_bytes(b"fake-ct"),
+            ct_cid: kotoba_core::cid::KotobaCid::from_bytes(b"fake-ct"),
             policy_cid: kotoba_core::cid::KotobaCid::from_bytes(b"fake-pol"),
         };
         assert!(entry.verify_sig(sk.verifying_key().as_bytes()).is_err());
@@ -291,7 +348,9 @@ mod tests {
         let sk = test_keypair();
         let mut chain = SourceChain::new("did:plc:alice");
         let entry = make_signed_entry(&sk, None, "did:plc:alice", 0, dummy_content());
-        assert!(chain.append_verified(entry, sk.verifying_key().as_bytes()).is_ok());
+        assert!(chain
+            .append_verified(entry, sk.verifying_key().as_bytes())
+            .is_ok());
         assert_eq!(chain.len(), 1);
     }
 
@@ -312,10 +371,22 @@ mod tests {
     fn append_seq_mismatch_rejected() {
         let mut chain = SourceChain::new("did:plc:alice");
         // Send seq=1 when chain is empty (expects seq=0)
-        let entry = ChainEntry::new(None, "did:plc:alice".into(), 1, dummy_content(), vec![0u8; 64]);
+        let entry = ChainEntry::new(
+            None,
+            "did:plc:alice".into(),
+            1,
+            dummy_content(),
+            vec![0u8; 64],
+        );
         let result = chain.append(entry);
         assert!(
-            matches!(result, Err(ChainError::SeqMismatch { expected: 0, got: 1 })),
+            matches!(
+                result,
+                Err(ChainError::SeqMismatch {
+                    expected: 0,
+                    got: 1
+                })
+            ),
             "wrong seq must produce SeqMismatch"
         );
         assert_eq!(chain.len(), 0);
@@ -331,7 +402,13 @@ mod tests {
 
         // Second entry references a wrong prev CID
         let wrong_prev = KotobaCid::from_bytes(b"wrong-prev");
-        let e1 = ChainEntry::new(Some(wrong_prev), "did:plc:alice".into(), 1, dummy_content(), vec![0u8; 64]);
+        let e1 = ChainEntry::new(
+            Some(wrong_prev),
+            "did:plc:alice".into(),
+            1,
+            dummy_content(),
+            vec![0u8; 64],
+        );
         let result = chain.append(e1);
         assert!(
             matches!(result, Err(ChainError::PrevMismatch)),
@@ -353,7 +430,13 @@ mod tests {
         let mut chain = SourceChain::new("did:plc:alice");
         assert!(chain.is_empty(), "fresh chain must be empty");
 
-        let entry = ChainEntry::new(None, "did:plc:alice".into(), 0, dummy_content(), vec![0u8; 64]);
+        let entry = ChainEntry::new(
+            None,
+            "did:plc:alice".into(),
+            0,
+            dummy_content(),
+            vec![0u8; 64],
+        );
         chain.append(entry).unwrap();
         assert!(!chain.is_empty(), "chain must not be empty after append");
     }
@@ -362,7 +445,13 @@ mod tests {
 
     #[test]
     fn chain_entry_new_default_policy_is_open() {
-        let entry = ChainEntry::new(None, "did:plc:alice".into(), 0, dummy_content(), vec![0u8; 64]);
+        let entry = ChainEntry::new(
+            None,
+            "did:plc:alice".into(),
+            0,
+            dummy_content(),
+            vec![0u8; 64],
+        );
         assert!(
             matches!(entry.policy, kotoba_core::DataPolicy::Open),
             "ChainEntry::new must default to DataPolicy::Open"

@@ -1,26 +1,77 @@
-use crate::quad::Quad;
+use crate::datom::{Datom, Value};
+use crate::quad::LegacyQuad as Quad;
+use kotoba_core::cid::KotobaCid;
 use serde::{Deserialize, Serialize};
 
-/// Multiplicity: +1 = assert, -1 = retract (Datom retraction as Delta)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Multiplicity { Assert = 1, Retract = -1 }
-
-/// Delta — atomic Pregel message: (Quad, ±1)
+/// Delta — atomic Pregel message. The op is stored only in `datom.op`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Delta {
-    pub quad:     Quad,
-    pub mult:     Multiplicity,
-    pub ts:       u64,
+    pub datom: Datom,
+    pub ts: u64,
 }
 
 impl Delta {
+    #[deprecated(note = "use assert_datom() or assert_legacy_quad() at explicit legacy boundaries")]
     pub fn assert(quad: Quad) -> Self {
-        Self { quad, mult: Multiplicity::Assert, ts: now_ms() }
+        Self::assert_legacy_quad(quad)
     }
+
+    #[deprecated(
+        note = "use retract_datom() or retract_legacy_quad() at explicit legacy boundaries"
+    )]
     pub fn retract(quad: Quad) -> Self {
-        Self { quad, mult: Multiplicity::Retract, ts: now_ms() }
+        Self::retract_legacy_quad(quad)
     }
-    pub fn is_assert(&self) -> bool { self.mult == Multiplicity::Assert }
+
+    pub fn assert_legacy_quad(quad: Quad) -> Self {
+        Self::assert_datom(Datom::from_legacy_quad(quad, true))
+    }
+
+    pub fn retract_legacy_quad(quad: Quad) -> Self {
+        Self::retract_datom(Datom::from_legacy_quad(quad, false))
+    }
+
+    pub fn assert_datom(mut datom: Datom) -> Self {
+        datom.op = true;
+        Self::from_datom(datom)
+    }
+
+    pub fn retract_datom(mut datom: Datom) -> Self {
+        datom.op = false;
+        Self::from_datom(datom)
+    }
+
+    pub fn from_datom(datom: Datom) -> Self {
+        Self {
+            datom,
+            ts: now_ms(),
+        }
+    }
+
+    pub fn is_assert(&self) -> bool {
+        self.datom.op
+    }
+
+    pub fn entity(&self) -> &KotobaCid {
+        &self.datom.e
+    }
+
+    pub fn attribute(&self) -> &str {
+        &self.datom.a
+    }
+
+    pub fn value(&self) -> &Value {
+        &self.datom.v
+    }
+
+    pub fn to_legacy_quad(&self) -> Quad {
+        self.datom.to_legacy_quad()
+    }
+
+    #[deprecated(note = "use to_legacy_quad() only at explicit legacy Quad boundaries")]
+    pub fn quad(&self) -> Quad {
+        self.to_legacy_quad()
+    }
 }
 
 fn now_ms() -> u64 {
@@ -35,97 +86,48 @@ mod tests {
     use super::*;
     use kotoba_core::cid::KotobaCid;
 
-    fn make_quad() -> Quad {
+    fn make_datom() -> Datom {
         let cid = KotobaCid::from_bytes(b"test");
-        Quad {
-            graph:     cid.clone(),
-            subject:   cid.clone(),
-            predicate: "test/pred".to_string(),
-            object:    crate::quad::QuadObject::Text("value".to_string()),
-        }
+        Datom::assert(
+            cid.clone(),
+            "test/pred".to_string(),
+            Value::Text("value".to_string()),
+            cid,
+        )
     }
 
     #[test]
-    fn assert_delta_has_assert_multiplicity() {
-        let d = Delta::assert(make_quad());
-        assert_eq!(d.mult, Multiplicity::Assert);
+    fn assert_delta_sets_datom_op_true() {
+        let d = Delta::assert_datom(make_datom());
+        assert!(d.datom.op);
         assert!(d.is_assert());
     }
 
     #[test]
-    fn retract_delta_has_retract_multiplicity() {
-        let d = Delta::retract(make_quad());
-        assert_eq!(d.mult, Multiplicity::Retract);
+    fn retract_delta_sets_datom_op_false() {
+        let d = Delta::retract_datom(make_datom());
+        assert!(!d.datom.op);
         assert!(!d.is_assert());
     }
 
     #[test]
     fn delta_ts_is_nonzero() {
-        let d = Delta::assert(make_quad());
+        let d = Delta::assert_datom(make_datom());
         assert!(d.ts > 0);
     }
 
     #[test]
-    fn multiplicity_discriminant_values() {
-        assert_eq!(Multiplicity::Assert  as i32,  1);
-        assert_eq!(Multiplicity::Retract as i32, -1);
-    }
-
-    #[test]
-    fn multiplicity_copy_and_clone() {
-        let m = Multiplicity::Assert;
-        let m2 = m;          // Copy
-        let m3 = m.clone();  // Clone
-        assert_eq!(m2, Multiplicity::Assert);
-        assert_eq!(m3, Multiplicity::Assert);
-    }
-
-    #[test]
     fn delta_clone_preserves_fields() {
-        let d = Delta::assert(make_quad());
+        let d = Delta::assert_datom(make_datom());
         let d2 = d.clone();
-        assert_eq!(d2.mult, Multiplicity::Assert);
-        assert_eq!(d2.quad, d.quad);
-        assert_eq!(d2.ts,   d.ts);
+        assert_eq!(d2.datom, d.datom);
+        assert_eq!(d2.ts, d.ts);
     }
 
     #[test]
-    fn retract_is_not_assert() {
-        let d = Delta::retract(make_quad());
-        assert!(!d.is_assert());
-        assert_eq!(d.mult, Multiplicity::Retract);
-    }
-
-    #[test]
-    fn delta_preserves_quad_predicate() {
-        let d = Delta::assert(make_quad());
-        assert_eq!(d.quad.predicate, "test/pred");
-    }
-
-    #[test]
-    fn delta_preserves_quad_object_text() {
-        let d = Delta::assert(make_quad());
-        if let crate::quad::QuadObject::Text(ref s) = d.quad.object {
-            assert_eq!(s, "value");
-        } else {
-            panic!("expected Text object");
-        }
-    }
-
-    #[test]
-    fn assert_and_retract_ts_monotonic() {
-        let d1 = Delta::assert(make_quad());
-        let d2 = Delta::retract(make_quad());
-        // Timestamps should be >= 0 and d2.ts >= d1.ts
-        assert!(d1.ts > 0);
-        assert!(d2.ts >= d1.ts, "retract timestamp should be >= assert timestamp");
-    }
-
-    #[test]
-    fn multiplicity_debug_format() {
-        let s = format!("{:?}", Multiplicity::Assert);
-        assert!(s.contains("Assert"), "Debug for Assert should contain 'Assert'");
-        let s2 = format!("{:?}", Multiplicity::Retract);
-        assert!(s2.contains("Retract"), "Debug for Retract should contain 'Retract'");
+    fn delta_preserves_datom_fields() {
+        let d = Delta::assert_datom(make_datom());
+        assert_eq!(d.attribute(), "test/pred");
+        assert_eq!(d.value(), &Value::Text("value".to_string()));
     }
 }

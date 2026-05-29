@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 /// `(topic, payload)` pair drained from the KSE inbox.
 type KseInboxItem = (String, Vec<u8>);
-use wasmtime::{Config, Engine, Store};
-use wasmtime::component::{Component, ComponentType, Lift, Linker, Lower};
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiView, ResourceTable};
 use kotoba_auth::delegation::DelegationChain;
+use wasmtime::component::{Component, ComponentType, Lift, Linker, Lower};
+use wasmtime::{Config, Engine, Store};
+use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 /// Type alias for a synchronous local inference function.
 ///
@@ -89,9 +89,9 @@ pub struct HostState {
 
 #[derive(Debug, Clone)]
 pub struct PendingQuad {
-    pub graph:       String,
-    pub subject:     String,
-    pub predicate:   String,
+    pub graph: String,
+    pub subject: String,
+    pub predicate: String,
     pub object_cbor: Vec<u8>,
 }
 
@@ -136,7 +136,10 @@ impl HostState {
     }
 
     /// Pre-populate the head commits map for `kqe.get-head` lookups during WASM execution.
-    pub fn with_head_commits(mut self, head_commits: std::collections::HashMap<String, String>) -> Self {
+    pub fn with_head_commits(
+        mut self,
+        head_commits: std::collections::HashMap<String, String>,
+    ) -> Self {
         self.head_commits = head_commits;
         self
     }
@@ -185,8 +188,12 @@ impl HostState {
 }
 
 impl WasiView for HostState {
-    fn table(&mut self) -> &mut ResourceTable { &mut self.wasi_table }
-    fn ctx(&mut self) -> &mut WasiCtx { &mut self.wasi_ctx }
+    fn table(&mut self) -> &mut ResourceTable {
+        &mut self.wasi_table
+    }
+    fn ctx(&mut self) -> &mut WasiCtx {
+        &mut self.wasi_ctx
+    }
 }
 
 /// Central wasmtime Engine shared across all invocations (thread-safe, clone is cheap).
@@ -258,9 +265,9 @@ fn bind_kqe(linker: &mut Linker<HostState>) -> Result<()> {
          -> Result<(Result<(), String>,)> {
             ctx.data_mut().charge_gas(10)?;
             ctx.data_mut().pending_asserts.push(PendingQuad {
-                graph:       q.graph,
-                subject:     q.subject,
-                predicate:   q.predicate,
+                graph: q.graph,
+                subject: q.subject,
+                predicate: q.predicate,
                 object_cbor: q.object_cbor,
             });
             Ok((Ok(()),))
@@ -275,9 +282,9 @@ fn bind_kqe(linker: &mut Linker<HostState>) -> Result<()> {
          -> Result<(Result<(), String>,)> {
             ctx.data_mut().charge_gas(10)?;
             ctx.data_mut().pending_retracts.push(PendingQuad {
-                graph:       q.graph,
-                subject:     q.subject,
-                predicate:   q.predicate,
+                graph: q.graph,
+                subject: q.subject,
+                predicate: q.predicate,
                 object_cbor: q.object_cbor,
             });
             Ok((Ok(()),))
@@ -312,7 +319,10 @@ fn bind_kqe(linker: &mut Linker<HostState>) -> Result<()> {
          (graph, subject, predicate): (String, String, String)|
          -> Result<(Vec<Vec<u8>>,)> {
             ctx.data_mut().charge_gas(5)?;
-            let matches: Vec<Vec<u8>> = ctx.data().quad_snapshot.iter()
+            let matches: Vec<Vec<u8>> = ctx
+                .data()
+                .quad_snapshot
+                .iter()
                 .filter(|q| q.graph == graph && q.subject == subject && q.predicate == predicate)
                 .map(|q| q.object_cbor.clone())
                 .collect();
@@ -340,28 +350,31 @@ fn bind_kqe(linker: &mut Linker<HostState>) -> Result<()> {
          -> Result<(Result<Vec<WitQuad>, String>,)> {
             ctx.data_mut().charge_gas(500)?;
             let result = (|| -> anyhow::Result<Vec<WitQuad>> {
-                use kotoba_kqe::{DatalogProgram, DatalogRule, Delta};
-                use kotoba_kqe::quad::{Quad, QuadObject};
                 use kotoba_core::cid::KotobaCid;
+                use kotoba_kqe::quad::{LegacyQuad as Quad, LegacyQuadObject as QuadObject};
+                use kotoba_kqe::{DatalogProgram, DatalogRule, Delta};
 
                 // Deserialize rules from CBOR
                 let rules: Vec<DatalogRule> = ciborium::de::from_reader(rules_cbor.as_slice())
                     .map_err(|e| anyhow::anyhow!("rule deserialize: {e}"))?;
 
                 let mut program = DatalogProgram::new();
-                for rule in rules { program.add_rule(rule); }
+                for rule in rules {
+                    program.add_rule(rule);
+                }
 
                 // Build input deltas from quad_snapshot (all treated as assert facts)
                 let snapshot = ctx.data().quad_snapshot.clone();
                 let mut input_deltas: Vec<Delta> = Vec::with_capacity(snapshot.len());
                 for wit_q in &snapshot {
-                    let object: QuadObject = ciborium::de::from_reader(wit_q.object_cbor.as_slice())
-                        .unwrap_or(QuadObject::Text(wit_q.predicate.clone()));
-                    input_deltas.push(Delta::assert(Quad {
-                        subject:   KotobaCid::from_bytes(wit_q.subject.as_bytes()),
+                    let object: QuadObject =
+                        ciborium::de::from_reader(wit_q.object_cbor.as_slice())
+                            .unwrap_or(QuadObject::Text(wit_q.predicate.clone()));
+                    input_deltas.push(Delta::assert_legacy_quad(Quad {
+                        subject: KotobaCid::from_bytes(wit_q.subject.as_bytes()),
                         predicate: wit_q.predicate.clone(),
                         object,
-                        graph:     KotobaCid::from_bytes(wit_q.graph.as_bytes()),
+                        graph: KotobaCid::from_bytes(wit_q.graph.as_bytes()),
                     }));
                 }
 
@@ -371,14 +384,17 @@ fn bind_kqe(linker: &mut Linker<HostState>) -> Result<()> {
                 // Convert derived deltas to WitQuad (only asserts)
                 let mut out = Vec::new();
                 for d in derived {
-                    if !d.is_assert() { continue; }
+                    if !d.is_assert() {
+                        continue;
+                    }
+                    let quad = d.to_legacy_quad();
                     let mut obj_cbor = Vec::new();
-                    ciborium::ser::into_writer(&d.quad.object, &mut obj_cbor)
+                    ciborium::ser::into_writer(&quad.object, &mut obj_cbor)
                         .map_err(|e| anyhow::anyhow!("object serialize: {e}"))?;
                     out.push(WitQuad {
-                        graph:       d.quad.graph.to_multibase(),
-                        subject:     d.quad.subject.to_multibase(),
-                        predicate:   d.quad.predicate,
+                        graph: quad.graph.to_multibase(),
+                        subject: quad.subject.to_multibase(),
+                        predicate: quad.predicate,
                         object_cbor: obj_cbor,
                     });
                 }
@@ -415,7 +431,10 @@ fn bind_kse(linker: &mut Linker<HostState>) -> Result<()> {
          (topic_pattern, max_items): (String, u32)|
          -> Result<(Result<Vec<KseInboxItem>, String>,)> {
             ctx.data_mut().charge_gas(20)?;
-            let matches: Vec<KseInboxItem> = ctx.data().kse_inbox.iter()
+            let matches: Vec<KseInboxItem> = ctx
+                .data()
+                .kse_inbox
+                .iter()
                 .filter(|(t, _)| topic_pattern.is_empty() || t.starts_with(&topic_pattern))
                 .take(max_items as usize)
                 .cloned()
@@ -446,10 +465,9 @@ fn bind_auth(linker: &mut Linker<HostState>) -> Result<()> {
          -> Result<(Result<String, String>,)> {
             ctx.data_mut().charge_gas(50)?;
             let result = (|| -> anyhow::Result<String> {
-                let chain = DelegationChain::from_cbor(&cacao_cbor)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                let did = chain.verify("", "")
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let chain =
+                    DelegationChain::from_cbor(&cacao_cbor).map_err(|e| anyhow::anyhow!("{e}"))?;
+                let did = chain.verify("", "").map_err(|e| anyhow::anyhow!("{e}"))?;
                 Ok(did)
             })();
             Ok((result.map_err(|e| e.to_string()),))
@@ -465,7 +483,10 @@ fn bind_auth(linker: &mut Linker<HostState>) -> Result<()> {
             let agent_did = ctx.data().agent_did.clone();
             // Convention: subject=agent_did, predicate="auth/capability/{resource_uri}/{ability}"
             let predicate = format!("auth/capability/{resource_uri}/{ability}");
-            let has = ctx.data().quad_snapshot.iter()
+            let has = ctx
+                .data()
+                .quad_snapshot
+                .iter()
                 .any(|q| q.subject == agent_did && q.predicate == predicate);
             Ok((has,))
         },
@@ -493,7 +514,7 @@ fn bind_llm(linker: &mut Linker<HostState>) -> Result<()> {
                 let prompt = String::from_utf8_lossy(&prompt_bytes).to_string();
                 return match engine_fn(&prompt, 256) {
                     Ok(text) => Ok((Ok(text.into_bytes()),)),
-                    Err(e)   => Ok((Err(e.to_string()),)),
+                    Err(e) => Ok((Err(e.to_string()),)),
                 };
             }
 
@@ -502,7 +523,7 @@ fn bind_llm(linker: &mut Linker<HostState>) -> Result<()> {
             Ok((Err(
                 "no local inference engine loaded — call HostState::with_inference() \
                  before executing WASM guests that call llm.infer"
-                .to_string(),
+                    .to_string(),
             ),))
         },
     )?;
@@ -518,15 +539,15 @@ fn bind_llm(linker: &mut Linker<HostState>) -> Result<()> {
             if let Some(embed_fn) = embed_fn_opt {
                 return match embed_fn(&text) {
                     Ok(floats) => {
-                        let bytes: Vec<u8> = floats.iter()
-                            .flat_map(|f| f.to_le_bytes())
-                            .collect();
+                        let bytes: Vec<u8> = floats.iter().flat_map(|f| f.to_le_bytes()).collect();
                         Ok((Ok(bytes),))
                     }
                     Err(e) => Ok((Err(e.to_string()),)),
                 };
             }
-            Ok((Err("no embed function configured — call HostState::with_embed_fn()".to_string()),))
+            Ok((Err(
+                "no embed function configured — call HostState::with_embed_fn()".to_string(),
+            ),))
         },
     )?;
 
@@ -536,7 +557,9 @@ fn bind_llm(linker: &mut Linker<HostState>) -> Result<()> {
          (base_model_cid, lora_cid): (String, String)|
          -> Result<(Result<(), String>,)> {
             ctx.data_mut().charge_gas(500)?;
-            ctx.data_mut().pending_lora_loads.push((base_model_cid, lora_cid));
+            ctx.data_mut()
+                .pending_lora_loads
+                .push((base_model_cid, lora_cid));
             Ok((Ok(()),))
         },
     )?;
@@ -558,15 +581,16 @@ fn bind_chain(linker: &mut Linker<HostState>) -> Result<()> {
             // Buffer the chain entry; caller appends to SourceChain after execute().
             let idx = ctx.data().pending_chain_entries.len();
             let synthetic_cid = format!("chain/pending/{idx}");
-            ctx.data_mut().pending_chain_entries.push((model_cid, prompt_cid, output_cid));
+            ctx.data_mut()
+                .pending_chain_entries
+                .push((model_cid, prompt_cid, output_cid));
             Ok((Ok(synthetic_cid),))
         },
     )?;
 
     inst.func_wrap(
         "head-cid",
-        |mut ctx: wasmtime::StoreContextMut<HostState>,
-         (): ()| -> Result<(Option<String>,)> {
+        |mut ctx: wasmtime::StoreContextMut<HostState>, (): ()| -> Result<(Option<String>,)> {
             ctx.data_mut().charge_gas(1)?;
             Ok((ctx.data().source_chain_head.clone(),))
         },
@@ -608,7 +632,8 @@ fn bind_evm(linker: &mut Linker<HostState>) -> Result<()> {
                 "params": [{"to": to, "data": data_hex}, block]
             });
             let result = (|| -> Result<Vec<u8>, String> {
-                let resp: serde_json::Value = agent1.post(&rpc_url)
+                let resp: serde_json::Value = agent1
+                    .post(&rpc_url)
                     .set("Content-Type", "application/json")
                     .send_json(body)
                     .map_err(|e| e.to_string())?
@@ -617,8 +642,13 @@ fn bind_evm(linker: &mut Linker<HostState>) -> Result<()> {
                 if let Some(err) = resp.get("error") {
                     return Err(err.to_string());
                 }
-                hex::decode(resp["result"].as_str().unwrap_or("0x").trim_start_matches("0x"))
-                    .map_err(|e| e.to_string())
+                hex::decode(
+                    resp["result"]
+                        .as_str()
+                        .unwrap_or("0x")
+                        .trim_start_matches("0x"),
+                )
+                .map_err(|e| e.to_string())
             })();
             Ok((result,))
         },
@@ -637,7 +667,8 @@ fn bind_evm(linker: &mut Linker<HostState>) -> Result<()> {
                 "params": [address, slot, "latest"]
             });
             let result = (|| -> Result<Vec<u8>, String> {
-                let resp: serde_json::Value = agent2.post(&rpc_url)
+                let resp: serde_json::Value = agent2
+                    .post(&rpc_url)
                     .set("Content-Type", "application/json")
                     .send_json(body)
                     .map_err(|e| e.to_string())?
@@ -646,8 +677,13 @@ fn bind_evm(linker: &mut Linker<HostState>) -> Result<()> {
                 if let Some(err) = resp.get("error") {
                     return Err(err.to_string());
                 }
-                hex::decode(resp["result"].as_str().unwrap_or("0x").trim_start_matches("0x"))
-                    .map_err(|e| e.to_string())
+                hex::decode(
+                    resp["result"]
+                        .as_str()
+                        .unwrap_or("0x")
+                        .trim_start_matches("0x"),
+                )
+                .map_err(|e| e.to_string())
             })();
             Ok((result,))
         },
@@ -666,7 +702,8 @@ fn bind_evm(linker: &mut Linker<HostState>) -> Result<()> {
                 "params": [address, "latest"]
             });
             let result = (|| -> Result<String, String> {
-                let resp: serde_json::Value = agent3.post(&rpc_url)
+                let resp: serde_json::Value = agent3
+                    .post(&rpc_url)
                     .set("Content-Type", "application/json")
                     .send_json(body)
                     .map_err(|e| e.to_string())?

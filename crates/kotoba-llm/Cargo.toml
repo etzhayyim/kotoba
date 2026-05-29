@@ -18,7 +18,7 @@ local-inference = [
 ]
 # Enable OpenAI-compatible HTTP inference (Ollama, vLLM, Vultr A16).
 # Always enabled in kotoba-server. Set KOTOBA_INFERENCE_URL to use.
-http-inference = ["reqwest"]
+http-inference = ["reqwest", "kotoba-core/foreign-http"]
 # Enable WebGPU fine-tuning backend (embedding + LM head, f32 compute, FP8 storage).
 # wgpu = "24" aligned with kami-engine (ADR-2605250004).
 webgpu-train = ["dep:wgpu", "dep:bytemuck"]

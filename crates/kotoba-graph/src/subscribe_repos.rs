@@ -19,7 +19,7 @@
 //!
 //! CIDv1 sha2-256 dag-cbor (AT Protocol standard) = 36 bytes:
 //!   [0x01, 0x71, 0x12, 0x20, ...32 sha2-256 bytes...]
-//!   (byte 2 is 0x12=sha2-256; KotobaCid uses 0x1e=blake3 at same position)
+//! KotobaCid uses the same sha2-256 multihash code for IPFS compatibility.
 //! We store blocks under their original AT CIDs for round-trip AT compatibility.
 //!
 //! Env vars:
@@ -28,9 +28,9 @@
 //!   KOTOBA_SUBSCRIBE_REPOS_CURSOR  — resume from seq number (u64)
 //!   KOTOBA_SUBSCRIBE_REPOS_DIDS    — comma-sep DID allowlist (empty = all)
 
-use std::sync::Arc;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Persist cursor every N committed events to avoid excessive BlockStore writes.
 const CURSOR_PERSIST_INTERVAL: u64 = 100;
@@ -39,10 +39,9 @@ const CURSOR_PERSIST_INTERVAL: u64 = 100;
 /// Not content-addressed — treated as a mutable named register in BlockStore.
 /// Bytes: CIDv1 prefix (4) + ASCII "subscribeRepos/cursor" (21) + padding (11).
 const CURSOR_SLOT_CID: KotobaCid = KotobaCid([
-    0x01, 0x71, 0x1e, 0x20,  // CIDv1 dag-cbor blake3 prefix
-    b's', b'u', b'b', b's', b'c', b'r', b'i', b'b', b'e', b'R', b'e', b'p', b'o', b's',
-    b'/', b'c', b'u', b'r', b's', b'o', b'r',
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0x01, 0x71, 0x12, 0x20, // CIDv1 dag-cbor sha2-256 prefix
+    b's', b'u', b'b', b's', b'c', b'r', b'i', b'b', b'e', b'R', b'e', b'p', b'o', b's', b'/', b'c',
+    b'u', b'r', b's', b'o', b'r', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ]);
 
 use bytes::Bytes;
@@ -53,7 +52,8 @@ use tracing::{debug, info, warn};
 
 use kotoba_core::cid::KotobaCid;
 use kotoba_core::store::BlockStore;
-use kotoba_kqe::quad::{Quad, QuadObject};
+use kotoba_kqe::datom::Datom;
+use kotoba_kqe::quad::{LegacyQuad as Quad, LegacyQuadObject as QuadObject};
 use kotoba_kse::Journal;
 
 use crate::atproto::{collection_to_cid, did_to_cid, jetstream_subject_to_topic};
@@ -84,21 +84,22 @@ fn save_cursor(store: &dyn BlockStore, seq: u64) {
 /// When `gossip_tx` is `Some`, each asserted quad is also forwarded to the GossipSub
 /// swarm actor on the `"quad/assert"` topic so remote peers receive AT Protocol events.
 pub async fn run_subscribe_repos(
-    journal:     Arc<Journal>,
-    quad_store:  Arc<QuadStore>,
+    journal: Arc<Journal>,
+    quad_store: Arc<QuadStore>,
     block_store: Arc<dyn BlockStore + Send + Sync>,
-    gossip_tx:   Option<tokio::sync::mpsc::Sender<(String, Vec<u8>)>>,
+    gossip_tx: Option<tokio::sync::mpsc::Sender<(String, Vec<u8>)>>,
 ) {
     let base = std::env::var("KOTOBA_SUBSCRIBE_REPOS_URL")
-        .unwrap_or_else(|_|
-            "wss://bsky.network/xrpc/com.atproto.sync.subscribeRepos".into()
-        );
+        .unwrap_or_else(|_| "wss://bsky.network/xrpc/com.atproto.sync.subscribeRepos".into());
 
     // Prefer env var cursor → then persisted cursor → then no cursor (full replay)
     let cursor_param = if let Ok(c) = std::env::var("KOTOBA_SUBSCRIBE_REPOS_CURSOR") {
         format!("?cursor={c}")
     } else if let Some(persisted) = load_cursor(&*block_store) {
-        info!(cursor = persisted, "subscribeRepos resuming from persisted cursor");
+        info!(
+            cursor = persisted,
+            "subscribeRepos resuming from persisted cursor"
+        );
         format!("?cursor={persisted}")
     } else {
         String::new()
@@ -113,7 +114,7 @@ pub async fn run_subscribe_repos(
         .filter(|s| !s.is_empty())
         .collect();
 
-    let mut backoff  = 1u64;
+    let mut backoff = 1u64;
     let commit_count = Arc::new(AtomicU64::new(0));
 
     loop {
@@ -135,7 +136,8 @@ pub async fn run_subscribe_repos(
                                 &quad_store,
                                 &block_store,
                                 &gossip_tx,
-                            ).await;
+                            )
+                            .await;
 
                             // Persist cursor every CURSOR_PERSIST_INTERVAL commits
                             if let Some(seq) = seq {
@@ -169,46 +171,68 @@ pub async fn run_subscribe_repos(
 
 /// Returns the `seq` of the processed commit frame (for cursor tracking), or None.
 async fn handle_frame(
-    data:        &[u8],
-    did_filter:  &[String],
-    journal:     &Arc<Journal>,
-    quad_store:  &Arc<QuadStore>,
+    data: &[u8],
+    did_filter: &[String],
+    journal: &Arc<Journal>,
+    quad_store: &Arc<QuadStore>,
     block_store: &Arc<dyn BlockStore + Send + Sync>,
-    gossip_tx:   &Option<tokio::sync::mpsc::Sender<(String, Vec<u8>)>>,
+    gossip_tx: &Option<tokio::sync::mpsc::Sender<(String, Vec<u8>)>>,
 ) -> Option<u64> {
     // Two CBOR values concatenated: header then body
     let mut cur = Cursor::new(data);
     let header: Value = match ciborium::from_reader(&mut cur) {
         Ok(v) => v,
-        Err(e) => { warn!(err = %e, "bad frame header"); return None; }
+        Err(e) => {
+            warn!(err = %e, "bad frame header");
+            return None;
+        }
     };
     let body: Value = match ciborium::from_reader(&mut cur) {
         Ok(v) => v,
-        Err(e) => { warn!(err = %e, "bad frame body"); return None; }
+        Err(e) => {
+            warn!(err = %e, "bad frame body");
+            return None;
+        }
     };
 
     // op=1 → message; op=-1 → error
     let op = cbor_i64(&header, "op").unwrap_or(0);
-    if op != 1 { return None; }
+    if op != 1 {
+        return None;
+    }
 
     match cbor_str(&header, "t").as_deref() {
         Some("#commit") => {
-            handle_commit(body, did_filter, journal, quad_store, block_store, gossip_tx).await
+            handle_commit(
+                body,
+                did_filter,
+                journal,
+                quad_store,
+                block_store,
+                gossip_tx,
+            )
+            .await
         }
-        Some("#identity") => { handle_identity(body, journal, quad_store).await; None }
-        Some("#account")  => None,
-        other => { debug!(t = ?other, "unhandled frame type"); None }
+        Some("#identity") => {
+            handle_identity(body, journal, quad_store).await;
+            None
+        }
+        Some("#account") => None,
+        other => {
+            debug!(t = ?other, "unhandled frame type");
+            None
+        }
     }
 }
 
 /// Returns the `seq` of the processed commit for cursor tracking.
 async fn handle_commit(
-    body:        Value,
-    did_filter:  &[String],
-    journal:     &Arc<Journal>,
-    quad_store:  &Arc<QuadStore>,
+    body: Value,
+    did_filter: &[String],
+    journal: &Arc<Journal>,
+    quad_store: &Arc<QuadStore>,
     block_store: &Arc<dyn BlockStore + Send + Sync>,
-    gossip_tx:   &Option<tokio::sync::mpsc::Sender<(String, Vec<u8>)>>,
+    gossip_tx: &Option<tokio::sync::mpsc::Sender<(String, Vec<u8>)>>,
 ) -> Option<u64> {
     let repo = match cbor_str(&body, "repo") {
         Some(d) => d,
@@ -219,7 +243,7 @@ async fn handle_commit(
         return None;
     }
 
-    let seq     = cbor_i64(&body, "seq")
+    let seq = cbor_i64(&body, "seq")
         .and_then(|v| u64::try_from(v).ok())
         .unwrap_or(0);
     let too_big = cbor_bool(&body, "tooBig").unwrap_or(false);
@@ -271,7 +295,7 @@ async fn handle_commit(
         };
 
         let graph_cid = collection_to_cid(collection);
-        let topic     = jetstream_subject_to_topic(collection);
+        let topic = jetstream_subject_to_topic(collection);
 
         let object = if action {
             // Create/update: object is the record CID (tag 42) or Text("delete")
@@ -290,21 +314,27 @@ async fn handle_commit(
         };
 
         let quad = Quad {
-            graph:     graph_cid,
-            subject:   subject_cid.clone(),
+            graph: graph_cid,
+            subject: subject_cid.clone(),
             predicate: rkey.to_string(),
             object,
         };
 
-        // Assert into QuadStore + Journal
-        quad_store.assert(quad.clone()).await;
+        // Assert into QuadStore as a Datom while preserving the legacy event payload.
+        quad_store
+            .assert_datom(
+                quad.graph.clone(),
+                Datom::from_legacy_quad(quad.clone(), true),
+            )
+            .await;
         let payload = match serde_json::to_vec(&quad) {
             Ok(v) => Bytes::from(v),
             Err(_) => continue,
         };
         // Propagate to GossipSub peers so remote kotoba nodes receive AT Protocol events
         if let Some(tx) = gossip_tx {
-            tx.try_send(("quad/assert".to_string(), payload.to_vec())).ok();
+            tx.try_send(("quad/assert".to_string(), payload.to_vec()))
+                .ok();
         }
         journal.publish(topic, payload).await;
     }
@@ -312,26 +342,33 @@ async fn handle_commit(
     Some(seq)
 }
 
-async fn handle_identity(
-    body:       Value,
-    journal:    &Arc<Journal>,
-    quad_store: &Arc<QuadStore>,
-) {
-    let did    = match cbor_str(&body, "did")    { Some(d) => d, None => return };
-    let handle = match cbor_str(&body, "handle") { Some(h) => h, None => return };
-
-    let graph_cid   = collection_to_cid("com.atproto.identity.handle");
-    let subject_cid = did_to_cid(&did);
-    let topic       = jetstream_subject_to_topic("com.atproto.identity.handle");
-
-    let quad = Quad {
-        graph:     graph_cid,
-        subject:   subject_cid,
-        predicate: "handle".into(),
-        object:    QuadObject::Text(handle.clone()),
+async fn handle_identity(body: Value, journal: &Arc<Journal>, quad_store: &Arc<QuadStore>) {
+    let did = match cbor_str(&body, "did") {
+        Some(d) => d,
+        None => return,
+    };
+    let handle = match cbor_str(&body, "handle") {
+        Some(h) => h,
+        None => return,
     };
 
-    quad_store.assert(quad.clone()).await;
+    let graph_cid = collection_to_cid("com.atproto.identity.handle");
+    let subject_cid = did_to_cid(&did);
+    let topic = jetstream_subject_to_topic("com.atproto.identity.handle");
+
+    let quad = Quad {
+        graph: graph_cid,
+        subject: subject_cid,
+        predicate: "handle".into(),
+        object: QuadObject::Text(handle.clone()),
+    };
+
+    quad_store
+        .assert_datom(
+            quad.graph.clone(),
+            Datom::from_legacy_quad(quad.clone(), true),
+        )
+        .await;
     let payload = serde_json::to_vec(&quad).unwrap_or_default().into();
     journal.publish(topic, payload).await;
 
@@ -345,7 +382,9 @@ fn read_uvarint(buf: &[u8]) -> Option<(u64, usize)> {
     let mut shift = 0u32;
     for (i, &b) in buf.iter().enumerate().take(10) {
         v |= ((b & 0x7f) as u64) << shift;
-        if b & 0x80 == 0 { return Some((v, i + 1)); }
+        if b & 0x80 == 0 {
+            return Some((v, i + 1));
+        }
         shift += 7;
     }
     None
@@ -356,7 +395,9 @@ fn read_cid_v1(buf: &[u8]) -> Option<(&[u8], usize)> {
     let mut pos = 0;
     let (ver, n) = read_uvarint(&buf[pos..])?;
     pos += n;
-    if ver != 1 { return None; }
+    if ver != 1 {
+        return None;
+    }
     let (_, n) = read_uvarint(&buf[pos..])?; // codec
     pos += n;
     let (_, n) = read_uvarint(&buf[pos..])?; // hash function code
@@ -364,7 +405,9 @@ fn read_cid_v1(buf: &[u8]) -> Option<(&[u8], usize)> {
     let (dlen, n) = read_uvarint(&buf[pos..])?; // digest length
     let dlen_usize = usize::try_from(dlen).ok()?;
     pos = pos.checked_add(n)?.checked_add(dlen_usize)?;
-    if buf.len() < pos { return None; }
+    if buf.len() < pos {
+        return None;
+    }
     Some((&buf[..pos], pos))
 }
 
@@ -374,7 +417,9 @@ fn parse_car(data: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut pos = 0;
 
     // Skip CAR header: uvarint(len) + CBOR header map
-    let Some((hlen, n)) = read_uvarint(&data[pos..]) else { return result };
+    let Some((hlen, n)) = read_uvarint(&data[pos..]) else {
+        return result;
+    };
     let hlen_usize = match usize::try_from(hlen) {
         Ok(v) => v,
         Err(_) => return result,
@@ -385,9 +430,16 @@ fn parse_car(data: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
     };
 
     while pos < data.len() {
-        let Some((section_len, n)) = read_uvarint(&data[pos..]) else { break };
-        pos = match pos.checked_add(n) { Some(p) => p, None => break };
-        if section_len == 0 { break; }
+        let Some((section_len, n)) = read_uvarint(&data[pos..]) else {
+            break;
+        };
+        pos = match pos.checked_add(n) {
+            Some(p) => p,
+            None => break,
+        };
+        if section_len == 0 {
+            break;
+        }
         let section_len_usize = match usize::try_from(section_len) {
             Ok(v) => v,
             Err(_) => break,
@@ -396,9 +448,13 @@ fn parse_car(data: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
             Some(e) => e,
             None => break,
         };
-        if section_end > data.len() { break; }
+        if section_end > data.len() {
+            break;
+        }
 
-        let Some((cid_bytes, cid_len)) = read_cid_v1(&data[pos..section_end]) else { break };
+        let Some((cid_bytes, cid_len)) = read_cid_v1(&data[pos..section_end]) else {
+            break;
+        };
         let block = data[pos + cid_len..section_end].to_vec();
         result.push((cid_bytes.to_vec(), block));
         pos = section_end;
@@ -412,7 +468,9 @@ fn parse_car(data: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
 fn cbor_get<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     if let Value::Map(m) = v {
         for (k, val) in m {
-            if matches!(k, Value::Text(s) if s == key) { return Some(val); }
+            if matches!(k, Value::Text(s) if s == key) {
+                return Some(val);
+            }
         }
     }
     None
@@ -445,7 +503,11 @@ fn cbor_cid_bytes(v: &Value) -> Option<[u8; 36]> {
         Value::Tag(42, inner) => {
             if let Value::Bytes(b) = inner.as_ref() {
                 // Strip leading multibase identity prefix byte 0x00
-                let raw = if b.first() == Some(&0) { &b[1..] } else { b.as_slice() };
+                let raw = if b.first() == Some(&0) {
+                    &b[1..]
+                } else {
+                    b.as_slice()
+                };
                 if raw.len() == 36 {
                     let mut arr = [0u8; 36];
                     arr.copy_from_slice(raw);
@@ -464,13 +526,15 @@ mod tests {
     use kotoba_store::MemoryBlockStore;
     use std::sync::Arc;
 
-    fn mem() -> Arc<MemoryBlockStore> { Arc::new(MemoryBlockStore::new()) }
+    fn mem() -> Arc<MemoryBlockStore> {
+        Arc::new(MemoryBlockStore::new())
+    }
 
     #[test]
     fn cursor_slot_cid_has_expected_prefix() {
         assert_eq!(CURSOR_SLOT_CID.0[0], 0x01); // CIDv1
         assert_eq!(CURSOR_SLOT_CID.0[1], 0x71); // dag-cbor
-        assert_eq!(CURSOR_SLOT_CID.0[2], 0x1e); // blake3
+        assert_eq!(CURSOR_SLOT_CID.0[2], 0x12); // sha2-256
         assert_eq!(CURSOR_SLOT_CID.0[3], 0x20); // hash length 32
     }
 
@@ -499,7 +563,8 @@ mod tests {
     fn cbor_cid_bytes_extracts_36_byte_payload() {
         let mut cid_bytes = vec![0x00u8]; // identity prefix
         cid_bytes.extend_from_slice(&[0xABu8; 36]);
-        let val = ciborium::value::Value::Tag(42, Box::new(ciborium::value::Value::Bytes(cid_bytes)));
+        let val =
+            ciborium::value::Value::Tag(42, Box::new(ciborium::value::Value::Bytes(cid_bytes)));
         let result = cbor_cid_bytes(&val);
         assert!(result.is_some());
         assert_eq!(result.unwrap(), [0xABu8; 36]);
@@ -507,13 +572,15 @@ mod tests {
 
     #[test]
     fn cbor_cid_bytes_rejects_wrong_tag() {
-        let val = ciborium::value::Value::Tag(0, Box::new(ciborium::value::Value::Bytes(vec![0u8; 37])));
+        let val =
+            ciborium::value::Value::Tag(0, Box::new(ciborium::value::Value::Bytes(vec![0u8; 37])));
         assert!(cbor_cid_bytes(&val).is_none());
     }
 
     #[test]
     fn cbor_cid_bytes_rejects_wrong_length() {
-        let val = ciborium::value::Value::Tag(42, Box::new(ciborium::value::Value::Bytes(vec![0u8; 20])));
+        let val =
+            ciborium::value::Value::Tag(42, Box::new(ciborium::value::Value::Bytes(vec![0u8; 20])));
         assert!(cbor_cid_bytes(&val).is_none());
     }
 
@@ -523,11 +590,14 @@ mod tests {
         // Section: varint(u64::MAX) encoded as 9-byte LEB128 + continuation
         // A valid uvarint for u64::MAX is 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF 0x01
         let mut data = vec![0x00u8]; // header len = 0
-        // u64::MAX = 0xFFFF_FFFF_FFFF_FFFF — 10-byte LEB128
+                                     // u64::MAX = 0xFFFF_FFFF_FFFF_FFFF — 10-byte LEB128
         data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]);
         // Must return empty without panicking
         let result = parse_car(&data);
-        assert!(result.is_empty(), "crafted overflow section_len must yield empty result, not panic");
+        assert!(
+            result.is_empty(),
+            "crafted overflow section_len must yield empty result, not panic"
+        );
     }
 
     #[test]
@@ -541,20 +611,21 @@ mod tests {
         // u64::MAX as CBOR Integer exceeds i64::MAX — must return None, not silently truncate.
         // ciborium::value::Integer implements From<u64>.
         let big = ciborium::value::Integer::from(u64::MAX);
-        let map = Value::Map(vec![
-            (Value::Text("seq".into()), Value::Integer(big)),
-        ]);
+        let map = Value::Map(vec![(Value::Text("seq".into()), Value::Integer(big))]);
         let result = cbor_i64(&map, "seq");
-        assert!(result.is_none(),
-            "cbor_i64 must return None for values > i64::MAX, got: {result:?}");
+        assert!(
+            result.is_none(),
+            "cbor_i64 must return None for values > i64::MAX, got: {result:?}"
+        );
     }
 
     #[test]
     fn cbor_i64_accepts_in_range_value() {
         use ciborium::value::Value;
-        let map = Value::Map(vec![
-            (Value::Text("seq".into()), Value::Integer(42i64.into())),
-        ]);
+        let map = Value::Map(vec![(
+            Value::Text("seq".into()),
+            Value::Integer(42i64.into()),
+        )]);
         assert_eq!(cbor_i64(&map, "seq"), Some(42i64));
     }
 
@@ -566,25 +637,34 @@ mod tests {
         // The fixed path uses `u64::try_from(i64)` which rejects negatives.
         use ciborium::value::Value;
         let negative_seq = ciborium::value::Integer::from(-1i64);
-        let map = Value::Map(vec![
-            (Value::Text("seq".into()), Value::Integer(negative_seq)),
-        ]);
+        let map = Value::Map(vec![(
+            Value::Text("seq".into()),
+            Value::Integer(negative_seq),
+        )]);
         // cbor_i64 accepts -1 (in i64 range), but u64::try_from(-1i64) rejects it.
         // The combined pipeline must return 0 (the safe fallback), never u64::MAX.
         let raw = cbor_i64(&map, "seq");
-        assert_eq!(raw, Some(-1i64), "cbor_i64 should pass through in-range negatives");
+        assert_eq!(
+            raw,
+            Some(-1i64),
+            "cbor_i64 should pass through in-range negatives"
+        );
         let seq_u64 = raw.and_then(|v| u64::try_from(v).ok()).unwrap_or(0);
-        assert_eq!(seq_u64, 0,
-            "negative seq must map to 0, not wrap to {}", u64::MAX);
+        assert_eq!(
+            seq_u64,
+            0,
+            "negative seq must map to 0, not wrap to {}",
+            u64::MAX
+        );
     }
 
     #[test]
     fn read_cid_v1_crafted_overflow_dlen_returns_none() {
-        // CIDv1 prefix bytes: version=1, codec=dag-cbor(0x71), hash=blake3(0x1e), then dlen=u64::MAX
+        // CIDv1 prefix bytes: version=1, codec=dag-cbor(0x71), hash=sha2-256(0x12), then dlen=u64::MAX
         let mut buf = vec![
             0x01, // version = 1
             0x71, // codec = dag-cbor
-            0x1e, // hash function = blake3
+            0x12, // hash function = sha2-256
         ];
         // dlen = u64::MAX as LEB128 (10 bytes)
         buf.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]);

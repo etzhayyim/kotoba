@@ -1,25 +1,25 @@
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
 /// KAIS — Kotoba Instruction Set
 /// 8-bit header: [7:4]=TYPE [3]=CMP [2]=FRG [1]=ACK [0]=PRI
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameType {
-    Call        = 0x0, // CALL: sub-program invoke
-    Read        = 0x1, // READ: Arrangement slice
-    Recv        = 0x2, // RECV: inbox drain (Phase 1)
-    Write       = 0x3, // WRITE: Delta(+1) emit
-    Halt        = 0x4, // HALT: Vote to Halt + checkpoint
-    Derive      = 0x5, // DERIVE: Prolly diff CID
-    ShelfGet    = 0x6, // SHELF_GET: KV read
-    Probe       = 0x7, // PROBE: bloom filter READ
-    Verify      = 0x8, // VERIFY: CACAO chain
-    Load        = 0x9, // LOAD: bulk Arrangement
-    Ack         = 0xA, // ACK: RECV complete
-    Nop         = 0xB, // NOP: keepalive ping
-    NopR        = 0xC, // NOP: keepalive pong
-    Retract     = 0xD, // RETRACT: Delta(-1) emit
-    Fault       = 0xE, // FAULT: error HALT
+    Call = 0x0,        // CALL: sub-program invoke
+    Read = 0x1,        // READ: Arrangement slice
+    Recv = 0x2,        // RECV: inbox drain (Phase 1)
+    Write = 0x3,       // WRITE: Delta(+1) emit
+    Halt = 0x4,        // HALT: Vote to Halt + checkpoint
+    Derive = 0x5,      // DERIVE: Prolly diff CID
+    ShelfGet = 0x6,    // SHELF_GET: KV read
+    Probe = 0x7,       // PROBE: bloom filter READ
+    Verify = 0x8,      // VERIFY: CACAO chain
+    Load = 0x9,        // LOAD: bulk Arrangement
+    Ack = 0xA,         // ACK: RECV complete
+    Nop = 0xB,         // NOP: keepalive ping
+    NopR = 0xC,        // NOP: keepalive pong
+    Retract = 0xD,     // RETRACT: Delta(-1) emit
+    Fault = 0xE,       // FAULT: error HALT
     CallForeign = 0xF, // CALL_FOREIGN: LLM/external
 }
 
@@ -50,9 +50,9 @@ impl FrameType {
 #[derive(Debug, Clone, Default)]
 pub struct FrameFlags {
     pub compressed: bool, // bit 3
-    pub fragment:   bool, // bit 2
-    pub ack_req:    bool, // bit 1
-    pub priority:   bool, // bit 0
+    pub fragment: bool,   // bit 2
+    pub ack_req: bool,    // bit 1
+    pub priority: bool,   // bit 0
 }
 
 impl FrameFlags {
@@ -65,9 +65,9 @@ impl FrameFlags {
     pub fn from_nibble(n: u8) -> Self {
         Self {
             compressed: (n >> 3) & 1 == 1,
-            fragment:   (n >> 2) & 1 == 1,
-            ack_req:    (n >> 1) & 1 == 1,
-            priority:   n & 1 == 1,
+            fragment: (n >> 2) & 1 == 1,
+            ack_req: (n >> 1) & 1 == 1,
+            priority: n & 1 == 1,
         }
     }
 }
@@ -75,8 +75,8 @@ impl FrameFlags {
 #[derive(Debug, Clone)]
 pub struct Frame {
     pub frame_type: FrameType,
-    pub flags:      FrameFlags,
-    pub payload:    Bytes,
+    pub flags: FrameFlags,
+    pub payload: Bytes,
 }
 
 impl Frame {
@@ -91,23 +91,37 @@ impl Frame {
     }
 
     pub fn decode(src: &[u8]) -> Option<(Self, usize)> {
-        if src.is_empty() { return None; }
+        if src.is_empty() {
+            return None;
+        }
         let header = src[0];
         let frame_type = FrameType::from_nibble(header >> 4)?;
         let flags = FrameFlags::from_nibble(header & 0x0F);
         let (len, varint_bytes) = read_varint(&src[1..])?;
         let offset = 1 + varint_bytes;
         let end = offset + len as usize;
-        if src.len() < end { return None; }
+        if src.len() < end {
+            return None;
+        }
         let payload = Bytes::copy_from_slice(&src[offset..end]);
-        Some((Self { frame_type, flags, payload }, end))
+        Some((
+            Self {
+                frame_type,
+                flags,
+                payload,
+            },
+            end,
+        ))
     }
 }
 
 fn varint_len(n: usize) -> usize {
     let mut n = n;
     let mut len = 1;
-    while n >= 0x80 { n >>= 7; len += 1; }
+    while n >= 0x80 {
+        n >>= 7;
+        len += 1;
+    }
     len
 }
 
@@ -115,7 +129,10 @@ fn put_varint(buf: &mut BytesMut, mut n: u64) {
     loop {
         let byte = (n & 0x7F) as u8;
         n >>= 7;
-        if n == 0 { buf.put_u8(byte); break; }
+        if n == 0 {
+            buf.put_u8(byte);
+            break;
+        }
         buf.put_u8(byte | 0x80);
     }
 }
@@ -125,9 +142,13 @@ fn read_varint(src: &[u8]) -> Option<(u64, usize)> {
     let mut shift = 0;
     for (i, &byte) in src.iter().enumerate() {
         result |= ((byte & 0x7F) as u64) << shift;
-        if byte & 0x80 == 0 { return Some((result, i + 1)); }
+        if byte & 0x80 == 0 {
+            return Some((result, i + 1));
+        }
         shift += 7;
-        if shift >= 64 { return None; }
+        if shift >= 64 {
+            return None;
+        }
     }
     None
 }
@@ -137,7 +158,11 @@ mod tests {
     use super::*;
 
     fn round_trip(ft: FrameType, flags: FrameFlags, payload: &[u8]) {
-        let frame = Frame { frame_type: ft, flags, payload: Bytes::copy_from_slice(payload) };
+        let frame = Frame {
+            frame_type: ft,
+            flags,
+            payload: Bytes::copy_from_slice(payload),
+        };
         let encoded = frame.encode();
         let (decoded, consumed) = Frame::decode(&encoded).expect("must decode");
         assert_eq!(consumed, encoded.len());
@@ -157,17 +182,34 @@ mod tests {
 
     #[test]
     fn encode_decode_call_foreign_with_flags() {
-        let flags = FrameFlags { compressed: true, fragment: false, ack_req: true, priority: false };
+        let flags = FrameFlags {
+            compressed: true,
+            fragment: false,
+            ack_req: true,
+            priority: false,
+        };
         round_trip(FrameType::CallForeign, flags, b"llm-payload");
     }
 
     #[test]
     fn all_frame_types_roundtrip() {
         let types = [
-            FrameType::Call, FrameType::Read, FrameType::Recv, FrameType::Write,
-            FrameType::Halt, FrameType::Derive, FrameType::ShelfGet, FrameType::Probe,
-            FrameType::Verify, FrameType::Load, FrameType::Ack, FrameType::Nop,
-            FrameType::NopR, FrameType::Retract, FrameType::Fault, FrameType::CallForeign,
+            FrameType::Call,
+            FrameType::Read,
+            FrameType::Recv,
+            FrameType::Write,
+            FrameType::Halt,
+            FrameType::Derive,
+            FrameType::ShelfGet,
+            FrameType::Probe,
+            FrameType::Verify,
+            FrameType::Load,
+            FrameType::Ack,
+            FrameType::Nop,
+            FrameType::NopR,
+            FrameType::Retract,
+            FrameType::Fault,
+            FrameType::CallForeign,
         ];
         for ft in types {
             round_trip(ft, FrameFlags::default(), b"test");
@@ -253,7 +295,12 @@ mod tests {
 
     #[test]
     fn all_flags_set_roundtrip() {
-        let flags = FrameFlags { compressed: true, fragment: true, ack_req: true, priority: true };
+        let flags = FrameFlags {
+            compressed: true,
+            fragment: true,
+            ack_req: true,
+            priority: true,
+        };
         assert_eq!(flags.to_nibble(), 0x0F);
         let back = FrameFlags::from_nibble(0x0F);
         assert!(back.compressed);
@@ -272,7 +319,12 @@ mod tests {
     fn frame_clone_preserves_all_fields() {
         let original = Frame {
             frame_type: FrameType::Verify,
-            flags: FrameFlags { compressed: true, fragment: false, ack_req: false, priority: true },
+            flags: FrameFlags {
+                compressed: true,
+                fragment: false,
+                ack_req: false,
+                priority: true,
+            },
             payload: Bytes::from_static(b"clone-me"),
         };
         let cloned = original.clone();

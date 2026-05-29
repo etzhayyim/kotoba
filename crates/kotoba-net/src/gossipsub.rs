@@ -19,7 +19,10 @@ mod tests {
 
     #[test]
     fn multiple_leading_slashes_stripped() {
-        assert_eq!(gossipsub_topic("//pregel/messages"), "kotoba/pregel/messages");
+        assert_eq!(
+            gossipsub_topic("//pregel/messages"),
+            "kotoba/pregel/messages"
+        );
     }
 
     #[test]
@@ -55,7 +58,10 @@ mod tests {
 
     #[test]
     fn topic_with_numbers_and_hyphens() {
-        assert_eq!(gossipsub_topic("layer-3/block-42"), "kotoba/layer-3/block-42");
+        assert_eq!(
+            gossipsub_topic("layer-3/block-42"),
+            "kotoba/layer-3/block-42"
+        );
     }
 
     #[test]
@@ -63,7 +69,10 @@ mod tests {
         let inputs = ["foo", "/foo", "//foo", "", "a/b/c"];
         for input in inputs {
             let result = gossipsub_topic(input);
-            assert!(result.starts_with("kotoba/"), "result should start with 'kotoba/': got '{result}' for input '{input}'");
+            assert!(
+                result.starts_with("kotoba/"),
+                "result should start with 'kotoba/': got '{result}' for input '{input}'"
+            );
         }
     }
 

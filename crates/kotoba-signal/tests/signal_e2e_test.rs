@@ -1,17 +1,16 @@
 /// End-to-end integration test for the full Signal Protocol stack.
 /// Covers: key generation → X3DH → Double Ratchet 1:1 → Sender Keys group → field encryption.
-
 use kotoba_signal::{
+    group::{GroupSession, SenderKeyState},
     identity::IdentityKeyPair,
-    prekey::{PreKey, SignedPreKey, PreKeyBundle},
-    session::Session,
-    group::{SenderKeyState, GroupSession},
-    store::SignalStore,
-    x3dh::{x3dh_init_sender, x3dh_init_receiver},
+    prekey::{PreKey, PreKeyBundle, SignedPreKey},
     ratchet::RatchetState,
+    session::Session,
+    store::SignalStore,
+    x3dh::{x3dh_init_receiver, x3dh_init_sender},
 };
-use x25519_dalek::{StaticSecret, PublicKey as X25519Public};
 use rand::rngs::OsRng;
+use x25519_dalek::{PublicKey as X25519Public, StaticSecret};
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -33,9 +32,9 @@ fn make_bundle(ik: &IdentityKeyPair, spk: &SignedPreKey, opk: Option<&PreKey>) -
 #[test]
 fn full_session_initiate_and_decrypt() {
     let alice_ik = IdentityKeyPair::generate();
-    let bob_ik   = IdentityKeyPair::generate();
-    let bob_spk  = SignedPreKey::generate(1, &bob_ik);
-    let bob_opk  = PreKey::generate(100);
+    let bob_ik = IdentityKeyPair::generate();
+    let bob_spk = SignedPreKey::generate(1, &bob_ik);
+    let bob_opk = PreKey::generate(100);
 
     let bundle = make_bundle(&bob_ik, &bob_spk, Some(&bob_opk));
 
@@ -52,7 +51,8 @@ fn full_session_initiate_and_decrypt() {
         &ep,
         "did:plc:alice",
         "dev-a",
-    ).unwrap();
+    )
+    .unwrap();
 
     // Alice → Bob
     let m1 = alice_session.encrypt(b"Hello Bob!").unwrap();
@@ -79,10 +79,10 @@ fn group_three_members_all_can_decrypt() {
 
     // Alice creates a sender key
     let mut alice_sk = SenderKeyState::generate(group_id, "did:plc:alice");
-    let alice_dist   = alice_sk.distribution();
+    let alice_dist = alice_sk.distribution();
 
     // Bob and Carol receive the distribution
-    let mut bob_session   = GroupSession::from_distribution(&alice_dist).unwrap();
+    let mut bob_session = GroupSession::from_distribution(&alice_dist).unwrap();
     let mut carol_session = GroupSession::from_distribution(&alice_dist).unwrap();
 
     // Alice sends 3 messages
@@ -91,9 +91,9 @@ fn group_three_members_all_can_decrypt() {
     let m3 = alice_sk.encrypt(b"Third").unwrap();
 
     // Both can decrypt in order
-    assert_eq!(bob_session.decrypt(&m1).unwrap(),   b"Hello group!");
+    assert_eq!(bob_session.decrypt(&m1).unwrap(), b"Hello group!");
     assert_eq!(carol_session.decrypt(&m1).unwrap(), b"Hello group!");
-    assert_eq!(bob_session.decrypt(&m2).unwrap(),   b"Second message");
+    assert_eq!(bob_session.decrypt(&m2).unwrap(), b"Second message");
     assert_eq!(carol_session.decrypt(&m3).unwrap(), b"Third");
 }
 
@@ -104,10 +104,17 @@ async fn signal_store_field_encryption_roundtrip() {
     let alice = SignalStore::new("did:plc:alice", "dev-1");
 
     let plain = "こんにちは、世界！";
-    let enc = alice.encrypt_field(plain, "did:plc:bob", "convo-abc123").unwrap();
-    assert!(enc.starts_with("signal:v1:"), "envelope must have signal:v1: prefix");
+    let enc = alice
+        .encrypt_field(plain, "did:plc:bob", "convo-abc123")
+        .unwrap();
+    assert!(
+        enc.starts_with("signal:v1:"),
+        "envelope must have signal:v1: prefix"
+    );
 
-    let dec = alice.decrypt_field(&enc, "did:plc:bob", "convo-abc123").unwrap();
+    let dec = alice
+        .decrypt_field(&enc, "did:plc:bob", "convo-abc123")
+        .unwrap();
     assert_eq!(dec, plain);
 }
 
@@ -115,8 +122,8 @@ async fn signal_store_field_encryption_roundtrip() {
 
 #[tokio::test]
 async fn secure_vault_roundtrip_via_store_key() {
-    use kotoba_kse::SecureVault;
     use bytes::Bytes;
+    use kotoba_kse::SecureVault;
 
     let sv = SecureVault::new();
     let mut key = [0u8; 32];
@@ -143,7 +150,9 @@ async fn store_prekey_bundle_and_retrieve() {
 
     // Verify SPK signature
     assert!(
-        bundle.identity_key.verify(&bundle.signed_prekey, &bundle.signed_prekey_sig),
+        bundle
+            .identity_key
+            .verify(&bundle.signed_prekey, &bundle.signed_prekey_sig),
         "SPK signature must be valid"
     );
 }

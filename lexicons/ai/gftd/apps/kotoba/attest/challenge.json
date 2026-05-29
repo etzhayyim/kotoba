@@ -1,0 +1,26 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.attest.challenge",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Challenge an existing Kotoba attestation claim.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["claim_cid", "challenger_did", "reason"],
+          "properties": {
+            "claim_cid": { "type": "string" },
+            "challenger_did": { "type": "string" },
+            "reason": { "type": "string" }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": { "type": "unknown" }
+      }
+    }
+  }
+}

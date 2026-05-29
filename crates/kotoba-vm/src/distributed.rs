@@ -45,8 +45,7 @@ use crate::pregel::{ComputeOutput, Message, PregelGraph, SuperstepResult, Vertex
 ///
 /// Using `Arc` instead of `&ComputeFn` lets the closure be cloned into the
 /// wrapping interceptor closure without lifetime issues.
-pub type SharedComputeFn =
-    Arc<dyn Fn(&Vertex, &[Message]) -> ComputeOutput + Send + Sync>;
+pub type SharedComputeFn = Arc<dyn Fn(&Vertex, &[Message]) -> ComputeOutput + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // DistributedMessage
@@ -56,9 +55,9 @@ pub type SharedComputeFn =
 #[derive(Debug, Clone)]
 pub struct DistributedMessage {
     /// Source vertex ID (multibase-encoded CID string)
-    pub src:     String,
+    pub src: String,
     /// Destination vertex ID (multibase-encoded CID string)
-    pub dst:     String,
+    pub dst: String,
     /// Opaque payload bytes
     pub payload: Vec<u8>,
 }
@@ -76,11 +75,11 @@ pub struct DistributedMessage {
 pub struct DistributedPregelRunner {
     /// The in-process Pregel graph.  Caller may add vertices and seed messages
     /// directly on this field before calling `run`.
-    pub graph:           PregelGraph,
-    inbound_rx:          mpsc::Receiver<DistributedMessage>,
-    outbound_tx:         mpsc::Sender<DistributedMessage>,
+    pub graph: PregelGraph,
+    inbound_rx: mpsc::Receiver<DistributedMessage>,
+    outbound_tx: mpsc::Sender<DistributedMessage>,
     /// Multibase-encoded vertex IDs that are owned by this node.
-    local_vertex_ids:    HashSet<String>,
+    local_vertex_ids: HashSet<String>,
 }
 
 impl DistributedPregelRunner {
@@ -88,11 +87,11 @@ impl DistributedPregelRunner {
     ///
     /// Prefer `channel_pair` which constructs all three objects at once.
     pub fn new(
-        inbound_rx:  mpsc::Receiver<DistributedMessage>,
+        inbound_rx: mpsc::Receiver<DistributedMessage>,
         outbound_tx: mpsc::Sender<DistributedMessage>,
     ) -> Self {
         Self {
-            graph:            PregelGraph::new(),
+            graph: PregelGraph::new(),
             inbound_rx,
             outbound_tx,
             local_vertex_ids: HashSet::new(),
@@ -147,44 +146,43 @@ impl DistributedPregelRunner {
         //    PregelGraph queues them for the next step.  Messages for unknown
         //    vertices are captured in `outbound_buffer` and sent after the
         //    superstep.
-        let local_ids       = self.local_vertex_ids.clone();
-        let outbound_buffer: Arc<Mutex<Vec<DistributedMessage>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let local_ids = self.local_vertex_ids.clone();
+        let outbound_buffer: Arc<Mutex<Vec<DistributedMessage>>> = Arc::new(Mutex::new(Vec::new()));
         let buf_clone = Arc::clone(&outbound_buffer);
 
-        let wrapped: crate::pregel::ComputeFn = Box::new(move |vertex: &Vertex, inbox: &[Message]| {
-            let output = user_compute(vertex, inbox);
+        let wrapped: crate::pregel::ComputeFn =
+            Box::new(move |vertex: &Vertex, inbox: &[Message]| {
+                let output = user_compute(vertex, inbox);
 
-            let mut local_messages  = Vec::new();
-            let mut guard           = buf_clone.lock().expect("outbound_buffer poisoned");
+                let mut local_messages = Vec::new();
+                let mut guard = buf_clone.lock().expect("outbound_buffer poisoned");
 
-            for msg in output.messages {
-                let dst_key = msg.dst.cid().to_multibase();
-                if local_ids.contains(&dst_key) {
-                    local_messages.push(msg);
-                } else {
-                    guard.push(DistributedMessage {
-                        src:     msg.src.cid().to_multibase(),
-                        dst:     dst_key,
-                        payload: msg.payload,
-                    });
+                for msg in output.messages {
+                    let dst_key = msg.dst.cid().to_multibase();
+                    if local_ids.contains(&dst_key) {
+                        local_messages.push(msg);
+                    } else {
+                        guard.push(DistributedMessage {
+                            src: msg.src.cid().to_multibase(),
+                            dst: dst_key,
+                            payload: msg.payload,
+                        });
+                    }
                 }
-            }
 
-            ComputeOutput {
-                new_state:  output.new_state,
-                messages:   local_messages,
-                vote_halt:  output.vote_halt,
-            }
-        });
+                ComputeOutput {
+                    new_state: output.new_state,
+                    messages: local_messages,
+                    vote_halt: output.vote_halt,
+                }
+            });
 
         // 3. Execute the local superstep
         let result = self.graph.superstep(&wrapped);
 
         // 4. Forward captured remote messages to peers (non-blocking; drop if full)
-        let to_send = std::mem::take(
-            &mut *outbound_buffer.lock().expect("outbound_buffer poisoned"),
-        );
+        let to_send =
+            std::mem::take(&mut *outbound_buffer.lock().expect("outbound_buffer poisoned"));
         for dmsg in to_send {
             // `try_send` to avoid blocking inside an async context.
             // If the channel is full the message is dropped — the caller can
@@ -201,7 +199,7 @@ impl DistributedPregelRunner {
     /// Returns the `SuperstepResult` for each superstep that ran.
     pub async fn run(
         &mut self,
-        compute:       SharedComputeFn,
+        compute: SharedComputeFn,
         max_supersteps: u32,
     ) -> Vec<SuperstepResult> {
         let mut results = Vec::new();
@@ -209,7 +207,9 @@ impl DistributedPregelRunner {
             let r = self.distributed_superstep(Arc::clone(&compute)).await;
             let halted = r.all_halted;
             results.push(r);
-            if halted { break; }
+            if halted {
+                break;
+            }
         }
         results
     }
@@ -228,11 +228,11 @@ impl DistributedPregelRunner {
     pub fn channel_pair(
         buffer: usize,
     ) -> (
-        mpsc::Sender<DistributedMessage>,   // inbound_tx  (server: swarm → runner)
+        mpsc::Sender<DistributedMessage>, // inbound_tx  (server: swarm → runner)
         mpsc::Receiver<DistributedMessage>, // outbound_rx (server: runner → swarm)
         DistributedPregelRunner,
     ) {
-        let (inbound_tx,  inbound_rx)  = mpsc::channel(buffer);
+        let (inbound_tx, inbound_rx) = mpsc::channel(buffer);
         let (outbound_tx, outbound_rx) = mpsc::channel(buffer);
         let runner = Self::new(inbound_rx, outbound_tx);
         (inbound_tx, outbound_rx, runner)
@@ -250,9 +250,9 @@ mod tests {
 
     fn halt_compute() -> SharedComputeFn {
         Arc::new(|_v: &Vertex, inbox: &[Message]| ComputeOutput {
-            new_state:  format!("step:{}", inbox.len()).into_bytes(),
-            messages:   vec![],
-            vote_halt:  true,
+            new_state: format!("step:{}", inbox.len()).into_bytes(),
+            messages: vec![],
+            vote_halt: true,
         })
     }
 
@@ -263,8 +263,8 @@ mod tests {
         let vid = VertexId::from("vertex-a");
         runner.add_local_vertex(vid.clone(), Vec::new());
         runner.graph.inject_message(Message {
-            src:     VertexId::from("seed"),
-            dst:     vid.clone(),
+            src: VertexId::from("seed"),
+            dst: vid.clone(),
             payload: b"hello".to_vec(),
         });
 
@@ -284,8 +284,8 @@ mod tests {
         // inbound_tx must accept DistributedMessage without blocking
         inbound_tx
             .try_send(DistributedMessage {
-                src:     "a".to_string(),
-                dst:     "b".to_string(),
+                src: "a".to_string(),
+                dst: "b".to_string(),
                 payload: b"test".to_vec(),
             })
             .expect("channel should not be full");
@@ -301,19 +301,20 @@ mod tests {
         // Send a message via the inbound channel (simulates a peer gossip message)
         inbound_tx
             .send(DistributedMessage {
-                src:     "remote-peer".to_string(),
-                dst:     vid.cid().to_multibase(),
+                src: "remote-peer".to_string(),
+                dst: vid.cid().to_multibase(),
                 payload: b"from-peer".to_vec(),
             })
             .await
             .unwrap();
 
         // Run one superstep; the inbound message should activate vertex-b
-        let result = runner
-            .distributed_superstep(halt_compute())
-            .await;
+        let result = runner.distributed_superstep(halt_compute()).await;
 
-        assert_eq!(result.active_count, 1, "vertex-b should be activated by inbound message");
+        assert_eq!(
+            result.active_count, 1,
+            "vertex-b should be activated by inbound message"
+        );
         assert_eq!(result.msg_delivered, 1);
     }
 
@@ -325,25 +326,24 @@ mod tests {
         let local_vid = VertexId::from("local-vertex");
         runner.add_local_vertex(local_vid.clone(), Vec::new());
         runner.graph.inject_message(Message {
-            src:     VertexId::from("seed"),
-            dst:     local_vid.clone(),
+            src: VertexId::from("seed"),
+            dst: local_vid.clone(),
             payload: b"go".to_vec(),
         });
 
         // Compute: send one message to a non-local vertex
         let remote_key = VertexId::from("remote-vertex").cid().to_multibase();
         let remote_key_clone = remote_key.clone();
-        let compute: SharedComputeFn = Arc::new(move |v: &Vertex, _inbox: &[Message]| {
-            ComputeOutput {
+        let compute: SharedComputeFn =
+            Arc::new(move |v: &Vertex, _inbox: &[Message]| ComputeOutput {
                 new_state: v.state.clone(),
-                messages:  vec![Message {
-                    src:     v.id.clone(),
-                    dst:     VertexId::from("remote-vertex"),
+                messages: vec![Message {
+                    src: v.id.clone(),
+                    dst: VertexId::from("remote-vertex"),
                     payload: b"hello-remote".to_vec(),
                 }],
                 vote_halt: true,
-            }
-        });
+            });
 
         runner.distributed_superstep(compute).await;
 
@@ -364,8 +364,8 @@ mod tests {
         runner.add_local_vertex(va.clone(), Vec::new());
         runner.add_local_vertex(vb.clone(), Vec::new());
         runner.graph.inject_message(Message {
-            src:     VertexId::from("seed"),
-            dst:     va.clone(),
+            src: VertexId::from("seed"),
+            dst: va.clone(),
             payload: b"start".to_vec(),
         });
 
@@ -375,15 +375,19 @@ mod tests {
             if v.id == VertexId::from("va") {
                 ComputeOutput {
                     new_state: b"done".to_vec(),
-                    messages:  vec![Message {
-                        src:     v.id.clone(),
-                        dst:     vb_clone.clone(),
+                    messages: vec![Message {
+                        src: v.id.clone(),
+                        dst: vb_clone.clone(),
                         payload: b"local-msg".to_vec(),
                     }],
                     vote_halt: true,
                 }
             } else {
-                ComputeOutput { new_state: v.state.clone(), messages: vec![], vote_halt: true }
+                ComputeOutput {
+                    new_state: v.state.clone(),
+                    messages: vec![],
+                    vote_halt: true,
+                }
             }
         });
 
@@ -399,8 +403,8 @@ mod tests {
     #[test]
     fn distributed_message_fields_accessible() {
         let dm = DistributedMessage {
-            src:     "src-vertex".to_string(),
-            dst:     "dst-vertex".to_string(),
+            src: "src-vertex".to_string(),
+            dst: "dst-vertex".to_string(),
             payload: b"payload".to_vec(),
         };
         assert_eq!(dm.src, "src-vertex");
@@ -411,8 +415,8 @@ mod tests {
     #[test]
     fn distributed_message_clone() {
         let dm = DistributedMessage {
-            src:     "a".to_string(),
-            dst:     "b".to_string(),
+            src: "a".to_string(),
+            dst: "b".to_string(),
             payload: vec![1, 2, 3],
         };
         let c = dm.clone();
@@ -461,22 +465,23 @@ mod tests {
         let v = VertexId::from("never-halts");
         runner.add_local_vertex(v.clone(), Vec::new());
         runner.graph.inject_message(Message {
-            src: VertexId::from("seed"), dst: v.clone(), payload: b"go".to_vec(),
+            src: VertexId::from("seed"),
+            dst: v.clone(),
+            payload: b"go".to_vec(),
         });
 
         // Compute never votes halt and always sends a message to itself
         let v_clone = v.clone();
-        let no_halt: SharedComputeFn = Arc::new(move |vertex: &Vertex, _: &[Message]| {
-            ComputeOutput {
+        let no_halt: SharedComputeFn =
+            Arc::new(move |vertex: &Vertex, _: &[Message]| ComputeOutput {
                 new_state: vertex.state.clone(),
-                messages:  vec![Message {
-                    src:     vertex.id.clone(),
-                    dst:     v_clone.clone(),
+                messages: vec![Message {
+                    src: vertex.id.clone(),
+                    dst: v_clone.clone(),
                     payload: b"again".to_vec(),
                 }],
                 vote_halt: false,
-            }
-        });
+            });
 
         let results = runner.run(no_halt, 5).await;
         assert_eq!(results.len(), 5, "run should stop after max_supersteps");

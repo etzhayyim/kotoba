@@ -14,12 +14,13 @@
 //!   - subscribeRepos (CAR binary): not yet implemented (requires CAR parser)
 //!   - CID mapping: AT uses sha2-256; KOTOBA remaps to blake3 via at_cid_str_to_kotoba()
 
+use bytes::Bytes;
+use futures::StreamExt;
+use kotoba_kqe::datom::Datom;
+use kotoba_kse::Journal;
 use std::sync::Arc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use futures::StreamExt;
-use kotoba_kse::Journal;
-use tracing::{info, warn, debug};
-use bytes::Bytes;
+use tracing::{debug, info, warn};
 
 use crate::atproto::jetstream_event_to_quad;
 use crate::quad_store::QuadStore;
@@ -64,8 +65,13 @@ pub async fn run_jetstream_client(journal: Arc<Journal>, quad_store: Arc<QuadSto
                                 };
                                 journal.publish(topic, payload).await;
 
-                                // 2. Assert into QuadStore (Arrangement + future ProllyTree commit)
-                                quad_store.assert(quad).await;
+                                // 2. Assert into QuadStore as Datom (Arrangement + future ProllyTree commit)
+                                quad_store
+                                    .assert_datom(
+                                        quad.graph.clone(),
+                                        Datom::from_legacy_quad(quad, true),
+                                    )
+                                    .await;
 
                                 debug!("jetstream quad asserted");
                             }
@@ -126,7 +132,10 @@ mod tests {
     #[test]
     fn single_collection_appends_param() {
         let url = build_subscribe_url_with("wss://example.com/subscribe", "app.bsky.feed.post");
-        assert!(url.contains("wantedCollections=app.bsky.feed.post"), "got: {url}");
+        assert!(
+            url.contains("wantedCollections=app.bsky.feed.post"),
+            "got: {url}"
+        );
     }
 
     #[test]
@@ -135,8 +144,14 @@ mod tests {
             "wss://example.com/subscribe",
             "app.bsky.feed.post,app.bsky.graph.follow",
         );
-        assert!(url.contains("wantedCollections=app.bsky.feed.post"), "got: {url}");
-        assert!(url.contains("wantedCollections=app.bsky.graph.follow"), "got: {url}");
+        assert!(
+            url.contains("wantedCollections=app.bsky.feed.post"),
+            "got: {url}"
+        );
+        assert!(
+            url.contains("wantedCollections=app.bsky.graph.follow"),
+            "got: {url}"
+        );
     }
 
     #[test]
@@ -145,8 +160,14 @@ mod tests {
             "wss://example.com/subscribe",
             " app.bsky.feed.post , app.bsky.graph.follow ",
         );
-        assert!(url.contains("wantedCollections=app.bsky.feed.post"), "got: {url}");
-        assert!(!url.contains("wantedCollections= "), "should strip spaces, got: {url}");
+        assert!(
+            url.contains("wantedCollections=app.bsky.feed.post"),
+            "got: {url}"
+        );
+        assert!(
+            !url.contains("wantedCollections= "),
+            "should strip spaces, got: {url}"
+        );
     }
 
     // ── additional build_subscribe_url_with tests ─────────────────────────────
@@ -154,8 +175,10 @@ mod tests {
     #[test]
     fn empty_csv_with_whitespace_only_returns_base_url() {
         let url = build_subscribe_url_with("wss://example.com/subscribe", "   ");
-        assert_eq!(url, "wss://example.com/subscribe",
-            "whitespace-only csv should produce base URL: {url}");
+        assert_eq!(
+            url, "wss://example.com/subscribe",
+            "whitespace-only csv should produce base URL: {url}"
+        );
     }
 
     #[test]
@@ -164,9 +187,18 @@ mod tests {
             "wss://example.com/subscribe",
             "app.bsky.feed.post,app.bsky.graph.follow,app.bsky.feed.like",
         );
-        assert!(url.contains("wantedCollections=app.bsky.feed.post"), "got: {url}");
-        assert!(url.contains("wantedCollections=app.bsky.graph.follow"), "got: {url}");
-        assert!(url.contains("wantedCollections=app.bsky.feed.like"), "got: {url}");
+        assert!(
+            url.contains("wantedCollections=app.bsky.feed.post"),
+            "got: {url}"
+        );
+        assert!(
+            url.contains("wantedCollections=app.bsky.graph.follow"),
+            "got: {url}"
+        );
+        assert!(
+            url.contains("wantedCollections=app.bsky.feed.like"),
+            "got: {url}"
+        );
     }
 
     #[test]
@@ -185,22 +217,29 @@ mod tests {
     fn ampersand_separator_used_between_params() {
         let url = build_subscribe_url_with("wss://example.com/sub", "col.one,col.two");
         // The two params must be separated by '&'
-        assert!(url.contains("wantedCollections=col.one&wantedCollections=col.two")
-            || url.contains("wantedCollections=col.two&wantedCollections=col.one"),
-            "expected & separator between params, got: {url}");
+        assert!(
+            url.contains("wantedCollections=col.one&wantedCollections=col.two")
+                || url.contains("wantedCollections=col.two&wantedCollections=col.one"),
+            "expected & separator between params, got: {url}"
+        );
     }
 
     #[test]
     fn single_collection_no_trailing_ampersand() {
         let url = build_subscribe_url_with("wss://example.com/sub", "col.one");
-        assert!(!url.ends_with('&'), "no trailing ampersand expected, got: {url}");
+        assert!(
+            !url.ends_with('&'),
+            "no trailing ampersand expected, got: {url}"
+        );
     }
 
     #[test]
     fn comma_only_csv_returns_base_url() {
         // A CSV that is all separators with no real tokens should behave like empty
         let url = build_subscribe_url_with("wss://example.com/subscribe", ",,,");
-        assert_eq!(url, "wss://example.com/subscribe",
-            "commas-only csv should produce base URL, got: {url}");
+        assert_eq!(
+            url, "wss://example.com/subscribe",
+            "commas-only csv should produce base URL, got: {url}"
+        );
     }
 }

@@ -1,0 +1,31 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.datomic.seekDatoms",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Return Datomic seek-datoms(index, components...) from a Kotoba distributed Datom graph.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["graph", "index"],
+          "properties": {
+            "graph": { "type": "string" },
+            "index": { "type": "string" },
+            "components_edn": { "type": "array", "items": { "type": "string" } },
+            "as_of": { "type": "string" },
+            "since": { "type": "string" },
+            "cacao_b64": { "type": "string" },
+            "presentation": { "type": "unknown" },
+            "limit": { "type": "integer", "minimum": 0 }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": { "type": "unknown" }
+      }
+    }
+  }
+}

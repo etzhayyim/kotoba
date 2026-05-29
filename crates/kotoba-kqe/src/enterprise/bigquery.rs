@@ -17,20 +17,21 @@
 
 use sqlparser::dialect::BigQueryDialect as SqlparserBigQuery;
 
-use crate::schema::SchemaMap;
 use super::{
-    CompiledEnterpriseQuery, EnterpriseDialect, EnterpriseFeature,
-    sql_base::SchemaBasedSqlCompiler,
+    sql_base::SchemaBasedSqlCompiler, CompiledEnterpriseQuery, EnterpriseDialect, EnterpriseFeature,
 };
+use crate::schema::SchemaMap;
 
 pub struct BigQueryDialect;
 
 impl EnterpriseDialect for BigQueryDialect {
-    fn dialect_name(&self) -> &'static str { "bigquery" }
+    fn dialect_name(&self) -> &'static str {
+        "bigquery"
+    }
 
     fn compile(
         &self,
-        query:  &str,
+        query: &str,
         schema: &SchemaMap,
         output: &str,
     ) -> anyhow::Result<CompiledEnterpriseQuery> {
@@ -43,12 +44,8 @@ impl EnterpriseDialect for BigQueryDialect {
 
         let prepped = preprocess_bigquery(query);
 
-        let (program, pp) = SchemaBasedSqlCompiler::compile(
-            &prepped,
-            &SqlparserBigQuery {},
-            schema,
-            output,
-        )?;
+        let (program, pp) =
+            SchemaBasedSqlCompiler::compile(&prepped, &SqlparserBigQuery {}, schema, output)?;
 
         Ok(CompiledEnterpriseQuery {
             program,
@@ -70,7 +67,9 @@ fn preprocess_bigquery(sql: &str) -> String {
         if let Some(close) = s[open + 1..].find('`') {
             let inner = s[open + 1..open + 1 + close].replace('.', "_");
             s.replace_range(open..open + 2 + close, &inner);
-        } else { break; }
+        } else {
+            break;
+        }
     }
 
     // UNNEST(col) → col (lose the array expansion, mark as SemiStructured)
@@ -78,7 +77,9 @@ fn preprocess_bigquery(sql: &str) -> String {
         if let Some(end) = find_paren(&s, idx + 6) {
             let inner = s[idx + 7..end].to_string();
             s.replace_range(idx..end + 1, &inner);
-        } else { break; }
+        } else {
+            break;
+        }
     }
 
     // WITH OFFSET → strip (ordinal index not representable in binary Datalog)
@@ -89,7 +90,9 @@ fn preprocess_bigquery(sql: &str) -> String {
     while let Some(idx) = s.to_uppercase().find(" EXCEPT (") {
         if let Some(end) = find_paren(&s, idx + 8) {
             s.replace_range(idx..end + 1, "");
-        } else { break; }
+        } else {
+            break;
+        }
     }
 
     // _TABLE_SUFFIX references → remove the LIKE clause
@@ -103,7 +106,12 @@ fn find_paren(s: &str, open: usize) -> Option<usize> {
     for (i, c) in s[open..].char_indices() {
         match c {
             '(' => depth += 1,
-            ')' => { depth -= 1; if depth == 0 { return Some(open + i); } }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + i);
+                }
+            }
             _ => {}
         }
     }
@@ -116,28 +124,36 @@ fn find_paren(s: &str, open: usize) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::schema::{AttrDef, SchemaMap, TableSchema};
-    use crate::{delta::Delta, quad::{Quad, QuadObject}};
+    use crate::{
+        datom::{Datom, Value},
+        delta::Delta,
+    };
     use kotoba_core::cid::KotobaCid;
 
-    fn cid(s: &str) -> KotobaCid { KotobaCid::from_bytes(s.as_bytes()) }
+    fn cid(s: &str) -> KotobaCid {
+        KotobaCid::from_bytes(s.as_bytes())
+    }
     fn fact(pred: &str, s: &str, o: &str) -> Delta {
-        Delta::assert(Quad {
-            graph: cid("g"), subject: cid(s), predicate: pred.to_string(),
-            object: QuadObject::Cid(cid(o)),
-        })
+        Delta::assert_datom(Datom::assert(
+            cid(s),
+            pred.to_string(),
+            Value::Cid(cid(o)),
+            cid("g"),
+        ))
     }
     fn has(d: &[Delta], pred: &str, s: &str, o: &str) -> bool {
-        d.iter().any(|x| x.quad.predicate == pred
-            && x.quad.subject == cid(s)
-            && matches!(&x.quad.object, QuadObject::Cid(c) if *c == cid(o)))
+        d.iter().any(|x| {
+            x.attribute() == pred
+                && x.entity() == &cid(s)
+                && matches!(x.value(), Value::Cid(c) if *c == cid(o))
+        })
     }
 
     #[test]
     fn backtick_table_ref() {
         // `my_project.my_dataset.events` → my_project_my_dataset_events
-        let prepped = preprocess_bigquery(
-            "SELECT e.id, e.name FROM `my_project.my_dataset.events` AS e"
-        );
+        let prepped =
+            preprocess_bigquery("SELECT e.id, e.name FROM `my_project.my_dataset.events` AS e");
         assert!(prepped.contains("my_project_my_dataset_events"));
         assert!(!prepped.contains('`'));
     }
@@ -145,22 +161,28 @@ mod tests {
     #[test]
     fn bigquery_select() {
         let mut schema = SchemaMap::new();
-        schema.add("analytics_sessions", TableSchema::new("session_id")
-            .with_attr(AttrDef::scalar("user_id", "analytics_sessions"))
-            .with_attr(AttrDef::scalar("channel", "analytics_sessions")));
+        schema.add(
+            "analytics_sessions",
+            TableSchema::new("session_id")
+                .with_attr(AttrDef::scalar("user_id", "analytics_sessions"))
+                .with_attr(AttrDef::scalar("channel", "analytics_sessions")),
+        );
 
-        let result = BigQueryDialect.compile(
-            "SELECT s.session_id, s.user_id \
+        let result = BigQueryDialect
+            .compile(
+                "SELECT s.session_id, s.user_id \
              FROM analytics_sessions AS s \
              WHERE s.channel = 'organic'",
-            &schema, "organic",
-        ).unwrap();
+                &schema,
+                "organic",
+            )
+            .unwrap();
 
         let input = vec![
-            fact("analytics_sessions/user_id",  "s1", "u1"),
-            fact("analytics_sessions/channel",  "s1", "organic"),
-            fact("analytics_sessions/user_id",  "s2", "u2"),
-            fact("analytics_sessions/channel",  "s2", "paid"),
+            fact("analytics_sessions/user_id", "s1", "u1"),
+            fact("analytics_sessions/channel", "s1", "organic"),
+            fact("analytics_sessions/user_id", "s2", "u2"),
+            fact("analytics_sessions/channel", "s2", "paid"),
         ];
         let derived = result.program.evaluate_delta(&input);
         assert!(has(&derived, "organic", "s1", "u1"));
