@@ -5,8 +5,8 @@
 //! without going through the legacy Quad projection.
 
 use crate::{
-    current_datoms, edn_to_kqe_value, plan_datom_lookup_for_triple, Datom, DatomicError, Db,
-    LogEntry, Value,
+    current_datoms, edn_to_kqe_value, index_range_datoms, plan_datom_lookup_for_triple,
+    seek_datoms_index, Datom, DatomIndex, DatomicError, Db, LogEntry, Value,
 };
 use kotoba_core::cid::KotobaCid;
 use kotoba_core::prolly::ProllyTree;
@@ -369,6 +369,65 @@ where
         lookup: &DatomIndexLookup,
     ) -> Result<Vec<Datom>, DistributedCommitError> {
         Ok(current_datoms(&self.history_for_lookup(head, lookup)?))
+    }
+
+    /// Datomic-compatible current datom scan over a distributed Prolly index.
+    pub fn datoms_index(
+        &self,
+        head: &KotobaCid,
+        index: DatomIndex,
+        components: &[Value],
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        self.current_for_index_components(head, root_for_datom_index(index), components)
+    }
+
+    /// Datomic-compatible history datom scan over a distributed Prolly index.
+    pub fn history_datoms_index(
+        &self,
+        head: &KotobaCid,
+        index: DatomIndex,
+        components: &[Value],
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        self.history_for_index_components(head, root_for_datom_index(index), components)
+    }
+
+    /// Datomic-compatible `seek-datoms` over the current distributed database.
+    pub fn seek_datoms(
+        &self,
+        head: &KotobaCid,
+        index: DatomIndex,
+        components: &[Value],
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        let datoms = self.current_db_from_head(head)?.datoms();
+        seek_datoms_index(datoms, index, components).map_err(Into::into)
+    }
+
+    /// Datomic-compatible `index-range` over the current distributed database.
+    pub fn index_range(
+        &self,
+        head: &KotobaCid,
+        attr: &str,
+        start: Option<&Value>,
+        end: Option<&Value>,
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        let datoms = self.current_db_from_head(head)?.datoms();
+        index_range_datoms(datoms, attr, start, end).map_err(Into::into)
+    }
+
+    pub fn history_for_index_components(
+        &self,
+        head: &KotobaCid,
+        root_name: &'static str,
+        components: &[Value],
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        let datoms = match index_components_prefix(root_name, components)? {
+            Some(prefix) => self.history_from_index_prefix(head, root_name, &prefix)?,
+            None => self.history_from_head(head)?,
+        };
+        Ok(datoms
+            .into_iter()
+            .filter(|datom| datom_matches_index_components(datom, root_name, components))
+            .collect())
     }
 
     pub fn current_for_index_components(
@@ -1558,8 +1617,8 @@ where
             });
         }
 
-        let roots = build_datom_roots(&req.datoms, self.store)?;
-        let root_seed = roots
+        let seed_roots = build_datom_roots(&req.datoms, self.store)?;
+        let root_seed = seed_roots
             .get(ROOT_EAVT)
             .cloned()
             .unwrap_or_else(KotobaCid::default);
@@ -1571,9 +1630,19 @@ where
                 req.seq,
             )
         });
+        let datoms = req
+            .datoms
+            .into_iter()
+            .map(|mut datom| {
+                datom.t = tx_cid.clone();
+                datom
+            })
+            .collect::<Vec<_>>();
+        let datom_count = datoms.len();
+        let roots = build_datom_roots(&datoms, self.store)?;
         let commit = DistributedDatomCommit::seal(
             req.graph,
-            tx_cid,
+            tx_cid.clone(),
             req.expected_parent,
             req.author,
             req.seq,
@@ -1602,7 +1671,7 @@ where
         Ok(CommitReport {
             commit,
             ipns_record,
-            datom_count: req.datoms.len(),
+            datom_count,
         })
     }
 }
@@ -1834,6 +1903,16 @@ fn attr_lookup_variants(attr: &str) -> Vec<&str> {
     }
 }
 
+fn root_for_datom_index(index: DatomIndex) -> &'static str {
+    match index {
+        DatomIndex::Eavt => ROOT_EAVT,
+        DatomIndex::Aevt => ROOT_AEVT,
+        DatomIndex::Avet => ROOT_AVET,
+        DatomIndex::Vaet => ROOT_VAET,
+        DatomIndex::Tea => ROOT_TEA,
+    }
+}
+
 fn extend_unique_datoms(out: &mut Vec<Datom>, datoms: Vec<Datom>) {
     for datom in datoms {
         if !out.contains(&datom) {
@@ -2009,6 +2088,34 @@ fn index_components_prefix(
                 _ => unreachable!(),
             }
         }
+        ROOT_TEA => {
+            let t = prefix_datoms_entity(&components[0]);
+            match components.len() {
+                1 => t.0.to_vec(),
+                2 => {
+                    let mut prefix = t.0.to_vec();
+                    prefix.extend_from_slice(&prefix_datoms_entity(&components[1]).0);
+                    prefix
+                }
+                3 => {
+                    let mut prefix = t.0.to_vec();
+                    prefix.extend_from_slice(&prefix_datoms_entity(&components[1]).0);
+                    prefix.extend_from_slice(&attr_prefix(&prefix_datoms_attr(&components[2])?));
+                    prefix
+                }
+                4 => truncate_op(
+                    KqeDatom {
+                        e: prefix_datoms_entity(&components[1]),
+                        a: prefix_datoms_attr(&components[2])?,
+                        v: kqe_value(&components[3]),
+                        tx: t,
+                        op: true,
+                    }
+                    .tea_key(),
+                ),
+                _ => unreachable!(),
+            }
+        }
         _ => {
             return Err(DatomicError::Query(format!("unsupported datom index {root_name}")).into())
         }
@@ -2048,6 +2155,12 @@ fn datom_matches_index_components(
             }
             (ROOT_VAET, 2) => datom.e == prefix_datoms_entity(component),
             (ROOT_VAET, 3) => datom.t == prefix_datoms_entity(component),
+            (ROOT_TEA, 0) => datom.t == prefix_datoms_entity(component),
+            (ROOT_TEA, 1) => datom.e == prefix_datoms_entity(component),
+            (ROOT_TEA, 2) => {
+                prefix_datoms_attr(component).is_ok_and(|a| attr_matches(&datom.a, &a))
+            }
+            (ROOT_TEA, 3) => datom.v == *component,
             _ => false,
         })
 }
@@ -3416,6 +3529,56 @@ mod tests {
             .unwrap();
         assert_eq!(by_entity_attr.len(), 1);
         assert_eq!(by_entity_attr[0].v, EdnValue::String("Alice".into()));
+
+        let datomic_avet = reader
+            .datoms_index(
+                &second.commit.cid,
+                DatomIndex::Avet,
+                &[
+                    kotoba_edn::parse(":person/name").unwrap(),
+                    EdnValue::String("Bob".into()),
+                ],
+            )
+            .unwrap();
+        assert_eq!(datomic_avet.len(), 1);
+        assert_eq!(datomic_avet[0].e, KotobaCid::from_bytes(b"bob"));
+
+        let datomic_tea = reader
+            .history_datoms_index(
+                &second.commit.cid,
+                DatomIndex::Tea,
+                &[EdnValue::String(second.commit.tx_cid.to_multibase())],
+            )
+            .unwrap();
+        assert!(datomic_tea
+            .iter()
+            .all(|datom| datom.t == second.commit.tx_cid));
+        assert_eq!(datomic_tea.len(), 1);
+
+        let seek = reader
+            .seek_datoms(
+                &second.commit.cid,
+                DatomIndex::Avet,
+                &[kotoba_edn::parse(":person/name").unwrap()],
+            )
+            .unwrap();
+        assert!(seek
+            .iter()
+            .any(|datom| datom.v == EdnValue::String("Alice".into())));
+        assert!(seek
+            .iter()
+            .any(|datom| datom.v == EdnValue::String("Bob".into())));
+
+        let range = reader
+            .index_range(
+                &second.commit.cid,
+                ":person/name",
+                Some(&EdnValue::String("Alice".into())),
+                Some(&EdnValue::String("Bob".into())),
+            )
+            .unwrap();
+        assert_eq!(range.len(), 1);
+        assert_eq!(range[0].v, EdnValue::String("Alice".into()));
     }
 
     #[test]

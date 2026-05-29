@@ -335,6 +335,27 @@ impl Db {
         datoms_index(current_datoms(&self.datoms), index, components)
     }
 
+    /// Datomic-like seek over current facts.
+    ///
+    /// Returns datoms in index order starting at the lexicographic lower bound
+    /// described by `components`.
+    pub fn seek_datoms(&self, index: DatomIndex, components: &[EdnValue]) -> Result<Vec<Datom>> {
+        seek_datoms_index(current_datoms(&self.datoms), index, components)
+    }
+
+    /// Datomic-like AVET range scan for a single attribute.
+    ///
+    /// `start` is inclusive and `end` is exclusive. `None` leaves the bound
+    /// open, matching Datomic's `index-range` shape.
+    pub fn index_range(
+        &self,
+        attr: impl AsRef<str>,
+        start: Option<&EdnValue>,
+        end: Option<&EdnValue>,
+    ) -> Result<Vec<Datom>> {
+        index_range_datoms(current_datoms(&self.datoms), attr.as_ref(), start, end)
+    }
+
     /// Full Datomic history, including retract tombstones.
     pub fn history(&self) -> HistoryDb {
         HistoryDb {
@@ -401,6 +422,19 @@ impl HistoryDb {
     /// Datomic-like indexed datom scan over history facts, including retract tombstones.
     pub fn datoms_index(&self, index: DatomIndex, components: &[EdnValue]) -> Result<Vec<Datom>> {
         datoms_index(self.datoms.clone(), index, components)
+    }
+
+    pub fn seek_datoms(&self, index: DatomIndex, components: &[EdnValue]) -> Result<Vec<Datom>> {
+        seek_datoms_index(self.datoms.clone(), index, components)
+    }
+
+    pub fn index_range(
+        &self,
+        attr: impl AsRef<str>,
+        start: Option<&EdnValue>,
+        end: Option<&EdnValue>,
+    ) -> Result<Vec<Datom>> {
+        index_range_datoms(self.datoms.clone(), attr.as_ref(), start, end)
     }
 }
 
@@ -1233,6 +1267,36 @@ fn datoms_index(
     Ok(datoms)
 }
 
+pub(crate) fn seek_datoms_index(
+    mut datoms: Vec<Datom>,
+    index: DatomIndex,
+    components: &[EdnValue],
+) -> Result<Vec<Datom>> {
+    if components.len() > 4 {
+        return Err(DatomicError::Query(format!(
+            "{index:?} index supports at most 4 components"
+        )));
+    }
+    datoms.sort_by(|left, right| datom_index_cmp(left, right, index));
+    datoms.retain(|datom| datom_index_seek_cmp(datom, index, components).is_ge());
+    Ok(datoms)
+}
+
+pub(crate) fn index_range_datoms(
+    mut datoms: Vec<Datom>,
+    attr: &str,
+    start: Option<&EdnValue>,
+    end: Option<&EdnValue>,
+) -> Result<Vec<Datom>> {
+    datoms.retain(|datom| {
+        attr_matches(&datom.a, attr)
+            && start.is_none_or(|start| query_sort_order(&datom.v, start).is_ge())
+            && end.is_none_or(|end| query_sort_order(&datom.v, end).is_lt())
+    });
+    datoms.sort_by(|left, right| datom_index_cmp(left, right, DatomIndex::Avet));
+    Ok(datoms)
+}
+
 fn datom_index_prefix_matches(datom: &Datom, index: DatomIndex, components: &[EdnValue]) -> bool {
     components
         .iter()
@@ -1261,6 +1325,46 @@ fn datom_index_prefix_matches(datom: &Datom, index: DatomIndex, components: &[Ed
             | (DatomIndex::Tea, 0) => component_matches_cid(component, &datom.t),
             _ => false,
         })
+}
+
+fn datom_index_seek_cmp(
+    datom: &Datom,
+    index: DatomIndex,
+    components: &[EdnValue],
+) -> std::cmp::Ordering {
+    let mut ordering = std::cmp::Ordering::Equal;
+    for (position, component) in components.iter().enumerate() {
+        ordering = match (index, position) {
+            (DatomIndex::Eavt, 0) | (DatomIndex::Aevt, 1) | (DatomIndex::Avet, 2) => {
+                cmp_cid(&datom.e, &component_to_cid(component))
+            }
+            (DatomIndex::Tea, 1) | (DatomIndex::Vaet, 2) => {
+                cmp_cid(&datom.e, &component_to_cid(component))
+            }
+            (DatomIndex::Eavt, 1)
+            | (DatomIndex::Aevt, 0)
+            | (DatomIndex::Avet, 0)
+            | (DatomIndex::Vaet, 1)
+            | (DatomIndex::Tea, 2) => datom
+                .a
+                .cmp(&attr_to_string(component).unwrap_or_else(|_| edn_to_string(component))),
+            (DatomIndex::Eavt, 2)
+            | (DatomIndex::Aevt, 2)
+            | (DatomIndex::Avet, 1)
+            | (DatomIndex::Vaet, 0)
+            | (DatomIndex::Tea, 3) => query_sort_order(&datom.v, component),
+            (DatomIndex::Eavt, 3)
+            | (DatomIndex::Aevt, 3)
+            | (DatomIndex::Avet, 3)
+            | (DatomIndex::Vaet, 3)
+            | (DatomIndex::Tea, 0) => cmp_cid(&datom.t, &component_to_cid(component)),
+            _ => std::cmp::Ordering::Equal,
+        };
+        if !ordering.is_eq() {
+            break;
+        }
+    }
+    ordering
 }
 
 fn datom_index_cmp(left: &Datom, right: &Datom, index: DatomIndex) -> std::cmp::Ordering {
@@ -1305,6 +1409,13 @@ fn cmp_cid(left: &KotobaCid, right: &KotobaCid) -> std::cmp::Ordering {
 fn component_matches_cid(component: &EdnValue, cid: &KotobaCid) -> bool {
     edn_entity_value_to_cid(component).is_some_and(|value| &value == cid)
         || component == &cid_value(cid)
+}
+
+fn component_to_cid(component: &EdnValue) -> KotobaCid {
+    edn_entity_value_to_cid(component).unwrap_or_else(|| match component {
+        EdnValue::String(value) => KotobaCid::from_bytes(value.as_bytes()),
+        _ => KotobaCid::from_bytes(edn_to_string(component).as_bytes()),
+    })
 }
 
 fn component_matches_attr(component: &EdnValue, attr: &str) -> bool {
@@ -5254,6 +5365,26 @@ mod tests {
             .unwrap();
         assert!(tea.iter().all(|datom| datom.t == report.tx_cid));
         assert!(tea.len() >= report.tx_data.len());
+
+        let seek = db
+            .seek_datoms(DatomIndex::Avet, &[kw_value(":person/name")])
+            .unwrap();
+        assert!(seek
+            .iter()
+            .any(|datom| datom.v == EdnValue::String("Alice".into())));
+        assert!(seek
+            .iter()
+            .any(|datom| datom.v == EdnValue::String("Bob".into())));
+
+        let range = db
+            .index_range(
+                ":person/name",
+                Some(&EdnValue::String("Alice".into())),
+                Some(&EdnValue::String("Bob".into())),
+            )
+            .unwrap();
+        assert_eq!(range.len(), 1);
+        assert_eq!(range[0].v, EdnValue::String("Alice".into()));
 
         assert!(matches!(
             db.datoms_index(
