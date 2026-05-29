@@ -132,6 +132,12 @@ async fn repo_persists_blocks_and_pins() {
         .expect("node start");
     let cid = node.put_raw_block(&data).await.expect("put");
     node.pin(&cid).await.expect("pin");
+    node.files_write_bytes("/persisted/file.txt", &data, true)
+        .await
+        .expect("files/write bytes");
+    node.name_publish("k51-kotoba-persisted", &cid, "2026-05-29T00:00:00Z")
+        .await
+        .expect("name/publish");
     assert_eq!(
         node.block_stat(&cid).await.expect("stat").size,
         data.len() as u64
@@ -147,6 +153,21 @@ async fn repo_persists_blocks_and_pins() {
         .expect("restart");
     assert_eq!(restarted.get_block(&cid).await.expect("get"), data);
     assert!(restarted.is_pinned(&cid).await.expect("is pinned"));
+    assert_eq!(
+        restarted
+            .files_read("/persisted/file.txt")
+            .await
+            .expect("files/read persisted"),
+        b"persistent block"[..]
+    );
+    assert_eq!(
+        restarted
+            .name_resolve("k51-kotoba-persisted")
+            .await
+            .expect("name/resolve persisted")
+            .cid,
+        cid
+    );
 }
 
 #[tokio::test]
@@ -356,6 +377,18 @@ async fn kubo_compatible_local_api_surface() {
             .expect("files/read generated"),
         b"generated"[..]
     );
+    let touched = node
+        .files_touch("/docs/empty.txt", true)
+        .await
+        .expect("files/touch");
+    assert_eq!(touched.path, "/docs/empty.txt");
+    assert_eq!(touched.size, 0);
+    assert_eq!(
+        node.files_touch("/docs/empty.txt", false)
+            .await
+            .expect("files/touch idempotent"),
+        touched
+    );
     assert_eq!(
         node.files_read("/docs/hello.txt")
             .await
@@ -376,14 +409,29 @@ async fn kubo_compatible_local_api_surface() {
         file_stat
     );
     let files = node.files_ls("/docs").await.expect("files/ls");
-    assert_eq!(files.len(), 2);
+    assert_eq!(files.len(), 3);
     assert!(files
         .iter()
         .any(|entry| entry.path == "/docs/hello.txt" && entry.cid == Some(raw)));
     assert!(files.iter().any(
         |entry| entry.path == "/docs/generated.txt" && entry.cid == Some(write_bytes_stat.cid)
     ));
-    assert_eq!(node.files_ls("/").await.expect("files/ls root").len(), 3);
+    assert!(files
+        .iter()
+        .any(|entry| entry.path == "/docs/empty.txt" && entry.cid == Some(touched.cid)));
+    assert_eq!(node.files_ls("/").await.expect("files/ls root").len(), 4);
+    assert_eq!(
+        node.files_du("/docs/hello.txt", false)
+            .await
+            .expect("files/du file"),
+        5
+    );
+    assert_eq!(
+        node.files_du("/docs", true)
+            .await
+            .expect("files/du recursive"),
+        14
+    );
 
     node.files_mkdir("/docs/archive", true)
         .await
@@ -510,7 +558,7 @@ async fn kubo_compatible_local_api_surface() {
         .contains(&raw));
     assert!(node.has_block(&raw).await.expect("has raw under mfs"));
     assert!(!node.has_block(&dag).await.expect("has dag after gc"));
-    assert_eq!(node.files_rm("/docs", true).await.expect("files/rm"), 8);
+    assert_eq!(node.files_rm("/docs", true).await.expect("files/rm"), 9);
     assert!(node
         .files_ls("/docs")
         .await

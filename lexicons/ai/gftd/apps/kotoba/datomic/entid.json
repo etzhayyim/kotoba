@@ -22,7 +22,16 @@
       },
       "output": {
         "encoding": "application/json",
-        "schema": { "type": "unknown" }
+        "schema": {
+          "type": "object",
+          "required": ["graph", "ident_edn"],
+          "properties": {
+            "graph": { "type": "string" },
+            "ident_edn": { "type": "string" },
+            "basis_t": { "type": "string" },
+            "entity": { "type": "string" }
+          }
+        }
       }
     }
   }

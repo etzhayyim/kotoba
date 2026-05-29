@@ -21,7 +21,26 @@
       },
       "output": {
         "encoding": "application/json",
-        "schema": { "type": "unknown" }
+        "schema": {
+          "type": "object",
+          "required": [
+            "graph",
+            "datom_count",
+            "history_datom_count",
+            "entity_count",
+            "attribute_count",
+            "tx_count"
+          ],
+          "properties": {
+            "graph": { "type": "string" },
+            "basis_t": { "type": "string" },
+            "datom_count": { "type": "integer", "minimum": 0 },
+            "history_datom_count": { "type": "integer", "minimum": 0 },
+            "entity_count": { "type": "integer", "minimum": 0 },
+            "attribute_count": { "type": "integer", "minimum": 0 },
+            "tx_count": { "type": "integer", "minimum": 0 }
+          }
+        }
       }
     }
   }

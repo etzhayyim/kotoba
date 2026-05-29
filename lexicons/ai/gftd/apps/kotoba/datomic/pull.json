@@ -23,7 +23,31 @@
       },
       "output": {
         "encoding": "application/json",
-        "schema": { "type": "unknown" }
+        "schema": {
+          "type": "object",
+          "required": ["graph", "entity", "entity_edn", "datom_count", "datoms"],
+          "properties": {
+            "graph": { "type": "string" },
+            "entity": { "type": "string" },
+            "basis_t": { "type": "string" },
+            "entity_edn": { "type": "string" },
+            "datom_count": { "type": "integer", "minimum": 0 },
+            "datoms": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["e", "a", "v_edn", "t", "added"],
+                "properties": {
+                  "e": { "type": "string" },
+                  "a": { "type": "string" },
+                  "v_edn": { "type": "string" },
+                  "t": { "type": "string" },
+                  "added": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }

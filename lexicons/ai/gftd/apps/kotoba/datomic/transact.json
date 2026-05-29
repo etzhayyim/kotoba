@@ -22,7 +22,60 @@
       },
       "output": {
         "encoding": "application/json",
-        "schema": { "type": "unknown" }
+        "schema": {
+          "type": "object",
+          "required": [
+            "status",
+            "graph",
+            "tx_cid",
+            "commit_cid",
+            "ipns_name",
+            "ipns_sequence",
+            "ipns_valid_until",
+            "index_roots",
+            "datom_count",
+            "journal_cids",
+            "tempids",
+            "datoms"
+          ],
+          "properties": {
+            "status": { "type": "string" },
+            "graph": { "type": "string" },
+            "tx_cid": { "type": "string" },
+            "commit_cid": { "type": "string" },
+            "auth_proof_cid": { "type": "string" },
+            "ipns_name": { "type": "string" },
+            "ipns_sequence": { "type": "integer", "minimum": 0 },
+            "ipns_valid_until": { "type": "string" },
+            "index_roots": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "datom_count": { "type": "integer", "minimum": 0 },
+            "journal_cids": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "tempids": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "datoms": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["e", "a", "v_edn", "t", "added"],
+                "properties": {
+                  "e": { "type": "string" },
+                  "a": { "type": "string" },
+                  "v_edn": { "type": "string" },
+                  "t": { "type": "string" },
+                  "added": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }

@@ -21,7 +21,14 @@
       },
       "output": {
         "encoding": "application/json",
-        "schema": { "type": "unknown" }
+        "schema": {
+          "type": "object",
+          "required": ["graph"],
+          "properties": {
+            "graph": { "type": "string" },
+            "basis_t": { "type": "string" }
+          }
+        }
       }
     }
   }

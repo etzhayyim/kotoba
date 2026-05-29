@@ -12,7 +12,7 @@ use ciborium::value::Value as CborValue;
 use ipld_core::cid::Cid as IpldCid;
 use ipld_core::ipld::Ipld;
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -965,6 +965,7 @@ impl KotobaIpfsNode {
             .unwrap_or(1);
         let record = IpnsRecord::new(name.0.clone(), cid, sequence, valid_until);
         self.state.names.write().await.insert(name, record.clone());
+        persist_repo_state(&self.state).await?;
         Ok(record)
     }
 
@@ -996,7 +997,27 @@ impl KotobaIpfsNode {
         self.get_block(cid).await?;
         let path = normalize_mfs_path(path.as_ref())?;
         self.state.files.write().await.insert(path, *cid);
+        persist_repo_state(&self.state).await?;
         Ok(())
+    }
+
+    /// Kubo-like MFS `files/touch`: create an empty file if the path is missing.
+    pub async fn files_touch(&self, path: impl AsRef<str>, parents: bool) -> Result<MfsStat> {
+        let path = normalize_mfs_path(path.as_ref())?;
+        if self.state.files.read().await.contains_key(&path) {
+            return self.files_stat(&path).await;
+        }
+        if parents {
+            for dir in ancestor_dirs(&path) {
+                self.files_mkdir(dir, true).await?;
+            }
+        } else {
+            self.ensure_mfs_parent(&path).await?;
+        }
+        let cid = self.put_raw_block(&[]).await?;
+        self.state.files.write().await.insert(path.clone(), cid);
+        persist_repo_state(&self.state).await?;
+        self.files_stat(&path).await
     }
 
     /// Kubo-like MFS `files/write` for bytes, stored as CIDv1/raw/sha2-256.
@@ -1029,6 +1050,8 @@ impl KotobaIpfsNode {
                 dirs.insert(dir);
             }
             dirs.insert(path);
+            drop(dirs);
+            persist_repo_state(&self.state).await?;
             return Ok(());
         }
         let Some(parent) = parent_mfs_dir(&path) else {
@@ -1038,6 +1061,7 @@ impl KotobaIpfsNode {
             bail!("mfs parent directory not found: {parent}");
         }
         self.state.dirs.write().await.insert(path);
+        persist_repo_state(&self.state).await?;
         Ok(())
     }
 
@@ -1049,6 +1073,7 @@ impl KotobaIpfsNode {
         if let Some(cid) = ipfs_path_cid(source)? {
             self.get_block(&cid).await?;
             self.state.files.write().await.insert(dest, cid);
+            persist_repo_state(&self.state).await?;
             return Ok(());
         }
         let source = normalize_mfs_path(source)?;
@@ -1060,6 +1085,7 @@ impl KotobaIpfsNode {
             .get(&source)
             .ok_or_else(|| anyhow!("mfs path not found: {source}"))?;
         self.state.files.write().await.insert(dest, cid);
+        persist_repo_state(&self.state).await?;
         Ok(())
     }
 
@@ -1082,6 +1108,9 @@ impl KotobaIpfsNode {
         }
         if let Some(cid) = files.remove(&source) {
             files.insert(dest, cid);
+            drop(files);
+            drop(dirs);
+            persist_repo_state(&self.state).await?;
             return Ok(());
         }
         if !dirs.contains(&source) {
@@ -1111,6 +1140,9 @@ impl KotobaIpfsNode {
         for (path, cid) in file_moves {
             files.insert(rebase_mfs_path(&path, &source, &dest), cid);
         }
+        drop(files);
+        drop(dirs);
+        persist_repo_state(&self.state).await?;
         Ok(())
     }
 
@@ -1151,7 +1183,40 @@ impl KotobaIpfsNode {
     /// flush is a durability boundary that validates and returns the current
     /// file stat.
     pub async fn files_flush(&self, path: impl AsRef<str>) -> Result<MfsStat> {
+        persist_repo_state(&self.state).await?;
         self.files_stat(path).await
+    }
+
+    /// Kubo-like MFS `files/du`: sum raw block sizes reachable from an MFS path.
+    pub async fn files_du(&self, path: impl AsRef<str>, recursive: bool) -> Result<u64> {
+        let path = normalize_mfs_path(path.as_ref())?;
+        let files = self.state.files.read().await;
+        let mut cids = Vec::new();
+        if let Some(cid) = files.get(&path) {
+            cids.push(*cid);
+        } else {
+            let child_prefix = if path == "/" {
+                "/".to_string()
+            } else {
+                format!("{path}/")
+            };
+            if !recursive && path != "/" {
+                bail!("files/du on directory requires recursive=true: {path}");
+            }
+            cids.extend(
+                files
+                    .iter()
+                    .filter(|(file_path, _)| file_path.starts_with(&child_prefix))
+                    .map(|(_, cid)| *cid),
+            );
+        }
+        drop(files);
+
+        let mut total = 0;
+        for cid in cids {
+            total += self.block_stat(&cid).await?.size;
+        }
+        Ok(total)
     }
 
     /// Kubo-like MFS `files/ls`.
@@ -1211,10 +1276,16 @@ impl KotobaIpfsNode {
             for key in dir_keys {
                 dirs.remove(&key);
             }
+            drop(files);
+            drop(dirs);
+            persist_repo_state(&self.state).await?;
             return Ok(removed);
         }
         removed += files.remove(&path).is_some() as usize;
         removed += dirs.remove(&path) as usize;
+        drop(files);
+        drop(dirs);
+        persist_repo_state(&self.state).await?;
         Ok(removed)
     }
 
@@ -1402,6 +1473,16 @@ pub struct BitswapStats {
     pub wantlist: Vec<IpldCid>,
     pub peers: Vec<PeerId>,
     pub provide_buf_len: u64,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct RepoStateManifest {
+    #[serde(default)]
+    files: BTreeMap<String, String>,
+    #[serde(default)]
+    dirs: Vec<String>,
+    #[serde(default)]
+    names: Vec<IpnsRecord>,
 }
 
 impl Clone for KotobaIpfsNode {
@@ -1660,6 +1741,71 @@ async fn load_repo(state: &Arc<State>) -> Result<()> {
         }
     }
 
+    load_repo_state(state, repo).await?;
+
+    Ok(())
+}
+
+async fn load_repo_state(state: &Arc<State>, repo: &Path) -> Result<()> {
+    let path = repo_state_path(repo);
+    let data = match tokio::fs::read(&path).await {
+        Ok(data) => data,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("read repo state {path:?}")),
+    };
+    let manifest: RepoStateManifest =
+        serde_json::from_slice(&data).with_context(|| format!("decode repo state {path:?}"))?;
+
+    {
+        let mut files = state.files.write().await;
+        files.clear();
+        for (mfs_path, cid) in manifest.files {
+            let cid = cid
+                .parse::<IpldCid>()
+                .map_err(|err| anyhow!("invalid MFS CID for {mfs_path}: {err}"))?;
+            files.insert(mfs_path, cid);
+        }
+    }
+    {
+        let mut dirs = state.dirs.write().await;
+        dirs.clear();
+        dirs.extend(manifest.dirs);
+    }
+    {
+        let mut names = state.names.write().await;
+        names.clear();
+        for record in manifest.names {
+            record
+                .value
+                .parse::<IpldCid>()
+                .map_err(|err| anyhow!("invalid IPNS record CID for {}: {err}", record.name.0))?;
+            names.insert(record.name.clone(), record);
+        }
+    }
+    Ok(())
+}
+
+async fn persist_repo_state(state: &State) -> Result<()> {
+    let Some(repo) = &state.repo_path else {
+        return Ok(());
+    };
+    let files = state
+        .files
+        .read()
+        .await
+        .iter()
+        .map(|(path, cid)| (path.clone(), cid.to_string()))
+        .collect();
+    let mut dirs: Vec<_> = state.dirs.read().await.iter().cloned().collect();
+    dirs.sort();
+    let mut names: Vec<_> = state.names.read().await.values().cloned().collect();
+    names.sort_by(|a, b| a.name.0.cmp(&b.name.0));
+    let manifest = RepoStateManifest { files, dirs, names };
+    let path = repo_state_path(repo);
+    let data = serde_json::to_vec_pretty(&manifest)?;
+    tokio::fs::write(&path, data)
+        .await
+        .with_context(|| format!("write repo state {path:?}"))?;
     Ok(())
 }
 
@@ -1716,6 +1862,10 @@ fn blocks_dir(repo: &Path) -> PathBuf {
 
 fn pins_dir(repo: &Path) -> PathBuf {
     repo.join("pins")
+}
+
+fn repo_state_path(repo: &Path) -> PathBuf {
+    repo.join("repo-state.json")
 }
 
 fn block_path(state: &State, cid: &IpldCid) -> Option<PathBuf> {

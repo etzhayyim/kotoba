@@ -7271,6 +7271,51 @@ mod tests {
             &["graph", "tx_edn"],
             &["as_of", "since", "cacao_b64", "presentation"],
         );
+        assert_lexicon_output_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/transact.json"),
+            &[
+                "status",
+                "graph",
+                "tx_cid",
+                "commit_cid",
+                "ipns_name",
+                "ipns_sequence",
+                "ipns_valid_until",
+                "index_roots",
+                "datom_count",
+                "journal_cids",
+                "tempids",
+                "datoms",
+            ],
+            &["auth_proof_cid"],
+        );
+        assert_lexicon_array_item_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/transact.json"),
+            "datoms",
+            &["e", "a", "v_edn", "t", "added"],
+        );
+        assert_lexicon_output_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/with.json"),
+            &[
+                "status",
+                "graph",
+                "tx_cid",
+                "tempids",
+                "tx_data",
+                "db_after_datoms",
+            ],
+            &["db_before_basis_t", "db_after_basis_t"],
+        );
+        assert_lexicon_array_item_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/with.json"),
+            "tx_data",
+            &["e", "a", "v_edn", "t", "added"],
+        );
+        assert_lexicon_array_item_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/with.json"),
+            "db_after_datoms",
+            &["e", "a", "v_edn", "t", "added"],
+        );
         assert_lexicon_input_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/q.json"),
             &["graph", "query_edn"],
@@ -7376,17 +7421,94 @@ mod tests {
             "datoms",
             &["e", "a", "v_edn", "t", "added"],
         );
-        for src in [
+        assert_lexicon_output_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/pull.json"),
+            &["graph", "entity", "entity_edn", "datom_count", "datoms"],
+            &["basis_t"],
+        );
+        assert_lexicon_array_item_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/pull.json"),
+            "datoms",
+            &["e", "a", "v_edn", "t", "added"],
+        );
+        assert_lexicon_output_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/pullMany.json"),
+            &["graph", "entity_count", "entities"],
+            &["basis_t"],
+        );
+        assert_lexicon_array_item_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/pullMany.json"),
+            "entities",
+            &["entity", "entity_edn", "datom_count", "datoms"],
+        );
+        assert_lexicon_nested_array_item_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/pullMany.json"),
+            "entities",
+            "datoms",
+            &["e", "a", "v_edn", "t", "added"],
+        );
+        assert_lexicon_input_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/basisT.json"),
+            &["graph"],
+            &["as_of", "since", "cacao_b64", "presentation"],
+        );
+        assert_lexicon_output_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/basisT.json"),
+            &["graph"],
+            &["basis_t"],
+        );
+        assert_lexicon_input_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/dbStats.json"),
+            &["graph"],
+            &["as_of", "since", "cacao_b64", "presentation"],
+        );
+        assert_lexicon_output_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/dbStats.json"),
+            &[
+                "graph",
+                "datom_count",
+                "history_datom_count",
+                "entity_count",
+                "attribute_count",
+                "tx_count",
+            ],
+            &["basis_t"],
+        );
+        assert_lexicon_input_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/entity.json"),
+            &["graph", "entity"],
+            &["as_of", "since", "cacao_b64", "presentation"],
+        );
+        assert_lexicon_output_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/entity.json"),
+            &["graph", "entity", "entity_edn", "datom_count", "datoms"],
+            &["basis_t"],
+        );
+        assert_lexicon_array_item_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/entity.json"),
+            "datoms",
+            &["e", "a", "v_edn", "t", "added"],
+        );
+        assert_lexicon_input_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/ident.json"),
+            &["graph", "entity"],
+            &["as_of", "since", "cacao_b64", "presentation"],
+        );
+        assert_lexicon_output_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/ident.json"),
+            &["graph", "entity"],
+            &["basis_t", "ident_edn"],
+        );
+        assert_lexicon_input_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/entid.json"),
-        ] {
-            assert_lexicon_input_fields(src, &["graph"], &["cacao_b64", "presentation"]);
-        }
+            &["graph", "ident_edn"],
+            &["as_of", "since", "cacao_b64", "presentation"],
+        );
+        assert_lexicon_output_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/entid.json"),
+            &["graph", "ident_edn"],
+            &["basis_t", "entity"],
+        );
     }
 
     fn assert_lexicon_input_fields(src: &str, required: &[&str], properties: &[&str]) {
