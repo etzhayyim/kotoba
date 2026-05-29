@@ -1152,6 +1152,10 @@ async fn call_tool(
                 use kotoba_kqe::{Datom as KqeDatom, Value as KqeValue};
                 let gas_graph = KotobaCid::from_bytes(b"kotoba/gas/ledger");
                 let agent_cid = KotobaCid::from_bytes(agent_did.as_bytes());
+                let tx_cid = mcp_tx_cid(
+                    "wasm.gas",
+                    &[agent_did.as_str(), &result.total_gas_used.to_string()],
+                );
                 // Safe cast: gas_limit is 10M per superstep and MAX_SUPERSTEPS is 256, so
                 // total_gas_used can reach at most ~2.56B — well below i64::MAX (9.2e18).
                 // Use try_from guard to prevent silent data corruption if limits ever change.
@@ -1160,20 +1164,26 @@ async fn call_tool(
                     agent_cid.clone(),
                     "gas/consumed_mkoto".to_string(),
                     KqeValue::Integer(gas_i64),
-                    gas_graph.clone(),
+                    tx_cid.clone(),
                 );
-                state
-                    .assert_datom_compat(gas_graph.clone(), gas_datom)
-                    .await;
 
                 // Provider attribution — identifies which compute node served this run
                 let provider_datom = KqeDatom::assert(
                     agent_cid,
                     "gas/provider_did".to_string(),
                     KqeValue::Text(state.operator_did.clone()),
-                    gas_graph.clone(),
+                    tx_cid.clone(),
                 );
-                state.assert_datom_compat(gas_graph, provider_datom).await;
+                commit_mcp_datoms(
+                    state,
+                    gas_graph.clone(),
+                    gas_graph.to_multibase(),
+                    gas_graph,
+                    vec![gas_datom, provider_datom],
+                    tx_cid,
+                    caller,
+                )
+                .await?;
             }
 
             // Write WASM-asserted quads into the store (capped to prevent runaway writes).
@@ -1192,13 +1202,25 @@ async fn call_tool(
                 }
                 for sq in &result.assert_quads {
                     let graph_cid = KotobaCid::from_bytes(sq.graph.as_bytes());
+                    let subject_cid = KotobaCid::from_bytes(sq.subject.as_bytes());
+                    let tx_cid =
+                        mcp_tx_cid("wasm.assert", &[&sq.graph, &sq.subject, &sq.predicate]);
                     let datom = KqeDatom::assert(
-                        KotobaCid::from_bytes(sq.subject.as_bytes()),
+                        subject_cid.clone(),
                         sq.predicate.clone(),
                         KqeValue::Bytes(sq.object_cbor.clone()),
-                        graph_cid.clone(),
+                        tx_cid.clone(),
                     );
-                    state.assert_datom_compat(graph_cid, datom).await;
+                    commit_mcp_datoms(
+                        state,
+                        graph_cid,
+                        sq.graph.clone(),
+                        subject_cid,
+                        vec![datom],
+                        tx_cid,
+                        caller,
+                    )
+                    .await?;
                 }
             }
 
@@ -1302,9 +1324,14 @@ async fn call_tool(
             let ledger_graph =
                 KotobaCid::from_bytes(format!("kotoba/ledger/epoch/{epoch}").as_bytes());
 
-            for datom in royalty_datoms {
-                state.assert_datom_compat(ledger_graph.clone(), datom).await;
-            }
+            let ledger_tx_cid = mcp_tx_cid("datalog.ledger", &[&epoch.to_string()]);
+            let mut ledger_datoms: Vec<_> = royalty_datoms
+                .into_iter()
+                .map(|mut datom| {
+                    datom.tx = ledger_tx_cid.clone();
+                    datom
+                })
+                .collect();
 
             // Pin provider attribution — identifies which pin node served this query
             {
@@ -1314,21 +1341,45 @@ async fn call_tool(
                     provider_cid,
                     "provider/did".to_string(),
                     KqeValue::Text(state.operator_did.clone()),
-                    ledger_graph.clone(),
+                    ledger_tx_cid.clone(),
                 );
-                state
-                    .assert_datom_compat(ledger_graph, provider_datom)
-                    .await;
+                ledger_datoms.push(provider_datom);
             }
+            commit_mcp_datoms(
+                state,
+                ledger_graph.clone(),
+                ledger_graph.to_multibase(),
+                ledger_graph.clone(),
+                ledger_datoms,
+                ledger_tx_cid,
+                caller,
+            )
+            .await?;
 
             // Write derived facts into the store
             let derived_count = derived.len();
             for d in &derived {
                 let graph_cid = d.datom.tx.clone();
-                state
-                    .quad_store
-                    .assert_datom(graph_cid, d.datom.clone())
-                    .await;
+                let tx_cid = mcp_tx_cid(
+                    "datalog.derived",
+                    &[
+                        &graph_cid.to_multibase(),
+                        &d.datom.e.to_multibase(),
+                        &d.datom.a,
+                    ],
+                );
+                let mut datom = d.datom.clone();
+                datom.tx = tx_cid.clone();
+                commit_mcp_datoms(
+                    state,
+                    graph_cid.clone(),
+                    graph_cid.to_multibase(),
+                    datom.e.clone(),
+                    vec![datom],
+                    tx_cid,
+                    caller,
+                )
+                .await?;
             }
 
             Ok(json!({
