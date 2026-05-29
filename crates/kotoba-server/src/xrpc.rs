@@ -15,6 +15,7 @@ pub const NSID_DATOMIC_Q: &str = "ai.gftd.apps.kotoba.datomic.q";
 pub const NSID_DATOMIC_WITH: &str = "ai.gftd.apps.kotoba.datomic.with";
 pub const NSID_DATOMIC_AS_OF: &str = "ai.gftd.apps.kotoba.datomic.asOf";
 pub const NSID_DATOMIC_SINCE: &str = "ai.gftd.apps.kotoba.datomic.since";
+pub const NSID_DATOMIC_SYNC: &str = "ai.gftd.apps.kotoba.datomic.sync";
 pub const NSID_DATOMIC_HISTORY: &str = "ai.gftd.apps.kotoba.datomic.history";
 pub const NSID_DATOMIC_TX_RANGE: &str = "ai.gftd.apps.kotoba.datomic.txRange";
 pub const NSID_DATOMIC_LOG: &str = "ai.gftd.apps.kotoba.datomic.log";
@@ -134,6 +135,17 @@ pub struct DatomicDbValueReq {
     pub graph: String,
     /// Transaction CID that selects the Datomic database value.
     pub tx: String,
+    pub cacao_b64: Option<String>,
+    #[serde(default)]
+    pub presentation: Option<kotoba_vc::VerifiablePresentation>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DatomicSyncReq {
+    pub graph: String,
+    /// Optional target transaction CID.  When present, `reached` indicates
+    /// whether the current distributed IPNS head includes this transaction.
+    pub tx: Option<String>,
     pub cacao_b64: Option<String>,
     #[serde(default)]
     pub presentation: Option<kotoba_vc::VerifiablePresentation>,
@@ -542,6 +554,17 @@ pub struct DatomicDbValueResp {
     pub entity_count: usize,
     pub attribute_count: usize,
     pub tx_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DatomicSyncResp {
+    pub graph: String,
+    pub basis_t: Option<String>,
+    pub commit_cid: String,
+    pub ipns_name: String,
+    pub ipns_sequence: u64,
+    pub target_tx: Option<String>,
+    pub reached: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -3430,6 +3453,48 @@ fn distributed_datomic_index_range(
     Ok(Some((basis_t, datoms)))
 }
 
+fn distributed_datomic_sync(
+    state: &KotobaState,
+    graph_cid: &kotoba_core::cid::KotobaCid,
+    target_tx: Option<&str>,
+) -> Result<Option<DatomicSyncResp>, (StatusCode, String)> {
+    let reader = DistributedDatomReader::new(&*state.block_store, &*state.ipns_registry);
+    let ipns_name = distributed_graph_ipns_name(graph_cid);
+    let Some(head) = reader.resolve_head(&ipns_name).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("distributed datomic head read: {e}"),
+        )
+    })?
+    else {
+        return Ok(None);
+    };
+    let target = parse_optional_tx_cid("tx", target_tx)?;
+    let reached = match target.as_ref() {
+        Some(tx) if *tx == head.tx_cid => true,
+        Some(tx) => reader
+            .log_from_head(&head.cid)
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("distributed datomic sync: {e}"),
+                )
+            })?
+            .into_iter()
+            .any(|entry| entry.tx == *tx),
+        None => true,
+    };
+    Ok(Some(DatomicSyncResp {
+        graph: graph_cid.to_multibase(),
+        basis_t: Some(head.tx_cid.to_multibase()),
+        commit_cid: head.cid.to_multibase(),
+        ipns_name,
+        ipns_sequence: head.seq,
+        target_tx: target.map(|tx| tx.to_multibase()),
+        reached,
+    }))
+}
+
 fn distributed_datomic_tx_range(
     state: &KotobaState,
     graph_cid: &kotoba_core::cid::KotobaCid,
@@ -3903,6 +3968,30 @@ pub async fn datomic_since(
         StatusCode::OK,
         Json(datomic_db_value_resp(req.graph, req.tx, &db)),
     ))
+}
+
+/// POST /xrpc/ai.gftd.apps.kotoba.datomic.sync
+pub async fn datomic_sync(
+    State(state): State<Arc<KotobaState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<DatomicSyncReq>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let graph_cid = parse_graph_cid(&req.graph)?;
+    require_datomic_read(
+        &state,
+        &headers,
+        &graph_cid,
+        req.cacao_b64.as_deref(),
+        req.presentation.as_ref(),
+        kotoba_auth::CacaoPayload::OP_DATOM_READ,
+        req.tx.as_deref(),
+        None,
+    )
+    .await?;
+    let response = distributed_datomic_sync(&state, &graph_cid, req.tx.as_deref())?
+        .ok_or_else(|| missing_distributed_datomic_head(&graph_cid))?;
+
+    Ok((StatusCode::OK, Json(response)))
 }
 
 /// POST /xrpc/ai.gftd.apps.kotoba.datomic.datoms
@@ -8236,6 +8325,7 @@ mod tests {
             super::NSID_DATOMIC_WITH,
             super::NSID_DATOMIC_AS_OF,
             super::NSID_DATOMIC_SINCE,
+            super::NSID_DATOMIC_SYNC,
             super::NSID_DATOMIC_HISTORY,
             super::NSID_DATOMIC_TX_RANGE,
             super::NSID_DATOMIC_LOG,
@@ -8293,6 +8383,7 @@ mod tests {
             super::NSID_DATOMIC_WITH,
             super::NSID_DATOMIC_AS_OF,
             super::NSID_DATOMIC_SINCE,
+            super::NSID_DATOMIC_SYNC,
             super::NSID_DATOMIC_HISTORY,
             super::NSID_DATOMIC_TX_RANGE,
             super::NSID_DATOMIC_LOG,
@@ -8386,6 +8477,7 @@ mod tests {
             super::NSID_DATOMIC_SINCE,
             "ai.gftd.apps.kotoba.datomic.since"
         );
+        assert_eq!(super::NSID_DATOMIC_SYNC, "ai.gftd.apps.kotoba.datomic.sync");
         assert_eq!(
             super::NSID_DATOMIC_HISTORY,
             "ai.gftd.apps.kotoba.datomic.history"
@@ -8478,6 +8570,10 @@ mod tests {
             (
                 super::NSID_DATOMIC_SINCE,
                 include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/since.json"),
+            ),
+            (
+                super::NSID_DATOMIC_SYNC,
+                include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/sync.json"),
             ),
             (
                 super::NSID_DATOMIC_HISTORY,
@@ -8681,6 +8777,22 @@ mod tests {
             );
         }
         assert_lexicon_input_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/sync.json"),
+            &["graph"],
+            &["tx", "cacao_b64", "presentation"],
+        );
+        assert_lexicon_output_fields(
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/sync.json"),
+            &[
+                "graph",
+                "commit_cid",
+                "ipns_name",
+                "ipns_sequence",
+                "reached",
+            ],
+            &["basis_t", "target_tx"],
+        );
+        assert_lexicon_input_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/q.json"),
             &["graph", "query_edn"],
             &[
@@ -8882,6 +8994,7 @@ mod tests {
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/with.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/asOf.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/since.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/sync.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/q.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/datoms.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/seekDatoms.json"),

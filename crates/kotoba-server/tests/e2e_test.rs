@@ -2546,6 +2546,20 @@ async fn datomic_as_of_and_since_expose_distributed_database_values() {
     assert_eq!(status, 200, "{second_body}");
     let second_tx = second_body["tx_cid"].as_str().unwrap();
 
+    let (status, sync_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.sync",
+            json!({ "graph": graph, "tx": first_tx }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{sync_body}");
+    assert_eq!(sync_body["basis_t"], second_tx, "{sync_body}");
+    assert_eq!(sync_body["target_tx"], first_tx, "{sync_body}");
+    assert_eq!(sync_body["reached"], true, "{sync_body}");
+    assert_eq!(sync_body["ipns_sequence"], 2, "{sync_body}");
+    assert!(sync_body["commit_cid"].as_str().is_some(), "{sync_body}");
+
     let (status, as_of_body) = s
         .post_auth(
             "/xrpc/ai.gftd.apps.kotoba.datomic.asOf",
@@ -2597,6 +2611,81 @@ async fn datomic_as_of_and_since_expose_distributed_database_values() {
         .await;
     assert_eq!(status, 200, "{since_q}");
     assert_eq!(since_q["rows_edn"], json!([["\"Bob\""]]), "{since_q}");
+}
+
+#[tokio::test]
+async fn datomic_sync_reports_distributed_head_and_target_tx_reachability() {
+    let s = TestServer::start(false).await;
+    let tok = tenant_jwt(&s.operator_did);
+    let graph = kotoba_core::cid::KotobaCid::from_bytes(b"datomic-sync-e2e").to_multibase();
+
+    let (status, first_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.transact",
+            json!({
+                "graph": graph,
+                "tx_edn": r#"[{:db/id "alice" :person/name "Alice"}]"#
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{first_body}");
+    let first_tx = first_body["tx_cid"].as_str().unwrap();
+
+    let (status, second_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.transact",
+            json!({
+                "graph": graph,
+                "tx_edn": r#"[{:db/id "bob" :person/name "Bob"}]"#
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{second_body}");
+    let second_tx = second_body["tx_cid"].as_str().unwrap();
+
+    let (status, head_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.sync",
+            json!({ "graph": graph }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{head_body}");
+    assert_eq!(head_body["basis_t"], second_tx, "{head_body}");
+    assert_eq!(
+        head_body["commit_cid"], second_body["commit_cid"],
+        "{head_body}"
+    );
+    assert_eq!(head_body["ipns_sequence"], 2, "{head_body}");
+    assert_eq!(head_body["reached"], true, "{head_body}");
+
+    let (status, reached_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.sync",
+            json!({ "graph": graph, "tx": first_tx }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{reached_body}");
+    assert_eq!(reached_body["basis_t"], second_tx, "{reached_body}");
+    assert_eq!(reached_body["target_tx"], first_tx, "{reached_body}");
+    assert_eq!(reached_body["reached"], true, "{reached_body}");
+
+    let missing_tx =
+        kotoba_core::cid::KotobaCid::from_bytes(b"datomic-sync-missing-tx").to_multibase();
+    let (status, missing_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.sync",
+            json!({ "graph": graph, "tx": missing_tx }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{missing_body}");
+    assert_eq!(missing_body["basis_t"], second_tx, "{missing_body}");
+    assert_eq!(missing_body["target_tx"], missing_tx, "{missing_body}");
+    assert_eq!(missing_body["reached"], false, "{missing_body}");
 }
 
 #[tokio::test]

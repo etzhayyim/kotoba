@@ -1,0 +1,69 @@
+{
+  "lexicon": 1,
+  "id": "ai.gftd.apps.kotoba.datomic.sync",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Return the current distributed Datomic IPNS head and whether it includes an optional target transaction CID.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["graph"],
+          "properties": {
+            "graph": { "type": "string" },
+            "tx": { "type": "string" },
+            "cacao_b64": { "type": "string" },
+            "presentation": {
+              "type": "object",
+              "required": ["@context", "id", "type"],
+              "properties": {
+                "@context": { "type": "array", "items": { "type": "string" } },
+                "id": { "type": "string" },
+                "type": { "type": "array", "items": { "type": "string" } },
+                "holder": { "type": "string" },
+                "verifiableCredential": { "type": "array", "items": { "type": "object" } },
+                "proof": {
+                  "type": "object",
+                  "required": ["type", "proofPurpose", "verificationMethod", "proofValue"],
+                  "properties": {
+                    "type": { "type": "string" },
+                    "cryptosuite": { "type": "string" },
+                    "proofPurpose": { "type": "string" },
+                    "verificationMethod": { "type": "string" },
+                    "created": { "type": "string" },
+                    "proofValue": { "type": "string" },
+                    "challenge": { "type": "string" },
+                    "domain": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "graph",
+            "commit_cid",
+            "ipns_name",
+            "ipns_sequence",
+            "reached"
+          ],
+          "properties": {
+            "graph": { "type": "string" },
+            "basis_t": { "type": "string" },
+            "commit_cid": { "type": "string" },
+            "ipns_name": { "type": "string" },
+            "ipns_sequence": { "type": "integer" },
+            "target_tx": { "type": "string" },
+            "reached": { "type": "boolean" }
+          }
+        }
+      }
+    }
+  }
+}
