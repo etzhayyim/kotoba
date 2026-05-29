@@ -60,7 +60,13 @@
                           "KotobaGraphMembership"
                         ]
                       },
-                      "serviceEndpoint": { "type": "unknown" }
+                      "serviceEndpoint": {
+                        "type": "union",
+                        "refs": [
+                          "#serviceEndpointString",
+                          "#serviceEndpointStringArray"
+                        ]
+                      }
                     }
                   }
                 }
@@ -127,6 +133,13 @@
           }
         }
       }
+    },
+    "serviceEndpointString": {
+      "type": "string"
+    },
+    "serviceEndpointStringArray": {
+      "type": "array",
+      "items": { "type": "string" }
     }
   }
 }

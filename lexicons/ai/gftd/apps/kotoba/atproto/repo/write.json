@@ -15,7 +15,7 @@
             "uri": { "type": "string" },
             "operation": { "type": "string", "knownValues": ["create", "update", "delete"] },
             "cid": { "type": "string" },
-            "record": { "type": "unknown" },
+            "record": { "type": "object" },
             "cacao_b64": { "type": "string" },
             "auth_presentation": {
               "type": "object",
@@ -47,7 +47,35 @@
       },
       "output": {
         "encoding": "application/json",
-        "schema": { "type": "unknown" }
+        "schema": {
+          "type": "object",
+          "required": [
+            "status",
+            "graph",
+            "entity_cid",
+            "tx_cid",
+            "commit_cid",
+            "ipns_name",
+            "ipns_sequence",
+            "datom_count",
+            "journal_cids"
+          ],
+          "properties": {
+            "status": { "type": "string" },
+            "graph": { "type": "string" },
+            "entity_cid": { "type": "string" },
+            "tx_cid": { "type": "string" },
+            "commit_cid": { "type": "string" },
+            "auth_proof_cid": { "type": "string" },
+            "ipns_name": { "type": "string" },
+            "ipns_sequence": { "type": "integer", "minimum": 0 },
+            "datom_count": { "type": "integer", "minimum": 0 },
+            "journal_cids": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
       }
     }
   }

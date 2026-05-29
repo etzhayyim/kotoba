@@ -68,7 +68,35 @@
       },
       "output": {
         "encoding": "application/json",
-        "schema": { "type": "unknown" }
+        "schema": {
+          "type": "object",
+          "required": [
+            "status",
+            "graph",
+            "entity_cid",
+            "tx_cid",
+            "commit_cid",
+            "ipns_name",
+            "ipns_sequence",
+            "datom_count",
+            "journal_cids"
+          ],
+          "properties": {
+            "status": { "type": "string" },
+            "graph": { "type": "string" },
+            "entity_cid": { "type": "string" },
+            "tx_cid": { "type": "string" },
+            "commit_cid": { "type": "string" },
+            "auth_proof_cid": { "type": "string" },
+            "ipns_name": { "type": "string" },
+            "ipns_sequence": { "type": "integer", "minimum": 0 },
+            "datom_count": { "type": "integer", "minimum": 0 },
+            "journal_cids": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
       }
     }
   }

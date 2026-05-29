@@ -7602,6 +7602,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn protocol_write_lexicons_expose_payloads_and_datom_write_response() {
+        let vc_issue = include_str!("../../../lexicons/ai/gftd/apps/kotoba/vc/issue.json");
+        assert_lexicon_input_object_fields(
+            vc_issue,
+            "credential",
+            &["@context", "id", "type", "issuer", "credentialSubject"],
+            &["validFrom", "validUntil", "credentialStatus", "proof"],
+        );
+        assert_protocol_datom_write_output_fields(vc_issue);
+
+        let vc_present = include_str!("../../../lexicons/ai/gftd/apps/kotoba/vc/present.json");
+        assert_protocol_datom_write_output_fields(vc_present);
+
+        let didcomm_send = include_str!("../../../lexicons/ai/gftd/apps/kotoba/didcomm/send.json");
+        assert_lexicon_input_object_fields(
+            didcomm_send,
+            "message",
+            &["id", "type"],
+            &[
+                "from",
+                "to",
+                "thid",
+                "pthid",
+                "created_time",
+                "expires_time",
+                "body",
+                "attachments",
+            ],
+        );
+        assert_protocol_datom_write_output_fields(didcomm_send);
+
+        let atproto_write =
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/atproto/repo/write.json");
+        assert_lexicon_input_object_fields(atproto_write, "record", &[], &[]);
+        assert_protocol_datom_write_output_fields(atproto_write);
+    }
+
+    fn assert_protocol_datom_write_output_fields(src: &str) {
+        assert_lexicon_output_fields(
+            src,
+            &[
+                "status",
+                "graph",
+                "entity_cid",
+                "tx_cid",
+                "commit_cid",
+                "ipns_name",
+                "ipns_sequence",
+                "datom_count",
+                "journal_cids",
+            ],
+            &["auth_proof_cid"],
+        );
+    }
+
     fn assert_lexicon_input_object_fields(
         src: &str,
         field: &str,
@@ -7615,20 +7671,20 @@ mod tests {
             "{} input {field} must be object",
             value["id"]
         );
-        let required_values = schema["required"].as_array().expect("required array");
+        let required_values = schema["required"].as_array();
         for required in required {
             assert!(
-                required_values
+                required_values.is_some_and(|values| values
                     .iter()
-                    .any(|value| value.as_str() == Some(*required)),
+                    .any(|value| value.as_str() == Some(*required))),
                 "{} input {field} missing required field {required}",
                 value["id"]
             );
         }
-        let property_values = schema["properties"].as_object().expect("properties object");
+        let property_values = schema["properties"].as_object();
         for property in required.iter().chain(properties.iter()) {
             assert!(
-                property_values.contains_key(*property),
+                property_values.is_some_and(|values| values.contains_key(*property)),
                 "{} input {field} missing property {property}",
                 value["id"]
             );
