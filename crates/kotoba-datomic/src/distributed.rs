@@ -416,9 +416,12 @@ where
     ) -> Result<Vec<Datom>, DistributedCommitError> {
         let mut history = Vec::new();
         for attr in attr_lookup_variants(attr) {
+            let start_key = start
+                .map(|value| avet_prefix(attr, value))
+                .unwrap_or_else(|| attr_prefix(attr));
             extend_unique_datoms(
                 &mut history,
-                self.history_from_index_prefix(head, ROOT_AVET, &attr_prefix(attr))?,
+                self.history_from_index_range(head, ROOT_AVET, &start_key)?,
             );
         }
         let datoms = current_datoms(&history);
@@ -1567,6 +1570,22 @@ where
         for commit in chain.into_iter().rev() {
             datoms.extend(datoms_from_index_seek(
                 &commit, root_name, &start, self.store,
+            )?);
+        }
+        Ok(datoms)
+    }
+
+    fn history_from_index_range(
+        &self,
+        head: &KotobaCid,
+        root_name: &'static str,
+        start_key: &[u8],
+    ) -> Result<Vec<Datom>, DistributedCommitError> {
+        let chain = self.commit_chain_from_head(head)?;
+        let mut datoms = Vec::new();
+        for commit in chain.into_iter().rev() {
+            datoms.extend(datoms_from_index_seek(
+                &commit, root_name, start_key, self.store,
             )?);
         }
         Ok(datoms)
@@ -3714,6 +3733,18 @@ mod tests {
         assert_eq!(range.len(), 1);
         assert_eq!(range[0].e, bob);
         assert_eq!(range[0].v, EdnValue::Integer(20));
+
+        let range_from_value_bound = reader
+            .index_range(
+                &second.commit.cid,
+                ":person/score",
+                Some(&EdnValue::Integer(15)),
+                Some(&EdnValue::Integer(30)),
+            )
+            .unwrap();
+        assert_eq!(range_from_value_bound.len(), 1);
+        assert_eq!(range_from_value_bound[0].e, bob);
+        assert_eq!(range_from_value_bound[0].v, EdnValue::Integer(20));
 
         let seek = reader
             .seek_datoms(
