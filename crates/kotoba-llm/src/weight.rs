@@ -74,7 +74,7 @@ pub struct WeightRef {
 
 impl WeightRef {
     /// Convert to Datom for storage in Arrangement.
-    pub fn to_datom(&self, graph_cid: KotobaCid) -> Datom {
+    pub fn to_datom(&self, tx_cid: KotobaCid) -> Datom {
         Datom::assert(
             self.model_cid.clone(),
             self.kind.predicate(),
@@ -83,7 +83,7 @@ impl WeightRef {
                 shape: self.shape.clone(),
                 dtype: self.dtype.clone().into(),
             },
-            graph_cid,
+            tx_cid,
         )
     }
 
@@ -201,11 +201,11 @@ mod tests {
             shape: vec![2048, 256],
             dtype: TensorDtype::F32,
         };
-        let graph_cid = KotobaCid::from_bytes(b"graph");
-        let datom = wr.to_datom(graph_cid.clone());
+        let tx_cid = KotobaCid::from_bytes(b"tx");
+        let datom = wr.to_datom(tx_cid.clone());
         assert_eq!(datom.a, kind.predicate());
         assert_eq!(datom.e, model_cid);
-        assert_eq!(datom.tx, graph_cid);
+        assert_eq!(datom.tx, tx_cid);
         assert!(datom.op);
     }
 
@@ -220,7 +220,7 @@ mod tests {
             shape: vec![32000, 2048],
             dtype: TensorDtype::F8E4M3,
         };
-        let datom = wr.to_datom(KotobaCid::from_bytes(b"g"));
+        let datom = wr.to_datom(KotobaCid::from_bytes(b"tx"));
         if let Value::TensorCid { cid, shape, dtype } = datom.v {
             assert_eq!(cid, blob_cid);
             assert_eq!(shape, vec![32000, 2048]);

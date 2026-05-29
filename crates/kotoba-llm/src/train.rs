@@ -41,16 +41,16 @@ pub struct GradientRef {
 
 impl GradientRef {
     /// Assert gradient into Arrangement.
-    pub fn to_assert_delta(&self, graph_cid: KotobaCid) -> Delta {
-        Delta::assert_datom(self.datom(graph_cid))
+    pub fn to_assert_delta(&self, tx_cid: KotobaCid) -> Delta {
+        Delta::assert_datom(self.datom(tx_cid))
     }
 
     /// Retract gradient from Arrangement (call after optimizer step).
-    pub fn to_retract_delta(&self, graph_cid: KotobaCid) -> Delta {
-        Delta::retract_datom(self.datom(graph_cid))
+    pub fn to_retract_delta(&self, tx_cid: KotobaCid) -> Delta {
+        Delta::retract_datom(self.datom(tx_cid))
     }
 
-    fn datom(&self, graph_cid: KotobaCid) -> Datom {
+    fn datom(&self, tx_cid: KotobaCid) -> Datom {
         Datom::assert(
             self.model_cid.clone(),
             format!("grad/{}/step/{}", self.kind.path(), self.step),
@@ -59,7 +59,7 @@ impl GradientRef {
                 shape: self.shape.clone(),
                 dtype: TensorDtype::F32,
             },
-            graph_cid,
+            tx_cid,
         )
     }
 }
@@ -78,22 +78,22 @@ pub struct AdamMoments {
 
 impl AdamMoments {
     /// Assert both moment tensors.
-    pub fn to_assert_deltas(&self, graph_cid: KotobaCid) -> [Delta; 2] {
+    pub fn to_assert_deltas(&self, tx_cid: KotobaCid) -> [Delta; 2] {
         [
-            Delta::assert_datom(self.m1_datom(graph_cid.clone())),
-            Delta::assert_datom(self.m2_datom(graph_cid)),
+            Delta::assert_datom(self.m1_datom(tx_cid.clone())),
+            Delta::assert_datom(self.m2_datom(tx_cid)),
         ]
     }
 
     /// Retract both moment tensors (before replacing with updated moments).
-    pub fn to_retract_deltas(&self, graph_cid: KotobaCid) -> [Delta; 2] {
+    pub fn to_retract_deltas(&self, tx_cid: KotobaCid) -> [Delta; 2] {
         [
-            Delta::retract_datom(self.m1_datom(graph_cid.clone())),
-            Delta::retract_datom(self.m2_datom(graph_cid)),
+            Delta::retract_datom(self.m1_datom(tx_cid.clone())),
+            Delta::retract_datom(self.m2_datom(tx_cid)),
         ]
     }
 
-    fn m1_datom(&self, graph_cid: KotobaCid) -> Datom {
+    fn m1_datom(&self, tx_cid: KotobaCid) -> Datom {
         Datom::assert(
             self.model_cid.clone(),
             format!("train/adam/m1/{}", self.kind.path()),
@@ -102,11 +102,11 @@ impl AdamMoments {
                 shape: self.shape.clone(),
                 dtype: TensorDtype::F32,
             },
-            graph_cid,
+            tx_cid,
         )
     }
 
-    fn m2_datom(&self, graph_cid: KotobaCid) -> Datom {
+    fn m2_datom(&self, tx_cid: KotobaCid) -> Datom {
         Datom::assert(
             self.model_cid.clone(),
             format!("train/adam/m2/{}", self.kind.path()),
@@ -115,7 +115,7 @@ impl AdamMoments {
                 shape: self.shape.clone(),
                 dtype: TensorDtype::F32,
             },
-            graph_cid,
+            tx_cid,
         )
     }
 }
@@ -138,7 +138,7 @@ pub struct OptimizerStep {
 
 impl OptimizerStep {
     /// Atomic weight-swap Delta pair: [retract_old, assert_new].
-    pub fn weight_deltas(&self, graph_cid: KotobaCid) -> [Delta; 2] {
+    pub fn weight_deltas(&self, tx_cid: KotobaCid) -> [Delta; 2] {
         let predicate = self.kind.predicate();
         let old_datom = Datom::retract(
             self.model_cid.clone(),
@@ -148,7 +148,7 @@ impl OptimizerStep {
                 shape: self.shape.clone(),
                 dtype: TensorDtype::F8E4M3,
             },
-            graph_cid.clone(),
+            tx_cid.clone(),
         );
         let new_datom = Datom::assert(
             self.model_cid.clone(),
@@ -158,7 +158,7 @@ impl OptimizerStep {
                 shape: self.shape.clone(),
                 dtype: TensorDtype::F8E4M3,
             },
-            graph_cid,
+            tx_cid,
         );
         [
             Delta::retract_datom(old_datom),

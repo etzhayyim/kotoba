@@ -14,7 +14,8 @@ pub mod train_gpu;
 #[cfg(feature = "webgpu-infer")]
 pub mod infer_gpu;
 
-pub use embed::{embed_to_quad, Embedding};
+#[allow(deprecated)]
+pub use embed::{embed_to_delta, embed_to_quad, Embedding};
 pub use gpu_common::{dequantize_fp8_e4m3, quantize_f32_to_fp8_e4m3};
 pub use infer::{InferError, InferenceRequest, InferenceSession};
 pub use kvcache::KvCache;
@@ -57,7 +58,7 @@ mod tests {
 
         let model = cid(b"model");
         let blob = cid(b"blob");
-        let graph = cid(b"graph");
+        let tx = cid(b"tx");
 
         let w = WeightRef {
             model_cid: model.clone(),
@@ -66,7 +67,7 @@ mod tests {
             shape: vec![32000, 2048],
             dtype: LegacyTensorDtype::F8E4M3,
         };
-        let datom = w.to_datom(graph);
+        let datom = w.to_datom(tx);
         assert_eq!(datom.a, "weight/embed");
         assert_eq!(datom.e, model);
     }
@@ -98,7 +99,7 @@ mod tests {
             scale: 0.5,
             rank: 16,
         };
-        let delta = lora_to_delta(&adapter, cid(b"graph"));
+        let delta = lora_to_delta(&adapter, cid(b"tx"));
         assert!(delta.is_assert());
         assert_eq!(delta.datom.a, "lora/adapter");
     }
@@ -113,7 +114,7 @@ mod tests {
             scale: 1.0,
             rank: 8,
         };
-        let delta = lora_retract_delta(&adapter, cid(b"graph"));
+        let delta = lora_retract_delta(&adapter, cid(b"tx"));
         assert!(!delta.is_assert());
         assert!(!delta.is_assert());
     }
@@ -126,7 +127,7 @@ mod tests {
 
         let session = cid(b"session");
         let mut cache = KvCache::new(session);
-        let delta = cache.store_kv(cid(b"graph"), 0, 5, cid(b"kv_blob"));
+        let delta = cache.store_kv(cid(b"tx"), 0, 5, cid(b"kv_blob"));
         assert!(delta.is_assert());
         assert_eq!(delta.datom.a, "kv/layer/0/seq/5");
     }
@@ -136,8 +137,8 @@ mod tests {
         use super::kvcache::KvCache;
 
         let mut cache = KvCache::new(cid(b"sess"));
-        cache.store_kv(cid(b"g"), 0, 0, cid(b"kv0"));
-        cache.store_kv(cid(b"g"), 0, 1, cid(b"kv1"));
+        cache.store_kv(cid(b"tx"), 0, 0, cid(b"kv0"));
+        cache.store_kv(cid(b"tx"), 0, 1, cid(b"kv1"));
         assert_eq!(cache.arrangement.len(), 2);
         cache.clear();
         assert!(cache.arrangement.is_empty());
@@ -147,28 +148,28 @@ mod tests {
 
     #[test]
     fn embed_inline_for_small_vector() {
-        use super::embed::{embed_to_quad, Embedding};
+        use super::embed::{embed_to_delta, Embedding};
 
         let emb = Embedding {
             doc_cid: cid(b"doc"),
             model_cid: cid(b"m"),
             vector: vec![0.1_f32; 512],
         };
-        let delta = embed_to_quad(&emb, cid(b"g"));
+        let delta = embed_to_delta(&emb, cid(b"tx"));
         assert!(delta.is_assert());
         assert!(matches!(delta.datom.v, Value::VectorF32(_)));
     }
 
     #[test]
     fn embed_tensor_cid_for_large_vector() {
-        use super::embed::{embed_to_quad, Embedding};
+        use super::embed::{embed_to_delta, Embedding};
 
         let emb = Embedding {
             doc_cid: cid(b"doc"),
             model_cid: cid(b"m"),
             vector: vec![0.1_f32; 2048],
         };
-        let delta = embed_to_quad(&emb, cid(b"g"));
+        let delta = embed_to_delta(&emb, cid(b"tx"));
         assert!(matches!(
             delta.datom.v,
             Value::TensorCid {

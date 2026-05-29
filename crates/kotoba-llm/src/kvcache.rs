@@ -5,7 +5,7 @@ use kotoba_kqe::delta::Delta;
 
 /// KvCache — attention KV-cache as ephemeral Arrangement
 /// session_cid = blake3(CBOR{model_cid, prompt_hash, ts})
-/// Each KV pair = Datom(session, "kv/layer/N/seq/M", kv_tensor_cid, graph, true)
+/// Each KV pair = Datom(session, "kv/layer/N/seq/M", kv_tensor_cid, tx, true)
 /// Pregel: KV-cache = vertex state during inference supersteps
 pub struct KvCache {
     pub session_cid: KotobaCid,
@@ -23,7 +23,7 @@ impl KvCache {
     /// Store KV pair for layer N, sequence position M
     pub fn store_kv(
         &mut self,
-        graph_cid: KotobaCid,
+        tx_cid: KotobaCid,
         layer: u32,
         seq: u32,
         kv_cid: KotobaCid,
@@ -32,7 +32,7 @@ impl KvCache {
             self.session_cid.clone(),
             format!("kv/layer/{layer}/seq/{seq}"),
             Value::Cid(kv_cid),
-            graph_cid,
+            tx_cid,
         );
         self.arrangement.insert_datom(&datom);
         Delta::assert_datom(datom)
@@ -55,9 +55,9 @@ mod tests {
     #[test]
     fn store_kv_returns_assert_delta() {
         let mut cache = make_cache();
-        let graph_cid = KotobaCid::from_bytes(b"graph");
+        let tx_cid = KotobaCid::from_bytes(b"tx");
         let kv_cid = KotobaCid::from_bytes(b"kv");
-        let delta = cache.store_kv(graph_cid, 0, 0, kv_cid);
+        let delta = cache.store_kv(tx_cid, 0, 0, kv_cid);
         assert!(delta.is_assert());
     }
 
@@ -65,7 +65,7 @@ mod tests {
     fn store_kv_predicate_encodes_layer_seq() {
         let mut cache = make_cache();
         let delta = cache.store_kv(
-            KotobaCid::from_bytes(b"g"),
+            KotobaCid::from_bytes(b"tx"),
             3,
             7,
             KotobaCid::from_bytes(b"kv"),
@@ -77,7 +77,7 @@ mod tests {
     fn store_kv_subject_is_session_cid() {
         let mut cache = make_cache();
         let delta = cache.store_kv(
-            KotobaCid::from_bytes(b"g"),
+            KotobaCid::from_bytes(b"tx"),
             0,
             0,
             KotobaCid::from_bytes(b"kv"),
@@ -89,7 +89,7 @@ mod tests {
     fn store_kv_object_is_cid() {
         let kv_cid = KotobaCid::from_bytes(b"kv-blob");
         let mut cache = make_cache();
-        let delta = cache.store_kv(KotobaCid::from_bytes(b"g"), 1, 2, kv_cid.clone());
+        let delta = cache.store_kv(KotobaCid::from_bytes(b"tx"), 1, 2, kv_cid.clone());
         if let Value::Cid(c) = delta.datom.v {
             assert_eq!(c, kv_cid);
         } else {
@@ -100,8 +100,8 @@ mod tests {
     #[test]
     fn store_kv_inserts_into_arrangement() {
         let mut cache = make_cache();
-        let graph_cid = KotobaCid::from_bytes(b"g");
-        cache.store_kv(graph_cid.clone(), 0, 5, KotobaCid::from_bytes(b"kv"));
+        let tx_cid = KotobaCid::from_bytes(b"tx");
+        cache.store_kv(tx_cid, 0, 5, KotobaCid::from_bytes(b"kv"));
         let quads = cache.arrangement.get_by_attribute("kv/layer/0/seq/5");
         assert!(
             !quads.is_empty(),
@@ -112,8 +112,8 @@ mod tests {
     #[test]
     fn clear_empties_arrangement() {
         let mut cache = make_cache();
-        let graph_cid = KotobaCid::from_bytes(b"g");
-        cache.store_kv(graph_cid.clone(), 0, 0, KotobaCid::from_bytes(b"kv"));
+        let tx_cid = KotobaCid::from_bytes(b"tx");
+        cache.store_kv(tx_cid, 0, 0, KotobaCid::from_bytes(b"kv"));
         cache.clear();
         let quads = cache.arrangement.get_by_attribute("kv/layer/0/seq/0");
         assert!(quads.is_empty(), "arrangement should be empty after clear");
@@ -124,9 +124,9 @@ mod tests {
     #[test]
     fn store_kv_multiple_layers_have_distinct_predicates() {
         let mut cache = make_cache();
-        let g = KotobaCid::from_bytes(b"g");
-        let d0 = cache.store_kv(g.clone(), 0, 0, KotobaCid::from_bytes(b"kv0"));
-        let d1 = cache.store_kv(g.clone(), 1, 0, KotobaCid::from_bytes(b"kv1"));
+        let tx = KotobaCid::from_bytes(b"tx");
+        let d0 = cache.store_kv(tx.clone(), 0, 0, KotobaCid::from_bytes(b"kv0"));
+        let d1 = cache.store_kv(tx.clone(), 1, 0, KotobaCid::from_bytes(b"kv1"));
         assert_ne!(
             d0.datom.a, d1.datom.a,
             "different layers must produce different predicates"
@@ -136,18 +136,18 @@ mod tests {
     #[test]
     fn store_kv_multiple_seqs_have_distinct_predicates() {
         let mut cache = make_cache();
-        let g = KotobaCid::from_bytes(b"g");
-        let da = cache.store_kv(g.clone(), 2, 10, KotobaCid::from_bytes(b"kva"));
-        let db = cache.store_kv(g.clone(), 2, 11, KotobaCid::from_bytes(b"kvb"));
+        let tx = KotobaCid::from_bytes(b"tx");
+        let da = cache.store_kv(tx.clone(), 2, 10, KotobaCid::from_bytes(b"kva"));
+        let db = cache.store_kv(tx.clone(), 2, 11, KotobaCid::from_bytes(b"kvb"));
         assert_ne!(da.datom.a, db.datom.a);
     }
 
     #[test]
     fn store_kv_second_entry_also_in_arrangement() {
         let mut cache = make_cache();
-        let g = KotobaCid::from_bytes(b"g");
-        cache.store_kv(g.clone(), 0, 0, KotobaCid::from_bytes(b"kv-a"));
-        cache.store_kv(g.clone(), 0, 1, KotobaCid::from_bytes(b"kv-b"));
+        let tx = KotobaCid::from_bytes(b"tx");
+        cache.store_kv(tx.clone(), 0, 0, KotobaCid::from_bytes(b"kv-a"));
+        cache.store_kv(tx.clone(), 0, 1, KotobaCid::from_bytes(b"kv-b"));
         let q1 = cache.arrangement.get_by_attribute("kv/layer/0/seq/0");
         let q2 = cache.arrangement.get_by_attribute("kv/layer/0/seq/1");
         assert!(!q1.is_empty(), "seq/0 should be in arrangement");
@@ -164,18 +164,18 @@ mod tests {
     #[test]
     fn store_kv_large_layer_and_seq_numbers() {
         let mut cache = make_cache();
-        let g = KotobaCid::from_bytes(b"g");
-        let d = cache.store_kv(g, 1023, 65535, KotobaCid::from_bytes(b"kv-large"));
+        let tx = KotobaCid::from_bytes(b"tx");
+        let d = cache.store_kv(tx, 1023, 65535, KotobaCid::from_bytes(b"kv-large"));
         assert_eq!(d.datom.a, "kv/layer/1023/seq/65535");
     }
 
     #[test]
     fn clear_then_store_works() {
         let mut cache = make_cache();
-        let g = KotobaCid::from_bytes(b"g");
-        cache.store_kv(g.clone(), 0, 0, KotobaCid::from_bytes(b"kv-before"));
+        let tx = KotobaCid::from_bytes(b"tx");
+        cache.store_kv(tx.clone(), 0, 0, KotobaCid::from_bytes(b"kv-before"));
         cache.clear();
-        cache.store_kv(g.clone(), 0, 0, KotobaCid::from_bytes(b"kv-after"));
+        cache.store_kv(tx.clone(), 0, 0, KotobaCid::from_bytes(b"kv-after"));
         let quads = cache.arrangement.get_by_attribute("kv/layer/0/seq/0");
         assert!(!quads.is_empty(), "should have one entry after clear+store");
     }
@@ -183,9 +183,9 @@ mod tests {
     #[test]
     fn store_kv_delta_subject_matches_session_cid_across_multiple_calls() {
         let mut cache = make_cache();
-        let g = KotobaCid::from_bytes(b"g");
-        let d1 = cache.store_kv(g.clone(), 0, 0, KotobaCid::from_bytes(b"k1"));
-        let d2 = cache.store_kv(g.clone(), 0, 1, KotobaCid::from_bytes(b"k2"));
+        let tx = KotobaCid::from_bytes(b"tx");
+        let d1 = cache.store_kv(tx.clone(), 0, 0, KotobaCid::from_bytes(b"k1"));
+        let d2 = cache.store_kv(tx.clone(), 0, 1, KotobaCid::from_bytes(b"k2"));
         assert_eq!(
             d1.datom.e, d2.datom.e,
             "all deltas for the same session should share the session CID as subject"

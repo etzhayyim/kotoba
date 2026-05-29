@@ -163,7 +163,7 @@ impl WebGpuTrainer {
     pub async fn train_step(
         &mut self,
         model_cid: KotobaCid,
-        graph_cid: KotobaCid,
+        tx_cid: KotobaCid,
         embed_ref: &WeightRef,
         lmhead_ref: &WeightRef,
         embed_m: Option<&AdamMoments>,
@@ -332,20 +332,19 @@ impl WebGpuTrainer {
             shape: lmhead_ref.shape.clone(),
         };
 
-        let embed_moment_deltas =
-            moment_swap_deltas(embed_m, &new_embed_moments, graph_cid.clone());
+        let embed_moment_deltas = moment_swap_deltas(embed_m, &new_embed_moments, tx_cid.clone());
         let lmhead_moment_deltas =
-            moment_swap_deltas(lmhead_m, &new_lmhead_moments, graph_cid.clone());
+            moment_swap_deltas(lmhead_m, &new_lmhead_moments, tx_cid.clone());
 
         Ok(TrainStepResult {
             weight_deltas: vec![
-                embed_step.weight_deltas(graph_cid.clone()),
-                lmhead_step.weight_deltas(graph_cid.clone()),
+                embed_step.weight_deltas(tx_cid.clone()),
+                lmhead_step.weight_deltas(tx_cid.clone()),
             ],
             moment_deltas: vec![embed_moment_deltas, lmhead_moment_deltas],
             grad_retracts: vec![
-                embed_grad_ref.to_retract_delta(graph_cid.clone()),
-                lmhead_grad_ref.to_retract_delta(graph_cid),
+                embed_grad_ref.to_retract_delta(tx_cid.clone()),
+                lmhead_grad_ref.to_retract_delta(tx_cid),
             ],
         })
     }
@@ -414,14 +413,14 @@ async fn load_or_init_moments(
 fn moment_swap_deltas(
     old: Option<&AdamMoments>,
     new_m: &AdamMoments,
-    graph_cid: KotobaCid,
+    tx_cid: KotobaCid,
 ) -> [Delta; 4] {
     let retracts: [Delta; 2] = if let Some(old_m) = old {
-        old_m.to_retract_deltas(graph_cid.clone())
+        old_m.to_retract_deltas(tx_cid.clone())
     } else {
-        new_m.to_retract_deltas(graph_cid.clone())
+        new_m.to_retract_deltas(tx_cid.clone())
     };
-    let asserts = new_m.to_assert_deltas(graph_cid);
+    let asserts = new_m.to_assert_deltas(tx_cid);
     [
         retracts[0].clone(),
         retracts[1].clone(),
