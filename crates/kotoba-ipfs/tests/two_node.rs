@@ -717,6 +717,46 @@ async fn kubo_compatible_local_api_surface() {
             .expect("re-add linked"),
         linked
     );
+    let batch_a = node.add(b"batch-a").await.expect("add batch a");
+    let batch_b = node.add(b"batch-b").await.expect("add batch b");
+    node.pin_add(&batch_b).await.expect("pin/add batch b");
+    let batch_rm = node
+        .block_rm_many(vec![batch_a, batch_b], false)
+        .await
+        .expect("block/rm batch");
+    assert_eq!(
+        batch_rm,
+        vec![
+            kotoba_ipfs::BlockRm {
+                cid: batch_a,
+                removed: true,
+                error: None,
+            },
+            kotoba_ipfs::BlockRm {
+                cid: batch_b,
+                removed: false,
+                error: Some(format!(
+                    "cannot remove pinned block without force: {batch_b}"
+                )),
+            },
+        ]
+    );
+    assert!(!node.has_block(&batch_a).await.expect("batch a removed"));
+    assert!(node.has_block(&batch_b).await.expect("batch b pinned"));
+    assert_eq!(
+        node.block_rm_many(vec![batch_b], true)
+            .await
+            .expect("block/rm batch force"),
+        vec![kotoba_ipfs::BlockRm {
+            cid: batch_b,
+            removed: true,
+            error: None,
+        }]
+    );
+    assert!(!node
+        .has_block(&batch_b)
+        .await
+        .expect("batch b force removed"));
     assert_eq!(node.add(b"hello").await.expect("re-add raw"), raw);
     assert_eq!(node.dag_put(&doc).await.expect("re-add dag"), dag);
     assert_eq!(

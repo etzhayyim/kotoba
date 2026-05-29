@@ -962,6 +962,35 @@ impl KotobaIpfsNode {
         self.block_rm_force(cid).await
     }
 
+    /// Kubo-like `block/rm` for a batch of CIDs.
+    pub async fn block_rm_many(
+        &self,
+        cids: impl IntoIterator<Item = IpldCid>,
+        force: bool,
+    ) -> Result<Vec<BlockRm>> {
+        let mut removed = Vec::new();
+        for cid in cids {
+            let result = if force {
+                self.block_rm_force(&cid).await
+            } else {
+                self.block_rm(&cid).await
+            };
+            removed.push(match result {
+                Ok(was_removed) => BlockRm {
+                    cid,
+                    removed: was_removed,
+                    error: None,
+                },
+                Err(err) => BlockRm {
+                    cid,
+                    removed: false,
+                    error: Some(err.to_string()),
+                },
+            });
+        }
+        Ok(removed)
+    }
+
     /// Kubo-like local block listing.
     pub async fn list_blocks(&self) -> Result<Vec<IpldCid>> {
         let mut cids: HashSet<IpldCid> = self.state.blocks.read().await.keys().copied().collect();
@@ -1889,6 +1918,13 @@ pub struct BlockStat {
 pub struct BlockPut {
     pub cid: IpldCid,
     pub size: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockRm {
+    pub cid: IpldCid,
+    pub removed: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

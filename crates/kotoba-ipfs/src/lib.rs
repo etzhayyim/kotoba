@@ -21,8 +21,8 @@ pub use ipns::{
     SignedIpnsRegistry,
 };
 pub use node::{
-    BandwidthStats, BitswapStats, BlockPut, BlockStat, DagImport, DagResolve, DagStat, IpfsConfig,
-    KotobaIpfsNode, MfsEntry, MfsKind, MfsStat, Multiaddr, NameResolve, NodeId, NodeVersion,
-    ObjectGet, ObjectLink, ObjectStat, PathResolve, PeerId, PinKind, PinLsEntry, PinVerify,
-    Provider, RepoStat, RepoVerify, RepoVerifyError, SwarmConnect, SwarmPeer,
+    BandwidthStats, BitswapStats, BlockPut, BlockRm, BlockStat, DagImport, DagResolve, DagStat,
+    IpfsConfig, KotobaIpfsNode, MfsEntry, MfsKind, MfsStat, Multiaddr, NameResolve, NodeId,
+    NodeVersion, ObjectGet, ObjectLink, ObjectStat, PathResolve, PeerId, PinKind, PinLsEntry,
+    PinVerify, Provider, RepoStat, RepoVerify, RepoVerifyError, SwarmConnect, SwarmPeer,
 };
