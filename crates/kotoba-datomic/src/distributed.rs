@@ -3215,6 +3215,11 @@ mod tests {
         )
     }
 
+    fn with_tx(mut datom: Datom, tx: &KotobaCid) -> Datom {
+        datom.t = tx.clone();
+        datom
+    }
+
     fn request(ipns_name: &str, graph: KotobaCid, datoms: Vec<Datom>) -> CommitDatomsRequest {
         CommitDatomsRequest {
             ipns_name: ipns_name.to_string(),
@@ -3626,7 +3631,7 @@ mod tests {
                     EdnValue::String(bob.to_multibase()),
                     kotoba_edn::parse(":person/friend").unwrap(),
                     EdnValue::String(alice.to_multibase()),
-                    EdnValue::String(tx.to_multibase()),
+                    EdnValue::String(report.commit.tx_cid.to_multibase()),
                 ],
             )
             .unwrap();
@@ -3694,11 +3699,17 @@ mod tests {
         let mut second_req = request("k51-kotoba-db", graph, vec![second_datom.clone()]);
         second_req.expected_parent = Some(first.commit.cid.clone());
         second_req.seq = 2;
-        writer.commit_datoms(second_req).unwrap();
+        let second = writer.commit_datoms(second_req).unwrap();
 
         let reader = DistributedDatomReader::new(&store, &ipns);
         let history = reader.history_for_name("k51-kotoba-db").unwrap();
-        assert_eq!(history, vec![first_datom, second_datom]);
+        assert_eq!(
+            history,
+            vec![
+                with_tx(first_datom, &first.commit.tx_cid),
+                with_tx(second_datom, &second.commit.tx_cid)
+            ]
+        );
     }
 
     #[test]
@@ -3781,7 +3792,10 @@ mod tests {
         assert_eq!(history_db.basis_t, Some(second.commit.tx_cid.clone()));
         assert_eq!(
             history_db.history().datoms(),
-            &[asserted.clone(), retracted]
+            &[
+                with_tx(asserted.clone(), &first.commit.tx_cid),
+                with_tx(retracted, &second.commit.tx_cid)
+            ]
         );
         let history_rows = crate::q_history(
             kotoba_edn::parse(
@@ -3808,7 +3822,10 @@ mod tests {
         let as_of_db = reader
             .history_db_as_of_tx(&second.commit.cid, &first.commit.tx_cid)
             .unwrap();
-        assert_eq!(as_of_db.history().datoms(), &[asserted]);
+        assert_eq!(
+            as_of_db.history().datoms(),
+            &[with_tx(asserted, &first.commit.tx_cid)]
+        );
     }
 
     #[test]
@@ -3835,19 +3852,25 @@ mod tests {
             reader
                 .current_for_entity(&report.commit.cid, &alice)
                 .unwrap(),
-            vec![alice_name.clone(), alice_role.clone()]
+            vec![
+                with_tx(alice_name.clone(), &report.commit.tx_cid),
+                with_tx(alice_role.clone(), &report.commit.tx_cid)
+            ]
         );
         assert_eq!(
             reader
                 .current_for_entity_attribute(&report.commit.cid, &alice, "person/role")
                 .unwrap(),
-            vec![alice_role.clone()]
+            vec![with_tx(alice_role.clone(), &report.commit.tx_cid)]
         );
         assert_eq!(
             reader
                 .current_for_attribute(&report.commit.cid, "person/name")
                 .unwrap(),
-            vec![alice_name.clone(), bob_name.clone()]
+            vec![
+                with_tx(alice_name.clone(), &report.commit.tx_cid),
+                with_tx(bob_name.clone(), &report.commit.tx_cid)
+            ]
         );
         assert_eq!(
             reader
@@ -3857,7 +3880,7 @@ mod tests {
                     &EdnValue::String("admin".into())
                 )
                 .unwrap(),
-            vec![alice_role.clone()]
+            vec![with_tx(alice_role.clone(), &report.commit.tx_cid)]
         );
         assert_eq!(
             reader
@@ -3869,7 +3892,7 @@ mod tests {
                     },
                 )
                 .unwrap(),
-            vec![alice_name]
+            vec![with_tx(alice_name, &report.commit.tx_cid)]
         );
         assert_eq!(
             reader
@@ -3881,7 +3904,7 @@ mod tests {
                     },
                 )
                 .unwrap(),
-            vec![bob_name]
+            vec![with_tx(bob_name, &report.commit.tx_cid)]
         );
     }
 
@@ -3918,7 +3941,7 @@ mod tests {
             reader
                 .current_for_triple(&report.commit.cid, &triple, &BTreeMap::new())
                 .unwrap(),
-            vec![bob_name.clone()]
+            vec![with_tx(bob_name.clone(), &report.commit.tx_cid)]
         );
 
         let mut binding = BTreeMap::new();
@@ -3928,7 +3951,7 @@ mod tests {
             reader
                 .current_for_triple(&report.commit.cid, &triple, &binding)
                 .unwrap(),
-            vec![bob_name]
+            vec![with_tx(bob_name, &report.commit.tx_cid)]
         );
     }
 
@@ -3972,7 +3995,7 @@ mod tests {
             reader
                 .current_for_triple(&report.commit.cid, &triple, &BTreeMap::new())
                 .unwrap(),
-            vec![alice_name.clone()]
+            vec![with_tx(alice_name.clone(), &report.commit.tx_cid)]
         );
 
         let mut binding = BTreeMap::new();
@@ -3982,7 +4005,7 @@ mod tests {
             reader
                 .current_for_triple(&report.commit.cid, &triple, &binding)
                 .unwrap(),
-            vec![alice_name]
+            vec![with_tx(alice_name, &report.commit.tx_cid)]
         );
     }
 
@@ -4289,7 +4312,7 @@ mod tests {
             rows,
             vec![vec![
                 EdnValue::String("Alice".into()),
-                cid_value(&KotobaCid::from_bytes(b"tx1")),
+                cid_value(&report.commit.tx_cid),
                 EdnValue::Bool(true)
             ]]
         );
@@ -4332,7 +4355,7 @@ mod tests {
             rows,
             vec![vec![
                 EdnValue::String("Alice".into()),
-                cid_value(&KotobaCid::from_bytes(b"tx1"))
+                cid_value(&report.commit.tx_cid)
             ]]
         );
 
@@ -4350,7 +4373,7 @@ mod tests {
             rows,
             vec![vec![
                 EdnValue::String("Eve".into()),
-                cid_value(&KotobaCid::from_bytes(b"tx1"))
+                cid_value(&report.commit.tx_cid)
             ]]
         );
 
