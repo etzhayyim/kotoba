@@ -5,8 +5,8 @@
 //! pin state, and a tiny TCP block exchange protocol between kotoba nodes.
 
 use crate::cid::{
-    cid_for_bytes, dag_cbor_block, decode_dag_pb_node, decode_unixfs_file_data, raw_cid,
-    unixfs_chunked_file_blocks, unixfs_file_block,
+    cid_for_bytes, dag_cbor_block, dag_pb_object_block, decode_dag_pb_node,
+    decode_unixfs_file_data, raw_cid, unixfs_chunked_file_blocks, unixfs_file_block,
 };
 use crate::ipns::{IpnsName, IpnsRecord};
 use anyhow::{anyhow, bail, Context, Result};
@@ -860,6 +860,26 @@ impl KotobaIpfsNode {
                 cid,
             })
             .collect())
+    }
+
+    /// Kubo-like `object/put` for dag-pb objects.
+    pub async fn object_put(&self, data: &[u8], links: Vec<ObjectLink>) -> Result<IpldCid> {
+        let links = links
+            .into_iter()
+            .map(|link| crate::cid::DagPbLink {
+                name: link.name,
+                cid: link.cid,
+                tsize: None,
+            })
+            .collect::<Vec<_>>();
+        let (cid, block) = dag_pb_object_block(data, &links);
+        self.put_block(&cid, &block).await?;
+        Ok(cid)
+    }
+
+    /// Kubo-like `object/new` for an empty dag-pb object.
+    pub async fn object_new(&self) -> Result<IpldCid> {
+        self.object_put(&[], Vec::new()).await
     }
 
     /// Remove a local block without pin protection.

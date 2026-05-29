@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use kotoba_core::cid::KotobaCid;
 use kotoba_ingest::{graph_cid_for, EmailIngestor};
-use kotoba_kqe::Value as KqeValue;
+use kotoba_kqe::{quad::LegacyQuad, quad::LegacyQuadObject};
 
 use crate::server::KotobaState;
 
@@ -72,6 +72,70 @@ fn require_email_auth(
     }
 }
 
+async fn current_email_quads(
+    state: &Arc<KotobaState>,
+    graph_cid: &KotobaCid,
+) -> Result<Vec<LegacyQuad>, (StatusCode, String)> {
+    let db = crate::xrpc::current_db_for_graph(state, graph_cid).await?;
+    Ok(db
+        .datoms()
+        .into_iter()
+        .filter_map(|datom| {
+            let substrate = datom.to_kqe().ok()?;
+            Some(LegacyQuad {
+                graph: graph_cid.clone(),
+                subject: substrate.e,
+                predicate: substrate.a,
+                object: substrate.v.into(),
+            })
+        })
+        .collect())
+}
+
+async fn legacy_email_datoms_for_commit(
+    state: &Arc<KotobaState>,
+    graph_cid: &KotobaCid,
+    tx_cid: &KotobaCid,
+    email_cid: &KotobaCid,
+) -> Result<Vec<kotoba_datomic::Datom>, (StatusCode, String)> {
+    let arrangement = state
+        .quad_store
+        .arrangement(graph_cid)
+        .await
+        .ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "email ingest produced no graph arrangement".to_string(),
+            )
+        })?;
+    let datoms = arrangement
+        .get_subject_datoms(tx_cid, email_cid)
+        .into_iter()
+        .map(kotoba_datomic::Datom::from_kqe)
+        .collect::<Vec<_>>();
+    if datoms.is_empty() {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "email ingest produced no datoms".to_string(),
+        ));
+    }
+    Ok(datoms)
+}
+
+fn text_from_quads(quads: &[LegacyQuad], subject: &KotobaCid, predicate: &str) -> String {
+    quads
+        .iter()
+        .find_map(|quad| {
+            if &quad.subject == subject && quad.predicate == predicate {
+                if let LegacyQuadObject::Text(text) = &quad.object {
+                    return Some(text.clone());
+                }
+            }
+            None
+        })
+        .unwrap_or_default()
+}
+
 // ── email.list ────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -90,24 +154,18 @@ pub async fn email_list(
     require_email_auth(&headers, &q.owner_did, &state.operator_did)?;
 
     let graph_cid = graph_cid_for(&q.owner_did);
-    let arrangement = match state.quad_store.arrangement(&graph_cid).await {
-        None => return Ok(Json(json!({ "emails": [], "total": 0 })).into_response()),
-        Some(a) => a,
-    };
+    let quads = current_email_quads(&state, &graph_cid).await?;
 
-    // All email subjects come from the PSO index on "email/date"
-    let mut entries: Vec<(String, String)> = arrangement
-        .get_by_attribute("email/date")
-        .into_iter()
-        .filter_map(|(subject_cid, values)| {
-            let date = values.first().and_then(|value| {
-                if let KqeValue::Text(t) = value {
-                    Some(t.clone())
-                } else {
-                    None
-                }
-            })?;
-            Some((subject_cid.to_multibase(), date))
+    let mut entries: Vec<(KotobaCid, String)> = quads
+        .iter()
+        .filter_map(|quad| {
+            if quad.predicate != "email/date" {
+                return None;
+            }
+            match &quad.object {
+                LegacyQuadObject::Text(date) => Some((quad.subject.clone(), date.clone())),
+                _ => None,
+            }
         })
         .collect();
 
@@ -122,17 +180,9 @@ pub async fn email_list(
         .into_iter()
         .skip(offset)
         .take(limit)
-        .map(|(cid_mb, date)| {
-            let message_id = KotobaCid::from_multibase(&cid_mb)
-                .map(|cid| {
-                    arrangement
-                        .get_values(&cid, "email/message_id")
-                        .into_iter()
-                        .find_map(text_value)
-                        .unwrap_or_default()
-                })
-                .unwrap_or_default();
-            json!({ "cid": cid_mb, "date": date, "message_id": message_id })
+        .map(|(email_cid, date)| {
+            let message_id = text_from_quads(&quads, &email_cid, "email/message_id");
+            json!({ "cid": email_cid.to_multibase(), "date": date, "message_id": message_id })
         })
         .collect();
 
@@ -183,45 +233,48 @@ pub async fn email_read(
     };
 
     let graph_cid = graph_cid_for(&q.owner_did);
-    let arrangement = match state.quad_store.arrangement(&graph_cid).await {
-        None => {
+    let quads = match current_email_quads(&state, &graph_cid).await {
+        Ok(quads) if !quads.is_empty() => quads,
+        Ok(_) => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": "no emails found for owner_did" })),
             )
                 .into_response()
         }
-        Some(a) => a,
+        Err((code, msg)) => return (code, Json(json!({ "error": msg }))).into_response(),
     };
 
-    let email_cid = KotobaCid::from_bytes(q.email_cid.as_bytes());
+    let email_cid = match KotobaCid::from_multibase(&q.email_cid) {
+        Some(cid) => cid,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid email_cid multibase" })),
+            )
+                .into_response()
+        }
+    };
 
     // Fetch body_cid → Vault decrypt via AgentCrypto
     let body_text = {
-        let blob_cid_str = arrangement
-            .get_values(&email_cid, "email/body_cid")
-            .into_iter()
-            .find_map(text_value);
-
-        match blob_cid_str {
+        let blob_cid_str = text_from_quads(&quads, &email_cid, "email/body_cid");
+        if blob_cid_str.is_empty() {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "email body_cid not found" })),
+            )
+                .into_response();
+        }
+        match KotobaCid::from_multibase(&blob_cid_str) {
             None => {
                 return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({ "error": "email body_cid not found" })),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "invalid body_cid multibase" })),
                 )
                     .into_response()
             }
-            Some(cid_str) => {
-                let blob_cid = match KotobaCid::from_multibase(&cid_str) {
-                    Some(c) => c,
-                    None => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({ "error": "invalid body_cid multibase" })),
-                        )
-                            .into_response()
-                    }
-                };
+            Some(blob_cid) => {
                 let enc_bytes = match state.vault.get(&blob_cid).await {
                     Some(b) => b,
                     None => {
@@ -250,24 +303,24 @@ pub async fn email_read(
     let from = open_field_safe(
         &*crypto,
         b"email/from",
-        &get_text_field(&arrangement, &email_cid, "email/from"),
+        &text_from_quads(&quads, &email_cid, "email/from"),
     )
     .await;
     let to = open_field_safe(
         &*crypto,
         b"email/to",
-        &get_text_field(&arrangement, &email_cid, "email/to"),
+        &text_from_quads(&quads, &email_cid, "email/to"),
     )
     .await;
     let subj = open_field_safe(
         &*crypto,
         b"email/subject",
-        &get_text_field(&arrangement, &email_cid, "email/subject"),
+        &text_from_quads(&quads, &email_cid, "email/subject"),
     )
     .await;
-    let date = get_text_field(&arrangement, &email_cid, "email/date");
-    let thread_id = get_text_field(&arrangement, &email_cid, "email/thread_id");
-    let message_id = get_text_field(&arrangement, &email_cid, "email/message_id");
+    let date = text_from_quads(&quads, &email_cid, "email/date");
+    let thread_id = text_from_quads(&quads, &email_cid, "email/thread_id");
+    let message_id = text_from_quads(&quads, &email_cid, "email/message_id");
 
     Json(json!({
         "email_cid":  q.email_cid,
@@ -371,19 +424,52 @@ pub async fn email_ingest(
             .into_response();
     }
 
+    let owner_did = body.owner_did;
+    let graph_cid = graph_cid_for(&owner_did);
     let ingestor = EmailIngestor::new(
         crypto,
         Arc::clone(&state.vault),
         Arc::clone(&state.quad_store),
-        body.owner_did,
+        owner_did.clone(),
     );
 
     match ingestor.ingest_raw(&raw, thread_id).await {
-        Ok(cid) => Json(json!({
-            "status": "ok",
-            "email_cid": cid.to_multibase(),
-        }))
-        .into_response(),
+        Ok(cid) => {
+            let tx_cid = KotobaCid::from_bytes(
+                format!("email.ingest:{}:{}", owner_did, cid.to_multibase()).as_bytes(),
+            );
+            let commit_datoms =
+                match legacy_email_datoms_for_commit(&state, &graph_cid, &tx_cid, &cid).await {
+                    Ok(datoms) => datoms,
+                    Err((code, msg)) => {
+                        return (code, Json(json!({ "error": msg }))).into_response();
+                    }
+                };
+            match crate::xrpc::commit_protocol_datoms(
+                &state,
+                graph_cid.clone(),
+                graph_cid.to_multibase(),
+                cid.clone(),
+                commit_datoms,
+                tx_cid,
+                owner_did,
+                kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT,
+                None,
+                None,
+            )
+            .await
+            {
+                Ok(resp) => Json(json!({
+                    "status": "ok",
+                    "email_cid": cid.to_multibase(),
+                    "commit_cid": resp.commit_cid,
+                    "ipns_name": resp.ipns_name,
+                    "ipns_sequence": resp.ipns_sequence,
+                }))
+                .into_response(),
+                Err((code, msg)) => (code, Json(json!({ "error": msg }))).into_response(),
+            }
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("{e}") })),
@@ -393,25 +479,6 @@ pub async fn email_ingest(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-fn get_text_field(
-    arr: &kotoba_kqe::arrangement::Arrangement,
-    subject: &KotobaCid,
-    predicate: &str,
-) -> String {
-    arr.get_values(subject, predicate)
-        .into_iter()
-        .find_map(text_value)
-        .unwrap_or_default()
-}
-
-fn text_value(value: KqeValue) -> Option<String> {
-    if let KqeValue::Text(t) = value {
-        Some(t)
-    } else {
-        None
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -514,6 +581,41 @@ mod tests {
             "b64 limit must allow payloads that would exceed the raw email limit \
              so the decoded-size guard is reachable"
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_email_datoms_for_commit_preserves_subject_tx_and_value() {
+        let state = Arc::new(KotobaState::new(None).expect("state"));
+        let graph_cid = graph_cid_for("did:key:zEmailBridge");
+        let email_cid = KotobaCid::from_bytes(b"email-bridge");
+        let tx_cid = KotobaCid::from_bytes(b"tx-email-bridge");
+
+        state
+            .quad_store
+            .assert_datom(
+                graph_cid.clone(),
+                kotoba_kqe::Datom::assert(
+                    email_cid.clone(),
+                    "email/message_id".to_string(),
+                    kotoba_kqe::Value::Text("<bridge@example>".to_string()),
+                    tx_cid.clone(),
+                ),
+            )
+            .await;
+
+        let datoms = legacy_email_datoms_for_commit(&state, &graph_cid, &tx_cid, &email_cid)
+            .await
+            .expect("bridge datoms");
+
+        assert_eq!(datoms.len(), 1);
+        assert_eq!(datoms[0].e, email_cid);
+        assert_eq!(datoms[0].a, "email/message_id");
+        assert_eq!(datoms[0].t, tx_cid);
+        assert_eq!(
+            datoms[0].v,
+            kotoba_edn::EdnValue::String("<bridge@example>".to_string())
+        );
+        assert!(datoms[0].added);
     }
 
     // ── open_field_safe ───────────────────────────────────────────────────────

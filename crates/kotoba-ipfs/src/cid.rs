@@ -111,6 +111,30 @@ pub fn unixfs_chunked_file_blocks(
     Ok((cid_for_bytes(CODEC_DAG_PB, &pb_node), pb_node, leaves))
 }
 
+/// Encode a generic dag-pb object block.
+///
+/// This is the block shape behind Kubo's `object/put`: optional PBNode.Data
+/// bytes plus zero or more PBLink entries.  The returned CID is
+/// CIDv1/dag-pb/sha2-256.
+pub fn dag_pb_object_block(data: &[u8], links: &[DagPbLink]) -> (Cid, Vec<u8>) {
+    let mut pb_node = Vec::new();
+    if !data.is_empty() {
+        write_bytes_field(&mut pb_node, 1, data);
+    }
+    for link in links {
+        let mut pb_link = Vec::new();
+        write_bytes_field(&mut pb_link, 1, &link.cid.to_bytes());
+        if !link.name.is_empty() {
+            write_bytes_field(&mut pb_link, 2, link.name.as_bytes());
+        }
+        if let Some(tsize) = link.tsize {
+            write_varint_field(&mut pb_link, 3, tsize);
+        }
+        write_bytes_field(&mut pb_node, 2, &pb_link);
+    }
+    (cid_for_bytes(CODEC_DAG_PB, &pb_node), pb_node)
+}
+
 /// Decode the single-file UnixFS dag-pb block shape produced by
 /// [`unixfs_file_block`].
 pub fn decode_unixfs_file_block(block: &[u8]) -> Result<Vec<u8>, CidError> {
@@ -347,6 +371,22 @@ mod tests {
                 .collect::<Vec<_>>(),
             leaves.iter().map(|(cid, _)| *cid).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn dag_pb_object_block_encodes_data_and_links() {
+        let child = raw_cid(b"child");
+        let links = vec![DagPbLink {
+            name: "child.txt".into(),
+            cid: child,
+            tsize: Some(5),
+        }];
+        let (cid, block) = dag_pb_object_block(b"metadata", &links);
+        assert_eq!(cid.codec(), CODEC_DAG_PB);
+        assert_eq!(cid, cid_for_bytes(CODEC_DAG_PB, &block));
+        let decoded = decode_dag_pb_node(&block).unwrap();
+        assert_eq!(decoded.data.as_deref(), Some(b"metadata".as_slice()));
+        assert_eq!(decoded.links, links);
     }
 
     #[test]

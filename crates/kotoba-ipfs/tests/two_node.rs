@@ -380,6 +380,32 @@ async fn kubo_compatible_local_api_surface() {
             cid: raw,
         }]
     );
+    let object_put = node
+        .object_put(
+            b"object metadata",
+            vec![kotoba_ipfs::ObjectLink {
+                name: "hello.txt".into(),
+                cid: raw,
+            }],
+        )
+        .await
+        .expect("object/put dag-pb");
+    let object_put_get = node.object_get(&object_put).await.expect("object/get put");
+    assert_eq!(object_put_get.data, b"object metadata");
+    assert_eq!(
+        object_put_get.links,
+        vec![kotoba_ipfs::ObjectLink {
+            name: "hello.txt".into(),
+            cid: raw,
+        }]
+    );
+    let empty_object = node.object_new().await.expect("object/new");
+    let empty_get = node
+        .object_get(&empty_object)
+        .await
+        .expect("object/get new");
+    assert!(empty_get.data.is_empty());
+    assert!(empty_get.links.is_empty());
     assert_eq!(
         node.object_links(&pb_dir)
             .await
