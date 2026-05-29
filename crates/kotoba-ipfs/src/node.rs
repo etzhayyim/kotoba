@@ -525,7 +525,10 @@ impl KotobaIpfsNode {
             self.state.blocks.write().await.insert(*cid, bytes.clone());
             return Ok(bytes);
         }
-        Err(anyhow!("block not found: {cid}"))
+        if let Some(bytes) = self.fetch_block_from_known_peers(cid).await? {
+            return Ok(bytes);
+        }
+        Err(anyhow!("block not found locally or on known peers: {cid}"))
     }
 
     /// Kubo-like `block/get`.
@@ -753,6 +756,33 @@ impl KotobaIpfsNode {
             .await
             .get(&peer)
             .ok_or_else(|| anyhow!("unknown peer: {peer}"))?;
+        self.fetch_block_from_socket(cid, socket).await
+    }
+
+    async fn fetch_block_from_known_peers(&self, cid: &IpldCid) -> Result<Option<Bytes>> {
+        let mut peers: Vec<_> = self
+            .state
+            .peers
+            .read()
+            .await
+            .iter()
+            .map(|(peer, socket)| (*peer, *socket))
+            .collect();
+        peers.sort_by_key(|(peer, _)| peer.0);
+        let mut errors = Vec::new();
+        for (peer, socket) in peers {
+            match self.fetch_block_from_socket(cid, socket).await {
+                Ok(bytes) => return Ok(Some(bytes)),
+                Err(err) => errors.push(format!("{peer}: {err}")),
+            }
+        }
+        if !errors.is_empty() {
+            tracing::debug!(cid = %cid, errors = ?errors, "known peers did not provide block");
+        }
+        Ok(None)
+    }
+
+    async fn fetch_block_from_socket(&self, cid: &IpldCid, socket: SocketAddr) -> Result<Bytes> {
         let fut = fetch_from_socket(socket, cid);
         let bytes = tokio::time::timeout(self.fetch_timeout, fut)
             .await
@@ -766,6 +796,7 @@ impl KotobaIpfsNode {
             .bytes_in
             .fetch_add(8 + bytes.len() as u64, Ordering::Relaxed);
         self.state.blocks.write().await.insert(*cid, bytes.clone());
+        persist_block(&self.state, cid, &bytes).await?;
         Ok(bytes)
     }
 
@@ -1266,14 +1297,16 @@ impl KotobaIpfsNode {
     /// Kubo-like `name/resolve` for records published through this node.
     pub async fn name_resolve(&self, name: impl Into<String>) -> Result<NameResolve> {
         let name = IpnsName::new(name);
-        let record = self
-            .state
-            .names
-            .read()
-            .await
-            .get(&name)
-            .cloned()
-            .ok_or_else(|| anyhow!("IPNS name not found: {}", name.0))?;
+        let local = self.state.names.read().await.get(&name).cloned();
+        let record = match local {
+            Some(record) => record,
+            None => self
+                .resolve_name_from_known_peers(&name)
+                .await?
+                .ok_or_else(|| {
+                    anyhow!("IPNS name not found locally or on known peers: {}", name.0)
+                })?,
+        };
         let cid = record
             .value
             .parse::<IpldCid>()
@@ -1284,6 +1317,49 @@ impl KotobaIpfsNode {
             cid,
             record,
         })
+    }
+
+    async fn resolve_name_from_known_peers(&self, name: &IpnsName) -> Result<Option<IpnsRecord>> {
+        let mut peers: Vec<_> = self
+            .state
+            .peers
+            .read()
+            .await
+            .iter()
+            .map(|(peer, socket)| (*peer, *socket))
+            .collect();
+        peers.sort_by_key(|(peer, _)| peer.0);
+        let mut errors = Vec::new();
+        for (peer, socket) in peers {
+            let fut = fetch_name_from_socket(socket, name);
+            match tokio::time::timeout(self.fetch_timeout, fut).await {
+                Ok(Ok(record)) => {
+                    self.state.bytes_out.fetch_add(
+                        format!("NAME {PROTOCOL} {}\n", name.0).len() as u64,
+                        Ordering::Relaxed,
+                    );
+                    let encoded = cbor_len(&record)?;
+                    self.state
+                        .bytes_in
+                        .fetch_add(8 + encoded, Ordering::Relaxed);
+                    self.state
+                        .names
+                        .write()
+                        .await
+                        .insert(name.clone(), record.clone());
+                    return Ok(Some(record));
+                }
+                Ok(Err(err)) => errors.push(format!("{peer}: {err}")),
+                Err(_) => errors.push(format!(
+                    "{peer}: name_resolve timeout after {:?}",
+                    self.fetch_timeout
+                )),
+            }
+        }
+        if !errors.is_empty() {
+            tracing::debug!(name = %name.0, errors = ?errors, "known peers did not provide IPNS name");
+        }
+        Ok(None)
     }
 
     /// Kubo-like `key/gen`: create a named local publishing key.
@@ -2297,10 +2373,44 @@ async fn serve_stream(state: Arc<State>, stream: TcpStream) -> Result<()> {
     match (parts.next(), parts.next(), parts.next(), parts.next()) {
         (Some("GET"), Some(protocol), Some(cid_s), None) if protocol == PROTOCOL => {
             let cid: IpldCid = cid_s.parse().map_err(|e| anyhow!("parse cid: {e}"))?;
-            let bytes = state.blocks.read().await.get(&cid).cloned();
+            let bytes = match state.blocks.read().await.get(&cid).cloned() {
+                Some(bytes) => Some(bytes),
+                None => match load_block(&state, &cid).await? {
+                    Some(bytes) => {
+                        state.blocks.write().await.insert(cid, bytes.clone());
+                        Some(bytes)
+                    }
+                    None => None,
+                },
+            };
             let stream = reader.get_mut();
             match bytes {
                 Some(bytes) => {
+                    state
+                        .bytes_out
+                        .fetch_add(8 + bytes.len() as u64, Ordering::Relaxed);
+                    stream
+                        .write_all(&(bytes.len() as u64).to_be_bytes())
+                        .await?;
+                    stream.write_all(&bytes).await?;
+                }
+                None => {
+                    state.bytes_out.fetch_add(8, Ordering::Relaxed);
+                    stream.write_all(&NOT_FOUND.to_be_bytes()).await?;
+                }
+            }
+            stream.flush().await?;
+            Ok(())
+        }
+        (Some("NAME"), Some(protocol), Some(name_s), None) if protocol == PROTOCOL => {
+            let name = IpnsName::new(name_s.to_string());
+            let record = state.names.read().await.get(&name).cloned();
+            let stream = reader.get_mut();
+            match record {
+                Some(record) => {
+                    let mut bytes = Vec::new();
+                    ciborium::into_writer(&record, &mut bytes)
+                        .map_err(|e| anyhow!("ipns record cbor encode: {e}"))?;
                     state
                         .bytes_out
                         .fetch_add(8 + bytes.len() as u64, Ordering::Relaxed);
@@ -2342,6 +2452,35 @@ async fn fetch_from_socket(socket: SocketAddr, cid: &IpldCid) -> Result<Bytes> {
     let mut buf = vec![0u8; len as usize];
     stream.read_exact(&mut buf).await?;
     Ok(Bytes::from(buf))
+}
+
+async fn fetch_name_from_socket(socket: SocketAddr, name: &IpnsName) -> Result<IpnsRecord> {
+    let mut stream = TcpStream::connect(socket)
+        .await
+        .with_context(|| format!("connect {socket}"))?;
+    stream
+        .write_all(format!("NAME {PROTOCOL} {}\n", name.0).as_bytes())
+        .await?;
+    stream.flush().await?;
+
+    let mut len_buf = [0u8; 8];
+    stream.read_exact(&mut len_buf).await?;
+    let len = u64::from_be_bytes(len_buf);
+    if len == NOT_FOUND {
+        bail!("IPNS name not found on peer: {}", name.0);
+    }
+    if len > usize::MAX as u64 {
+        bail!("IPNS record too large: {len}");
+    }
+    let mut buf = vec![0u8; len as usize];
+    stream.read_exact(&mut buf).await?;
+    ciborium::from_reader(&buf[..]).map_err(|e| anyhow!("ipns record cbor decode: {e}"))
+}
+
+fn cbor_len<T: Serialize>(value: &T) -> Result<u64> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes).map_err(|e| anyhow!("cbor encode: {e}"))?;
+    Ok(bytes.len() as u64)
 }
 
 fn verify_cid(cid: &IpldCid, data: &[u8]) -> Result<()> {

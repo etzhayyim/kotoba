@@ -16,9 +16,9 @@ async fn two_node_block_exchange() {
 
     let data = b"hello kotoba-ipfs block exchange".to_vec();
 
-    // Node A on a fixed port so B can dial it.
+    // Node A on an ephemeral port so parallel test runs do not collide.
     let node_a = IpfsConfig::new()
-        .with_listen("/ip4/127.0.0.1/tcp/17011".parse().unwrap())
+        .with_listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
         .start()
         .await
         .expect("node A start");
@@ -30,9 +30,13 @@ async fn two_node_block_exchange() {
     eprintln!("node A peer_id: {peer_a}");
     eprintln!("stored CID:     {cid}");
 
-    let peer_a_addr: Multiaddr = format!("/ip4/127.0.0.1/tcp/17011/p2p/{peer_a}")
-        .parse()
-        .unwrap();
+    let peer_a_addr: Multiaddr = node_a
+        .listen_addrs()
+        .await
+        .expect("node A listen addrs")
+        .into_iter()
+        .next()
+        .expect("node A listen addr");
     // Node B on ephemeral port, seeded with A as a bootstrap peer.
     let node_b = IpfsConfig::new()
         .with_bootstrap(vec![peer_a_addr.clone()])
@@ -96,6 +100,48 @@ async fn two_node_block_exchange() {
     assert!(bitswap_b.blocks_received >= 1);
     assert!(bitswap_b.data_received >= data.len() as u64);
     assert_eq!(bitswap_b.peers, vec![peer_a]);
+
+    let remote_data = b"remote block_get via peer fallback".to_vec();
+    let remote_cid = node_a
+        .put_raw_block(&remote_data)
+        .await
+        .expect("put remote block");
+    assert_eq!(
+        node_b
+            .block_get(&remote_cid)
+            .await
+            .expect("remote block/get"),
+        remote_data
+    );
+
+    node_a
+        .name_publish(
+            "k51-kotoba-two-node-head",
+            &remote_cid,
+            "2026-05-29T00:00:00Z",
+        )
+        .await
+        .expect("name/publish on node A");
+    let resolved = node_b
+        .name_resolve("k51-kotoba-two-node-head")
+        .await
+        .expect("remote name/resolve");
+    assert_eq!(resolved.cid, remote_cid);
+    assert_eq!(
+        node_b
+            .resolve_path("/ipns/k51-kotoba-two-node-head")
+            .await
+            .expect("remote /ipns path")
+            .cid,
+        remote_cid
+    );
+    assert_eq!(
+        node_b
+            .cat_path("/ipns/k51-kotoba-two-node-head")
+            .await
+            .expect("remote /ipns cat"),
+        remote_data
+    );
     let disconnected = node_b
         .swarm_disconnect(peer_a)
         .await
