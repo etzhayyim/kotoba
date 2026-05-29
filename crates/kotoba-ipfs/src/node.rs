@@ -220,6 +220,7 @@ struct State {
     files: RwLock<HashMap<String, IpldCid>>,
     dirs: RwLock<HashSet<String>>,
     names: RwLock<HashMap<IpnsName, IpnsRecord>>,
+    keys: RwLock<HashMap<String, KeyEntry>>,
     listen_addrs: RwLock<Vec<Multiaddr>>,
     bytes_in: AtomicU64,
     bytes_out: AtomicU64,
@@ -1285,6 +1286,89 @@ impl KotobaIpfsNode {
         })
     }
 
+    /// Kubo-like `key/gen`: create a named local publishing key.
+    pub async fn key_gen(&self, name: impl Into<String>) -> Result<KeyEntry> {
+        let name = validate_key_name(name.into())?;
+        let mut keys = self.state.keys.write().await;
+        if keys.contains_key(&name) {
+            bail!("key already exists: {name}");
+        }
+        let ordinal = keys.len() + 1;
+        let id = format!(
+            "k51-{}",
+            raw_cid(format!("kotoba-ipfs-key:v1:{}:{}:{ordinal}", self.peer_id.0, name).as_bytes())
+        );
+        let key = KeyEntry {
+            name: name.clone(),
+            id,
+        };
+        keys.insert(name, key.clone());
+        drop(keys);
+        persist_repo_state(&self.state).await?;
+        Ok(key)
+    }
+
+    /// Kubo-like `key/list`: list locally managed publishing keys.
+    pub async fn key_list(&self) -> Result<Vec<KeyEntry>> {
+        let mut keys: Vec<_> = self.state.keys.read().await.values().cloned().collect();
+        keys.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(keys)
+    }
+
+    /// Kubo-like `key/rename`: rename a local publishing key, preserving its id.
+    pub async fn key_rename(
+        &self,
+        old: impl AsRef<str>,
+        new: impl Into<String>,
+        force: bool,
+    ) -> Result<KeyEntry> {
+        let old = old.as_ref();
+        let new = validate_key_name(new.into())?;
+        if old == new {
+            let key = self
+                .state
+                .keys
+                .read()
+                .await
+                .get(old)
+                .cloned()
+                .ok_or_else(|| anyhow!("key not found: {old}"))?;
+            return Ok(key);
+        }
+        let mut keys = self.state.keys.write().await;
+        if keys.contains_key(&new) && !force {
+            bail!("key already exists: {new}");
+        }
+        let mut key = keys
+            .remove(old)
+            .ok_or_else(|| anyhow!("key not found: {old}"))?;
+        if force {
+            keys.remove(&new);
+        }
+        key.name = new.clone();
+        keys.insert(new, key.clone());
+        drop(keys);
+        persist_repo_state(&self.state).await?;
+        Ok(key)
+    }
+
+    /// Kubo-like `key/rm`: remove a local publishing key.
+    pub async fn key_rm(&self, name: impl AsRef<str>) -> Result<KeyEntry> {
+        let name = name.as_ref();
+        if name.trim().is_empty() {
+            bail!("key name must not be empty");
+        }
+        let key = self
+            .state
+            .keys
+            .write()
+            .await
+            .remove(name)
+            .ok_or_else(|| anyhow!("key not found: {name}"))?;
+        persist_repo_state(&self.state).await?;
+        Ok(key)
+    }
+
     /// Kubo-like MFS `files/write`: bind an MFS path to a CID.
     pub async fn files_write(&self, path: impl AsRef<str>, cid: &IpldCid) -> Result<()> {
         self.get_block(cid).await?;
@@ -1991,6 +2075,12 @@ pub struct NameResolve {
     pub record: IpnsRecord,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyEntry {
+    pub name: String,
+    pub id: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RepoStat {
     pub num_objects: u64,
@@ -2036,6 +2126,8 @@ struct RepoStateManifest {
     dirs: Vec<String>,
     #[serde(default)]
     names: Vec<IpnsRecord>,
+    #[serde(default)]
+    keys: Vec<KeyEntry>,
 }
 
 impl Clone for KotobaIpfsNode {
@@ -2485,6 +2577,17 @@ async fn load_repo_state(state: &Arc<State>, repo: &Path) -> Result<()> {
             names.insert(record.name.clone(), record);
         }
     }
+    {
+        let mut keys = state.keys.write().await;
+        keys.clear();
+        for key in manifest.keys {
+            let name = validate_key_name(key.name.clone())?;
+            if key.id.trim().is_empty() {
+                bail!("invalid key id for {name}: empty");
+            }
+            keys.insert(name, key);
+        }
+    }
     Ok(())
 }
 
@@ -2503,13 +2606,31 @@ async fn persist_repo_state(state: &State) -> Result<()> {
     dirs.sort();
     let mut names: Vec<_> = state.names.read().await.values().cloned().collect();
     names.sort_by(|a, b| a.name.0.cmp(&b.name.0));
-    let manifest = RepoStateManifest { files, dirs, names };
+    let mut keys: Vec<_> = state.keys.read().await.values().cloned().collect();
+    keys.sort_by(|a, b| a.name.cmp(&b.name));
+    let manifest = RepoStateManifest {
+        files,
+        dirs,
+        names,
+        keys,
+    };
     let path = repo_state_path(repo);
     let data = serde_json::to_vec_pretty(&manifest)?;
     tokio::fs::write(&path, data)
         .await
         .with_context(|| format!("write repo state {path:?}"))?;
     Ok(())
+}
+
+fn validate_key_name(name: String) -> Result<String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        bail!("key name must not be empty");
+    }
+    if name == "self" {
+        bail!("key name is reserved: self");
+    }
+    Ok(name)
 }
 
 async fn persist_block(state: &State, cid: &IpldCid, data: &[u8]) -> Result<()> {

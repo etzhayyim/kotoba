@@ -145,6 +145,7 @@ async fn repo_persists_blocks_and_pins() {
     node.name_publish("k51-kotoba-persisted", &cid, "2026-05-29T00:00:00Z")
         .await
         .expect("name/publish");
+    let key = node.key_gen("persisted-key").await.expect("key/gen");
     assert_eq!(
         node.block_stat(&cid).await.expect("stat").size,
         data.len() as u64
@@ -193,6 +194,12 @@ async fn repo_persists_blocks_and_pins() {
             .cid,
         cid
     );
+    assert!(restarted
+        .key_list()
+        .await
+        .expect("key/list persisted")
+        .iter()
+        .any(|entry| entry == &key));
 }
 
 #[tokio::test]
@@ -1039,6 +1046,37 @@ async fn kubo_compatible_local_api_surface() {
             .cid,
         dag
     );
+    let publish_key = node.key_gen("publish").await.expect("key/gen");
+    assert_eq!(publish_key.name, "publish");
+    assert!(publish_key.id.starts_with("k51-"));
+    assert!(node.key_gen("publish").await.is_err());
+    assert!(node.key_gen("self").await.is_err());
+    assert!(node
+        .key_list()
+        .await
+        .expect("key/list")
+        .iter()
+        .any(|entry| entry == &publish_key));
+    let renamed = node
+        .key_rename("publish", "publish-renamed", false)
+        .await
+        .expect("key/rename");
+    assert_eq!(renamed.name, "publish-renamed");
+    assert_eq!(renamed.id, publish_key.id);
+    let existing = node.key_gen("existing").await.expect("key/gen existing");
+    assert!(node
+        .key_rename("publish-renamed", "existing", false)
+        .await
+        .is_err());
+    let replaced = node
+        .key_rename("publish-renamed", "existing", true)
+        .await
+        .expect("key/rename force");
+    assert_eq!(replaced.name, "existing");
+    assert_eq!(replaced.id, publish_key.id);
+    assert_ne!(replaced.id, existing.id);
+    assert_eq!(node.key_rm("existing").await.expect("key/rm"), replaced);
+    assert!(node.key_rm("existing").await.is_err());
 
     let stat = node.repo_stat().await.expect("repo/stat");
     assert_eq!(
