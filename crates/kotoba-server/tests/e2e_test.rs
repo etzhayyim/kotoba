@@ -3517,13 +3517,16 @@ async fn datomic_transact_accepts_cacao_datom_transact_operation_scope() {
             "/xrpc/ai.gftd.apps.kotoba.datomic.q",
             json!({
                 "graph": graph,
-                "query_edn": r#"{:find [?proof ?operation ?author ?ipns ?seq ?controller]
+                "query_edn": r#"{:find [?proof ?operation ?author ?ipns ?seq ?controller ?storage ?codec ?index]
                                  :where [[?tx :tx/authProofCid ?proof]
                                          [?tx :tx/operation ?operation]
                                          [?tx :tx/author ?author]
                                          [?tx :tx/ipnsName ?ipns]
                                          [?tx :tx/ipnsSequence ?seq]
-                                         [?tx :tx/ipnsControllerDid ?controller]]}"#
+                                         [?tx :tx/ipnsControllerDid ?controller]
+                                         [?tx :tx/storageBackend ?storage]
+                                         [?tx :tx/ipldCodec ?codec]
+                                         [?tx :tx/indexModel ?index]]}"#
             }),
             &tok,
         )
@@ -3554,6 +3557,36 @@ async fn datomic_transact_accepts_cacao_datom_transact_operation_scope() {
         "{query_body}"
     );
     assert_eq!(row[5], format!("\"{}\"", s.operator_did), "{query_body}");
+    assert_eq!(row[6], "\"ipfs/ipld/ipns\"", "{query_body}");
+    assert_eq!(row[7], "\"dag-cbor\"", "{query_body}");
+    assert_eq!(row[8], "\"prolly-tree\"", "{query_body}");
+
+    let (status, index_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.q",
+            json!({
+                "graph": graph,
+                "query_edn": r#"{:find [?root]
+                                 :where [[?tx :tx/authProofCid ?proof]
+                                         [?tx :tx/indexRootName ?root]]}"#
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{index_body}");
+    for root in ["eavt", "aevt", "avet", "vaet", "tea"] {
+        assert!(
+            index_body["rows_edn"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| {
+                    row.as_array()
+                        .is_some_and(|row| row[0] == format!("\"{root}\""))
+                }),
+            "missing tx index root metadata {root}: {index_body}"
+        );
+    }
 
     let (status, cap_body) = s
         .post_auth(
@@ -6210,14 +6243,17 @@ async fn assert_protocol_tx_metadata(
             "/xrpc/ai.gftd.apps.kotoba.datomic.q",
             json!({
                 "graph": graph,
-                "query_edn": r#"{:find [?proof ?operation ?ipns ?seq ?controller ?instant]
+                "query_edn": r#"{:find [?proof ?operation ?ipns ?seq ?controller ?instant ?storage ?codec ?index]
                                  :where [[?tx :tx/authProofCid ?proof]
                                          [?tx :tx/operation ?operation]
                                          [?tx :tx/ipnsName ?ipns]
                                          [?tx :tx/ipnsSequence ?seq]
                                          [?tx :db/txInstant ?instant]
                                          [(pos? ?instant)]
-                                         [?tx :tx/ipnsControllerDid ?controller]]}"#
+                                         [?tx :tx/ipnsControllerDid ?controller]
+                                         [?tx :tx/storageBackend ?storage]
+                                         [?tx :tx/ipldCodec ?codec]
+                                         [?tx :tx/indexModel ?index]]}"#
             }),
             &tok,
         )
@@ -6244,6 +6280,9 @@ async fn assert_protocol_tx_metadata(
             .unwrap_or(0)
             > 0
     );
+    assert_eq!(row[6], "\"ipfs/ipld/ipns\"", "{q_body}");
+    assert_eq!(row[7], "\"dag-cbor\"", "{q_body}");
+    assert_eq!(row[8], "\"prolly-tree\"", "{q_body}");
 
     let (status, cap_body) = s
         .post_auth(
@@ -10504,11 +10543,14 @@ async fn attest_claim_roundtrip() {
             "/xrpc/ai.gftd.apps.kotoba.datomic.q",
             json!({
                 "graph": graph,
-                "query_edn": r#"{:find [?operation ?ipns ?seq ?controller]
+                "query_edn": r#"{:find [?operation ?ipns ?seq ?controller ?storage ?codec ?index]
                                  :where [[?tx :tx/operation ?operation]
                                          [?tx :tx/ipnsName ?ipns]
                                          [?tx :tx/ipnsSequence ?seq]
-                                         [?tx :tx/ipnsControllerDid ?controller]]}"#
+                                         [?tx :tx/ipnsControllerDid ?controller]
+                                         [?tx :tx/storageBackend ?storage]
+                                         [?tx :tx/ipldCodec ?codec]
+                                         [?tx :tx/indexModel ?index]]}"#
             }),
             &tenant_jwt(&s.operator_did),
         )
@@ -10524,6 +10566,9 @@ async fn attest_claim_roundtrip() {
                     && row[1] == format!("\"{}\"", body["ipns_name"].as_str().unwrap())
                     && row[2] == body["ipns_sequence"].as_i64().unwrap().to_string()
                     && row[3] == format!("\"{}\"", s.operator_did)
+                    && row[4] == "\"ipfs/ipld/ipns\""
+                    && row[5] == "\"dag-cbor\""
+                    && row[6] == "\"prolly-tree\""
             })),
         "{tx_meta_body}"
     );

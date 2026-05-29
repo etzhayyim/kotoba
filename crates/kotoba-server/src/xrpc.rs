@@ -2158,6 +2158,32 @@ fn append_tx_metadata_datoms(
         ":tx/ipnsControllerDid",
         kotoba_edn::EdnValue::String(ipns_controller_did.to_string()),
     );
+    assert_tx(
+        datoms,
+        tx_cid,
+        ":tx/storageBackend",
+        kotoba_edn::EdnValue::String("ipfs/ipld/ipns".to_string()),
+    );
+    assert_tx(
+        datoms,
+        tx_cid,
+        ":tx/ipldCodec",
+        kotoba_edn::EdnValue::String("dag-cbor".to_string()),
+    );
+    assert_tx(
+        datoms,
+        tx_cid,
+        ":tx/indexModel",
+        kotoba_edn::EdnValue::String("prolly-tree".to_string()),
+    );
+    for root in ["eavt", "aevt", "avet", "vaet", "tea"] {
+        assert_tx(
+            datoms,
+            tx_cid,
+            ":tx/indexRootName",
+            kotoba_edn::EdnValue::String(root.to_string()),
+        );
+    }
     if let Some(expected_parent) = expected_parent {
         assert_tx(
             datoms,
@@ -8005,6 +8031,15 @@ mod tests {
             ":tx/ipnsControllerDid",
             EdnValue::string(state.operator_did.clone())
         ));
+        assert!(has(
+            ":tx/storageBackend",
+            EdnValue::string("ipfs/ipld/ipns")
+        ));
+        assert!(has(":tx/ipldCodec", EdnValue::string("dag-cbor")));
+        assert!(has(":tx/indexModel", EdnValue::string("prolly-tree")));
+        for root in ["eavt", "aevt", "avet", "vaet", "tea"] {
+            assert!(has(":tx/indexRootName", EdnValue::string(root)));
+        }
         assert!(tx_datoms
             .iter()
             .any(|datom| datom.a == ":person/name" && datom.v == EdnValue::string("Alice")));
