@@ -12,8 +12,10 @@ use serde::{Deserialize, Serialize};
 pub const DIDCOMM_MESSAGING_SERVICE: &str = "DIDCommMessaging";
 
 pub const ATTR_DIDCOMM_ID: &str = "didcomm/id";
+pub const ATTR_DIDCOMM_CID: &str = "didcomm/cid";
 pub const ATTR_DIDCOMM_PROTOCOL: &str = "didcomm/protocol";
 pub const ATTR_DIDCOMM_SERVICE_TYPE: &str = "didcomm/serviceType";
+pub const ATTR_DIDCOMM_WIRE_FORMAT: &str = "didcomm/wireFormat";
 pub const ATTR_DIDCOMM_TYPE: &str = "didcomm/type";
 pub const ATTR_DIDCOMM_FROM: &str = "didcomm/from";
 pub const ATTR_DIDCOMM_TO: &str = "didcomm/to";
@@ -98,6 +100,12 @@ impl DidCommMessage {
             datom(&e, ATTR_DIDCOMM_ID, EdnValue::string(&self.id), &tx),
             datom(
                 &e,
+                ATTR_DIDCOMM_CID,
+                EdnValue::string(e.to_multibase()),
+                &tx,
+            ),
+            datom(
+                &e,
                 ATTR_DIDCOMM_PROTOCOL,
                 EdnValue::string("DIDComm v2"),
                 &tx,
@@ -106,6 +114,12 @@ impl DidCommMessage {
                 &e,
                 ATTR_DIDCOMM_SERVICE_TYPE,
                 EdnValue::string(DIDCOMM_MESSAGING_SERVICE),
+                &tx,
+            ),
+            datom(
+                &e,
+                ATTR_DIDCOMM_WIRE_FORMAT,
+                EdnValue::string("application/didcomm-plain+json"),
                 &tx,
             ),
             datom(&e, ATTR_DIDCOMM_WIRE_ID, EdnValue::string(&self.id), &tx),
@@ -304,12 +318,18 @@ mod tests {
             }],
         };
         let datoms = msg.to_datoms(KotobaCid::from_bytes(b"tx")).unwrap();
+        let e = msg.cid().unwrap();
+        assert!(datoms
+            .iter()
+            .any(|d| d.a == ATTR_DIDCOMM_CID && d.v == EdnValue::string(e.to_multibase())));
         assert!(datoms.iter().any(|d| d.a == ATTR_DIDCOMM_TYPE));
         assert!(datoms
             .iter()
             .any(|d| d.a == ATTR_DIDCOMM_PROTOCOL && d.v == EdnValue::string("DIDComm v2")));
         assert!(datoms.iter().any(|d| d.a == ATTR_DIDCOMM_SERVICE_TYPE
             && d.v == EdnValue::string(DIDCOMM_MESSAGING_SERVICE)));
+        assert!(datoms.iter().any(|d| d.a == ATTR_DIDCOMM_WIRE_FORMAT
+            && d.v == EdnValue::string("application/didcomm-plain+json")));
         assert!(datoms.iter().any(|d| d.a == ATTR_DIDCOMM_THREAD));
         assert!(datoms.iter().any(|d| d.a == ATTR_DIDCOMM_BODY));
         assert!(datoms.iter().any(|d| d.a == ATTR_DIDCOMM_WIRE_TYPE));

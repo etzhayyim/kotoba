@@ -2552,6 +2552,12 @@ fn atproto_repo_write_datoms(
     let mut out = vec![
         kotoba_datomic::Datom::assert(
             entity_cid.clone(),
+            "atproto/entityCid".to_string(),
+            kotoba_edn::EdnValue::string(entity_cid.to_multibase()),
+            tx_cid.clone(),
+        ),
+        kotoba_datomic::Datom::assert(
+            entity_cid.clone(),
             "atproto/uri".to_string(),
             kotoba_edn::EdnValue::string(&req.uri),
             tx_cid.clone(),
@@ -2578,6 +2584,12 @@ fn atproto_repo_write_datoms(
             entity_cid.clone(),
             "atproto/rkey".to_string(),
             kotoba_edn::EdnValue::string(&uri.rkey),
+            tx_cid.clone(),
+        ),
+        kotoba_datomic::Datom::assert(
+            entity_cid.clone(),
+            "atproto/wireFormat".to_string(),
+            kotoba_edn::EdnValue::string("application/atproto+json"),
             tx_cid.clone(),
         ),
         kotoba_datomic::Datom::assert(
@@ -2676,6 +2688,8 @@ fn atproto_repo_delete_datoms(
                 && !matches!(
                     datom.a.as_str(),
                     "atproto/uri"
+                        | "atproto/entityCid"
+                        | "atproto/wireFormat"
                         | "atproto/authority"
                         | "atproto/collection"
                         | "atproto/nsid"
@@ -2686,6 +2700,12 @@ fn atproto_repo_delete_datoms(
         .map(|datom| kotoba_datomic::Datom::retract(datom.e, datom.a, datom.v, tx_cid.clone()))
         .collect::<Vec<_>>();
     out.extend([
+        kotoba_datomic::Datom::assert(
+            entity_cid.clone(),
+            "atproto/entityCid".to_string(),
+            kotoba_edn::EdnValue::string(entity_cid.to_multibase()),
+            tx_cid.clone(),
+        ),
         kotoba_datomic::Datom::assert(
             entity_cid.clone(),
             "atproto/uri".to_string(),
@@ -2714,6 +2734,12 @@ fn atproto_repo_delete_datoms(
             entity_cid.clone(),
             "atproto/rkey".to_string(),
             kotoba_edn::EdnValue::string(&uri.rkey),
+            tx_cid.clone(),
+        ),
+        kotoba_datomic::Datom::assert(
+            entity_cid.clone(),
+            "atproto/wireFormat".to_string(),
+            kotoba_edn::EdnValue::string("application/atproto+json"),
             tx_cid.clone(),
         ),
         kotoba_datomic::Datom::assert(

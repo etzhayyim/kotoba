@@ -5258,6 +5258,28 @@ async fn didcomm_send_projects_message_to_distributed_datoms() {
         "{q_body}"
     );
 
+    let (status, cid_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.q",
+            json!({
+                "graph": graph,
+                "query_edn": r#"{:find [?cid ?wireFormat]
+                                 :where [[?e :didcomm/id "msg-e2e-1"]
+                                         [?e :didcomm/cid ?cid]
+                                         [?e :didcomm/wireFormat ?wireFormat]]}"#
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{cid_body}");
+    assert!(
+        cid_body["rows_edn"].as_array().unwrap().iter().any(|row| {
+            row[0] == format!("\"{}\"", body["entity_cid"].as_str().unwrap())
+                && row[1] == "\"application/didcomm-plain+json\""
+        }),
+        "{cid_body}"
+    );
+
     let (status, body_field_body) = s
         .post_auth(
             "/xrpc/ai.gftd.apps.kotoba.datomic.q",
@@ -5562,6 +5584,28 @@ async fn atproto_repo_write_projects_record_to_distributed_datoms() {
         "{q_body}"
     );
 
+    let (status, cid_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.q",
+            json!({
+                "graph": graph,
+                "query_edn": r#"{:find [?cid ?wireFormat]
+                                 :where [[?e :atproto/uri ?uri]
+                                         [?e :atproto/entityCid ?cid]
+                                         [?e :atproto/wireFormat ?wireFormat]]}"#
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{cid_body}");
+    assert!(
+        cid_body["rows_edn"].as_array().unwrap().iter().any(|row| {
+            row[0] == format!("\"{}\"", body["entity_cid"].as_str().unwrap())
+                && row[1] == "\"application/atproto+json\""
+        }),
+        "{cid_body}"
+    );
+
     let (status, nsid_body) = s
         .post_auth(
             "/xrpc/ai.gftd.apps.kotoba.datomic.q",
@@ -5683,6 +5727,32 @@ async fn atproto_repo_write_projects_record_to_distributed_datoms() {
         deleted_body["rows_edn"],
         json!([["true", "\"delete\""]]),
         "{deleted_body}"
+    );
+
+    let (status, deleted_cid_body) = s
+        .post_auth(
+            "/xrpc/ai.gftd.apps.kotoba.datomic.q",
+            json!({
+                "graph": graph,
+                "query_edn": r#"{:find [?cid ?wireFormat]
+                                 :where [[?e :atproto/deleted true]
+                                         [?e :atproto/entityCid ?cid]
+                                         [?e :atproto/wireFormat ?wireFormat]]}"#
+            }),
+            &tok,
+        )
+        .await;
+    assert_eq!(status, 200, "{deleted_cid_body}");
+    assert!(
+        deleted_cid_body["rows_edn"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| {
+                row[0] == format!("\"{}\"", delete_body["entity_cid"].as_str().unwrap())
+                    && row[1] == "\"application/atproto+json\""
+            }),
+        "{deleted_cid_body}"
     );
 
     let (status, deleted_text_body) = s
