@@ -7004,9 +7004,12 @@ pub async fn agent_sync_close(
 mod tests {
     use super::{
         append_auth_capability_datoms, atproto_repo_record_entity_cid, atproto_repo_write_datoms,
-        is_did_web_ip_host, AtprotoRepoWriteReq, AuthCapabilityProjection, ZCAP_ALLOWED_ACTION_IRI,
-        ZCAP_CONTROLLER_IRI, ZCAP_INVOCATION_PROOF_IRI, ZCAP_INVOCATION_TARGET_IRI,
+        datomic_transact, distributed_graph_ipns_name, is_did_web_ip_host, AtprotoRepoWriteReq,
+        AuthCapabilityProjection, DatomicTransactReq, ZCAP_ALLOWED_ACTION_IRI, ZCAP_CONTROLLER_IRI,
+        ZCAP_INVOCATION_PROOF_IRI, ZCAP_INVOCATION_TARGET_IRI,
     };
+    use crate::server::KotobaState;
+    use axum::response::IntoResponse;
     use kotoba_core::cid::KotobaCid;
     use kotoba_datomic::distributed::{
         CommitDatomsRequest, DistributedCommitWriter, DistributedDatomReader,
@@ -7015,6 +7018,20 @@ mod tests {
     use kotoba_edn::EdnValue;
     use kotoba_ipfs::InMemoryIpnsRegistry;
     use kotoba_store::MemoryBlockStore;
+    use std::sync::Arc;
+
+    fn test_operator_jwt(did: &str) -> String {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(
+            serde_json::json!({
+                "sub": did,
+                "exp": 4_102_444_800u64
+            })
+            .to_string(),
+        );
+        format!("{header}.{payload}.")
+    }
     use serde_json::json;
 
     #[test]
@@ -7215,6 +7232,81 @@ mod tests {
         assert!(has(ZCAP_INVOCATION_PROOF_IRI, &proof_cid.to_multibase()));
         assert!(has(":capability/credential", "urn:uuid:capability-vc-1"));
         assert!(tea_datoms.iter().all(|datom| datom.t == tx));
+    }
+
+    #[tokio::test]
+    async fn datomic_transact_xrpc_commits_distributed_tx_metadata() {
+        std::env::set_var("KOTOBA_IPFS", "off");
+        std::env::set_var("KOTOBA_IPNS_REQUIRE_SIGNATURE", "false");
+        let state = Arc::new(KotobaState::new(None).unwrap());
+        let graph = KotobaCid::from_bytes(b"xrpc-distributed-transact-graph");
+        let graph_mb = graph.to_multibase();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", test_operator_jwt(&state.operator_did))
+                .parse()
+                .unwrap(),
+        );
+
+        let response = datomic_transact(
+            axum::extract::State(Arc::clone(&state)),
+            headers,
+            axum::Json(DatomicTransactReq {
+                graph: graph_mb.clone(),
+                tx_edn: r#"[[:db/add "alice" :person/name "Alice"]]"#.into(),
+                cacao_b64: None,
+                cacao_proof_cid: None,
+                expected_parent: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let tx_cid = KotobaCid::from_multibase(body["tx_cid"].as_str().unwrap()).unwrap();
+        let ipns_name = distributed_graph_ipns_name(&graph);
+        assert_eq!(body["ipns_name"], ipns_name);
+        assert_eq!(body["ipns_sequence"], 1);
+
+        let reader = DistributedDatomReader::new(&*state.block_store, &*state.ipns_registry);
+        let head = reader.resolve_head(&ipns_name).unwrap().unwrap();
+        assert_eq!(head.cid.to_multibase(), body["commit_cid"]);
+        let tx_datoms = reader
+            .history_datoms_index(
+                &head.cid,
+                kotoba_datomic::DatomIndex::Tea,
+                &[EdnValue::string(tx_cid.to_multibase())],
+            )
+            .unwrap();
+        let has = |attr: &str, value: EdnValue| {
+            tx_datoms
+                .iter()
+                .any(|datom| datom.e == tx_cid && datom.a == attr && datom.v == value)
+        };
+        assert!(has(":tx/graph", EdnValue::string(graph_mb)));
+        assert!(has(
+            ":tx/operation",
+            EdnValue::string(kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT)
+        ));
+        assert!(has(
+            ":tx/author",
+            EdnValue::string(state.operator_did.clone())
+        ));
+        assert!(has(":tx/ipnsName", EdnValue::string(ipns_name)));
+        assert!(has(":tx/ipnsSequence", EdnValue::Integer(1)));
+        assert!(has(
+            ":tx/ipnsControllerDid",
+            EdnValue::string(state.operator_did.clone())
+        ));
+        assert!(tx_datoms
+            .iter()
+            .any(|datom| datom.a == ":person/name" && datom.v == EdnValue::string("Alice")));
     }
 
     #[test]
