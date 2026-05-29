@@ -6349,6 +6349,51 @@ async fn assert_capability_invocation_target(
             "missing capability target {expected_target} for attr {attr}: {body}"
         );
     }
+
+    let typed_scope = expected_target
+        .strip_prefix("kotoba://graph/")
+        .map(|value| (":capability/graph", value))
+        .or_else(|| {
+            expected_target
+                .strip_prefix("kotoba://tx/")
+                .map(|value| (":capability/tx", value))
+        })
+        .or_else(|| {
+            expected_target
+                .strip_prefix("didcomm://thread/")
+                .map(|value| (":capability/didcommThread", value))
+        })
+        .or_else(|| {
+            expected_target
+                .starts_with("at://")
+                .then_some((":capability/atprotoResource", expected_target))
+        });
+    if let Some((attr, expected_value)) = typed_scope {
+        let (status, body) = s
+            .post_auth(
+                "/xrpc/ai.gftd.apps.kotoba.datomic.q",
+                json!({
+                    "graph": graph,
+                    "query_edn": format!(
+                        r#"{{:find [?target]
+                             :where [[?tx :capability/proofCid ?proof]
+                                     [?tx {attr} ?target]]
+                             :in [?proof]}}"#
+                    ),
+                    "inputs_edn": [format!(r#""{proof_cid}""#)]
+                }),
+                &tok,
+            )
+            .await;
+        assert_eq!(status, 200, "{body}");
+        let rows = body["rows_edn"].as_array().expect("typed capability rows");
+        assert!(
+            rows.iter().any(|row| row.as_array().is_some_and(|row| {
+                row.first() == Some(&json!(format!("\"{expected_value}\"")))
+            })),
+            "missing typed capability target {expected_value} for attr {attr}: {body}"
+        );
+    }
 }
 
 #[tokio::test]
