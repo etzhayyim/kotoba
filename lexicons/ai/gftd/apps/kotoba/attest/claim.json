@@ -27,6 +27,10 @@
             "status",
             "claim_cid",
             "credential_cid",
+            "credential_id",
+            "credential_type",
+            "credential_wire_format",
+            "credential_data_model",
             "commit_cid",
             "ipns_name",
             "ipns_sequence"
@@ -35,6 +39,10 @@
             "status": { "type": "string", "knownValues": ["attested"] },
             "claim_cid": { "type": "string" },
             "credential_cid": { "type": "string" },
+            "credential_id": { "type": "string" },
+            "credential_type": { "type": "string" },
+            "credential_wire_format": { "type": "string" },
+            "credential_data_model": { "type": "string" },
             "commit_cid": { "type": "string" },
             "ipns_name": { "type": "string" },
             "ipns_sequence": { "type": "integer", "minimum": 0 }

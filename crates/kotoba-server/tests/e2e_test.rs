@@ -10234,6 +10234,19 @@ async fn attest_claim_roundtrip() {
     assert_eq!(body["status"], "attested", "{body}");
     assert!(body["claim_cid"].as_str().is_some(), "{body}");
     assert!(body["credential_cid"].as_str().is_some(), "{body}");
+    assert!(body["credential_id"].as_str().is_some(), "{body}");
+    assert_eq!(
+        body["credential_type"], "KotobaAttestationCredential",
+        "{body}"
+    );
+    assert_eq!(
+        body["credential_wire_format"], "application/vc+ld+json",
+        "{body}"
+    );
+    assert_eq!(
+        body["credential_data_model"], "W3C VC Data Model 2.0",
+        "{body}"
+    );
     assert!(body["commit_cid"].as_str().is_some(), "{body}");
     assert!(body["ipns_name"].as_str().is_some(), "{body}");
     assert_eq!(body["ipns_sequence"].as_u64(), Some(1), "{body}");
@@ -10244,7 +10257,7 @@ async fn attest_claim_roundtrip() {
             "/xrpc/ai.gftd.apps.kotoba.datomic.q",
             json!({
                 "graph": graph,
-                "query_edn": r#"{:find [?issuer ?types ?subjectId ?claimCid ?claimType ?attester ?stake ?status ?statusId ?statusType]
+                "query_edn": r#"{:find [?issuer ?types ?subjectId ?claimCid ?claimType ?attester ?stake ?status ?statusId ?statusType ?cid ?wireFormat ?dataModel ?context ?attestType]
 	                                :where [[?e :credential/issuer ?issuer]
 	                                        [?e :credential/type ?types]
 	                                        [?e :credential/subjectId ?subjectId]
@@ -10254,7 +10267,13 @@ async fn attest_claim_roundtrip() {
 	                                        [?e :credential/subject/stakeMkoto ?stake]
 	                                        [?e :credential/status ?status]
 	                                        [?e :credential/status/id ?statusId]
-	                                        [?e :credential/status/type ?statusType]]}"#
+	                                        [?e :credential/status/type ?statusType]
+	                                        [?e :credential/cid ?cid]
+	                                        [?e :credential/wireFormat ?wireFormat]
+	                                        [?e :credential/dataModel ?dataModel]
+	                                        [?e :credential/context ?context]
+	                                        [?claim :attest/credentialCid ?cid]
+	                                        [?claim :attest/credentialType ?attestType]]}"#
             }),
             &tenant_jwt(&s.operator_did),
         )
@@ -10288,6 +10307,17 @@ async fn attest_claim_roundtrip() {
         "{q_body}"
     );
     assert_eq!(row[9], "\"KotobaAttestationStatus\"", "{q_body}");
+    assert_eq!(
+        row[10],
+        format!("\"{}\"", body["credential_cid"].as_str().unwrap()),
+        "{q_body}"
+    );
+    assert_eq!(row[11], "\"application/vc+ld+json\"", "{q_body}");
+    assert_eq!(row[12], "\"W3C VC Data Model 2.0\"", "{q_body}");
+    assert!(row[13]
+        .as_str()
+        .is_some_and(|context| context.contains("https://www.w3.org/ns/credentials/v2")));
+    assert_eq!(row[14], "\"KotobaAttestationCredential\"", "{q_body}");
 
     let (status, iri_body) = s
         .post_auth(

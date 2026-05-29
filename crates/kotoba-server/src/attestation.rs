@@ -230,6 +230,27 @@ fn attestation_claim_datoms(
     assert_claim(
         &mut out,
         claim_cid,
+        "attest/credentialType",
+        kotoba_edn::EdnValue::string("KotobaAttestationCredential"),
+        tx_cid,
+    );
+    assert_claim(
+        &mut out,
+        claim_cid,
+        "attest/credentialWireFormat",
+        kotoba_edn::EdnValue::string("application/vc+ld+json"),
+        tx_cid,
+    );
+    assert_claim(
+        &mut out,
+        claim_cid,
+        "attest/credentialDataModel",
+        kotoba_edn::EdnValue::string("W3C VC Data Model 2.0"),
+        tx_cid,
+    );
+    assert_claim(
+        &mut out,
+        claim_cid,
         "attest/credentialStatus",
         kotoba_edn::EdnValue::string("active"),
         tx_cid,
@@ -346,6 +367,14 @@ pub struct AttestClaimResp {
     pub claim_cid: String,
     /// Multibase CID of the W3C VC projection for this attestation.
     pub credential_cid: String,
+    /// W3C VC id for the issued attestation credential.
+    pub credential_id: String,
+    /// Specific VC type that represents this attestation.
+    pub credential_type: &'static str,
+    /// External wire format of the attestation credential.
+    pub credential_wire_format: &'static str,
+    /// W3C VC data model used by the attestation credential.
+    pub credential_data_model: &'static str,
     /// Distributed Datomic commit CID containing the VC datoms.
     pub commit_cid: String,
     /// IPNS name for the attestation graph head.
@@ -398,6 +427,9 @@ pub struct AttestRecord {
     pub claim_cid: String,
     pub credential_cid: String,
     pub credential_id: String,
+    pub credential_type: String,
+    pub credential_wire_format: String,
+    pub credential_data_model: String,
     pub credential_status: String,
     pub entity_did: String,
     pub claim_type: String,
@@ -594,6 +626,10 @@ pub async fn attest_claim(
             status: "attested",
             claim_cid: claim_cid_str,
             credential_cid: credential_cid.to_multibase(),
+            credential_id: credential.id,
+            credential_type: "KotobaAttestationCredential",
+            credential_wire_format: "application/vc+ld+json",
+            credential_data_model: "W3C VC Data Model 2.0",
             commit_cid: distributed.commit_cid,
             ipns_name: distributed.ipns_name,
             ipns_sequence: distributed.ipns_sequence,
@@ -763,6 +799,9 @@ pub async fn attest_query(
             claim_cid: claim_cid.to_multibase(),
             credential_cid: String::new(),
             credential_id: String::new(),
+            credential_type: String::new(),
+            credential_wire_format: String::new(),
+            credential_data_model: String::new(),
             credential_status: String::new(),
             entity_did: String::new(),
             claim_type: String::new(),
@@ -774,6 +813,9 @@ pub async fn attest_query(
             match datom.a.as_str() {
                 "attest/credentialCid" => rec.credential_cid = datom_text(&datom.v),
                 "attest/credentialId" => rec.credential_id = datom_text(&datom.v),
+                "attest/credentialType" => rec.credential_type = datom_text(&datom.v),
+                "attest/credentialWireFormat" => rec.credential_wire_format = datom_text(&datom.v),
+                "attest/credentialDataModel" => rec.credential_data_model = datom_text(&datom.v),
                 "attest/credentialStatus" => rec.credential_status = datom_text(&datom.v),
                 "attest/entity" => rec.entity_did = datom_text(&datom.v),
                 "attest/type" => rec.claim_type = datom_text(&datom.v),
@@ -983,13 +1025,16 @@ mod tests {
 
         let reader = kotoba_datomic::distributed::DistributedDatomReader::new(&store, &ipns);
         let query = kotoba_edn::parse(
-            r#"{:find [?issuer ?entity ?claimType ?credStatus ?attestStatus ?evidence]
+            r#"{:find [?issuer ?entity ?claimType ?credStatus ?attestType ?wireFormat ?dataModel ?attestStatus ?evidence]
                 :where [[?vc :credential/issuer ?issuer]
                         [?vc :credential/subject/id ?entity]
                         [?vc :credential/subject/claimType ?claimType]
                         [?vc :credential/status/type ?credStatus]
                         [?vc :credential/id ?credentialId]
                         [?claim :attest/credentialId ?credentialId]
+                        [?claim :attest/credentialType ?attestType]
+                        [?claim :attest/credentialWireFormat ?wireFormat]
+                        [?claim :attest/credentialDataModel ?dataModel]
                         [?claim :attest/credentialStatus ?attestStatus]
                         [?claim :attest/evidence ?evidence]]}"#,
         )
@@ -1003,6 +1048,9 @@ mod tests {
                 kotoba_edn::EdnValue::string("did:plc:attestedentity"),
                 kotoba_edn::EdnValue::string("verified_entity"),
                 kotoba_edn::EdnValue::string("KotobaAttestationStatus"),
+                kotoba_edn::EdnValue::string("KotobaAttestationCredential"),
+                kotoba_edn::EdnValue::string("application/vc+ld+json"),
+                kotoba_edn::EdnValue::string("W3C VC Data Model 2.0"),
                 kotoba_edn::EdnValue::string("active"),
                 kotoba_edn::EdnValue::string("ipfs://bafyattestationevidence"),
             ]]
@@ -1154,6 +1202,10 @@ mod tests {
                 "status",
                 "claim_cid",
                 "credential_cid",
+                "credential_id",
+                "credential_type",
+                "credential_wire_format",
+                "credential_data_model",
                 "commit_cid",
                 "ipns_name",
                 "ipns_sequence",
@@ -1183,6 +1235,9 @@ mod tests {
                 "claim_cid",
                 "credential_cid",
                 "credential_id",
+                "credential_type",
+                "credential_wire_format",
+                "credential_data_model",
                 "credential_status",
                 "entity_did",
                 "claim_type",
