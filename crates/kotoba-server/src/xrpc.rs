@@ -7511,6 +7511,93 @@ mod tests {
         );
     }
 
+    #[test]
+    fn protocol_lexicons_expose_w3c_vp_auth_input_schema() {
+        for src in [
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/transact.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/with.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/q.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/datoms.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/seekDatoms.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/indexRange.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/pull.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/pullMany.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/history.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/txRange.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/log.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/basisT.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/dbStats.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/entity.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/ident.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/entid.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/vc/present.json"),
+        ] {
+            assert_lexicon_input_presentation_schema(src, "presentation");
+        }
+        for src in [
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/vc/issue.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/vc/present.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/didcomm/send.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/atproto/repo/write.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/did/document/publish.json"),
+        ] {
+            assert_lexicon_input_presentation_schema(src, "auth_presentation");
+        }
+    }
+
+    fn assert_lexicon_input_presentation_schema(src: &str, field: &str) {
+        let value: serde_json::Value = serde_json::from_str(src).expect("lexicon JSON");
+        let property = &value["defs"]["main"]["input"]["schema"]["properties"][field];
+        assert_eq!(
+            property["type"], "object",
+            "{} input {field} must be an object",
+            value["id"]
+        );
+        let required_values = property["required"].as_array().expect("required array");
+        for required in ["@context", "id", "type"] {
+            assert!(
+                required_values
+                    .iter()
+                    .any(|value| value.as_str() == Some(required)),
+                "{} input {field} missing VP required field {required}",
+                value["id"]
+            );
+        }
+        let properties = property["properties"]
+            .as_object()
+            .expect("properties object");
+        for expected in [
+            "@context",
+            "id",
+            "type",
+            "holder",
+            "verifiableCredential",
+            "proof",
+        ] {
+            assert!(
+                properties.contains_key(expected),
+                "{} input {field} missing VP property {expected}",
+                value["id"]
+            );
+        }
+        let proof = &property["properties"]["proof"];
+        assert_eq!(
+            proof["type"], "object",
+            "{} input {field}.proof must be an object",
+            value["id"]
+        );
+        let proof_required = proof["required"].as_array().expect("proof required array");
+        for required in ["type", "proofPurpose", "verificationMethod", "proofValue"] {
+            assert!(
+                proof_required
+                    .iter()
+                    .any(|value| value.as_str() == Some(required)),
+                "{} input {field}.proof missing DataIntegrityProof required field {required}",
+                value["id"]
+            );
+        }
+    }
+
     fn assert_lexicon_input_fields(src: &str, required: &[&str], properties: &[&str]) {
         let value: serde_json::Value = serde_json::from_str(src).expect("lexicon JSON");
         let schema = &value["defs"]["main"]["input"]["schema"];

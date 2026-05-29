@@ -601,6 +601,54 @@ impl KotobaIpfsNode {
         })
     }
 
+    /// Kubo-like `dag/export`: write a CAR v1 stream rooted at `cid`.
+    pub async fn dag_export(&self, cid: &IpldCid, recursive: bool) -> Result<Bytes> {
+        let mut roots = vec![*cid];
+        let mut blocks = vec![*cid];
+        if recursive {
+            blocks.extend(self.refs(cid, true).await?);
+        }
+        blocks.sort();
+        blocks.dedup();
+        roots.sort();
+        let mut out = Vec::new();
+        write_car_header(&mut out, &roots)?;
+        for block_cid in blocks {
+            let data = self.get_block(&block_cid).await?;
+            write_car_block(&mut out, &block_cid, &data)?;
+        }
+        Ok(Bytes::from(out))
+    }
+
+    /// Kubo-like `dag/import`: read a CAR v1 stream into the local block store.
+    pub async fn dag_import(&self, car: &[u8]) -> Result<DagImport> {
+        let mut pos = 0;
+        let header_len = read_uvarint(car, &mut pos)? as usize;
+        if pos + header_len > car.len() {
+            bail!("CAR header exceeds input length");
+        }
+        let roots = read_car_header(&car[pos..pos + header_len])?;
+        pos += header_len;
+
+        let mut blocks = Vec::new();
+        while pos < car.len() {
+            let section_len = read_uvarint(car, &mut pos)? as usize;
+            if section_len == 0 {
+                continue;
+            }
+            if pos + section_len > car.len() {
+                bail!("CAR block section exceeds input length");
+            }
+            let section = &car[pos..pos + section_len];
+            let (cid, cid_len) = read_car_cid(section)?;
+            let data = &section[cid_len..];
+            self.put_block(&cid, data).await?;
+            blocks.push(cid);
+            pos += section_len;
+        }
+        Ok(DagImport { roots, blocks })
+    }
+
     /// Kubo-like `dag/resolve` for local dag-cbor roots and direct IPLD links.
     pub async fn dag_resolve(&self, cid: &IpldCid, path: impl AsRef<str>) -> Result<DagResolve> {
         let path = normalize_ipld_path(path.as_ref())?;
@@ -1418,6 +1466,12 @@ pub struct DagResolve {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DagImport {
+    pub roots: Vec<IpldCid>,
+    pub blocks: Vec<IpldCid>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PathResolve {
     pub cid: IpldCid,
     pub rem_path: String,
@@ -1703,6 +1757,112 @@ fn cbor_value_to_ipld(value: CborValue) -> Result<Ipld> {
         CborValue::Tag(tag, _) => bail!("unsupported dag-cbor tag {tag}"),
         _ => bail!("unsupported dag-cbor value"),
     })
+}
+
+fn write_car_header(out: &mut Vec<u8>, roots: &[IpldCid]) -> Result<()> {
+    let root_values = roots
+        .iter()
+        .map(|cid| {
+            let mut bytes = vec![0];
+            bytes.extend(cid.to_bytes());
+            CborValue::Tag(42, Box::new(CborValue::Bytes(bytes)))
+        })
+        .collect();
+    let header = CborValue::Map(vec![
+        (
+            CborValue::Text("roots".to_string()),
+            CborValue::Array(root_values),
+        ),
+        (
+            CborValue::Text("version".to_string()),
+            CborValue::Integer(1.into()),
+        ),
+    ]);
+    let mut data = Vec::new();
+    ciborium::into_writer(&header, &mut data).map_err(|e| anyhow!("CAR header encode: {e}"))?;
+    write_uvarint(out, data.len() as u64);
+    out.extend(data);
+    Ok(())
+}
+
+fn read_car_header(data: &[u8]) -> Result<Vec<IpldCid>> {
+    let value: CborValue =
+        ciborium::from_reader(data).map_err(|e| anyhow!("CAR header decode: {e}"))?;
+    let CborValue::Map(entries) = value else {
+        bail!("CAR header must be a map");
+    };
+    let mut version = None;
+    let mut roots = None;
+    for (key, value) in entries {
+        let CborValue::Text(key) = key else {
+            bail!("CAR header key must be text");
+        };
+        match key.as_str() {
+            "version" => version = Some(value),
+            "roots" => roots = Some(value),
+            _ => {}
+        }
+    }
+    if version != Some(CborValue::Integer(1.into())) {
+        bail!("unsupported CAR version");
+    }
+    let Some(CborValue::Array(root_values)) = roots else {
+        bail!("CAR header missing roots");
+    };
+    root_values.into_iter().map(car_cid_link).collect()
+}
+
+fn car_cid_link(value: CborValue) -> Result<IpldCid> {
+    let CborValue::Tag(42, value) = value else {
+        bail!("CAR root must be a CID link");
+    };
+    let CborValue::Bytes(bytes) = *value else {
+        bail!("CAR CID link must contain bytes");
+    };
+    let raw = bytes.strip_prefix(&[0]).unwrap_or(bytes.as_slice());
+    IpldCid::read_bytes(raw).map_err(|e| anyhow!("CAR CID link decode: {e}"))
+}
+
+fn write_car_block(out: &mut Vec<u8>, cid: &IpldCid, data: &[u8]) -> Result<()> {
+    let cid_bytes = cid.to_bytes();
+    write_uvarint(out, (cid_bytes.len() + data.len()) as u64);
+    out.extend(cid_bytes);
+    out.extend(data);
+    Ok(())
+}
+
+fn read_car_cid(section: &[u8]) -> Result<(IpldCid, usize)> {
+    for len in 1..=section.len() {
+        if let Ok(cid) = IpldCid::read_bytes(&section[..len]) {
+            return Ok((cid, len));
+        }
+    }
+    bail!("CAR block section does not start with a CID")
+}
+
+fn write_uvarint(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn read_uvarint(data: &[u8], pos: &mut usize) -> Result<u64> {
+    let mut value = 0u64;
+    let mut shift = 0;
+    loop {
+        let byte = *data.get(*pos).ok_or_else(|| anyhow!("truncated uvarint"))?;
+        *pos += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+        shift += 7;
+        if shift >= 64 {
+            bail!("uvarint overflow");
+        }
+    }
 }
 
 fn rebase_mfs_path(path: &str, source: &str, dest: &str) -> String {

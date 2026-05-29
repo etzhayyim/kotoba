@@ -19,7 +19,7 @@ pub use ipns::{
     SignedIpnsRegistry,
 };
 pub use node::{
-    BandwidthStats, BitswapStats, BlockPut, BlockStat, DagResolve, DagStat, IpfsConfig,
+    BandwidthStats, BitswapStats, BlockPut, BlockStat, DagImport, DagResolve, DagStat, IpfsConfig,
     KotobaIpfsNode, MfsEntry, MfsStat, Multiaddr, NameResolve, NodeId, NodeVersion, ObjectStat,
     PathResolve, PeerId, PinVerify, Provider, RepoStat, RepoVerify, RepoVerifyError, SwarmConnect,
     SwarmPeer,

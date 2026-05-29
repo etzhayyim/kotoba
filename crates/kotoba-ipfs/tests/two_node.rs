@@ -315,6 +315,38 @@ async fn kubo_compatible_local_api_surface() {
         .expect("resolve /ipfs dag link path");
     assert_eq!(path_resolve.cid, child);
     assert_eq!(path_resolve.rem_path, "");
+    let car = node
+        .dag_export(&linked, true)
+        .await
+        .expect("dag/export recursive CAR");
+    let import_temp = tempfile::tempdir().expect("import tempdir");
+    let import_node = IpfsConfig::new()
+        .with_repo_path(import_temp.path())
+        .start()
+        .await
+        .expect("import node start");
+    let imported = import_node.dag_import(&car).await.expect("dag/import CAR");
+    assert_eq!(imported.roots, vec![linked]);
+    assert_eq!(imported.blocks, vec![child, leaf, linked]);
+    assert!(import_node
+        .has_block(&linked)
+        .await
+        .expect("has imported root"));
+    assert!(import_node
+        .has_block(&child)
+        .await
+        .expect("has imported child"));
+    assert!(import_node
+        .has_block(&leaf)
+        .await
+        .expect("has imported leaf"));
+    assert_eq!(
+        import_node
+            .refs(&linked, true)
+            .await
+            .expect("refs imported CAR"),
+        vec![child, leaf]
+    );
 
     let updated_pin = node.add(b"hello v2").await.expect("add updated pin");
     node.pin_add(&raw).await.expect("pin/add");
