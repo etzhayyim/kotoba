@@ -557,6 +557,8 @@ pub(crate) struct AuthCapabilityProjection {
     invocation_targets: Vec<String>,
     proof_cid: Option<kotoba_core::cid::KotobaCid>,
     credential_ids: Vec<String>,
+    presentation_id: Option<String>,
+    presentation_cid: Option<kotoba_core::cid::KotobaCid>,
 }
 
 const ZCAP_ALLOWED_ACTION_IRI: &str = "https://w3id.org/security#allowedAction";
@@ -1780,6 +1782,8 @@ fn cacao_capability_projection(
             .collect(),
         proof_cid,
         credential_ids: vec![],
+        presentation_id: None,
+        presentation_cid: None,
     }
 }
 
@@ -1788,6 +1792,7 @@ fn vp_capability_projection(
     proof_cid: Option<kotoba_core::cid::KotobaCid>,
 ) -> AuthCapabilityProjection {
     let invoker = presentation.holder.clone().unwrap_or_default();
+    let presentation_cid = presentation.cid().ok().or_else(|| proof_cid.clone());
     let mut allowed_actions = Vec::new();
     let mut invocation_targets = Vec::new();
     let mut credential_ids = Vec::new();
@@ -1849,6 +1854,8 @@ fn vp_capability_projection(
         invocation_targets,
         proof_cid,
         credential_ids,
+        presentation_id: Some(presentation.id.clone()),
+        presentation_cid,
     }
 }
 
@@ -2485,6 +2492,28 @@ fn append_auth_capability_datoms(
             tx_cid,
             ":capability/credential",
             kotoba_edn::EdnValue::String(credential_id.clone()),
+        );
+    }
+    if let Some(presentation_id) = &projection.presentation_id {
+        assert_tx(
+            datoms,
+            tx_cid,
+            ":capability/presentation",
+            kotoba_edn::EdnValue::String(presentation_id.clone()),
+        );
+    }
+    if let Some(presentation_cid) = &projection.presentation_cid {
+        assert_tx(
+            datoms,
+            tx_cid,
+            ":capability/presentationCid",
+            kotoba_edn::EdnValue::String(presentation_cid.to_multibase()),
+        );
+        assert_tx(
+            datoms,
+            tx_cid,
+            kotoba_vc::ATTR_PRESENTATION_CID,
+            kotoba_edn::EdnValue::String(presentation_cid.to_multibase()),
         );
     }
 }
@@ -8409,13 +8438,13 @@ mod tests {
         datomic_q, datomic_seek_datoms, datomic_sync, datomic_transact, datomic_tx_range,
         datomic_with, did_document_publish, didcomm_send, distributed_graph_ipns_name,
         enforce_datomic_range_tx_scope, is_did_web_ip_host, protocol_payload_tx_cid, vc_issue,
-        AtprotoRepoWriteReq, AuthCapabilityProjection, DatomicBasisTReq, DatomicDatomsReq,
-        DatomicDbStatsReq, DatomicEntidReq, DatomicEntityReq, DatomicHistoryReq, DatomicIdentReq,
-        DatomicIndexPullReq, DatomicIndexRangeReq, DatomicLogReq, DatomicPullManyReq,
-        DatomicPullReq, DatomicQReq, DatomicSeekDatomsReq, DatomicSyncReq, DatomicTransactReq,
-        DatomicTxRangeReq, DatomicWithReq, DidCommSendReq, DidDocumentPublishReq, VcIssueReq,
-        ZCAP_ALLOWED_ACTION_IRI, ZCAP_CAPABILITY_INVOCATION_IRI, ZCAP_CONTROLLER_IRI,
-        ZCAP_INVOCATION_PROOF_IRI, ZCAP_INVOCATION_TARGET_IRI,
+        vp_capability_projection, AtprotoRepoWriteReq, AuthCapabilityProjection, DatomicBasisTReq,
+        DatomicDatomsReq, DatomicDbStatsReq, DatomicEntidReq, DatomicEntityReq, DatomicHistoryReq,
+        DatomicIdentReq, DatomicIndexPullReq, DatomicIndexRangeReq, DatomicLogReq,
+        DatomicPullManyReq, DatomicPullReq, DatomicQReq, DatomicSeekDatomsReq, DatomicSyncReq,
+        DatomicTransactReq, DatomicTxRangeReq, DatomicWithReq, DidCommSendReq,
+        DidDocumentPublishReq, VcIssueReq, ZCAP_ALLOWED_ACTION_IRI, ZCAP_CAPABILITY_INVOCATION_IRI,
+        ZCAP_CONTROLLER_IRI, ZCAP_INVOCATION_PROOF_IRI, ZCAP_INVOCATION_TARGET_IRI,
     };
     use crate::server::KotobaState;
     use axum::response::IntoResponse;
@@ -9303,6 +9332,8 @@ mod tests {
             invocation_targets: targets.clone(),
             proof_cid: Some(proof_cid.clone()),
             credential_ids: vec!["urn:uuid:capability-vc-1".into()],
+            presentation_id: Some("urn:uuid:capability-vp-1".into()),
+            presentation_cid: Some(KotobaCid::from_bytes(b"capability-presentation")),
         };
         let mut datoms = Vec::<Datom>::new();
         append_auth_capability_datoms(&mut datoms, &tx, &projection);
@@ -9369,7 +9400,73 @@ mod tests {
         assert!(has(":capability/proofCid", &proof_cid.to_multibase()));
         assert!(has(ZCAP_INVOCATION_PROOF_IRI, &proof_cid.to_multibase()));
         assert!(has(":capability/credential", "urn:uuid:capability-vc-1"));
+        assert!(has(":capability/presentation", "urn:uuid:capability-vp-1"));
+        let presentation_cid = KotobaCid::from_bytes(b"capability-presentation").to_multibase();
+        assert!(has(":capability/presentationCid", &presentation_cid));
+        assert!(has(kotoba_vc::ATTR_PRESENTATION_CID, &presentation_cid));
         assert!(tea_datoms.iter().all(|datom| datom.t == tx));
+    }
+
+    #[test]
+    fn vp_capability_projection_preserves_presentation_evidence() {
+        let graph = KotobaCid::from_bytes(b"vp-capability-graph").to_multibase();
+        let tx_scope = format!(
+            "kotoba://tx/{}",
+            KotobaCid::from_bytes(b"vp-capability-tx").to_multibase()
+        );
+        let mut credential = kotoba_vc::VerifiableCredential::new(
+            "urn:uuid:vp-capability-credential",
+            "did:key:zOperator",
+            serde_json::json!({
+                "id": "did:key:zHolder",
+                "operations": [
+                    kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT,
+                    kotoba_auth::CacaoPayload::OP_VC_PRESENT
+                ],
+                "resources": [
+                    format!("kotoba://graph/{graph}"),
+                    tx_scope
+                ]
+            }),
+        );
+        credential
+            .types
+            .push("KotobaCapabilityCredential".to_string());
+        let presentation = kotoba_vc::VerifiablePresentation {
+            context: vec![kotoba_vc::VC_CONTEXT_V2.to_string()],
+            id: "urn:uuid:vp-capability-presentation".to_string(),
+            types: vec!["VerifiablePresentation".to_string()],
+            holder: Some("did:key:zHolder".to_string()),
+            verifiable_credentials: vec![credential],
+            proof: None,
+        };
+        let presentation_cid = presentation.cid().expect("presentation cid");
+        let projection = vp_capability_projection(&presentation, None);
+
+        assert_eq!(projection.proof_format, "W3C VerifiablePresentation");
+        assert_eq!(projection.controller, "did:key:zOperator");
+        assert_eq!(projection.invoker, "did:key:zHolder");
+        assert_eq!(
+            projection.presentation_id.as_deref(),
+            Some("urn:uuid:vp-capability-presentation")
+        );
+        assert_eq!(
+            projection.presentation_cid.as_ref(),
+            Some(&presentation_cid)
+        );
+        assert!(projection
+            .credential_ids
+            .contains(&"urn:uuid:vp-capability-credential".to_string()));
+        assert!(projection
+            .allowed_actions
+            .contains(&kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT.to_string()));
+        assert!(projection
+            .allowed_actions
+            .contains(&kotoba_auth::CacaoPayload::OP_VC_PRESENT.to_string()));
+        assert!(projection
+            .invocation_targets
+            .contains(&format!("kotoba://graph/{graph}")));
+        assert!(projection.invocation_targets.contains(&tx_scope));
     }
 
     #[tokio::test]
