@@ -3676,7 +3676,7 @@ fn is_find_expression(seq: &[EdnValue]) -> bool {
             if matches!(
                 symbol.name.as_str(),
                 "pull" | "count" | "count-distinct" | "sum" | "min" | "max" | "avg"
-                    | "median" | "variance" | "stddev"
+                    | "median" | "variance" | "stddev" | "rand" | "sample"
             )
     )
 }
@@ -3694,6 +3694,8 @@ enum FindItem {
     Median(EdnValue),
     Variance(EdnValue),
     Stddev(EdnValue),
+    Rand(EdnValue),
+    Sample { limit: usize, value: EdnValue },
 }
 
 impl FindItem {
@@ -3709,6 +3711,8 @@ impl FindItem {
                 | Self::Median(_)
                 | Self::Variance(_)
                 | Self::Stddev(_)
+                | Self::Rand(_)
+                | Self::Sample { .. }
         )
     }
 
@@ -3723,7 +3727,9 @@ impl FindItem {
             | Self::Avg(value)
             | Self::Median(value)
             | Self::Variance(value)
-            | Self::Stddev(value) => Ok(match variable_name(value) {
+            | Self::Stddev(value)
+            | Self::Rand(value)
+            | Self::Sample { value, .. } => Ok(match variable_name(value) {
                 Some(var) => binding.get(var).cloned().unwrap_or(EdnValue::Nil),
                 None => value.clone(),
             }),
@@ -3774,6 +3780,24 @@ fn parse_find_item(value: &EdnValue) -> Result<FindItem> {
     if seq.len() == 2 && matches!(seq[0].as_symbol(), Some(symbol) if symbol.name == "stddev") {
         return Ok(FindItem::Stddev(seq[1].clone()));
     }
+    if seq.len() == 2 && matches!(seq[0].as_symbol(), Some(symbol) if symbol.name == "rand") {
+        return Ok(FindItem::Rand(seq[1].clone()));
+    }
+    if seq.len() == 3 && matches!(seq[0].as_symbol(), Some(symbol) if symbol.name == "sample") {
+        let limit = match &seq[1] {
+            EdnValue::Integer(limit) if *limit >= 0 => *limit as usize,
+            other => {
+                return Err(DatomicError::Query(format!(
+                    "sample expects a non-negative integer limit, got {}",
+                    edn_to_string(other)
+                )));
+            }
+        };
+        return Ok(FindItem::Sample {
+            limit,
+            value: seq[2].clone(),
+        });
+    }
     if seq.len() == 3 && matches!(seq[0].as_symbol(), Some(symbol) if symbol.name == "pull") {
         return Ok(FindItem::Pull {
             entity: seq[1].clone(),
@@ -3797,6 +3821,8 @@ enum AggregateValue {
     Median(Vec<i64>),
     Variance(Vec<i64>),
     Stddev(Vec<i64>),
+    Rand(Option<EdnValue>),
+    Sample { limit: usize, values: Vec<EdnValue> },
 }
 
 impl AggregateValue {
@@ -3813,6 +3839,11 @@ impl AggregateValue {
             FindItem::Median(_) => Some(Self::Median(Vec::new())),
             FindItem::Variance(_) => Some(Self::Variance(Vec::new())),
             FindItem::Stddev(_) => Some(Self::Stddev(Vec::new())),
+            FindItem::Rand(_) => Some(Self::Rand(None)),
+            FindItem::Sample { limit, .. } => Some(Self::Sample {
+                limit: *limit,
+                values: Vec::new(),
+            }),
         }
     }
 
@@ -3849,6 +3880,16 @@ impl AggregateValue {
             Self::Median(values) | Self::Variance(values) | Self::Stddev(values) => {
                 values.push(aggregate_integer(&value)?);
             }
+            Self::Rand(current) => {
+                if current.is_none() {
+                    *current = Some(value);
+                }
+            }
+            Self::Sample { limit, values } => {
+                if values.len() < *limit {
+                    values.push(value);
+                }
+            }
         }
         Ok(())
     }
@@ -3873,6 +3914,8 @@ impl AggregateValue {
                 Some(variance) => EdnValue::float(variance.sqrt()),
                 None => EdnValue::Nil,
             },
+            Self::Rand(value) => value.clone().unwrap_or(EdnValue::Nil),
+            Self::Sample { values, .. } => EdnValue::Vector(values.clone()),
         }
     }
 }
@@ -7986,6 +8029,39 @@ mod tests {
                 ]
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn q_supports_datomic_rand_and_sample_aggregates() {
+        let conn = Connection::new();
+        conn.transact(
+            parse(
+                r#"[
+                  {:db/id "alice" :person/role :admin :person/name "Alice"}
+                  {:db/id "bob" :person/role :admin :person/name "Bob"}
+                  {:db/id "eve" :person/role :admin :person/name "Eve"}
+                ]"#,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let query = parse(
+            r#"{:find [?role (rand ?name) (sample 2 ?name)]
+                :where [[?e :person/role ?role]
+                        [?e :person/name ?name]]}"#,
+        )
+        .unwrap();
+        let rows = q(query, &conn.db(), &[]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], kw_value(":admin"));
+        assert!(
+            matches!(&rows[0][1], EdnValue::String(value) if ["Alice", "Bob", "Eve"].contains(&value.as_str()))
+        );
+        assert!(matches!(&rows[0][2], EdnValue::Vector(values)
+            if values.len() == 2
+                && values.iter().all(|value| matches!(value, EdnValue::String(name)
+                    if ["Alice", "Bob", "Eve"].contains(&name.as_str())))));
     }
 
     #[tokio::test]
