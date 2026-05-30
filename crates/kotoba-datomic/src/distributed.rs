@@ -1733,6 +1733,21 @@ where
                 .map(|arg| required_query_value(arg, binding))
                 .collect::<Result<Vec<_>, _>>()
                 .map(crate::query_hash_set_value),
+            "union"
+            | "clojure.set/union"
+            | "set/union"
+            | "intersection"
+            | "clojure.set/intersection"
+            | "set/intersection"
+            | "difference"
+            | "clojure.set/difference"
+            | "set/difference" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| {
+                    crate::query_set_operation_value(op, values).map_err(Into::into)
+                }),
             "hash-map" => args
                 .iter()
                 .map(|arg| required_query_value(arg, binding))
@@ -1803,11 +1818,14 @@ where
                 .map(|arg| required_query_value(arg, binding))
                 .collect::<Result<Vec<_>, _>>()
                 .and_then(|values| crate::query_disj_value(values).map_err(Into::into)),
-            "+" | "-" | "*" | "quot" | "rem" | "mod" | "min" | "max" => args
-                .iter()
-                .map(|arg| required_query_value(arg, binding))
-                .collect::<Result<Vec<_>, _>>()
-                .and_then(|values| crate::query_arithmetic_value(op, values).map_err(Into::into)),
+            "inc" | "dec" | "abs" | "+" | "-" | "*" | "quot" | "rem" | "mod" | "min" | "max" => {
+                args.iter()
+                    .map(|arg| required_query_value(arg, binding))
+                    .collect::<Result<Vec<_>, _>>()
+                    .and_then(|values| {
+                        crate::query_arithmetic_value(op, values).map_err(Into::into)
+                    })
+            }
             "tuple" => args
                 .iter()
                 .map(|arg| required_query_value(arg, binding))
@@ -6595,6 +6613,39 @@ mod tests {
             .q_triples(&report.commit.cid, &window_query)
             .unwrap();
         assert_eq!(rows, vec![vec![EdnValue::String("Alice".into())]]);
+
+        let set_query = kotoba_edn::parse(
+            r#"{:find [?expanded ?shared ?reduced]
+                :where [[?e :person/role ?role]
+                        [(= ?role :role/admin)]
+                        [(hash-set ?role :role/auditor) ?roles]
+                        [(clojure.set/union ?roles #{:role/operator}) ?expanded]
+                        [(set/subset? #{:role/admin} ?expanded)]
+                        [(set/superset? ?expanded ?roles)]
+                        [(set/intersection ?expanded #{:role/admin :role/missing}) ?shared]
+                        [(set/difference ?expanded #{:role/auditor}) ?reduced]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &set_query)
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                EdnValue::Set(BTreeSet::from([
+                    EdnValue::Keyword(Keyword::parse("role/admin")),
+                    EdnValue::Keyword(Keyword::parse("role/auditor")),
+                    EdnValue::Keyword(Keyword::parse("role/operator")),
+                ])),
+                EdnValue::Set(BTreeSet::from([EdnValue::Keyword(Keyword::parse(
+                    "role/admin"
+                ))])),
+                EdnValue::Set(BTreeSet::from([
+                    EdnValue::Keyword(Keyword::parse("role/admin")),
+                    EdnValue::Keyword(Keyword::parse("role/operator")),
+                ])),
+            ]]
+        );
 
         let get_query = kotoba_edn::parse(
             r#"{:find [?type ?status ?verified ?score ?nextScore ?adjustedScore ?doubleScore ?quotScore ?remScore ?modScore ?negativeMod ?minScore ?maxScore ?tagCount ?subject ?generatedStatus ?summaryCount ?fallback ?nonEmptyTags]

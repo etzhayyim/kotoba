@@ -2711,6 +2711,15 @@ fn query_apply_value_function(op: &str, args: Vec<EdnValue>) -> Result<EdnValue>
         "vector" => Ok(EdnValue::Vector(args)),
         "list" => Ok(EdnValue::List(args)),
         "hash-set" => Ok(query_hash_set_value(args)),
+        "union"
+        | "clojure.set/union"
+        | "set/union"
+        | "intersection"
+        | "clojure.set/intersection"
+        | "set/intersection"
+        | "difference"
+        | "clojure.set/difference"
+        | "set/difference" => query_set_operation_value(op, args),
         "hash-map" => query_hash_map_value(args),
         "count" => match args.as_slice() {
             [value] => query_count_value(value.clone()),
@@ -2767,6 +2776,56 @@ fn assoc_in_path(collection: EdnValue, path: &[EdnValue], value: EdnValue) -> Re
 
 pub(crate) fn query_hash_set_value(args: Vec<EdnValue>) -> EdnValue {
     EdnValue::Set(args.into_iter().collect())
+}
+
+fn query_set_arg(op: &str, value: EdnValue) -> Result<BTreeSet<EdnValue>> {
+    match value {
+        EdnValue::Set(values) => Ok(values),
+        other => Err(DatomicError::Query(format!(
+            "{op} expects set arguments, got {}",
+            edn_to_string(&other)
+        ))),
+    }
+}
+
+pub(crate) fn query_set_operation_value(op: &str, args: Vec<EdnValue>) -> Result<EdnValue> {
+    match op {
+        "union" | "clojure.set/union" | "set/union" => {
+            let mut out = BTreeSet::new();
+            for arg in args {
+                out.extend(query_set_arg(op, arg)?);
+            }
+            Ok(EdnValue::Set(out))
+        }
+        "intersection" | "clojure.set/intersection" | "set/intersection" => {
+            let Some((first, rest)) = args.split_first() else {
+                return Err(DatomicError::Query(
+                    "intersection expects at least one argument".into(),
+                ));
+            };
+            let mut out = query_set_arg(op, first.clone())?;
+            for arg in rest {
+                let set = query_set_arg(op, arg.clone())?;
+                out.retain(|value| set.contains(value));
+            }
+            Ok(EdnValue::Set(out))
+        }
+        "difference" | "clojure.set/difference" | "set/difference" => {
+            let Some((first, rest)) = args.split_first() else {
+                return Err(DatomicError::Query(
+                    "difference expects at least one argument".into(),
+                ));
+            };
+            let mut out = query_set_arg(op, first.clone())?;
+            for arg in rest {
+                for value in query_set_arg(op, arg.clone())? {
+                    out.remove(&value);
+                }
+            }
+            Ok(EdnValue::Set(out))
+        }
+        other => Err(DatomicError::UnsupportedOperation(other.into())),
+    }
 }
 
 pub(crate) fn query_hash_map_value(args: Vec<EdnValue>) -> Result<EdnValue> {
@@ -3366,6 +3425,22 @@ pub(crate) fn query_variadic_predicate(op: &str, args: &[EdnValue]) -> Result<bo
                 ));
             }
             query_contains_predicate(&args[0], &args[1])?
+        }
+        "subset?" | "clojure.set/subset?" | "set/subset?" => {
+            if args.len() != 2 {
+                return Err(DatomicError::Query(format!("{op} expects two arguments")));
+            }
+            let left = query_set_arg(op, args[0].clone())?;
+            let right = query_set_arg(op, args[1].clone())?;
+            left.is_subset(&right)
+        }
+        "superset?" | "clojure.set/superset?" | "set/superset?" => {
+            if args.len() != 2 {
+                return Err(DatomicError::Query(format!("{op} expects two arguments")));
+            }
+            let left = query_set_arg(op, args[0].clone())?;
+            let right = query_set_arg(op, args[1].clone())?;
+            left.is_superset(&right)
         }
         "starts-with?" | "clojure.string/starts-with?" | "str/starts-with?" => {
             if args.len() != 2 {
@@ -4837,6 +4912,19 @@ fn eval_query_function(
             .map(|arg| resolve_query_value(arg, binding))
             .collect::<Result<Vec<_>>>()
             .map(query_hash_set_value),
+        "union"
+        | "clojure.set/union"
+        | "set/union"
+        | "intersection"
+        | "clojure.set/intersection"
+        | "set/intersection"
+        | "difference"
+        | "clojure.set/difference"
+        | "set/difference" => args
+            .iter()
+            .map(|arg| resolve_query_value(arg, binding))
+            .collect::<Result<Vec<_>>>()
+            .and_then(|values| query_set_operation_value(op, values)),
         "hash-map" => args
             .iter()
             .map(|arg| resolve_query_value(arg, binding))
@@ -7972,6 +8060,47 @@ mod tests {
                 EdnValue::String("KOTOBA".into()),
                 EdnValue::String("42".into()),
                 EdnValue::String("KOTOBA-42".into()),
+            ]]
+        );
+    }
+
+    #[tokio::test]
+    async fn q_supports_clojure_set_function_bindings() {
+        let conn = Connection::new();
+        conn.transact(
+            parse(
+                r#"[
+                  {:db/id "alice" :person/roles #{:role/admin :role/auditor}}
+                ]"#,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let query = parse(
+            r#"{:find [?expanded ?shared ?reduced]
+                :where [[?e :person/roles ?roles]
+                        [(clojure.set/union ?roles #{:role/operator}) ?expanded]
+                        [(set/subset? #{:role/admin} ?expanded)]
+                        [(set/superset? ?expanded ?roles)]
+                        [(set/intersection ?expanded #{:role/admin :role/missing}) ?shared]
+                        [(set/difference ?expanded #{:role/auditor}) ?reduced]]}"#,
+        )
+        .unwrap();
+        let rows = q(query, &conn.db(), &[]).unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                EdnValue::Set(BTreeSet::from([
+                    kw_value(":role/admin"),
+                    kw_value(":role/auditor"),
+                    kw_value(":role/operator"),
+                ])),
+                EdnValue::Set(BTreeSet::from([kw_value(":role/admin")])),
+                EdnValue::Set(BTreeSet::from([
+                    kw_value(":role/admin"),
+                    kw_value(":role/operator"),
+                ])),
             ]]
         );
     }
