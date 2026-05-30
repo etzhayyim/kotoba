@@ -1632,6 +1632,9 @@ pub struct SparqlReq {
     pub since: Option<String>,
     /// CACAO delegation chain (DAG-CBOR + base64) for private graphs.
     pub cacao_b64: Option<String>,
+    /// W3C Verifiable Presentation carrying operator-issued graph capabilities.
+    #[serde(default)]
+    pub presentation: Option<kotoba_vc::VerifiablePresentation>,
     /// Maximum results to materialise (defaults to 10000).
     pub limit: Option<usize>,
     /// For DESCRIBE only: number of hops to traverse along `QuadObject::Cid`
@@ -1678,27 +1681,17 @@ pub async fn kg_sparql(
             .ok_or((StatusCode::BAD_REQUEST, format!("invalid graph CID: {s}")))?,
     };
 
-    // CACAO / visibility gate.
-    if let Some(cacao_b64) = req.cacao_b64.as_deref() {
-        crate::graph_auth::verify_cacao_graph_operation(
-            cacao_b64,
-            &graph_cid.to_multibase(),
-            kotoba_auth::CacaoPayload::OP_GRAPH_QUERY,
-            Some(&state.operator_did),
-            Some(&state.nonce_store),
-        )
-        .map_err(AccessDenied::into_response)?;
-    } else {
-        let visibility = state.graph_visibility(&graph_cid).await;
-        check_read_access(
-            &visibility,
-            &headers,
-            None,
-            Some(&state.operator_did),
-            Some(&state.nonce_store),
-        )
-        .map_err(AccessDenied::into_response)?;
-    }
+    crate::xrpc::require_datomic_read(
+        &state,
+        &headers,
+        &graph_cid,
+        req.cacao_b64.as_deref(),
+        req.presentation.as_ref(),
+        kotoba_auth::CacaoPayload::OP_GRAPH_QUERY,
+        req.as_of.as_deref(),
+        req.since.as_deref(),
+    )
+    .await?;
 
     // Detect the SPARQL query form from the leading keyword.
     let t0 = Instant::now();
@@ -1809,6 +1802,7 @@ fn quad_to_json(q: kotoba_kqe::quad::LegacyQuad) -> serde_json::Value {
 mod tests {
     use super::*;
     use axum::response::IntoResponse;
+    use ed25519_dalek::Signer as _;
     use kotoba_core::cid::KotobaCid;
     use kotoba_core::named_graph::GraphVisibility;
     use kotoba_datomic::distributed::CommitDatomsRequest;
@@ -1907,6 +1901,7 @@ mod tests {
                 as_of: None,
                 since: None,
                 cacao_b64: None,
+                presentation: None,
                 limit: None,
                 max_hops: 0,
             }),
@@ -1935,6 +1930,7 @@ mod tests {
                 as_of: Some(tx.to_multibase()),
                 since: None,
                 cacao_b64: None,
+                presentation: None,
                 limit: None,
                 max_hops: 0,
             }),
@@ -1961,6 +1957,7 @@ mod tests {
                 as_of: None,
                 since: Some(tx.to_multibase()),
                 cacao_b64: None,
+                presentation: None,
                 limit: None,
                 max_hops: 0,
             }),
@@ -1976,6 +1973,161 @@ mod tests {
         assert_eq!(since_body["basisT"], second_tx.to_multibase());
         assert_eq!(since_body["count"], 1);
         assert_eq!(since_body["quads"][0]["object"]["text"], "editor");
+    }
+
+    #[tokio::test]
+    async fn kg_sparql_accepts_vp_graph_query_capability_for_private_graph() {
+        std::env::set_var("KOTOBA_IPFS", "off");
+        std::env::set_var("KOTOBA_IPNS_REQUIRE_SIGNATURE", "false");
+        let state = Arc::new(KotobaState::new(None).unwrap());
+        let graph = KotobaCid::from_bytes(b"kg-sparql-vp-private-graph");
+        let graph_mb = graph.to_multibase();
+        state.graph_registry.write().await.insert(
+            graph.clone(),
+            (
+                "kg-sparql-vp-private-graph".into(),
+                GraphVisibility::Private {
+                    owner_did: state.operator_did.clone(),
+                },
+            ),
+        );
+
+        let ipns_name = "k51-kotoba-kg-sparql-vp-private-head".to_string();
+        let tx = KotobaCid::from_bytes(b"kg-sparql-vp-private-tx");
+        let alice = KotobaCid::from_bytes(b"kg-sparql-vp-private-alice");
+        DistributedCommitWriter::new(&*state.block_store, &*state.ipns_registry)
+            .commit_datoms(CommitDatomsRequest {
+                ipns_name: ipns_name.clone(),
+                graph: graph.clone(),
+                datoms: vec![Datom::assert(
+                    alice,
+                    "role".into(),
+                    EdnValue::string("admin"),
+                    tx.clone(),
+                )],
+                expected_parent: None,
+                tx_cid: Some(tx),
+                author: state.operator_did.clone(),
+                seq: 1,
+                valid_until: "2030-01-01T00:00:00Z".into(),
+                ttl_secs: Some(60),
+                cacao_proof_cid: None,
+                ipns_controller_did: None,
+                ipns_signing_key: None,
+            })
+            .unwrap();
+
+        let denied = kg_sparql(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Json(SparqlReq {
+                query: r#"SELECT ?s WHERE { ?s <role> "admin" }"#.into(),
+                graph: Some(graph_mb.clone()),
+                remote_peer: None,
+                remote_ipns_name: Some(ipns_name.clone()),
+                as_of: None,
+                since: None,
+                cacao_b64: None,
+                presentation: None,
+                limit: None,
+                max_hops: 0,
+            }),
+        )
+        .await;
+        assert!(
+            denied.is_err(),
+            "private graph must reject unauthenticated SPARQL"
+        );
+
+        let response = kg_sparql(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Json(SparqlReq {
+                query: r#"SELECT ?s WHERE { ?s <role> "admin" }"#.into(),
+                graph: Some(graph_mb),
+                remote_peer: None,
+                remote_ipns_name: Some(ipns_name),
+                as_of: None,
+                since: None,
+                cacao_b64: None,
+                presentation: Some(signed_graph_query_presentation(&state, &graph)),
+                limit: None,
+                max_hops: 0,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["form"], "select");
+        assert_eq!(body["count"], 1);
+        assert_eq!(body["quads"][0]["object"]["text"], "admin");
+    }
+
+    fn signed_graph_query_presentation(
+        state: &KotobaState,
+        graph: &KotobaCid,
+    ) -> kotoba_vc::VerifiablePresentation {
+        let holder = state.operator_did.clone();
+        let mut credential = kotoba_vc::VerifiableCredential::new(
+            "urn:uuid:kg-sparql-vp-capability",
+            state.operator_did.clone(),
+            serde_json::json!({
+                "id": holder,
+                "graph": graph.to_multibase(),
+                "operation": kotoba_auth::CacaoPayload::OP_GRAPH_QUERY,
+                "scope": format!("kotoba://graph/{}", graph.to_multibase()),
+            }),
+        );
+        credential
+            .types
+            .push("KotobaGraphCapabilityCredential".into());
+        let credential_signature = state
+            .ipns_signing_key()
+            .sign(&credential.proof_bytes().unwrap());
+        credential.proof = Some(kotoba_vc::DataIntegrityProof {
+            proof_type: "DataIntegrityProof".into(),
+            cryptosuite: Some("eddsa-2022".into()),
+            proof_purpose: "assertionMethod".into(),
+            verification_method: format!("{}#agent-ed25519", state.operator_did),
+            created: Some("2026-05-30T00:00:00Z".into()),
+            proof_value: multibase::encode(
+                multibase::Base::Base58Btc,
+                credential_signature.to_bytes(),
+            ),
+            challenge: Some("graph.sparql".into()),
+            domain: Some("kotoba.graph.sparql".into()),
+        });
+
+        let mut presentation = kotoba_vc::VerifiablePresentation {
+            context: vec![kotoba_vc::VC_CONTEXT_V2.into()],
+            id: "urn:uuid:kg-sparql-vp".into(),
+            types: vec!["VerifiablePresentation".into()],
+            holder: Some(state.operator_did.clone()),
+            verifiable_credentials: vec![credential],
+            proof: None,
+        };
+        let presentation_signature = state
+            .ipns_signing_key()
+            .sign(&presentation.proof_bytes().unwrap());
+        presentation.proof = Some(kotoba_vc::DataIntegrityProof {
+            proof_type: "DataIntegrityProof".into(),
+            cryptosuite: Some("eddsa-2022".into()),
+            proof_purpose: "authentication".into(),
+            verification_method: format!("{}#agent-ed25519", state.operator_did),
+            created: Some("2026-05-30T00:00:00Z".into()),
+            proof_value: multibase::encode(
+                multibase::Base::Base58Btc,
+                presentation_signature.to_bytes(),
+            ),
+            challenge: Some("graph.sparql".into()),
+            domain: Some("kotoba.graph.sparql".into()),
+        });
+        presentation
     }
 
     // ── obj_to_json ───────────────────────────────────────────────────────────

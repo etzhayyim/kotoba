@@ -1332,7 +1332,7 @@ fn datomic_entity_from_request(
     }
 }
 
-async fn require_datomic_read(
+pub(crate) async fn require_datomic_read(
     state: &KotobaState,
     headers: &axum::http::HeaderMap,
     graph: &kotoba_core::cid::KotobaCid,
@@ -11801,6 +11801,7 @@ mod tests {
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/entity.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/ident.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/entid.json"),
+            include_str!("../../../lexicons/ai/gftd/apps/kotoba/graph/sparql.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/vc/present.json"),
         ] {
             assert_lexicon_input_presentation_schema(src, "presentation");
@@ -11935,6 +11936,7 @@ mod tests {
                 "asOf",
                 "since",
                 "cacaoB64",
+                "presentation",
                 "limit",
                 "maxHops",
             ],
