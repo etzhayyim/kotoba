@@ -23,6 +23,7 @@ const DB_RETRACT: &str = ":db/retract";
 const DB_FN_CAS: &str = ":db.fn/cas";
 const DB_FN_RETRACT_ENTITY: &str = ":db.fn/retractEntity";
 const DB_FN_RETRACT_ATTRIBUTE: &str = ":db.fn/retractAttribute";
+const DB_ID: &str = ":db/id";
 const DB_IDENT: &str = ":db/ident";
 const DB_CARDINALITY: &str = ":db/cardinality";
 const DB_CARDINALITY_ONE: &str = ":db.cardinality/one";
@@ -2006,6 +2007,10 @@ fn pull_entity_inner(db: &Db, pattern: &EdnValue, eid: &Entity, depth: usize) ->
     let pattern = PullPattern::parse(pattern)?;
     let schema = Schema::from_datoms(&db.datoms);
     let mut map = BTreeMap::new();
+    if pattern.wants(DB_ID) {
+        let value = pattern.apply_xform(DB_ID, cid_value(eid))?;
+        map.insert(pattern.attr_key(DB_ID), value);
+    }
     for datom in db.datoms().into_iter().filter(|d| &d.e == eid) {
         if !pattern.wants(&datom.a) {
             continue;
@@ -6422,8 +6427,12 @@ mod tests {
             .await
             .unwrap();
         let alice = report.tempids["alice"].clone();
-        let pulled = conn.db().pull(parse(r#"[*]"#).unwrap(), alice).unwrap();
+        let pulled = conn
+            .db()
+            .pull(parse(r#"[*]"#).unwrap(), alice.clone())
+            .unwrap();
         let map = pulled.as_map().unwrap();
+        assert_eq!(map.get(&kw_value(":db/id")), Some(&cid_value(&alice)));
         assert_eq!(
             map.get(&kw_value(":person/name")),
             Some(&EdnValue::String("Alice".into()))
@@ -6431,6 +6440,43 @@ mod tests {
         assert_eq!(
             map.get(&kw_value(":person/age")),
             Some(&EdnValue::Integer(30))
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_supports_datomic_db_id_pattern() {
+        let conn = Connection::new();
+        let report = conn
+            .transact(
+                parse(
+                    r#"[
+                      {:db/id "alice" :person/name "Alice" :person/friend "bob"}
+                      {:db/id "bob" :person/name "Bob"}
+                    ]"#,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let alice = report.tempids["alice"].clone();
+        let bob = report.tempids["bob"].clone();
+        let pulled = conn
+            .db()
+            .pull(
+                parse(r#"[[:db/id :as :id] {:person/friend [:db/id :person/name]}]"#).unwrap(),
+                alice.clone(),
+            )
+            .unwrap();
+        let map = pulled.as_map().unwrap();
+        assert_eq!(map.get(&kw_value(":id")), Some(&cid_value(&alice)));
+        let friend = map
+            .get(&kw_value(":person/friend"))
+            .and_then(EdnValue::as_map)
+            .unwrap();
+        assert_eq!(friend.get(&kw_value(":db/id")), Some(&cid_value(&bob)));
+        assert_eq!(
+            friend.get(&kw_value(":person/name")),
+            Some(&EdnValue::String("Bob".into()))
         );
     }
 
