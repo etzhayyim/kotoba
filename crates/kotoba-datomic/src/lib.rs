@@ -883,13 +883,92 @@ fn entity_map_to_datoms(
         let a = attr_to_string(&a)?;
         if schema.cardinality_many.contains(&a) {
             for v in cardinality_many_tx_values(v) {
-                out.push(Datom::assert(eid.clone(), a.clone(), v, tx_cid.clone()));
+                append_entity_attr_datoms(
+                    &mut out,
+                    eid.clone(),
+                    a.clone(),
+                    v,
+                    tx_cid.clone(),
+                    tempids,
+                    db,
+                    schema,
+                    pending,
+                )?;
             }
             continue;
         }
-        out.push(Datom::assert(eid.clone(), a, v, tx_cid.clone()));
+        append_entity_attr_datoms(
+            &mut out,
+            eid.clone(),
+            a,
+            v,
+            tx_cid.clone(),
+            tempids,
+            db,
+            schema,
+            pending,
+        )?;
     }
     Ok(out)
+}
+
+fn append_entity_attr_datoms(
+    out: &mut Vec<Datom>,
+    eid: KotobaCid,
+    attr: String,
+    value: EdnValue,
+    tx_cid: KotobaCid,
+    tempids: &mut BTreeMap<String, KotobaCid>,
+    db: &Db,
+    schema: &Schema,
+    pending: &[Datom],
+) -> Result<()> {
+    if schema.value_types.get(&attr) == Some(&ValueType::Ref) {
+        if let EdnValue::Map(mut nested_entity) = value {
+            let nested_eid_value =
+                ensure_nested_entity_id(&mut nested_entity, &eid, &attr, out.len());
+            let nested_eid = entity_ref_to_cid_for_tx(&nested_eid_value, tempids, db, &tx_cid)?;
+            let mut nested_pending = Vec::with_capacity(pending.len() + out.len());
+            nested_pending.extend_from_slice(pending);
+            nested_pending.extend_from_slice(out);
+            out.extend(entity_map_to_datoms(
+                nested_entity,
+                tx_cid.clone(),
+                tempids,
+                db,
+                schema,
+                &nested_pending,
+            )?);
+            out.push(Datom::assert(eid, attr, cid_value(&nested_eid), tx_cid));
+            return Ok(());
+        }
+    }
+    out.push(Datom::assert(eid, attr, value, tx_cid));
+    Ok(())
+}
+
+fn ensure_nested_entity_id(
+    entity: &mut BTreeMap<EdnValue, EdnValue>,
+    parent: &KotobaCid,
+    attr: &str,
+    ordinal: usize,
+) -> EdnValue {
+    let db_id_key = EdnValue::Keyword(Keyword::namespaced("db", "id"));
+    if let Some(id) = entity.get(&db_id_key) {
+        return id.clone();
+    }
+    let db_ident_key = EdnValue::Keyword(Keyword::namespaced("db", "ident"));
+    if let Some(ident) = entity.get(&db_ident_key) {
+        return ident.clone();
+    }
+    let tempid = EdnValue::String(format!(
+        "__kotoba_nested:{}:{}:{}",
+        parent.to_multibase(),
+        attr,
+        ordinal
+    ));
+    entity.insert(db_id_key, tempid.clone());
+    tempid
 }
 
 fn cardinality_many_tx_values(value: EdnValue) -> Vec<EdnValue> {
@@ -5017,6 +5096,76 @@ mod tests {
             map.get(&EdnValue::Keyword(Keyword::namespaced("person", "age"))),
             Some(&EdnValue::Integer(30))
         );
+    }
+
+    #[tokio::test]
+    async fn entity_map_ref_attributes_accept_nested_entity_maps() {
+        let conn = Connection::new();
+        conn.transact(
+            parse(
+                r#"[
+                  {:db/id "address-attr"
+                   :db/ident :person/address
+                   :db/valueType :db.type/ref
+                   :db/isComponent true}
+                ]"#,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let report = conn
+            .transact(
+                parse(
+                    r#"[
+                      {:db/id "alice"
+                       :person/name "Alice"
+                       :person/address {:address/city "Tokyo"
+                                        :address/postal-code "100-0001"}}
+                    ]"#,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let alice = report.tempids["alice"].clone();
+        let pulled = conn
+            .db()
+            .pull(
+                parse(r#"[:person/name {:person/address [:address/city :address/postal-code]}]"#)
+                    .unwrap(),
+                alice.clone(),
+            )
+            .unwrap();
+        let address = pulled
+            .as_map()
+            .and_then(|m| m.get(&kw_value(":person/address")))
+            .and_then(EdnValue::as_map)
+            .unwrap();
+        assert_eq!(
+            address.get(&kw_value(":address/city")),
+            Some(&EdnValue::String("Tokyo".into()))
+        );
+        assert_eq!(
+            address.get(&kw_value(":address/postal-code")),
+            Some(&EdnValue::String("100-0001".into()))
+        );
+        assert!(conn.db().datoms().iter().any(|d| {
+            d.e == alice
+                && d.a == ":person/address"
+                && matches!(d.v, EdnValue::String(ref value)
+                    if KotobaCid::from_multibase(value).is_some())
+        }));
+
+        conn.transact(parse(r#"[[:db.fn/retractEntity "alice"]]"#).unwrap())
+            .await
+            .unwrap();
+        assert!(conn
+            .db()
+            .datoms()
+            .iter()
+            .all(|d| !d.a.starts_with(":person/") && !d.a.starts_with(":address/")));
     }
 
     #[tokio::test]
