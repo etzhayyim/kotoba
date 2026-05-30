@@ -1806,13 +1806,18 @@ where
                 crate::query_not_empty_value(required_query_value(&args[0], binding)?)
                     .map_err(Into::into)
             }
-            "map" | "filter" | "remove" | "keep" => args
+            "map" | "filter" | "remove" | "keep" | "group-by" | "partition-by" => args
                 .iter()
                 .map(|arg| required_query_value(arg, binding))
                 .collect::<Result<Vec<_>, _>>()
                 .and_then(|values| {
                     crate::query_collection_transform_value(op, values).map_err(Into::into)
                 }),
+            "frequencies" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_frequencies_value(values).map_err(Into::into)),
             "reduce" => args
                 .iter()
                 .map(|arg| required_query_value(arg, binding))
@@ -6742,7 +6747,7 @@ mod tests {
         );
 
         let collection_predicate_query = kotoba_edn::parse(
-            r#"{:find [?allTags ?noNilTags ?notEveryTagString ?tagsVector ?sameTag ?hasTag ?notFalse ?truthyTags ?tagsString ?tagKeywords ?nonStringTags ?keptTags ?sum ?product ?max ?applySum ?applyMax ?applySet ?initialOdds ?afterOdds ?splitNumbers ?splitOdds ?flat ?interposed ?interleaved ?pairs ?windows ?paddedPairs ?allPairs]
+            r#"{:find [?allTags ?noNilTags ?notEveryTagString ?tagsVector ?sameTag ?hasTag ?notFalse ?truthyTags ?tagsString ?tagKeywords ?nonStringTags ?keptTags ?sum ?product ?max ?applySum ?applyMax ?applySet ?initialOdds ?afterOdds ?splitNumbers ?splitOdds ?groupedNumbers ?partitionedNumbers ?numberFrequencies ?flat ?interposed ?interleaved ?pairs ?windows ?paddedPairs ?allPairs]
                 :where [[?e :credential/claims ?claims]
                         [(get ?claims :claim/tags) ?tags]
                         [(distinct? :role/admin :role/auditor :role/operator)]
@@ -6769,6 +6774,9 @@ mod tests {
                         [(drop-while odd? [1 3 2 5]) ?afterOdds]
                         [(split-at 2 [1 2 3]) ?splitNumbers]
                         [(split-with odd? [1 3 2 5]) ?splitOdds]
+                        [(group-by odd? [1 2 3]) ?groupedNumbers]
+                        [(partition-by odd? [1 3 2 5]) ?partitionedNumbers]
+                        [(frequencies [1 1 2]) ?numberFrequencies]
                         [(flatten [[1 2] [3 [4]]]) ?flat]
                         [(interpose 0 [1 2 3]) ?interposed]
                         [(interleave [1 2 3] [:a :b :c]) ?interleaved]
@@ -6834,6 +6842,25 @@ mod tests {
                     EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(3)]),
                     EdnValue::Vector(vec![EdnValue::Integer(2), EdnValue::Integer(5)]),
                 ]),
+                EdnValue::Map(BTreeMap::from([
+                    (
+                        EdnValue::Bool(false),
+                        EdnValue::Vector(vec![EdnValue::Integer(2)]),
+                    ),
+                    (
+                        EdnValue::Bool(true),
+                        EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(3)]),
+                    ),
+                ])),
+                EdnValue::Vector(vec![
+                    EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(3)]),
+                    EdnValue::Vector(vec![EdnValue::Integer(2)]),
+                    EdnValue::Vector(vec![EdnValue::Integer(5)]),
+                ]),
+                EdnValue::Map(BTreeMap::from([
+                    (EdnValue::Integer(1), EdnValue::Integer(2)),
+                    (EdnValue::Integer(2), EdnValue::Integer(1)),
+                ])),
                 EdnValue::Vector(vec![
                     EdnValue::Integer(1),
                     EdnValue::Integer(2),

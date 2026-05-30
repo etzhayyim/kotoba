@@ -2760,7 +2760,10 @@ fn query_apply_value_function(op: &str, args: Vec<EdnValue>) -> Result<EdnValue>
             [value] => query_not_empty_value(value.clone()),
             _ => Err(DatomicError::Query("not-empty expects one argument".into())),
         },
-        "map" | "filter" | "remove" | "keep" => query_collection_transform_value(op, args),
+        "map" | "filter" | "remove" | "keep" | "group-by" | "partition-by" => {
+            query_collection_transform_value(op, args)
+        }
+        "frequencies" => query_frequencies_value(args),
         "reduce" => query_reduce_value(args),
         "apply" => query_apply_function_value(args),
         "seq" | "first" | "last" | "rest" | "next" => match args.as_slice() {
@@ -2847,9 +2850,66 @@ pub(crate) fn query_collection_transform_value(op: &str, args: Vec<EdnValue>) ->
                 },
             )
             .collect::<Result<Vec<_>>>()?,
+        "group-by" => {
+            let mut out: BTreeMap<EdnValue, EdnValue> = BTreeMap::new();
+            for value in values {
+                let key = query_apply_value_function(&function, vec![value.clone()])?;
+                match out.entry(key) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(EdnValue::Vector(vec![value]));
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        let EdnValue::Vector(existing) = entry.get_mut() else {
+                            unreachable!("group-by stores vector values")
+                        };
+                        existing.push(value);
+                    }
+                }
+            }
+            return Ok(EdnValue::Map(out));
+        }
+        "partition-by" => {
+            let mut out = Vec::new();
+            let mut current_key = None;
+            let mut current_values = Vec::new();
+            for value in values {
+                let key = query_apply_value_function(&function, vec![value.clone()])?;
+                if current_key
+                    .as_ref()
+                    .map_or(true, |existing| existing == &key)
+                {
+                    current_key = Some(key);
+                    current_values.push(value);
+                } else {
+                    out.push(EdnValue::Vector(current_values));
+                    current_key = Some(key);
+                    current_values = vec![value];
+                }
+            }
+            if !current_values.is_empty() {
+                out.push(EdnValue::Vector(current_values));
+            }
+            out
+        }
         other => return Err(DatomicError::UnsupportedOperation(other.into())),
     };
     Ok(EdnValue::Vector(out))
+}
+
+pub(crate) fn query_frequencies_value(args: Vec<EdnValue>) -> Result<EdnValue> {
+    let [collection]: [EdnValue; 1] = args
+        .try_into()
+        .map_err(|_| DatomicError::Query("frequencies expects one argument".into()))?;
+    let mut out = BTreeMap::new();
+    for value in query_seq_values(collection)? {
+        let count = match out.remove(&value) {
+            Some(EdnValue::Integer(count)) => count + 1,
+            Some(_) => unreachable!("frequencies stores integer counts"),
+            None => 1,
+        };
+        out.insert(value, EdnValue::Integer(count));
+    }
+    Ok(EdnValue::Map(out))
 }
 
 pub(crate) fn query_reduce_value(args: Vec<EdnValue>) -> Result<EdnValue> {
@@ -5459,11 +5519,16 @@ fn eval_query_function(
             }
             query_not_empty_value(resolve_query_value(&args[0], binding)?)
         }
-        "map" | "filter" | "remove" | "keep" => args
+        "map" | "filter" | "remove" | "keep" | "group-by" | "partition-by" => args
             .iter()
             .map(|arg| resolve_query_value(arg, binding))
             .collect::<Result<Vec<_>>>()
             .and_then(|values| query_collection_transform_value(op, values)),
+        "frequencies" => args
+            .iter()
+            .map(|arg| resolve_query_value(arg, binding))
+            .collect::<Result<Vec<_>>>()
+            .and_then(query_frequencies_value),
         "reduce" => args
             .iter()
             .map(|arg| resolve_query_value(arg, binding))
@@ -8695,7 +8760,7 @@ mod tests {
         .await
         .unwrap();
         let query = parse(
-            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString ?incScores ?oddScores ?nonOddScores ?nonEmptyNames ?scoreSum ?scoreProduct ?scoreMax ?applySum ?applyMax ?scoreSet ?initialOdds ?afterOdds ?splitScores ?splitOdds ?flatScores ?interposedScores ?interleavedScores ?pairs ?windows ?paddedPairs ?allPairs]
+            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString ?incScores ?oddScores ?nonOddScores ?nonEmptyNames ?scoreSum ?scoreProduct ?scoreMax ?applySum ?applyMax ?scoreSet ?initialOdds ?afterOdds ?splitScores ?splitOdds ?groupedScores ?partitionedScores ?scoreFrequencies ?flatScores ?interposedScores ?interleavedScores ?pairs ?windows ?paddedPairs ?allPairs]
                 :where [[?e :person/scores ?scores]
                         [?e :person/names ?names]
                         [(distinct? 1 2 3)]
@@ -8724,6 +8789,9 @@ mod tests {
                         [(drop-while odd? ?scores) ?afterOdds]
                         [(split-at 2 ?scores) ?splitScores]
                         [(split-with odd? ?scores) ?splitOdds]
+                        [(group-by odd? ?scores) ?groupedScores]
+                        [(partition-by odd? ?scores) ?partitionedScores]
+                        [(frequencies [1 1 2]) ?scoreFrequencies]
                         [(flatten [[1 2 3] [4 [5]]]) ?flatScores]
                         [(interpose 0 ?scores) ?interposedScores]
                         [(interleave ?scores [:a :b :c]) ?interleavedScores]
@@ -8788,6 +8856,25 @@ mod tests {
                     EdnValue::Vector(vec![EdnValue::Integer(1)]),
                     EdnValue::Vector(vec![EdnValue::Integer(2), EdnValue::Integer(3)]),
                 ]),
+                EdnValue::Map(BTreeMap::from([
+                    (
+                        EdnValue::Bool(false),
+                        EdnValue::Vector(vec![EdnValue::Integer(2)]),
+                    ),
+                    (
+                        EdnValue::Bool(true),
+                        EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(3)]),
+                    ),
+                ])),
+                EdnValue::Vector(vec![
+                    EdnValue::Vector(vec![EdnValue::Integer(1)]),
+                    EdnValue::Vector(vec![EdnValue::Integer(2)]),
+                    EdnValue::Vector(vec![EdnValue::Integer(3)]),
+                ]),
+                EdnValue::Map(BTreeMap::from([
+                    (EdnValue::Integer(1), EdnValue::Integer(2)),
+                    (EdnValue::Integer(2), EdnValue::Integer(1)),
+                ])),
                 EdnValue::Vector(vec![
                     EdnValue::Integer(1),
                     EdnValue::Integer(2),
