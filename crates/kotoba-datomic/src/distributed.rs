@@ -132,6 +132,16 @@ impl RemoteIpfsBlockStore {
             cache: Mutex::new(HashMap::new()),
         }
     }
+
+    pub fn cached_blocks(&self) -> Result<Vec<(KotobaCid, bytes::Bytes)>, DistributedCommitError> {
+        Ok(self
+            .cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("remote block cache lock poisoned"))?
+            .iter()
+            .map(|(cid, bytes)| (cid.clone(), bytes.clone()))
+            .collect())
+    }
 }
 
 impl BlockStore for RemoteIpfsBlockStore {
@@ -321,6 +331,29 @@ where
             });
         }
         Ok(entries)
+    }
+
+    /// Traverse the full distributed Datomic DAG reachable from `head`.
+    ///
+    /// This is primarily used by remote sync adapters: when `self.store` is a
+    /// caching remote block store, loading every index root causes all commit
+    /// and ProllyTree blocks needed for later local q/datoms/pull reads to be
+    /// cached for persistence into the caller's local block store.
+    pub fn materialize_head_blocks(&self, head: &KotobaCid) -> Result<(), DistributedCommitError> {
+        let chain = self.commit_chain_from_head(head)?;
+        for commit in chain {
+            for root_name in [ROOT_EAVT, ROOT_AEVT, ROOT_AVET, ROOT_VAET, ROOT_TEA] {
+                let root = commit.index_roots.get(root_name).ok_or_else(|| {
+                    DistributedCommitError::MissingIndexRoot {
+                        commit: commit.cid.to_multibase(),
+                        root: root_name,
+                    }
+                })?;
+                ProllyTree::scan_prefix(root, &[], self.store)
+                    .map_err(DistributedCommitError::Store)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn tx_range_from_head(

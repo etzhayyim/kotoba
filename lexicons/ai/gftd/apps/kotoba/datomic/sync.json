@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Return the current distributed Datomic IPNS head and whether it includes an optional target transaction CID, and optional remote kotoba-ipfs/IPNS peer reads.",
+      "description": "Return the current distributed Datomic IPNS head and whether it includes an optional target transaction CID. When remote_peer is supplied, materialize the remote DAG-CBOR/Prolly blocks and IPNS record into the local node.",
       "input": {
         "encoding": "application/json",
         "schema": {
@@ -21,7 +21,7 @@
             },
             "remote_peer": {
               "type": "string",
-              "description": "Optional host:port or /ip4/<addr>/tcp/<port> kotoba-ipfs peer used to resolve the graph IPNS head and DAG-CBOR/Prolly blocks."
+              "description": "Optional host:port or /ip4/<addr>/tcp/<port> kotoba-ipfs peer used to resolve and sync the graph IPNS head and DAG-CBOR/Prolly blocks."
             },
             "remote_ipns_name": {
               "type": "string",
@@ -134,6 +134,10 @@
             },
             "reached": {
               "type": "boolean"
+            },
+            "synced_block_count": {
+              "type": "integer",
+              "minimum": 0
             }
           }
         }

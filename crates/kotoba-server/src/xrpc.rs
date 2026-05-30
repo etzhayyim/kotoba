@@ -57,7 +57,7 @@ use kotoba_datomic::distributed::{
     DistributedDatomReader, DistributedTransactRequest, RemoteIpfsBlockStore,
     RemoteIpfsIpnsRegistry, ROOT_AEVT, ROOT_AVET, ROOT_EAVT, ROOT_TEA, ROOT_VAET,
 };
-use kotoba_ipfs::{IpnsName, IpnsRegistryError};
+use kotoba_ipfs::{IpnsName, IpnsRegistry, IpnsRegistryError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -614,6 +614,7 @@ pub struct DatomicSyncResp {
     pub ipns_sequence: u64,
     pub target_tx: Option<String>,
     pub reached: bool,
+    pub synced_block_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -3830,11 +3831,67 @@ fn distributed_datomic_sync(
         let remote_store = RemoteIpfsBlockStore::new(socket);
         let remote_ipns = RemoteIpfsIpnsRegistry::new(socket);
         let reader = DistributedDatomReader::new(&remote_store, &remote_ipns);
-        return distributed_datomic_sync_with_reader(&reader, graph_cid, target_tx, ipns_name);
+        let response = distributed_datomic_sync_with_reader(
+            &reader,
+            graph_cid,
+            target_tx,
+            ipns_name.clone(),
+            0,
+        )?;
+        if let Some(response) = response {
+            let head = reader.resolve_head(&ipns_name).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("distributed datomic remote sync head: {e}"),
+                )
+            })?;
+            if let Some(head) = head {
+                reader.materialize_head_blocks(&head.cid).map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("distributed datomic remote sync blocks: {e}"),
+                    )
+                })?;
+                let blocks = remote_store.cached_blocks().map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("distributed datomic remote sync cache: {e}"),
+                    )
+                })?;
+                for (cid, bytes) in &blocks {
+                    state.block_store.put(cid, bytes).map_err(|e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("distributed datomic remote sync store: {e}"),
+                        )
+                    })?;
+                }
+                let record = remote_ipns
+                    .resolve(&IpnsName::new(ipns_name.clone()))
+                    .map_err(|e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("distributed datomic remote sync ipns resolve: {e}"),
+                        )
+                    })?;
+                state.ipns_registry.publish(record).map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("distributed datomic remote sync ipns publish: {e}"),
+                    )
+                })?;
+                return Ok(Some(DatomicSyncResp {
+                    synced_block_count: blocks.len(),
+                    ..response
+                }));
+            }
+            return Ok(Some(response));
+        }
+        return Ok(None);
     }
 
     let reader = DistributedDatomReader::new(&*state.block_store, &*state.ipns_registry);
-    distributed_datomic_sync_with_reader(&reader, graph_cid, target_tx, ipns_name)
+    distributed_datomic_sync_with_reader(&reader, graph_cid, target_tx, ipns_name, 0)
 }
 
 fn distributed_datomic_sync_with_reader<R>(
@@ -3842,6 +3899,7 @@ fn distributed_datomic_sync_with_reader<R>(
     graph_cid: &kotoba_core::cid::KotobaCid,
     target_tx: Option<&str>,
     ipns_name: String,
+    synced_block_count: usize,
 ) -> Result<Option<DatomicSyncResp>, (StatusCode, String)>
 where
     R: kotoba_ipfs::IpnsRegistry + ?Sized,
@@ -3878,6 +3936,7 @@ where
         ipns_sequence: head.seq,
         target_tx: target.map(|tx| tx.to_multibase()),
         reached,
+        synced_block_count,
     }))
 }
 
@@ -8141,14 +8200,14 @@ mod tests {
         atproto_repo_write_datoms, datomic_basis_t, datomic_datoms, datomic_db_stats,
         datomic_entid, datomic_entity, datomic_history, datomic_ident, datomic_index_pull,
         datomic_index_range, datomic_log, datomic_pull, datomic_pull_many, datomic_q,
-        datomic_seek_datoms, datomic_transact, datomic_tx_range, datomic_with,
+        datomic_seek_datoms, datomic_sync, datomic_transact, datomic_tx_range, datomic_with,
         did_document_publish, didcomm_send, distributed_graph_ipns_name,
         enforce_datomic_range_tx_scope, is_did_web_ip_host, vc_issue, AtprotoRepoWriteReq,
         AuthCapabilityProjection, DatomicBasisTReq, DatomicDatomsReq, DatomicDbStatsReq,
         DatomicEntidReq, DatomicEntityReq, DatomicHistoryReq, DatomicIdentReq, DatomicIndexPullReq,
         DatomicIndexRangeReq, DatomicLogReq, DatomicPullManyReq, DatomicPullReq, DatomicQReq,
-        DatomicSeekDatomsReq, DatomicTransactReq, DatomicTxRangeReq, DatomicWithReq,
-        DidCommSendReq, DidDocumentPublishReq, VcIssueReq, ZCAP_ALLOWED_ACTION_IRI,
+        DatomicSeekDatomsReq, DatomicSyncReq, DatomicTransactReq, DatomicTxRangeReq,
+        DatomicWithReq, DidCommSendReq, DidDocumentPublishReq, VcIssueReq, ZCAP_ALLOWED_ACTION_IRI,
         ZCAP_CONTROLLER_IRI, ZCAP_INVOCATION_PROOF_IRI, ZCAP_INVOCATION_TARGET_IRI,
     };
     use crate::server::KotobaState;
@@ -9848,6 +9907,122 @@ mod tests {
         assert_eq!(remote_range_body["datom_count"], 1);
         assert_eq!(remote_range_body["datoms"][0]["v_edn"], "20");
 
+        let sync = datomic_sync(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicSyncReq {
+                graph: graph_mb.clone(),
+                tx: Some(report.commit.tx_cid.to_multibase()),
+                remote_peer: Some(remote_peer.clone()),
+                remote_ipns_name: Some(ipns_name.clone()),
+                cacao_b64: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(sync.status(), axum::http::StatusCode::OK);
+        let sync_body = axum::body::to_bytes(sync.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let sync_body: serde_json::Value = serde_json::from_slice(&sync_body).unwrap();
+        assert_eq!(sync_body["reached"], true);
+        assert!(
+            sync_body["synced_block_count"]
+                .as_u64()
+                .expect("synced_block_count")
+                > 0
+        );
+
+        let local_after_sync = datomic_q(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicQReq {
+                graph: graph_mb.clone(),
+                query_edn:
+                    r#"[:find ?name :where [?e :person/name ?name] [?e :person/role "admin"]]"#
+                        .into(),
+                inputs_edn: vec![],
+                as_of: None,
+                since: None,
+                history: false,
+                remote_peer: None,
+                remote_ipns_name: Some(ipns_name.clone()),
+                cacao_b64: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(local_after_sync.status(), axum::http::StatusCode::OK);
+        let local_after_sync_body = axum::body::to_bytes(local_after_sync.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let local_after_sync_body: serde_json::Value =
+            serde_json::from_slice(&local_after_sync_body).unwrap();
+        assert_eq!(
+            local_after_sync_body["basis_t"],
+            report.commit.tx_cid.to_multibase()
+        );
+        assert_eq!(
+            local_after_sync_body["rows_edn"],
+            serde_json::json!([[r#""Alice""#]])
+        );
+
+        let local_append = datomic_transact(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicTransactReq {
+                graph: graph_mb.clone(),
+                tx_edn: r#"[[:db/add "remote-bob" :person/title "Synced Writer"]]"#.into(),
+                ipns_name: Some(ipns_name.clone()),
+                cacao_b64: None,
+                presentation: None,
+                expected_parent: None,
+                cacao_proof_cid: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(local_append.status(), axum::http::StatusCode::OK);
+
+        let local_after_append = datomic_q(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicQReq {
+                graph: graph_mb.clone(),
+                query_edn: r#"[:find ?role ?title
+                    :where [?e :person/role ?role]
+                           [?e :person/title ?title]]"#
+                    .into(),
+                inputs_edn: vec![],
+                as_of: None,
+                since: None,
+                history: false,
+                remote_peer: None,
+                remote_ipns_name: Some(ipns_name.clone()),
+                cacao_b64: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(local_after_append.status(), axum::http::StatusCode::OK);
+        let local_after_append_body =
+            axum::body::to_bytes(local_after_append.into_body(), usize::MAX)
+                .await
+                .unwrap();
+        let local_after_append_body: serde_json::Value =
+            serde_json::from_slice(&local_after_append_body).unwrap();
+        assert_eq!(
+            local_after_append_body["rows_edn"],
+            serde_json::json!([[r#""admin""#, r#""Synced Writer""#]])
+        );
+
         let tx_range = datomic_tx_range(
             axum::extract::State(Arc::clone(&state)),
             headers,
@@ -11323,7 +11498,7 @@ mod tests {
                 "ipns_sequence",
                 "reached",
             ],
-            &["basis_t", "target_tx"],
+            &["basis_t", "target_tx", "synced_block_count"],
         );
         assert_lexicon_input_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/q.json"),
