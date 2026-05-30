@@ -228,9 +228,22 @@ impl VerifiableCredential {
     }
 
     pub fn subject_id(&self) -> Option<&str> {
-        self.credential_subject
-            .get("id")
-            .and_then(serde_json::Value::as_str)
+        self.subject_ids().into_iter().next()
+    }
+
+    pub fn subject_ids(&self) -> Vec<&str> {
+        match self.credential_subject.as_json() {
+            serde_json::Value::Object(obj) => obj
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .into_iter()
+                .collect(),
+            serde_json::Value::Array(values) => values
+                .iter()
+                .filter_map(|value| value.get("id").and_then(serde_json::Value::as_str))
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 
     pub fn to_datoms(&self, tx: KotobaCid) -> Result<Vec<Datom>, VcError> {
@@ -281,7 +294,7 @@ impl VerifiableCredential {
             datom(&e, ATTR_CREDENTIAL_SUBJECT, subject.clone(), &tx),
             datom(&e, ATTR_VC_CREDENTIAL_SUBJECT_IRI, subject, &tx),
         ];
-        if let Some(subject_id) = self.subject_id() {
+        for subject_id in self.subject_ids() {
             out.push(datom(
                 &e,
                 "credential/subjectId",
@@ -755,7 +768,14 @@ fn append_subject_field_datoms(
     subject: &serde_json::Value,
     tx: &KotobaCid,
 ) {
-    append_json_field_datoms(out, e, ATTR_CREDENTIAL_SUBJECT_FIELD_PREFIX, subject, tx);
+    match subject {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                append_json_field_datoms(out, e, ATTR_CREDENTIAL_SUBJECT_FIELD_PREFIX, value, tx);
+            }
+        }
+        _ => append_json_field_datoms(out, e, ATTR_CREDENTIAL_SUBJECT_FIELD_PREFIX, subject, tx),
+    }
 }
 
 fn append_json_field_datoms(
@@ -818,6 +838,61 @@ mod tests {
             vc.credential_subject.get("role").and_then(|v| v.as_str()),
             Some("admin")
         );
+    }
+
+    #[test]
+    fn credential_subject_array_projects_each_subject_to_datoms() {
+        let vc = VerifiableCredential::new(
+            "urn:uuid:vc-subject-array",
+            "did:key:zIssuer",
+            json!([
+                {
+                    "id": "did:plc:alice",
+                    "role": "admin",
+                    "profile": { "region": "JP" }
+                },
+                {
+                    "id": "did:web:bob.example",
+                    "role": "auditor",
+                    "profile": { "region": "US" }
+                }
+            ]),
+        );
+
+        assert_eq!(vc.subject_id(), Some("did:plc:alice"));
+        assert_eq!(
+            vc.subject_ids(),
+            vec!["did:plc:alice", "did:web:bob.example"]
+        );
+
+        let datoms = vc
+            .to_datoms(KotobaCid::from_bytes(b"tx-subject-array"))
+            .unwrap();
+        for subject_id in ["did:plc:alice", "did:web:bob.example"] {
+            assert!(
+                datoms.iter().any(|datom| {
+                    datom.a == "credential/subjectId" && datom.v == EdnValue::string(subject_id)
+                }),
+                "missing credential/subjectId for {subject_id}"
+            );
+        }
+        for role in ["admin", "auditor"] {
+            assert!(
+                datoms.iter().any(|datom| {
+                    datom.a == "credential/subject/role" && datom.v == EdnValue::string(role)
+                }),
+                "missing credential/subject/role for {role}"
+            );
+        }
+        for region in ["JP", "US"] {
+            assert!(
+                datoms.iter().any(|datom| {
+                    datom.a == "credential/subject/profile/region"
+                        && datom.v == EdnValue::string(region)
+                }),
+                "missing credential/subject/profile/region for {region}"
+            );
+        }
     }
 
     #[test]
