@@ -206,6 +206,7 @@ fn sign_attestation_credential(
     signing_key: &ed25519_dalek::SigningKey,
 ) -> Result<VerifiableCredential, kotoba_vc::VcError> {
     credential.proof = None;
+    credential.ensure_data_integrity_context();
     let signature = signing_key.sign(&credential.proof_bytes()?);
     credential.proof = Some(DataIntegrityProof {
         proof_type: "DataIntegrityProof".to_string(),

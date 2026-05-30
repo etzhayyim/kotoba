@@ -227,6 +227,11 @@ impl VerifiableCredential {
         Ok(KotobaCid::from_bytes(&bytes))
     }
 
+    pub fn ensure_data_integrity_context(&mut self) {
+        ensure_context(&mut self.context, VC_CONTEXT_V2);
+        ensure_context(&mut self.context, DATA_INTEGRITY_CONTEXT);
+    }
+
     pub fn subject_id(&self) -> Option<&str> {
         self.subject_ids().into_iter().next()
     }
@@ -248,6 +253,7 @@ impl VerifiableCredential {
 
     pub fn to_datoms(&self, tx: KotobaCid) -> Result<Vec<Datom>, VcError> {
         let e = self.cid()?;
+        let context = projected_context(&self.context, self.proof.is_some());
         let subject = json_to_edn(&self.credential_subject);
         let types = string_vec(&self.types);
         let mut out = vec![
@@ -266,10 +272,10 @@ impl VerifiableCredential {
             datom(
                 &e,
                 ATTR_CREDENTIAL_DATA_MODEL,
-                EdnValue::string(vc_data_model_name(&self.context)),
+                EdnValue::string(vc_data_model_name(&context)),
                 &tx,
             ),
-            datom(&e, ATTR_CREDENTIAL_CONTEXT, string_vec(&self.context), &tx),
+            datom(&e, ATTR_CREDENTIAL_CONTEXT, string_vec(&context), &tx),
             datom(
                 &e,
                 ATTR_CREDENTIAL_ID,
@@ -383,8 +389,14 @@ impl VerifiablePresentation {
         Ok(KotobaCid::from_bytes(&bytes))
     }
 
+    pub fn ensure_data_integrity_context(&mut self) {
+        ensure_context(&mut self.context, VC_CONTEXT_V2);
+        ensure_context(&mut self.context, DATA_INTEGRITY_CONTEXT);
+    }
+
     pub fn to_datoms(&self, tx: KotobaCid) -> Result<Vec<Datom>, VcError> {
         let e = self.cid()?;
+        let context = projected_context(&self.context, self.proof.is_some());
         let types = string_vec(&self.types);
         let mut out = vec![
             datom(
@@ -402,15 +414,10 @@ impl VerifiablePresentation {
             datom(
                 &e,
                 ATTR_PRESENTATION_DATA_MODEL,
-                EdnValue::string(vc_data_model_name(&self.context)),
+                EdnValue::string(vc_data_model_name(&context)),
                 &tx,
             ),
-            datom(
-                &e,
-                ATTR_PRESENTATION_CONTEXT,
-                string_vec(&self.context),
-                &tx,
-            ),
+            datom(&e, ATTR_PRESENTATION_CONTEXT, string_vec(&context), &tx),
             datom(
                 &e,
                 ATTR_PRESENTATION_ID,
@@ -554,6 +561,21 @@ fn vc_data_model_name(context: &[String]) -> &'static str {
     } else {
         "W3C VC Data Model"
     }
+}
+
+fn ensure_context(context: &mut Vec<String>, value: &str) {
+    if !context.iter().any(|existing| existing == value) {
+        context.push(value.to_string());
+    }
+}
+
+fn projected_context(context: &[String], has_proof: bool) -> Vec<String> {
+    let mut context = context.to_vec();
+    ensure_context(&mut context, VC_CONTEXT_V2);
+    if has_proof {
+        ensure_context(&mut context, DATA_INTEGRITY_CONTEXT);
+    }
+    context
 }
 
 fn append_credential_status_datoms(
@@ -964,6 +986,13 @@ mod tests {
 
         let datoms = vc.to_datoms(KotobaCid::from_bytes(b"tx")).unwrap();
 
+        let context = datoms
+            .iter()
+            .find(|d| d.a == ATTR_CREDENTIAL_CONTEXT)
+            .map(|d| kotoba_edn::to_string(&d.v))
+            .expect("credential context datom");
+        assert!(context.contains(VC_CONTEXT_V2), "{context}");
+        assert!(context.contains(DATA_INTEGRITY_CONTEXT), "{context}");
         assert!(datoms.iter().any(|d| {
             d.a == ATTR_CREDENTIAL_STATUS_ID
                 && d.v == EdnValue::string("kotoba://credential/status/1")
@@ -1081,6 +1110,13 @@ mod tests {
 
         let datoms = vp.to_datoms(KotobaCid::from_bytes(b"tx")).unwrap();
 
+        let context = datoms
+            .iter()
+            .find(|d| d.a == ATTR_PRESENTATION_CONTEXT)
+            .map(|d| kotoba_edn::to_string(&d.v))
+            .expect("presentation context datom");
+        assert!(context.contains(VC_CONTEXT_V2), "{context}");
+        assert!(context.contains(DATA_INTEGRITY_CONTEXT), "{context}");
         for (attr, value) in [
             (ATTR_PRESENTATION_PROOF_TYPE, "DataIntegrityProof"),
             (ATTR_PRESENTATION_PROOF_CRYPTOSUITE, "eddsa-2022"),

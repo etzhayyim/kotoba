@@ -5934,6 +5934,7 @@ fn issue_credential_with_operator_proof(
 ) -> Result<kotoba_vc::VerifiableCredential, kotoba_vc::VcError> {
     credential.issuer = state.operator_did.clone();
     credential.proof = None;
+    credential.ensure_data_integrity_context();
     let signature = state.ipns_signing_key().sign(&credential.proof_bytes()?);
     credential.proof = Some(kotoba_vc::DataIntegrityProof {
         proof_type: "DataIntegrityProof".to_string(),
