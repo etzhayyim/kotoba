@@ -26,6 +26,7 @@ use kotoba_core::cid::KotobaCid;
 use kotoba_vc::{CredentialStatus, DataIntegrityProof, VerifiableCredential, VC_CONTEXT_V2};
 
 use crate::server::KotobaState;
+use crate::xrpc::ProtocolWriteAuth;
 
 const MAX_ATTEST_DID_LEN: usize = 512;
 const MAX_ATTEST_CLAIM_TYPE: usize = 64;
@@ -71,6 +72,36 @@ fn require_attester_auth(
             StatusCode::UNAUTHORIZED,
             format!("Bearer sub does not match attester_did {attester_did:?}"),
         ))
+    }
+}
+
+fn authorize_attestation_write(
+    state: &KotobaState,
+    headers: &HeaderMap,
+    actor_did: &str,
+    graph: &KotobaCid,
+    cacao_b64: Option<&str>,
+    presentation: Option<&kotoba_vc::VerifiablePresentation>,
+    operation: &str,
+    tx_cid: &KotobaCid,
+) -> Result<ProtocolWriteAuth, (StatusCode, String)> {
+    if cacao_b64.is_some() || presentation.is_some() {
+        crate::xrpc::authorize_protocol_datom_write(
+            state,
+            headers,
+            &graph.to_multibase(),
+            cacao_b64,
+            presentation,
+            &[operation],
+            Some(tx_cid),
+        )
+    } else {
+        require_attester_auth(headers, actor_did, &state.operator_did)?;
+        Ok(ProtocolWriteAuth {
+            author: state.operator_did.clone(),
+            auth_proof_cid: None,
+            auth_capability: None,
+        })
     }
 }
 
@@ -358,6 +389,10 @@ pub struct AttestClaimReq {
     pub stake_mkoto: u64,
     /// Optional human-readable evidence string (URL, CID multibase, etc.).
     pub evidence: Option<String>,
+    /// Optional CACAO proof authorizing VC issue on the attestation graph.
+    pub cacao_b64: Option<String>,
+    /// Optional W3C Verifiable Presentation carrying a graph capability.
+    pub auth_presentation: Option<kotoba_vc::VerifiablePresentation>,
 }
 
 #[derive(Debug, Serialize)]
@@ -391,6 +426,10 @@ pub struct AttestChallengeReq {
     pub challenger_did: String,
     /// Reason for the challenge.
     pub reason: String,
+    /// Optional CACAO proof authorizing Datom transact on the attestation graph.
+    pub cacao_b64: Option<String>,
+    /// Optional W3C Verifiable Presentation carrying a graph capability.
+    pub auth_presentation: Option<kotoba_vc::VerifiablePresentation>,
 }
 
 #[derive(Debug, Serialize)]
@@ -497,12 +536,6 @@ pub async fn attest_claim(
                 Json(serde_json::json!({ "error": format!("evidence exceeds {MAX_ATTEST_EVIDENCE_LEN} bytes") }))).into_response();
         }
     }
-    if let Err((code, msg)) =
-        require_attester_auth(&headers, &req.attester_did, &state.operator_did)
-    {
-        return (code, Json(serde_json::json!({ "error": msg }))).into_response();
-    }
-
     // Reject stake values that exceed i64::MAX to prevent silent truncation when
     // stored as Datom EDN Integer(i64). Real stakes are at most ~10^10 mKOTO,
     // orders of magnitude below the 9.2×10^18 i64 ceiling.
@@ -572,6 +605,21 @@ pub async fn attest_claim(
         )
         .as_bytes(),
     );
+    let auth = match authorize_attestation_write(
+        &state,
+        &headers,
+        &req.attester_did,
+        &graph,
+        req.cacao_b64.as_deref(),
+        req.auth_presentation.as_ref(),
+        kotoba_auth::CacaoPayload::OP_VC_ISSUE,
+        &tx_cid,
+    ) {
+        Ok(auth) => auth,
+        Err((code, msg)) => {
+            return (code, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
     let mut datoms = match credential.to_datoms(tx_cid.clone()) {
         Ok(datoms) => datoms,
         Err(e) => {
@@ -597,10 +645,10 @@ pub async fn attest_claim(
         credential_cid.clone(),
         datoms,
         tx_cid,
-        state.operator_did.clone(),
+        auth.author,
         kotoba_auth::CacaoPayload::OP_VC_ISSUE,
-        None,
-        None,
+        auth.auth_proof_cid,
+        auth.auth_capability,
     )
     .await
     {
@@ -659,12 +707,6 @@ pub async fn attest_challenge(
         return (StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": format!("reason must be 1–{MAX_ATTEST_REASON_LEN} bytes") }))).into_response();
     }
-    if let Err((code, msg)) =
-        require_attester_auth(&headers, &req.challenger_did, &state.operator_did)
-    {
-        return (code, Json(serde_json::json!({ "error": msg }))).into_response();
-    }
-
     // Decode the claim CID from multibase (base32lower 'b' prefix).
     let claim_cid = match KotobaCid::from_multibase(&req.claim_cid) {
         Some(c) => c,
@@ -690,6 +732,21 @@ pub async fn attest_challenge(
         )
         .as_bytes(),
     );
+    let auth = match authorize_attestation_write(
+        &state,
+        &headers,
+        &req.challenger_did,
+        &graph,
+        req.cacao_b64.as_deref(),
+        req.auth_presentation.as_ref(),
+        kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT,
+        &tx_cid,
+    ) {
+        Ok(auth) => auth,
+        Err((code, msg)) => {
+            return (code, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
     let datoms = attestation_challenge_datoms(&req, &claim_cid, &challenge_cid, &tx_cid, ts);
     let distributed = match crate::xrpc::commit_protocol_datoms(
         &state,
@@ -698,10 +755,10 @@ pub async fn attest_challenge(
         challenge_cid.clone(),
         datoms,
         tx_cid,
-        state.operator_did.clone(),
+        auth.author,
         kotoba_auth::CacaoPayload::OP_DATOM_TRANSACT,
-        None,
-        None,
+        auth.auth_proof_cid,
+        auth.auth_capability,
     )
     .await
     {
@@ -986,6 +1043,8 @@ mod tests {
             attester_did: "did:plc:attester".into(),
             stake_mkoto: MIN_STAKE_VERIFIED_ENTITY,
             evidence: Some("ipfs://bafyattestationevidence".into()),
+            cacao_b64: None,
+            auth_presentation: None,
         };
         let claim_cid = KotobaCid::from_bytes(b"attestation-vc-claim");
         let credential = sign_attestation_credential(
@@ -1079,6 +1138,8 @@ mod tests {
             claim_cid: claim_cid.to_multibase(),
             challenger_did: "did:plc:challenger".into(),
             reason: "counter-evidence".into(),
+            cacao_b64: None,
+            auth_presentation: None,
         };
 
         let commit = writer
@@ -1135,6 +1196,48 @@ mod tests {
             .unwrap()
             .iter()
             .all(|datom| datom.t == tx_cid));
+    }
+
+    #[tokio::test]
+    async fn attest_claim_accepts_vp_vc_issue_capability() {
+        std::env::set_var("KOTOBA_IPFS", "off");
+        std::env::set_var("KOTOBA_IPNS_REQUIRE_SIGNATURE", "false");
+        let state = Arc::new(KotobaState::new(None).unwrap());
+        let graph = attest_graph_cid();
+
+        let response = attest_claim(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Json(AttestClaimReq {
+                entity_did: "did:plc:vpattestedentity".into(),
+                claim_type: "verified_entity".into(),
+                attester_did: state.operator_did.clone(),
+                stake_mkoto: MIN_STAKE_VERIFIED_ENTITY,
+                evidence: Some("ipfs://bafyattestationvpevidence".into()),
+                cacao_b64: None,
+                auth_presentation: Some(signed_capability_presentation(
+                    &state,
+                    &graph,
+                    kotoba_auth::CacaoPayload::OP_VC_ISSUE,
+                    "attest.claim",
+                )),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let db = crate::xrpc::current_db_for_graph(&state, &graph)
+            .await
+            .unwrap();
+        assert!(db.datoms().iter().any(|datom| {
+            datom.a == ":capability/operation"
+                && datom.v == kotoba_edn::EdnValue::string(kotoba_auth::CacaoPayload::OP_VC_ISSUE)
+        }));
+        assert!(db.datoms().iter().any(|datom| {
+            datom.a == ":capability/proofFormat"
+                && datom.v == kotoba_edn::EdnValue::string("W3C VerifiablePresentation")
+        }));
     }
 
     #[test]
@@ -1212,6 +1315,12 @@ mod tests {
             ],
             &[],
         );
+        assert_lexicon_input_fields(
+            claim,
+            &["entity_did", "claim_type", "attester_did", "stake_mkoto"],
+            &["evidence", "cacao_b64", "auth_presentation"],
+        );
+        assert_lexicon_input_presentation_schema(claim, "auth_presentation");
 
         let challenge = include_str!("../../../lexicons/ai/gftd/apps/kotoba/attest/challenge.json");
         assert_lexicon_output_fields(
@@ -1225,6 +1334,12 @@ mod tests {
             ],
             &[],
         );
+        assert_lexicon_input_fields(
+            challenge,
+            &["claim_cid", "challenger_did", "reason"],
+            &["cacao_b64", "auth_presentation"],
+        );
+        assert_lexicon_input_presentation_schema(challenge, "auth_presentation");
 
         let query = include_str!("../../../lexicons/ai/gftd/apps/kotoba/attest/query.json");
         assert_lexicon_output_fields(query, &["claims", "total"], &[]);
@@ -1246,6 +1361,126 @@ mod tests {
                 "ts_unix",
             ],
         );
+    }
+
+    fn signed_capability_presentation(
+        state: &KotobaState,
+        graph: &KotobaCid,
+        operation: &str,
+        challenge: &str,
+    ) -> kotoba_vc::VerifiablePresentation {
+        let holder = state.operator_did.clone();
+        let mut credential = kotoba_vc::VerifiableCredential::new(
+            format!("urn:uuid:{challenge}-vp-capability"),
+            state.operator_did.clone(),
+            serde_json::json!({
+                "id": holder,
+                "graph": graph.to_multibase(),
+                "operation": operation,
+                "scope": format!("kotoba://graph/{}", graph.to_multibase()),
+            }),
+        );
+        credential
+            .types
+            .push("KotobaGraphCapabilityCredential".into());
+        let credential_signature = state
+            .ipns_signing_key()
+            .sign(&credential.proof_bytes().unwrap());
+        credential.proof = Some(kotoba_vc::DataIntegrityProof {
+            proof_type: "DataIntegrityProof".into(),
+            cryptosuite: Some("eddsa-2022".into()),
+            proof_purpose: "assertionMethod".into(),
+            verification_method: format!("{}#agent-ed25519", state.operator_did),
+            created: Some("2026-05-30T00:00:00Z".into()),
+            proof_value: multibase::encode(
+                multibase::Base::Base58Btc,
+                credential_signature.to_bytes(),
+            ),
+            challenge: Some(challenge.into()),
+            domain: Some("kotoba.protocol.write".into()),
+        });
+
+        let mut presentation = kotoba_vc::VerifiablePresentation {
+            context: vec![kotoba_vc::VC_CONTEXT_V2.into()],
+            id: format!("urn:uuid:{challenge}-vp"),
+            types: vec!["VerifiablePresentation".into()],
+            holder: Some(state.operator_did.clone()),
+            verifiable_credentials: vec![credential],
+            proof: None,
+        };
+        let presentation_signature = state
+            .ipns_signing_key()
+            .sign(&presentation.proof_bytes().unwrap());
+        presentation.proof = Some(kotoba_vc::DataIntegrityProof {
+            proof_type: "DataIntegrityProof".into(),
+            cryptosuite: Some("eddsa-2022".into()),
+            proof_purpose: "authentication".into(),
+            verification_method: format!("{}#agent-ed25519", state.operator_did),
+            created: Some("2026-05-30T00:00:00Z".into()),
+            proof_value: multibase::encode(
+                multibase::Base::Base58Btc,
+                presentation_signature.to_bytes(),
+            ),
+            challenge: Some(challenge.into()),
+            domain: Some("kotoba.protocol.write".into()),
+        });
+        presentation
+    }
+
+    fn assert_lexicon_input_fields(src: &str, required: &[&str], properties: &[&str]) {
+        let value: serde_json::Value = serde_json::from_str(src).expect("lexicon JSON");
+        let schema = &value["defs"]["main"]["input"]["schema"];
+        assert_eq!(
+            schema["type"], "object",
+            "{} input must be object",
+            value["id"]
+        );
+        let required_values = schema["required"].as_array().expect("required array");
+        for field in required {
+            assert!(
+                required_values
+                    .iter()
+                    .any(|value| value.as_str() == Some(field)),
+                "{} missing required input field {field}",
+                value["id"]
+            );
+        }
+        let property_values = schema["properties"].as_object().expect("properties object");
+        for field in required.iter().chain(properties.iter()) {
+            assert!(
+                property_values.contains_key(*field),
+                "{} missing input property {field}",
+                value["id"]
+            );
+        }
+    }
+
+    fn assert_lexicon_input_presentation_schema(src: &str, field: &str) {
+        let value: serde_json::Value = serde_json::from_str(src).expect("lexicon JSON");
+        let schema = &value["defs"]["main"]["input"]["schema"]["properties"][field];
+        assert_eq!(schema["type"], "object");
+        let required_values = schema["required"].as_array().expect("required array");
+        for field in ["@context", "id", "type", "proof"] {
+            assert!(
+                required_values
+                    .iter()
+                    .any(|value| value.as_str() == Some(field)),
+                "{} presentation missing required field {field}",
+                value["id"]
+            );
+        }
+        let proof_required = schema["properties"]["proof"]["required"]
+            .as_array()
+            .expect("proof required array");
+        for field in ["type", "proofPurpose", "verificationMethod", "proofValue"] {
+            assert!(
+                proof_required
+                    .iter()
+                    .any(|value| value.as_str() == Some(field)),
+                "{} presentation proof missing required field {field}",
+                value["id"]
+            );
+        }
     }
 
     fn assert_lexicon_output_fields(src: &str, required: &[&str], properties: &[&str]) {
