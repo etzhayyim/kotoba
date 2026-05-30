@@ -1935,7 +1935,7 @@ where
                 crate::query_not_empty_value(required_query_value(&args[0], binding)?)
                     .map_err(Into::into)
             }
-            "map" | "filter" | "remove" | "keep" | "group-by" | "partition-by" => args
+            "map" | "filter" | "remove" | "keep" | "some" | "group-by" | "partition-by" => args
                 .iter()
                 .map(|arg| required_query_value(arg, binding))
                 .collect::<Result<Vec<_>, _>>()
@@ -1989,13 +1989,14 @@ where
                 .and_then(|values| {
                     crate::query_collection_slice_value(op, values).map_err(Into::into)
                 }),
-            "reverse" | "sort" | "flatten" | "interpose" | "interleave" => args
-                .iter()
-                .map(|arg| required_query_value(arg, binding))
-                .collect::<Result<Vec<_>, _>>()
-                .and_then(|values| {
-                    crate::query_collection_order_value(op, values).map_err(Into::into)
-                }),
+            "concat" | "distinct" | "reverse" | "sort" | "flatten" | "interpose" | "interleave" => {
+                args.iter()
+                    .map(|arg| required_query_value(arg, binding))
+                    .collect::<Result<Vec<_>, _>>()
+                    .and_then(|values| {
+                        crate::query_collection_order_value(op, values).map_err(Into::into)
+                    })
+            }
             "conj" => args
                 .iter()
                 .map(|arg| required_query_value(arg, binding))
@@ -6940,7 +6941,7 @@ mod tests {
         );
 
         let collection_predicate_query = kotoba_edn::parse(
-            r#"{:find [?allTags ?noNilTags ?notEveryTagString ?tagsVector ?sameTag ?hasTag ?notFalse ?truthyTags ?tagsString ?tagKeywords ?nonStringTags ?keptTags ?sum ?product ?max ?applySum ?applyMax ?applySet ?initialOdds ?afterOdds ?splitNumbers ?splitOdds ?groupedNumbers ?partitionedNumbers ?numberFrequencies ?numberRange ?repeatedTag ?tagMap ?flat ?interposed ?interleaved ?pairs ?windows ?paddedPairs ?allPairs]
+            r#"{:find [?allTags ?noNilTags ?notEveryTagString ?tagsVector ?sameTag ?hasTag ?notFalse ?truthyTags ?tagsString ?tagKeywords ?nonStringTags ?keptTags ?someTag ?sum ?product ?max ?applySum ?applyMax ?applySet ?initialOdds ?afterOdds ?splitNumbers ?splitOdds ?groupedNumbers ?partitionedNumbers ?numberFrequencies ?numberRange ?repeatedTag ?tagMap ?flat ?concatenated ?distinctNumbers ?interposed ?interleaved ?pairs ?windows ?paddedPairs ?allPairs]
                 :where [[?e :credential/claims ?claims]
                         [(get ?claims :claim/tags) ?tags]
                         [(distinct? :role/admin :role/auditor :role/operator)]
@@ -6957,6 +6958,7 @@ mod tests {
                         [(filter keyword? ?tags) ?tagKeywords]
                         [(remove string? ?tags) ?nonStringTags]
                         [(keep identity ?tags) ?keptTags]
+                        [(some identity ?tags) ?someTag]
                         [(reduce + 0 [1 2 3]) ?sum]
                         [(reduce * [1 2 3]) ?product]
                         [(reduce max [1 2 3]) ?max]
@@ -6974,6 +6976,8 @@ mod tests {
                         [(repeat 3 :ok) ?repeatedTag]
                         [(zipmap [:a :b] [1 2 3]) ?tagMap]
                         [(flatten [[1 2] [3 [4]]]) ?flat]
+                        [(concat [1 2] [3 4]) ?concatenated]
+                        [(distinct [1 2 1 3]) ?distinctNumbers]
                         [(interpose 0 [1 2 3]) ?interposed]
                         [(interleave [1 2 3] [:a :b :c]) ?interleaved]
                         [(partition 2 [1 2 3]) ?pairs]
@@ -7018,6 +7022,7 @@ mod tests {
                     EdnValue::Keyword(Keyword::parse("vc")),
                     EdnValue::Keyword(Keyword::parse("ipld")),
                 ]),
+                EdnValue::Keyword(Keyword::parse("vc")),
                 EdnValue::Integer(6),
                 EdnValue::Integer(6),
                 EdnValue::Integer(3),
@@ -7076,6 +7081,17 @@ mod tests {
                     EdnValue::Integer(2),
                     EdnValue::Integer(3),
                     EdnValue::Integer(4),
+                ]),
+                EdnValue::Vector(vec![
+                    EdnValue::Integer(1),
+                    EdnValue::Integer(2),
+                    EdnValue::Integer(3),
+                    EdnValue::Integer(4),
+                ]),
+                EdnValue::Vector(vec![
+                    EdnValue::Integer(1),
+                    EdnValue::Integer(2),
+                    EdnValue::Integer(3),
                 ]),
                 EdnValue::Vector(vec![
                     EdnValue::Integer(1),
