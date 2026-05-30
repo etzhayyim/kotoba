@@ -534,6 +534,8 @@ pub struct ProtocolDatomWriteResp {
     pub auth_proof_cid: Option<String>,
     pub ipns_name: String,
     pub ipns_sequence: u64,
+    pub ipns_valid_until: String,
+    pub index_roots: BTreeMap<String, String>,
     pub datom_count: usize,
     pub assert_count: usize,
     pub retract_count: usize,
@@ -2585,6 +2587,13 @@ pub(crate) async fn commit_protocol_datoms(
             .map(|cid| cid.to_multibase()),
         ipns_name,
         ipns_sequence: distributed.ipns_record.sequence,
+        ipns_valid_until: distributed.ipns_record.valid_until,
+        index_roots: distributed
+            .commit
+            .index_roots
+            .into_iter()
+            .map(|(k, v)| (k, v.to_multibase()))
+            .collect(),
         datom_count: datoms.len(),
         assert_count,
         retract_count,
@@ -8651,6 +8660,15 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["ipns_name"], distributed_graph_ipns_name(&graph));
+        assert_eq!(body["ipns_sequence"], 1);
+        assert!(body["ipns_valid_until"].as_str().is_some());
+        let index_roots = body["index_roots"].as_object().expect("index roots");
+        for root in ["eavt", "aevt", "avet", "vaet", "tea"] {
+            assert!(
+                index_roots.get(root).and_then(|cid| cid.as_str()).is_some(),
+                "protocol write response missing {root} root: {body}"
+            );
+        }
 
         let expected_issuer = format!(r#""{}""#, state.operator_did);
         let response = datomic_q(
@@ -12699,6 +12717,8 @@ mod tests {
                 "commit_cid",
                 "ipns_name",
                 "ipns_sequence",
+                "ipns_valid_until",
+                "index_roots",
                 "datom_count",
                 "journal_cids",
             ],
