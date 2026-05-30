@@ -13,6 +13,10 @@
           "properties": {
             "graph": { "type": "string" },
             "tx_edn": { "type": "string" },
+            "ipns_name": {
+              "type": "string",
+              "description": "Optional distributed mutable head name for the write. Defaults to the graph canonical k51-kotoba-{graph} IPNS head."
+            },
             "cacao_b64": { "type": "string" },
             "presentation": {
               "type": "object",

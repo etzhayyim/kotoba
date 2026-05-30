@@ -561,7 +561,7 @@ mod tests {
     fn publish_and_resolve_roundtrip() {
         let registry = InMemoryIpnsRegistry::new();
         let cid = raw_cid(b"commit");
-        let record = IpnsRecord::new("k51-kotoba-test", &cid, 1, "2026-05-29T00:00:00Z");
+        let record = IpnsRecord::new("k51-kotoba-test", &cid, 1, "2030-01-01T00:00:00Z");
         registry.publish(record.clone()).unwrap();
         assert_eq!(registry.resolve(&record.name).unwrap(), record);
     }
@@ -572,10 +572,10 @@ mod tests {
         let cid = raw_cid(b"commit");
         let name = "k51-kotoba-test";
         registry
-            .publish(IpnsRecord::new(name, &cid, 2, "2026-05-29T00:00:00Z"))
+            .publish(IpnsRecord::new(name, &cid, 2, "2030-01-01T00:00:00Z"))
             .unwrap();
         let err = registry
-            .publish(IpnsRecord::new(name, &cid, 1, "2026-05-29T00:00:00Z"))
+            .publish(IpnsRecord::new(name, &cid, 1, "2030-01-01T00:00:00Z"))
             .unwrap_err();
         assert!(matches!(err, IpnsRegistryError::StaleRecord { .. }));
     }
@@ -584,7 +584,7 @@ mod tests {
     fn ipns_record_signs_and_verifies_ed25519() {
         let cid = raw_cid(b"commit");
         let signing_key = SigningKey::from_bytes(&[7; 32]);
-        let mut record = IpnsRecord::new("k51-kotoba-test", &cid, 1, "2026-05-29T00:00:00Z");
+        let mut record = IpnsRecord::new("k51-kotoba-test", &cid, 1, "2030-01-01T00:00:00Z");
         record.ttl_secs = Some(60);
 
         record.sign_ed25519(&signing_key).unwrap();
@@ -599,7 +599,7 @@ mod tests {
         let cid = raw_cid(b"commit");
         let other = raw_cid(b"other-commit");
         let signing_key = SigningKey::from_bytes(&[7; 32]);
-        let mut record = IpnsRecord::new("k51-kotoba-test", &cid, 1, "2026-05-29T00:00:00Z");
+        let mut record = IpnsRecord::new("k51-kotoba-test", &cid, 1, "2030-01-01T00:00:00Z");
         record.sign_ed25519(&signing_key).unwrap();
         record.value = other.to_string();
 
@@ -615,7 +615,7 @@ mod tests {
         let cid = raw_cid(b"commit");
         let other = raw_cid(b"other-commit");
         let signing_key = SigningKey::from_bytes(&[7; 32]);
-        let mut record = IpnsRecord::new("k51-kotoba-test", &cid, 1, "2026-05-29T00:00:00Z");
+        let mut record = IpnsRecord::new("k51-kotoba-test", &cid, 1, "2030-01-01T00:00:00Z");
         record.sign_ed25519(&signing_key).unwrap();
         record.value = other.to_string();
 
@@ -629,7 +629,7 @@ mod tests {
     fn publish_rejects_partial_signature_metadata() {
         let registry = InMemoryIpnsRegistry::new();
         let cid = raw_cid(b"commit");
-        let mut record = IpnsRecord::new("k51-kotoba-test", &cid, 1, "2026-05-29T00:00:00Z");
+        let mut record = IpnsRecord::new("k51-kotoba-test", &cid, 1, "2030-01-01T00:00:00Z");
         record.public_key_multibase = Some(multibase::encode(Base::Base58Btc, [7; 32]));
 
         assert!(matches!(
@@ -642,7 +642,7 @@ mod tests {
     fn signed_registry_requires_verified_signature_on_publish() {
         let registry = SignedIpnsRegistry::new(Arc::new(InMemoryIpnsRegistry::new()));
         let cid = raw_cid(b"commit");
-        let record = IpnsRecord::new("k51-kotoba-test", &cid, 1, "2026-05-29T00:00:00Z");
+        let record = IpnsRecord::new("k51-kotoba-test", &cid, 1, "2030-01-01T00:00:00Z");
 
         assert!(matches!(
             registry.publish(record),
@@ -656,7 +656,7 @@ mod tests {
         let registry = SignedIpnsRegistry::new(inner);
         let cid = raw_cid(b"commit");
         let signing_key = SigningKey::from_bytes(&[7; 32]);
-        let mut record = IpnsRecord::new("k51-kotoba-test", &cid, 1, "2026-05-29T00:00:00Z");
+        let mut record = IpnsRecord::new("k51-kotoba-test", &cid, 1, "2030-01-01T00:00:00Z");
         record.sign_ed25519(&signing_key).unwrap();
 
         registry.publish(record.clone()).unwrap();
@@ -668,7 +668,7 @@ mod tests {
     fn kubo_signed_record_block_roundtrips_as_dag_cbor() {
         let cid = raw_cid(b"commit");
         let signing_key = SigningKey::from_bytes(&[7; 32]);
-        let mut record = IpnsRecord::new("k51-kotoba-test", &cid, 1, "2026-05-29T00:00:00Z");
+        let mut record = IpnsRecord::new("k51-kotoba-test", &cid, 1, "2030-01-01T00:00:00Z");
         record.ttl_secs = Some(60);
         record.sign_ed25519(&signing_key).unwrap();
 
@@ -686,7 +686,7 @@ mod tests {
     #[test]
     fn ipns_record_signature_requires_signature() {
         let cid = raw_cid(b"commit");
-        let record = IpnsRecord::new("k51-kotoba-test", &cid, 1, "2026-05-29T00:00:00Z");
+        let record = IpnsRecord::new("k51-kotoba-test", &cid, 1, "2030-01-01T00:00:00Z");
 
         assert!(matches!(
             record.verify_ed25519_signature(),

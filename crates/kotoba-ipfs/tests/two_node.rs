@@ -125,7 +125,7 @@ async fn two_node_block_exchange() {
         .name_publish(
             "k51-kotoba-two-node-head",
             &remote_cid,
-            "2026-05-29T00:00:00Z",
+            "2030-01-01T00:00:00Z",
         )
         .await
         .expect("name/publish on node A");
@@ -195,7 +195,7 @@ async fn repo_persists_blocks_and_pins() {
     node.files_write_bytes("/persisted/file.txt", &data, true)
         .await
         .expect("files/write bytes");
-    node.name_publish("k51-kotoba-persisted", &cid, "2026-05-29T00:00:00Z")
+    node.name_publish("k51-kotoba-persisted", &cid, "2030-01-01T00:00:00Z")
         .await
         .expect("name/publish");
     let key = node.key_gen("persisted-key").await.expect("key/gen");
@@ -1150,7 +1150,7 @@ async fn kubo_compatible_local_api_surface() {
     assert!(refs.contains(&dag));
 
     let published = node
-        .name_publish("k51-kotoba-local", &raw, "2026-05-29T00:00:00Z")
+        .name_publish("k51-kotoba-local", &raw, "2030-01-01T00:00:00Z")
         .await
         .expect("name/publish");
     assert_eq!(published.value, raw.to_string());
@@ -1176,7 +1176,7 @@ async fn kubo_compatible_local_api_surface() {
         b"hello"[..]
     );
     let republished = node
-        .name_publish("k51-kotoba-local", &dag, "2026-05-29T00:01:00Z")
+        .name_publish("k51-kotoba-local", &dag, "2030-01-01T00:01:00Z")
         .await
         .expect("name/publish sequence");
     assert_eq!(republished.sequence, 2);

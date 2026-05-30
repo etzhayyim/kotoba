@@ -110,6 +110,9 @@ pub struct QuadCreateResp {
 pub struct DatomicTransactReq {
     pub graph: String,
     pub tx_edn: String,
+    /// Optional distributed mutable head name. Defaults to the canonical
+    /// `k51-kotoba-{graphCid}` IPNS name for the graph.
+    pub ipns_name: Option<String>,
     pub cacao_b64: Option<String>,
     #[serde(default)]
     pub presentation: Option<kotoba_vc::VerifiablePresentation>,
@@ -2085,6 +2088,28 @@ pub(crate) fn distributed_graph_ipns_name(graph_cid: &kotoba_core::cid::KotobaCi
     format!("k51-kotoba-{}", graph_cid.to_multibase())
 }
 
+fn datomic_write_ipns_name(
+    graph_cid: &kotoba_core::cid::KotobaCid,
+    requested: Option<&str>,
+) -> Result<String, (StatusCode, String)> {
+    let Some(name) = requested else {
+        return Ok(distributed_graph_ipns_name(graph_cid));
+    };
+    if name.is_empty()
+        || name.len() > 256
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "ipns_name must be 1-256 characters using ASCII letters, digits, '-', '_', '.', or ':'"
+                .to_string(),
+        ));
+    }
+    Ok(name.to_string())
+}
+
 fn did_document_registry_graph_cid(did: &str) -> kotoba_core::cid::KotobaCid {
     kotoba_core::cid::KotobaCid::from_bytes(format!("did-document-registry:{did}").as_bytes())
 }
@@ -4036,7 +4061,7 @@ pub async fn datomic_transact(
 
     let tx_data = kotoba_edn::parse(&req.tx_edn)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("tx_edn parse: {e}")))?;
-    let ipns_name = distributed_graph_ipns_name(&graph_cid);
+    let ipns_name = datomic_write_ipns_name(&graph_cid, req.ipns_name.as_deref())?;
     let current_head = match state
         .ipns_registry
         .resolve(&IpnsName::new(ipns_name.clone()))
@@ -8327,7 +8352,10 @@ mod tests {
             headers,
             axum::Json(DatomicTransactReq {
                 graph: graph_mb.clone(),
-                tx_edn: r#"[[:db/add "alice" :person/name "Alice"]]"#.into(),
+                tx_edn: r#"[[:db/add "alice" :person/name "Alice"]
+                            [:db/add "alice" :person/role "admin"]]"#
+                    .into(),
+                ipns_name: None,
                 cacao_b64: None,
                 cacao_proof_cid: None,
                 expected_parent: None,
@@ -8394,6 +8422,102 @@ mod tests {
         assert!(tx_datoms
             .iter()
             .any(|datom| datom.a == ":person/name" && datom.v == EdnValue::string("Alice")));
+    }
+
+    #[tokio::test]
+    async fn datomic_transact_xrpc_writes_named_ipns_head_readable_by_override() {
+        std::env::set_var("KOTOBA_IPFS", "off");
+        std::env::set_var("KOTOBA_IPNS_REQUIRE_SIGNATURE", "false");
+        let state = Arc::new(KotobaState::new(None).unwrap());
+        let graph = KotobaCid::from_bytes(b"xrpc-named-ipns-transact-graph");
+        let graph_mb = graph.to_multibase();
+        state.graph_registry.write().await.insert(
+            graph.clone(),
+            (
+                "xrpc-named-ipns-transact-graph".into(),
+                GraphVisibility::Public,
+            ),
+        );
+        let named_head = "k51-kotoba-xrpc-named-write-head".to_string();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", test_operator_jwt(&state.operator_did))
+                .parse()
+                .unwrap(),
+        );
+
+        let write = datomic_transact(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicTransactReq {
+                graph: graph_mb.clone(),
+                tx_edn: r#"[[:db/add "alice" :person/name "Alice"]
+                            [:db/add "alice" :person/role "admin"]]"#
+                    .into(),
+                ipns_name: Some(named_head.clone()),
+                cacao_b64: None,
+                cacao_proof_cid: None,
+                expected_parent: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(write.status(), axum::http::StatusCode::OK);
+        let write_body = axum::body::to_bytes(write.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let write_body: serde_json::Value = serde_json::from_slice(&write_body).unwrap();
+        assert_eq!(write_body["ipns_name"], named_head);
+        assert_eq!(write_body["ipns_sequence"], 1);
+
+        let canonical_reader =
+            DistributedDatomReader::new(&*state.block_store, &*state.ipns_registry);
+        assert!(canonical_reader
+            .resolve_head(&distributed_graph_ipns_name(&graph))
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            canonical_reader
+                .resolve_head(&named_head)
+                .unwrap()
+                .unwrap()
+                .cid
+                .to_multibase(),
+            write_body["commit_cid"].as_str().unwrap()
+        );
+
+        let datoms = datomic_datoms(
+            axum::extract::State(state),
+            headers,
+            axum::Json(DatomicDatomsReq {
+                graph: graph_mb,
+                index: ":eavt".into(),
+                components_edn: vec![],
+                as_of: None,
+                since: None,
+                remote_peer: None,
+                remote_ipns_name: Some(named_head),
+                cacao_b64: None,
+                presentation: None,
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(datoms.status(), axum::http::StatusCode::OK);
+        let datoms_body = axum::body::to_bytes(datoms.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let datoms_body: serde_json::Value = serde_json::from_slice(&datoms_body).unwrap();
+        assert!(datoms_body["datoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|datom| { datom["a"] == ":person/name" && datom["v_edn"] == r#""Alice""# }));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8603,6 +8727,7 @@ mod tests {
                             [:db/add "alice" :person/email "alice@example.com"]
                             [:db/add "alice" :db/ident :person/alice]]"#
                     .into(),
+                ipns_name: None,
                 cacao_b64: None,
                 cacao_proof_cid: None,
                 expected_parent: None,
@@ -8627,6 +8752,7 @@ mod tests {
                 tx_edn: r#"[[:db/add "bob" :person/name "Bob"]
                             [:db/add "bob" :person/role "operator"]]"#
                     .into(),
+                ipns_name: None,
                 cacao_b64: None,
                 cacao_proof_cid: None,
                 expected_parent: None,
@@ -9568,6 +9694,7 @@ mod tests {
             &[
                 "cacao_b64",
                 "presentation",
+                "ipns_name",
                 "expected_parent",
                 "cacao_proof_cid",
             ],
