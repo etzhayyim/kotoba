@@ -564,6 +564,7 @@ pub(crate) struct AuthCapabilityProjection {
 const ZCAP_ALLOWED_ACTION_IRI: &str = "https://w3id.org/security#allowedAction";
 const ZCAP_INVOCATION_TARGET_IRI: &str = "https://w3id.org/security#invocationTarget";
 const ZCAP_CONTROLLER_IRI: &str = "https://w3id.org/security#controller";
+const ZCAP_INVOKER_IRI: &str = "https://w3id.org/security#invoker";
 const ZCAP_INVOCATION_PROOF_IRI: &str = "https://w3id.org/security#proof";
 const ZCAP_CAPABILITY_INVOCATION_IRI: &str = "https://w3id.org/security#CapabilityInvocation";
 
@@ -2397,6 +2398,12 @@ fn append_auth_capability_datoms(
             datoms,
             tx_cid,
             ":capability/invoker",
+            kotoba_edn::EdnValue::String(projection.invoker.clone()),
+        );
+        assert_tx(
+            datoms,
+            tx_cid,
+            ZCAP_INVOKER_IRI,
             kotoba_edn::EdnValue::String(projection.invoker.clone()),
         );
     }
@@ -8470,6 +8477,7 @@ mod tests {
         DatomicTransactReq, DatomicTxRangeReq, DatomicWithReq, DidCommSendReq,
         DidDocumentPublishReq, VcIssueReq, ZCAP_ALLOWED_ACTION_IRI, ZCAP_CAPABILITY_INVOCATION_IRI,
         ZCAP_CONTROLLER_IRI, ZCAP_INVOCATION_PROOF_IRI, ZCAP_INVOCATION_TARGET_IRI,
+        ZCAP_INVOKER_IRI,
     };
     use crate::server::KotobaState;
     use axum::response::IntoResponse;
@@ -9412,6 +9420,7 @@ mod tests {
         assert!(has(":capability/controller", "did:key:zController"));
         assert!(has(ZCAP_CONTROLLER_IRI, "did:key:zController"));
         assert!(has(":capability/invoker", "did:key:zInvoker"));
+        assert!(has(ZCAP_INVOKER_IRI, "did:key:zInvoker"));
         assert!(has(
             ":capability/graph",
             graph_scope.trim_start_matches("kotoba://graph/")
