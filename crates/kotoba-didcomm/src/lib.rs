@@ -20,6 +20,7 @@ pub const ATTR_DIDCOMM_TYPE: &str = "didcomm/type";
 pub const ATTR_DIDCOMM_FROM: &str = "didcomm/from";
 pub const ATTR_DIDCOMM_TO: &str = "didcomm/to";
 pub const ATTR_DIDCOMM_THREAD: &str = "didcomm/thread";
+pub const ATTR_DIDCOMM_THREAD_SCOPE: &str = "didcomm/threadScope";
 pub const ATTR_DIDCOMM_PARENT_THREAD: &str = "didcomm/parentThread";
 pub const ATTR_DIDCOMM_CREATED_TIME: &str = "didcomm/createdTime";
 pub const ATTR_DIDCOMM_EXPIRES_TIME: &str = "didcomm/expiresTime";
@@ -94,8 +95,13 @@ impl DidCommMessage {
         self.thid.as_deref().unwrap_or(&self.id)
     }
 
+    pub fn thread_scope(&self) -> String {
+        format!("didcomm://thread/{}", self.thread_id())
+    }
+
     pub fn to_datoms(&self, tx: KotobaCid) -> Result<Vec<Datom>, DidCommError> {
         let e = self.cid()?;
+        let thread_scope = self.thread_scope();
         let mut out = vec![
             datom(&e, ATTR_DIDCOMM_ID, EdnValue::string(&self.id), &tx),
             datom(
@@ -139,6 +145,12 @@ impl DidCommMessage {
                 &e,
                 ATTR_DIDCOMM_THREAD,
                 EdnValue::string(self.thread_id()),
+                &tx,
+            ),
+            datom(
+                &e,
+                ATTR_DIDCOMM_THREAD_SCOPE,
+                EdnValue::string(&thread_scope),
                 &tx,
             ),
             datom(
@@ -331,6 +343,9 @@ mod tests {
         assert!(datoms.iter().any(|d| d.a == ATTR_DIDCOMM_WIRE_FORMAT
             && d.v == EdnValue::string("application/didcomm-plain+json")));
         assert!(datoms.iter().any(|d| d.a == ATTR_DIDCOMM_THREAD));
+        assert!(datoms.iter().any(|d| {
+            d.a == ATTR_DIDCOMM_THREAD_SCOPE && d.v == EdnValue::string("didcomm://thread/thread-1")
+        }));
         assert!(datoms.iter().any(|d| d.a == ATTR_DIDCOMM_BODY));
         assert!(datoms.iter().any(|d| d.a == ATTR_DIDCOMM_WIRE_TYPE));
         assert!(datoms
