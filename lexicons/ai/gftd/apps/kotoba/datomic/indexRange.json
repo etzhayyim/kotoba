@@ -4,46 +4,118 @@
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Return Datomic index-range(attr, start, end) datoms from a Kotoba distributed Datom graph.",
+      "description": "Return Datomic index-range(attr, start, end) datoms from a Kotoba distributed Datom graph, and optional remote kotoba-ipfs/IPNS peer reads.",
       "input": {
         "encoding": "application/json",
         "schema": {
           "type": "object",
-          "required": ["graph", "attr_edn"],
+          "required": [
+            "graph",
+            "attr_edn"
+          ],
           "properties": {
-            "graph": { "type": "string" },
-            "attr_edn": { "type": "string" },
-            "start_edn": { "type": "string" },
-            "end_edn": { "type": "string" },
-            "as_of": { "type": "string" },
-            "since": { "type": "string" },
-            "cacao_b64": { "type": "string" },
+            "graph": {
+              "type": "string"
+            },
+            "attr_edn": {
+              "type": "string"
+            },
+            "start_edn": {
+              "type": "string"
+            },
+            "end_edn": {
+              "type": "string"
+            },
+            "as_of": {
+              "type": "string"
+            },
+            "since": {
+              "type": "string"
+            },
+            "remote_peer": {
+              "type": "string",
+              "description": "Optional host:port or /ip4/<addr>/tcp/<port> kotoba-ipfs peer used to resolve the graph IPNS head and DAG-CBOR/Prolly blocks."
+            },
+            "remote_ipns_name": {
+              "type": "string",
+              "description": "Optional IPNS name override for remote reads. Defaults to the graph canonical k51-kotoba-{graph} head."
+            },
+            "cacao_b64": {
+              "type": "string"
+            },
             "presentation": {
               "type": "object",
-              "required": ["@context", "id", "type"],
+              "required": [
+                "@context",
+                "id",
+                "type"
+              ],
               "properties": {
-                "@context": { "type": "array", "items": { "type": "string" } },
-                "id": { "type": "string" },
-                "type": { "type": "array", "items": { "type": "string" } },
-                "holder": { "type": "string" },
-                "verifiableCredential": { "type": "array", "items": { "type": "object" } },
+                "@context": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "id": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "holder": {
+                  "type": "string"
+                },
+                "verifiableCredential": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                },
                 "proof": {
                   "type": "object",
-                  "required": ["type", "proofPurpose", "verificationMethod", "proofValue"],
+                  "required": [
+                    "type",
+                    "proofPurpose",
+                    "verificationMethod",
+                    "proofValue"
+                  ],
                   "properties": {
-                    "type": { "type": "string" },
-                    "cryptosuite": { "type": "string" },
-                    "proofPurpose": { "type": "string" },
-                    "verificationMethod": { "type": "string" },
-                    "created": { "type": "string" },
-                    "proofValue": { "type": "string" },
-                    "challenge": { "type": "string" },
-                    "domain": { "type": "string" }
+                    "type": {
+                      "type": "string"
+                    },
+                    "cryptosuite": {
+                      "type": "string"
+                    },
+                    "proofPurpose": {
+                      "type": "string"
+                    },
+                    "verificationMethod": {
+                      "type": "string"
+                    },
+                    "created": {
+                      "type": "string"
+                    },
+                    "proofValue": {
+                      "type": "string"
+                    },
+                    "challenge": {
+                      "type": "string"
+                    },
+                    "domain": {
+                      "type": "string"
+                    }
                   }
                 }
               }
             },
-            "limit": { "type": "integer", "minimum": 0 }
+            "limit": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         }
       },
@@ -51,29 +123,55 @@
         "encoding": "application/json",
         "schema": {
           "type": "object",
-          "required": ["graph", "index", "datom_count", "datoms"],
+          "required": [
+            "graph",
+            "index",
+            "datom_count",
+            "datoms"
+          ],
           "properties": {
-            "graph": { "type": "string" },
+            "graph": {
+              "type": "string"
+            },
             "index": {
               "type": "string",
               "description": "Always :avet for Datomic index-range results."
             },
-            "basis_t": { "type": "string" },
-            "datom_count": { "type": "integer", "minimum": 0 },
+            "basis_t": {
+              "type": "string"
+            },
+            "datom_count": {
+              "type": "integer",
+              "minimum": 0
+            },
             "datoms": {
               "type": "array",
               "items": {
                 "type": "object",
-                "required": ["e", "a", "v_edn", "t", "added"],
+                "required": [
+                  "e",
+                  "a",
+                  "v_edn",
+                  "t",
+                  "added"
+                ],
                 "properties": {
-                  "e": { "type": "string" },
-                  "a": { "type": "string" },
-                  "v_edn": { "type": "string" },
+                  "e": {
+                    "type": "string"
+                  },
+                  "a": {
+                    "type": "string"
+                  },
+                  "v_edn": {
+                    "type": "string"
+                  },
                   "t": {
                     "type": "string",
                     "description": "Transaction CID for this Datom."
                   },
-                  "added": { "type": "boolean" }
+                  "added": {
+                    "type": "boolean"
+                  }
                 }
               }
             }

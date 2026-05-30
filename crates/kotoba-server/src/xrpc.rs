@@ -54,12 +54,13 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use ed25519_dalek::Signer;
 use kotoba_datomic::distributed::{
     CommitDatomsRequest, DistributedCommitError, DistributedCommitWriter, DistributedDatomCommit,
-    DistributedDatomReader, DistributedTransactRequest, ROOT_AEVT, ROOT_AVET, ROOT_EAVT, ROOT_TEA,
-    ROOT_VAET,
+    DistributedDatomReader, DistributedTransactRequest, RemoteIpfsBlockStore,
+    RemoteIpfsIpnsRegistry, ROOT_AEVT, ROOT_AVET, ROOT_EAVT, ROOT_TEA, ROOT_VAET,
 };
 use kotoba_ipfs::{IpnsName, IpnsRegistryError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 /// Maximum size of a base64-encoded CACAO delegation token (8 KiB decoded ≈ 6 KiB base64).
@@ -136,6 +137,8 @@ pub struct DatomicDbValueReq {
     pub graph: String,
     /// Transaction CID that selects the Datomic database value.
     pub tx: String,
+    pub remote_peer: Option<String>,
+    pub remote_ipns_name: Option<String>,
     pub cacao_b64: Option<String>,
     #[serde(default)]
     pub presentation: Option<kotoba_vc::VerifiablePresentation>,
@@ -147,6 +150,8 @@ pub struct DatomicSyncReq {
     /// Optional target transaction CID.  When present, `reached` indicates
     /// whether the current distributed IPNS head includes this transaction.
     pub tx: Option<String>,
+    pub remote_peer: Option<String>,
+    pub remote_ipns_name: Option<String>,
     pub cacao_b64: Option<String>,
     #[serde(default)]
     pub presentation: Option<kotoba_vc::VerifiablePresentation>,
@@ -164,6 +169,8 @@ pub struct DatomicDatomsReq {
     pub as_of: Option<String>,
     /// Optional Datomic `since` transaction CID.
     pub since: Option<String>,
+    pub remote_peer: Option<String>,
+    pub remote_ipns_name: Option<String>,
     pub cacao_b64: Option<String>,
     #[serde(default)]
     pub presentation: Option<kotoba_vc::VerifiablePresentation>,
@@ -182,6 +189,8 @@ pub struct DatomicSeekDatomsReq {
     pub as_of: Option<String>,
     /// Optional Datomic `since` transaction CID.
     pub since: Option<String>,
+    pub remote_peer: Option<String>,
+    pub remote_ipns_name: Option<String>,
     pub cacao_b64: Option<String>,
     #[serde(default)]
     pub presentation: Option<kotoba_vc::VerifiablePresentation>,
@@ -201,6 +210,8 @@ pub struct DatomicIndexRangeReq {
     pub as_of: Option<String>,
     /// Optional Datomic `since` transaction CID.
     pub since: Option<String>,
+    pub remote_peer: Option<String>,
+    pub remote_ipns_name: Option<String>,
     pub cacao_b64: Option<String>,
     #[serde(default)]
     pub presentation: Option<kotoba_vc::VerifiablePresentation>,
@@ -220,6 +231,8 @@ pub struct DatomicIndexPullReq {
     pub as_of: Option<String>,
     /// Optional Datomic `since` transaction CID.
     pub since: Option<String>,
+    pub remote_peer: Option<String>,
+    pub remote_ipns_name: Option<String>,
     pub cacao_b64: Option<String>,
     #[serde(default)]
     pub presentation: Option<kotoba_vc::VerifiablePresentation>,
@@ -237,6 +250,8 @@ pub struct DatomicPullReq {
     /// Optional Datomic `since` transaction CID.  Queries facts strictly after
     /// this transaction.
     pub since: Option<String>,
+    pub remote_peer: Option<String>,
+    pub remote_ipns_name: Option<String>,
     pub cacao_b64: Option<String>,
     #[serde(default)]
     pub presentation: Option<kotoba_vc::VerifiablePresentation>,
@@ -253,6 +268,8 @@ pub struct DatomicPullManyReq {
     /// Optional Datomic `since` transaction CID.  Queries facts strictly after
     /// this transaction.
     pub since: Option<String>,
+    pub remote_peer: Option<String>,
+    pub remote_ipns_name: Option<String>,
     pub cacao_b64: Option<String>,
     #[serde(default)]
     pub presentation: Option<kotoba_vc::VerifiablePresentation>,
@@ -274,6 +291,13 @@ pub struct DatomicQReq {
     /// the fifth datom `added` component.
     #[serde(default)]
     pub history: bool,
+    /// Optional `host:port` for a remote `kotoba-ipfs/1` peer. When present,
+    /// the query resolves the graph IPNS head and DAG-CBOR/Prolly blocks from
+    /// that peer instead of this node's local block store.
+    pub remote_peer: Option<String>,
+    /// Optional IPNS name override for remote reads. Defaults to the graph's
+    /// canonical `k51-kotoba-{graphCid}` head.
+    pub remote_ipns_name: Option<String>,
     pub cacao_b64: Option<String>,
     #[serde(default)]
     pub presentation: Option<kotoba_vc::VerifiablePresentation>,
@@ -291,6 +315,8 @@ pub struct DatomicHistoryReq {
     /// Optional Datomic `since` transaction CID.  Returns history strictly
     /// after this transaction.
     pub since: Option<String>,
+    pub remote_peer: Option<String>,
+    pub remote_ipns_name: Option<String>,
     pub limit: Option<usize>,
 }
 
@@ -301,6 +327,8 @@ pub struct DatomicTxRangeReq {
     pub start: Option<String>,
     /// Exclusive end transaction CID.  Omitted means the current head.
     pub end: Option<String>,
+    pub remote_peer: Option<String>,
+    pub remote_ipns_name: Option<String>,
     pub cacao_b64: Option<String>,
     #[serde(default)]
     pub presentation: Option<kotoba_vc::VerifiablePresentation>,
@@ -314,6 +342,8 @@ pub struct DatomicLogReq {
     pub start: Option<String>,
     /// Exclusive end transaction CID. Omitted means the current head.
     pub end: Option<String>,
+    pub remote_peer: Option<String>,
+    pub remote_ipns_name: Option<String>,
     pub cacao_b64: Option<String>,
     #[serde(default)]
     pub presentation: Option<kotoba_vc::VerifiablePresentation>,
@@ -327,6 +357,8 @@ pub struct DatomicBasisTReq {
     pub as_of: Option<String>,
     /// Optional Datomic `since` transaction CID.
     pub since: Option<String>,
+    pub remote_peer: Option<String>,
+    pub remote_ipns_name: Option<String>,
     pub cacao_b64: Option<String>,
     #[serde(default)]
     pub presentation: Option<kotoba_vc::VerifiablePresentation>,
@@ -339,6 +371,8 @@ pub struct DatomicDbStatsReq {
     pub as_of: Option<String>,
     /// Optional Datomic `since` transaction CID.
     pub since: Option<String>,
+    pub remote_peer: Option<String>,
+    pub remote_ipns_name: Option<String>,
     pub cacao_b64: Option<String>,
     #[serde(default)]
     pub presentation: Option<kotoba_vc::VerifiablePresentation>,
@@ -350,6 +384,8 @@ pub struct DatomicEntityReq {
     pub entity: String,
     pub as_of: Option<String>,
     pub since: Option<String>,
+    pub remote_peer: Option<String>,
+    pub remote_ipns_name: Option<String>,
     pub cacao_b64: Option<String>,
     #[serde(default)]
     pub presentation: Option<kotoba_vc::VerifiablePresentation>,
@@ -361,6 +397,8 @@ pub struct DatomicIdentReq {
     pub entity: String,
     pub as_of: Option<String>,
     pub since: Option<String>,
+    pub remote_peer: Option<String>,
+    pub remote_ipns_name: Option<String>,
     pub cacao_b64: Option<String>,
     #[serde(default)]
     pub presentation: Option<kotoba_vc::VerifiablePresentation>,
@@ -373,6 +411,8 @@ pub struct DatomicEntidReq {
     pub ident_edn: String,
     pub as_of: Option<String>,
     pub since: Option<String>,
+    pub remote_peer: Option<String>,
+    pub remote_ipns_name: Option<String>,
     pub cacao_b64: Option<String>,
     #[serde(default)]
     pub presentation: Option<kotoba_vc::VerifiablePresentation>,
@@ -3174,16 +3214,39 @@ fn distributed_datomic_db(
     graph_cid: &kotoba_core::cid::KotobaCid,
     as_of: Option<&str>,
     since: Option<&str>,
+    remote_peer: Option<&str>,
+    remote_ipns_name: Option<&str>,
 ) -> Result<Option<kotoba_datomic::Db>, (StatusCode, String)> {
+    let ipns_name = remote_ipns_name
+        .map(str::to_string)
+        .unwrap_or_else(|| distributed_graph_ipns_name(graph_cid));
+    if let Some(remote_peer) = remote_peer {
+        let socket = parse_remote_peer_socket(remote_peer)?;
+        let remote_store = RemoteIpfsBlockStore::new(socket);
+        let remote_ipns = RemoteIpfsIpnsRegistry::new(socket);
+        let reader = DistributedDatomReader::new(&remote_store, &remote_ipns);
+        return distributed_datomic_db_with_reader(&reader, &ipns_name, as_of, since);
+    }
+
     let reader = DistributedDatomReader::new(&*state.block_store, &*state.ipns_registry);
-    let Some(head) = reader
-        .resolve_head(&distributed_graph_ipns_name(graph_cid))
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("distributed datomic head read: {e}"),
-            )
-        })?
+    distributed_datomic_db_with_reader(&reader, &ipns_name, as_of, since)
+}
+
+fn distributed_datomic_db_with_reader<R>(
+    reader: &DistributedDatomReader<'_, R>,
+    ipns_name: &str,
+    as_of: Option<&str>,
+    since: Option<&str>,
+) -> Result<Option<kotoba_datomic::Db>, (StatusCode, String)>
+where
+    R: kotoba_ipfs::IpnsRegistry + ?Sized,
+{
+    let Some(head) = reader.resolve_head(ipns_name).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("distributed datomic head read: {e}"),
+        )
+    })?
     else {
         return Ok(None);
     };
@@ -3227,9 +3290,18 @@ fn require_distributed_datomic_db(
     graph_cid: &kotoba_core::cid::KotobaCid,
     as_of: Option<&str>,
     since: Option<&str>,
+    remote_peer: Option<&str>,
+    remote_ipns_name: Option<&str>,
 ) -> Result<kotoba_datomic::Db, (StatusCode, String)> {
-    distributed_datomic_db(state, graph_cid, as_of, since)?
-        .ok_or_else(|| missing_distributed_datomic_head(graph_cid))
+    distributed_datomic_db(
+        state,
+        graph_cid,
+        as_of,
+        since,
+        remote_peer,
+        remote_ipns_name,
+    )?
+    .ok_or_else(|| missing_distributed_datomic_head(graph_cid))
 }
 
 fn distributed_datomic_history_db(
@@ -3237,16 +3309,39 @@ fn distributed_datomic_history_db(
     graph_cid: &kotoba_core::cid::KotobaCid,
     as_of: Option<&str>,
     since: Option<&str>,
+    remote_peer: Option<&str>,
+    remote_ipns_name: Option<&str>,
 ) -> Result<Option<kotoba_datomic::Db>, (StatusCode, String)> {
+    let ipns_name = remote_ipns_name
+        .map(str::to_string)
+        .unwrap_or_else(|| distributed_graph_ipns_name(graph_cid));
+    if let Some(remote_peer) = remote_peer {
+        let socket = parse_remote_peer_socket(remote_peer)?;
+        let remote_store = RemoteIpfsBlockStore::new(socket);
+        let remote_ipns = RemoteIpfsIpnsRegistry::new(socket);
+        let reader = DistributedDatomReader::new(&remote_store, &remote_ipns);
+        return distributed_datomic_history_db_with_reader(&reader, &ipns_name, as_of, since);
+    }
+
     let reader = DistributedDatomReader::new(&*state.block_store, &*state.ipns_registry);
-    let Some(head) = reader
-        .resolve_head(&distributed_graph_ipns_name(graph_cid))
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("distributed datomic head read: {e}"),
-            )
-        })?
+    distributed_datomic_history_db_with_reader(&reader, &ipns_name, as_of, since)
+}
+
+fn distributed_datomic_history_db_with_reader<R>(
+    reader: &DistributedDatomReader<'_, R>,
+    ipns_name: &str,
+    as_of: Option<&str>,
+    since: Option<&str>,
+) -> Result<Option<kotoba_datomic::Db>, (StatusCode, String)>
+where
+    R: kotoba_ipfs::IpnsRegistry + ?Sized,
+{
+    let Some(head) = reader.resolve_head(ipns_name).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("distributed datomic head read: {e}"),
+        )
+    })?
     else {
         return Ok(None);
     };
@@ -3278,9 +3373,18 @@ fn require_distributed_datomic_history_db(
     graph_cid: &kotoba_core::cid::KotobaCid,
     as_of: Option<&str>,
     since: Option<&str>,
+    remote_peer: Option<&str>,
+    remote_ipns_name: Option<&str>,
 ) -> Result<kotoba_datomic::Db, (StatusCode, String)> {
-    distributed_datomic_history_db(state, graph_cid, as_of, since)?
-        .ok_or_else(|| missing_distributed_datomic_head(graph_cid))
+    distributed_datomic_history_db(
+        state,
+        graph_cid,
+        as_of,
+        since,
+        remote_peer,
+        remote_ipns_name,
+    )?
+    .ok_or_else(|| missing_distributed_datomic_head(graph_cid))
 }
 
 fn distributed_datomic_q(
@@ -3291,30 +3395,44 @@ fn distributed_datomic_q(
     as_of: Option<&str>,
     since: Option<&str>,
     history: bool,
+    remote_peer: Option<&str>,
+    remote_ipns_name: Option<&str>,
 ) -> Result<Option<(Option<String>, Vec<Vec<kotoba_edn::EdnValue>>)>, (StatusCode, String)> {
-    if history {
-        let Some(db) = distributed_datomic_history_db(state, graph_cid, as_of, since)? else {
-            return Ok(None);
-        };
-        let basis_t = basis_t_resp(&db);
-        let rows =
-            kotoba_datomic::q_history(query.clone(), &db.history(), inputs).map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("distributed datomic q: {e}"),
-                )
-            })?;
-        return Ok(Some((basis_t, rows)));
+    let ipns_name = remote_ipns_name
+        .map(str::to_string)
+        .unwrap_or_else(|| distributed_graph_ipns_name(graph_cid));
+    if let Some(remote_peer) = remote_peer {
+        let socket = parse_remote_peer_socket(remote_peer)?;
+        let remote_store = RemoteIpfsBlockStore::new(socket);
+        let remote_ipns = RemoteIpfsIpnsRegistry::new(socket);
+        let reader = DistributedDatomReader::new(&remote_store, &remote_ipns);
+        return distributed_datomic_q_with_reader(
+            &reader, &ipns_name, query, inputs, as_of, since, history,
+        );
     }
+
     let reader = DistributedDatomReader::new(&*state.block_store, &*state.ipns_registry);
-    let Some(head) = reader
-        .resolve_head(&distributed_graph_ipns_name(graph_cid))
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("distributed datomic head read: {e}"),
-            )
-        })?
+    distributed_datomic_q_with_reader(&reader, &ipns_name, query, inputs, as_of, since, history)
+}
+
+fn distributed_datomic_q_with_reader<R>(
+    reader: &DistributedDatomReader<'_, R>,
+    ipns_name: &str,
+    query: &kotoba_edn::EdnValue,
+    inputs: &[kotoba_edn::EdnValue],
+    as_of: Option<&str>,
+    since: Option<&str>,
+    history: bool,
+) -> Result<Option<(Option<String>, Vec<Vec<kotoba_edn::EdnValue>>)>, (StatusCode, String)>
+where
+    R: kotoba_ipfs::IpnsRegistry + ?Sized,
+{
+    let Some(head) = reader.resolve_head(ipns_name).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("distributed datomic head read: {e}"),
+        )
+    })?
     else {
         return Ok(None);
     };
@@ -3326,6 +3444,31 @@ fn distributed_datomic_q(
             "as_of and since are mutually exclusive".to_string(),
         ));
     }
+
+    if history {
+        let db = match (as_of.as_ref(), since.as_ref()) {
+            (Some(tx), None) => reader.history_db_as_of_tx(&head.cid, tx),
+            (None, Some(tx)) => reader.history_db_since_tx(&head.cid, tx),
+            (None, None) => reader.history_db_from_head(&head.cid),
+            (Some(_), Some(_)) => unreachable!("checked above"),
+        }
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("distributed datomic history: {e}"),
+            )
+        })?;
+        let basis_t = basis_t_resp(&db);
+        let rows =
+            kotoba_datomic::q_history(query.clone(), &db.history(), inputs).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("distributed datomic q: {e}"),
+                )
+            })?;
+        return Ok(Some((basis_t, rows)));
+    }
+
     let rows = match (as_of.as_ref(), since.as_ref()) {
         (Some(tx), None) => reader.q_triples_as_of_tx_with_inputs(&head.cid, tx, query, inputs),
         (None, Some(tx)) => reader.q_triples_since_tx_with_inputs(&head.cid, tx, query, inputs),
@@ -3342,6 +3485,33 @@ fn distributed_datomic_q(
         .or_else(|| Some(head.tx_cid.clone()))
         .map(|cid| cid.to_multibase());
     Ok(Some((basis_t, rows)))
+}
+
+fn parse_remote_peer_socket(remote_peer: &str) -> Result<SocketAddr, (StatusCode, String)> {
+    if let Ok(socket) = remote_peer.parse::<SocketAddr>() {
+        return Ok(socket);
+    }
+    let segments = remote_peer.split('/').collect::<Vec<_>>();
+    if segments.len() > 1 {
+        let ip = segments
+            .windows(2)
+            .find_map(|window| (window[0] == "ip4").then_some(window[1]));
+        let port = segments
+            .windows(2)
+            .find_map(|window| (window[0] == "tcp").then_some(window[1]));
+        if let (Some(ip), Some(port)) = (ip, port) {
+            return format!("{ip}:{port}").parse::<SocketAddr>().map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid remote_peer multiaddr: {e}"),
+                )
+            });
+        }
+    }
+    Err((
+        StatusCode::BAD_REQUEST,
+        "remote_peer must be host:port or /ip4/<addr>/tcp/<port>".to_string(),
+    ))
 }
 
 fn distributed_datomic_datoms(
@@ -3527,9 +3697,33 @@ fn distributed_datomic_sync(
     state: &KotobaState,
     graph_cid: &kotoba_core::cid::KotobaCid,
     target_tx: Option<&str>,
+    remote_peer: Option<&str>,
+    remote_ipns_name: Option<&str>,
 ) -> Result<Option<DatomicSyncResp>, (StatusCode, String)> {
+    let ipns_name = remote_ipns_name
+        .map(str::to_string)
+        .unwrap_or_else(|| distributed_graph_ipns_name(graph_cid));
+    if let Some(remote_peer) = remote_peer {
+        let socket = parse_remote_peer_socket(remote_peer)?;
+        let remote_store = RemoteIpfsBlockStore::new(socket);
+        let remote_ipns = RemoteIpfsIpnsRegistry::new(socket);
+        let reader = DistributedDatomReader::new(&remote_store, &remote_ipns);
+        return distributed_datomic_sync_with_reader(&reader, graph_cid, target_tx, ipns_name);
+    }
+
     let reader = DistributedDatomReader::new(&*state.block_store, &*state.ipns_registry);
-    let ipns_name = distributed_graph_ipns_name(graph_cid);
+    distributed_datomic_sync_with_reader(&reader, graph_cid, target_tx, ipns_name)
+}
+
+fn distributed_datomic_sync_with_reader<R>(
+    reader: &DistributedDatomReader<'_, R>,
+    graph_cid: &kotoba_core::cid::KotobaCid,
+    target_tx: Option<&str>,
+    ipns_name: String,
+) -> Result<Option<DatomicSyncResp>, (StatusCode, String)>
+where
+    R: kotoba_ipfs::IpnsRegistry + ?Sized,
+{
     let Some(head) = reader.resolve_head(&ipns_name).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -3569,6 +3763,8 @@ fn distributed_datomic_tx(
     state: &KotobaState,
     graph_cid: &kotoba_core::cid::KotobaCid,
     tx: &str,
+    remote_peer: Option<&str>,
+    remote_ipns_name: Option<&str>,
 ) -> Result<
     Option<(
         Option<String>,
@@ -3576,15 +3772,41 @@ fn distributed_datomic_tx(
     )>,
     (StatusCode, String),
 > {
+    let ipns_name = remote_ipns_name
+        .map(str::to_string)
+        .unwrap_or_else(|| distributed_graph_ipns_name(graph_cid));
+    if let Some(remote_peer) = remote_peer {
+        let socket = parse_remote_peer_socket(remote_peer)?;
+        let remote_store = RemoteIpfsBlockStore::new(socket);
+        let remote_ipns = RemoteIpfsIpnsRegistry::new(socket);
+        let reader = DistributedDatomReader::new(&remote_store, &remote_ipns);
+        return distributed_datomic_tx_with_reader(&reader, &ipns_name, tx);
+    }
+
     let reader = DistributedDatomReader::new(&*state.block_store, &*state.ipns_registry);
-    let Some(head) = reader
-        .resolve_head(&distributed_graph_ipns_name(graph_cid))
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("distributed datomic head read: {e}"),
-            )
-        })?
+    distributed_datomic_tx_with_reader(&reader, &ipns_name, tx)
+}
+
+fn distributed_datomic_tx_with_reader<R>(
+    reader: &DistributedDatomReader<'_, R>,
+    ipns_name: &str,
+    tx: &str,
+) -> Result<
+    Option<(
+        Option<String>,
+        kotoba_datomic::distributed::DistributedTxRangeEntry,
+    )>,
+    (StatusCode, String),
+>
+where
+    R: kotoba_ipfs::IpnsRegistry + ?Sized,
+{
+    let Some(head) = reader.resolve_head(ipns_name).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("distributed datomic head read: {e}"),
+        )
+    })?
     else {
         return Ok(None);
     };
@@ -3616,6 +3838,8 @@ fn distributed_datomic_tx_range(
     graph_cid: &kotoba_core::cid::KotobaCid,
     start: Option<&str>,
     end: Option<&str>,
+    remote_peer: Option<&str>,
+    remote_ipns_name: Option<&str>,
 ) -> Result<
     Option<(
         Option<String>,
@@ -3623,15 +3847,42 @@ fn distributed_datomic_tx_range(
     )>,
     (StatusCode, String),
 > {
+    let ipns_name = remote_ipns_name
+        .map(str::to_string)
+        .unwrap_or_else(|| distributed_graph_ipns_name(graph_cid));
+    if let Some(remote_peer) = remote_peer {
+        let socket = parse_remote_peer_socket(remote_peer)?;
+        let remote_store = RemoteIpfsBlockStore::new(socket);
+        let remote_ipns = RemoteIpfsIpnsRegistry::new(socket);
+        let reader = DistributedDatomReader::new(&remote_store, &remote_ipns);
+        return distributed_datomic_tx_range_with_reader(&reader, &ipns_name, start, end);
+    }
+
     let reader = DistributedDatomReader::new(&*state.block_store, &*state.ipns_registry);
-    let Some(head) = reader
-        .resolve_head(&distributed_graph_ipns_name(graph_cid))
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("distributed datomic head read: {e}"),
-            )
-        })?
+    distributed_datomic_tx_range_with_reader(&reader, &ipns_name, start, end)
+}
+
+fn distributed_datomic_tx_range_with_reader<R>(
+    reader: &DistributedDatomReader<'_, R>,
+    ipns_name: &str,
+    start: Option<&str>,
+    end: Option<&str>,
+) -> Result<
+    Option<(
+        Option<String>,
+        Vec<kotoba_datomic::distributed::DistributedTxRangeEntry>,
+    )>,
+    (StatusCode, String),
+>
+where
+    R: kotoba_ipfs::IpnsRegistry + ?Sized,
+{
+    let Some(head) = reader.resolve_head(ipns_name).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("distributed datomic head read: {e}"),
+        )
+    })?
     else {
         return Ok(None);
     };
@@ -3653,16 +3904,39 @@ fn distributed_datomic_log(
     graph_cid: &kotoba_core::cid::KotobaCid,
     start: Option<&str>,
     end: Option<&str>,
+    remote_peer: Option<&str>,
+    remote_ipns_name: Option<&str>,
 ) -> Result<Option<(Option<String>, Vec<kotoba_datomic::LogEntry>)>, (StatusCode, String)> {
+    let ipns_name = remote_ipns_name
+        .map(str::to_string)
+        .unwrap_or_else(|| distributed_graph_ipns_name(graph_cid));
+    if let Some(remote_peer) = remote_peer {
+        let socket = parse_remote_peer_socket(remote_peer)?;
+        let remote_store = RemoteIpfsBlockStore::new(socket);
+        let remote_ipns = RemoteIpfsIpnsRegistry::new(socket);
+        let reader = DistributedDatomReader::new(&remote_store, &remote_ipns);
+        return distributed_datomic_log_with_reader(&reader, &ipns_name, start, end);
+    }
+
     let reader = DistributedDatomReader::new(&*state.block_store, &*state.ipns_registry);
-    let Some(head) = reader
-        .resolve_head(&distributed_graph_ipns_name(graph_cid))
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("distributed datomic head read: {e}"),
-            )
-        })?
+    distributed_datomic_log_with_reader(&reader, &ipns_name, start, end)
+}
+
+fn distributed_datomic_log_with_reader<R>(
+    reader: &DistributedDatomReader<'_, R>,
+    ipns_name: &str,
+    start: Option<&str>,
+    end: Option<&str>,
+) -> Result<Option<(Option<String>, Vec<kotoba_datomic::LogEntry>)>, (StatusCode, String)>
+where
+    R: kotoba_ipfs::IpnsRegistry + ?Sized,
+{
+    let Some(head) = reader.resolve_head(ipns_name).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("distributed datomic head read: {e}"),
+        )
+    })?
     else {
         return Ok(None);
     };
@@ -3994,6 +4268,8 @@ pub async fn datomic_with(
         &graph_cid,
         req.as_of.as_deref(),
         req.since.as_deref(),
+        None,
+        None,
     )? {
         Some(db) => db,
         None => kotoba_datomic::Db::from_datoms(Vec::new(), None),
@@ -4052,7 +4328,14 @@ pub async fn datomic_as_of(
         None,
     )
     .await?;
-    let db = require_distributed_datomic_db(&state, &graph_cid, Some(req.tx.as_str()), None)?;
+    let db = require_distributed_datomic_db(
+        &state,
+        &graph_cid,
+        Some(req.tx.as_str()),
+        None,
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
+    )?;
 
     Ok((
         StatusCode::OK,
@@ -4078,7 +4361,14 @@ pub async fn datomic_since(
         Some(req.tx.as_str()),
     )
     .await?;
-    let db = require_distributed_datomic_db(&state, &graph_cid, None, Some(req.tx.as_str()))?;
+    let db = require_distributed_datomic_db(
+        &state,
+        &graph_cid,
+        None,
+        Some(req.tx.as_str()),
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
+    )?;
 
     Ok((
         StatusCode::OK,
@@ -4104,8 +4394,14 @@ pub async fn datomic_sync(
         None,
     )
     .await?;
-    let response = distributed_datomic_sync(&state, &graph_cid, req.tx.as_deref())?
-        .ok_or_else(|| missing_distributed_datomic_head(&graph_cid))?;
+    let response = distributed_datomic_sync(
+        &state,
+        &graph_cid,
+        req.tx.as_deref(),
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
+    )?
+    .ok_or_else(|| missing_distributed_datomic_head(&graph_cid))?;
 
     Ok((StatusCode::OK, Json(response)))
 }
@@ -4136,30 +4432,34 @@ pub async fn datomic_datoms(
         &graph_cid,
         req.as_of.as_deref(),
         req.since.as_deref(),
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
     )?;
     let components = resolve_datomic_index_components(&db, index, &components)?;
-    if let Some((basis_t, mut datoms)) = distributed_datomic_datoms(
-        &state,
-        &graph_cid,
-        index,
-        &components,
-        req.as_of.as_deref(),
-        req.since.as_deref(),
-    )? {
-        datoms.sort_by_key(|datom| datomic_datoms_sort_key(datom, index));
-        let limit = req.limit.unwrap_or(1000).min(10_000);
-        let datoms = datoms.into_iter().take(limit).collect::<Vec<_>>();
-        let datom_count = datoms.len();
-        return Ok((
-            StatusCode::OK,
-            Json(DatomicDatomsResp {
-                graph: req.graph,
-                index: req.index,
-                basis_t,
-                datom_count,
-                datoms: datoms.into_iter().map(datomic_datom_resp).collect(),
-            }),
-        ));
+    if req.remote_peer.is_none() && req.remote_ipns_name.is_none() {
+        if let Some((basis_t, mut datoms)) = distributed_datomic_datoms(
+            &state,
+            &graph_cid,
+            index,
+            &components,
+            req.as_of.as_deref(),
+            req.since.as_deref(),
+        )? {
+            datoms.sort_by_key(|datom| datomic_datoms_sort_key(datom, index));
+            let limit = req.limit.unwrap_or(1000).min(10_000);
+            let datoms = datoms.into_iter().take(limit).collect::<Vec<_>>();
+            let datom_count = datoms.len();
+            return Ok((
+                StatusCode::OK,
+                Json(DatomicDatomsResp {
+                    graph: req.graph,
+                    index: req.index,
+                    basis_t,
+                    datom_count,
+                    datoms: datoms.into_iter().map(datomic_datom_resp).collect(),
+                }),
+            ));
+        }
     }
     let mut datoms = db.datoms();
     datoms.sort_by_key(|datom| datomic_datoms_sort_key(datom, index));
@@ -4215,35 +4515,39 @@ pub async fn datomic_seek_datoms(
         &graph_cid,
         req.as_of.as_deref(),
         req.since.as_deref(),
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
     )?;
     let components = resolve_datomic_index_components(&db, index, &components)?;
     let seek_key = datomic_seek_key(index, &components)?;
-    if let Some((basis_t, mut datoms)) = distributed_datomic_seek_datoms(
-        &state,
-        &graph_cid,
-        index,
-        &components,
-        req.as_of.as_deref(),
-        req.since.as_deref(),
-    )? {
-        datoms.sort_by_key(|datom| datomic_datoms_sort_key(datom, index));
-        let limit = req.limit.unwrap_or(1000).min(10_000);
-        let datoms = datoms
-            .into_iter()
-            .filter(|datom| datomic_datoms_sort_values(datom, index) >= seek_key)
-            .take(limit)
-            .collect::<Vec<_>>();
-        let datom_count = datoms.len();
-        return Ok((
-            StatusCode::OK,
-            Json(DatomicDatomsResp {
-                graph: req.graph,
-                index: req.index,
-                basis_t,
-                datom_count,
-                datoms: datoms.into_iter().map(datomic_datom_resp).collect(),
-            }),
-        ));
+    if req.remote_peer.is_none() && req.remote_ipns_name.is_none() {
+        if let Some((basis_t, mut datoms)) = distributed_datomic_seek_datoms(
+            &state,
+            &graph_cid,
+            index,
+            &components,
+            req.as_of.as_deref(),
+            req.since.as_deref(),
+        )? {
+            datoms.sort_by_key(|datom| datomic_datoms_sort_key(datom, index));
+            let limit = req.limit.unwrap_or(1000).min(10_000);
+            let datoms = datoms
+                .into_iter()
+                .filter(|datom| datomic_datoms_sort_values(datom, index) >= seek_key)
+                .take(limit)
+                .collect::<Vec<_>>();
+            let datom_count = datoms.len();
+            return Ok((
+                StatusCode::OK,
+                Json(DatomicDatomsResp {
+                    graph: req.graph,
+                    index: req.index,
+                    basis_t,
+                    datom_count,
+                    datoms: datoms.into_iter().map(datomic_datom_resp).collect(),
+                }),
+            ));
+        }
     }
     let mut datoms = db.datoms();
     datoms.sort_by_key(|datom| datomic_datoms_sort_key(datom, index));
@@ -4295,6 +4599,8 @@ pub async fn datomic_index_range(
         &graph_cid,
         req.as_of.as_deref(),
         req.since.as_deref(),
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
     )?;
     let start = resolve_datomic_index_range_bound(
         &db,
@@ -4313,38 +4619,40 @@ pub async fn datomic_index_range(
         }
     }
 
-    if let Some((basis_t, mut datoms)) = distributed_datomic_index_range(
-        &state,
-        &graph_cid,
-        &attr,
-        req.as_of.as_deref(),
-        req.since.as_deref(),
-    )? {
-        datoms.sort_by_key(|datom| datomic_datoms_sort_key(datom, DatomicDatomsIndex::Avet));
-        let limit = req.limit.unwrap_or(1000).min(10_000);
-        let datoms = datoms
-            .into_iter()
-            .filter(|datom| {
-                datom.a == attr
-                    && start
-                        .as_ref()
-                        .map(|start| datom.v >= *start)
-                        .unwrap_or(true)
-                    && end.as_ref().map(|end| datom.v < *end).unwrap_or(true)
-            })
-            .take(limit)
-            .collect::<Vec<_>>();
-        let datom_count = datoms.len();
-        return Ok((
-            StatusCode::OK,
-            Json(DatomicDatomsResp {
-                graph: req.graph,
-                index: ":avet".to_string(),
-                basis_t,
-                datom_count,
-                datoms: datoms.into_iter().map(datomic_datom_resp).collect(),
-            }),
-        ));
+    if req.remote_peer.is_none() && req.remote_ipns_name.is_none() {
+        if let Some((basis_t, mut datoms)) = distributed_datomic_index_range(
+            &state,
+            &graph_cid,
+            &attr,
+            req.as_of.as_deref(),
+            req.since.as_deref(),
+        )? {
+            datoms.sort_by_key(|datom| datomic_datoms_sort_key(datom, DatomicDatomsIndex::Avet));
+            let limit = req.limit.unwrap_or(1000).min(10_000);
+            let datoms = datoms
+                .into_iter()
+                .filter(|datom| {
+                    datom.a == attr
+                        && start
+                            .as_ref()
+                            .map(|start| datom.v >= *start)
+                            .unwrap_or(true)
+                        && end.as_ref().map(|end| datom.v < *end).unwrap_or(true)
+                })
+                .take(limit)
+                .collect::<Vec<_>>();
+            let datom_count = datoms.len();
+            return Ok((
+                StatusCode::OK,
+                Json(DatomicDatomsResp {
+                    graph: req.graph,
+                    index: ":avet".to_string(),
+                    basis_t,
+                    datom_count,
+                    datoms: datoms.into_iter().map(datomic_datom_resp).collect(),
+                }),
+            ));
+        }
     }
 
     let mut datoms = db.datoms();
@@ -4407,16 +4715,22 @@ pub async fn datomic_index_pull(
         &graph_cid,
         req.as_of.as_deref(),
         req.since.as_deref(),
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
     )?;
     let components = resolve_datomic_index_components(&db, index, &components)?;
-    let (basis_t, mut datoms) = distributed_datomic_datoms(
-        &state,
-        &graph_cid,
-        index,
-        &components,
-        req.as_of.as_deref(),
-        req.since.as_deref(),
-    )?
+    let (basis_t, mut datoms) = if req.remote_peer.is_none() && req.remote_ipns_name.is_none() {
+        distributed_datomic_datoms(
+            &state,
+            &graph_cid,
+            index,
+            &components,
+            req.as_of.as_deref(),
+            req.since.as_deref(),
+        )?
+    } else {
+        None
+    }
     .unwrap_or_else(|| {
         let datoms = db
             .datoms()
@@ -4500,6 +4814,8 @@ pub async fn datomic_pull(
         &graph_cid,
         req.as_of.as_deref(),
         req.since.as_deref(),
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
     )?;
     let entity = datomic_entity_from_request(&db, &req.entity)?;
     let entity_edn = db
@@ -4564,6 +4880,8 @@ pub async fn datomic_pull_many(
         &graph_cid,
         req.as_of.as_deref(),
         req.since.as_deref(),
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
     )?;
     let entity_cids = req
         .entities
@@ -4644,6 +4962,8 @@ pub async fn datomic_q(
         req.as_of.as_deref(),
         req.since.as_deref(),
         req.history,
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
     )?
     .ok_or_else(|| missing_distributed_datomic_head(&graph_cid))?;
     let rows_map = datomic_q_rows_map(&query, &rows)?;
@@ -4807,6 +5127,8 @@ pub async fn datomic_history(
         &graph_cid,
         req.as_of.as_deref(),
         req.since.as_deref(),
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
     )?;
     let datoms = db
         .history()
@@ -4882,8 +5204,14 @@ pub async fn datomic_tx(
         None,
     )
     .await?;
-    let (basis_t, entry) = distributed_datomic_tx(&state, &graph_cid, &req.tx)?
-        .ok_or_else(|| missing_distributed_datomic_head(&graph_cid))?;
+    let (basis_t, entry) = distributed_datomic_tx(
+        &state,
+        &graph_cid,
+        &req.tx,
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
+    )?
+    .ok_or_else(|| missing_distributed_datomic_head(&graph_cid))?;
 
     Ok((
         StatusCode::OK,
@@ -4914,9 +5242,15 @@ pub async fn datomic_tx_range(
     )
     .await?;
     let limit = req.limit.unwrap_or(100).min(10_000);
-    let (basis_t, entries) =
-        distributed_datomic_tx_range(&state, &graph_cid, req.start.as_deref(), req.end.as_deref())?
-            .unwrap_or((None, Vec::new()));
+    let (basis_t, entries) = distributed_datomic_tx_range(
+        &state,
+        &graph_cid,
+        req.start.as_deref(),
+        req.end.as_deref(),
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
+    )?
+    .unwrap_or((None, Vec::new()));
     let txes = entries
         .into_iter()
         .take(limit)
@@ -4953,9 +5287,15 @@ pub async fn datomic_log(
     )
     .await?;
     let limit = req.limit.unwrap_or(100).min(10_000);
-    let (basis_t, entries) =
-        distributed_datomic_log(&state, &graph_cid, req.start.as_deref(), req.end.as_deref())?
-            .ok_or_else(|| missing_distributed_datomic_head(&graph_cid))?;
+    let (basis_t, entries) = distributed_datomic_log(
+        &state,
+        &graph_cid,
+        req.start.as_deref(),
+        req.end.as_deref(),
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
+    )?
+    .ok_or_else(|| missing_distributed_datomic_head(&graph_cid))?;
     let txes = entries
         .into_iter()
         .take(limit)
@@ -5009,6 +5349,8 @@ pub async fn datomic_basis_t(
         &graph_cid,
         req.as_of.as_deref(),
         req.since.as_deref(),
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
     )?;
 
     Ok((
@@ -5043,6 +5385,8 @@ pub async fn datomic_db_stats(
         &graph_cid,
         req.as_of.as_deref(),
         req.since.as_deref(),
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
     )?;
 
     Ok((StatusCode::OK, Json(datomic_db_stats_resp(req.graph, &db))))
@@ -5071,6 +5415,8 @@ pub async fn datomic_entity(
         &graph_cid,
         req.as_of.as_deref(),
         req.since.as_deref(),
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
     )?;
     let entity = datomic_entity_from_request(&db, &req.entity)?;
     let entity_edn = db
@@ -5120,6 +5466,8 @@ pub async fn datomic_ident(
         &graph_cid,
         req.as_of.as_deref(),
         req.since.as_deref(),
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
     )?;
     let ident_edn =
         datomic_ident_for_entity(&db, &entity).map(|value| kotoba_edn::to_string(&value));
@@ -5160,6 +5508,8 @@ pub async fn datomic_entid(
         &graph_cid,
         req.as_of.as_deref(),
         req.since.as_deref(),
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
     )?;
     let entity = datomic_entid_for_value(&db, &ident)?.map(|cid| cid.to_multibase());
 
@@ -5601,7 +5951,7 @@ pub async fn atproto_repo_write(
         .as_slice(),
     );
     let datoms = if operation == "delete" {
-        let db = distributed_datomic_db(&state, &graph_cid, None, None)?
+        let db = distributed_datomic_db(&state, &graph_cid, None, None, None, None)?
             .unwrap_or_else(|| kotoba_datomic::Db::from_datoms(Vec::new(), None));
         atproto_repo_delete_datoms(&db, &req, &uri, &entity_cid, &tx_cid)
     } else {
@@ -6337,7 +6687,7 @@ pub async fn commit_store(
     let expected_parent = current_head
         .as_ref()
         .and_then(|record| KotobaCid::from_multibase(&record.value));
-    let db = require_distributed_datomic_db(&state, &graph_cid, None, None)?;
+    let db = require_distributed_datomic_db(&state, &graph_cid, None, None, None, None)?;
     let writer = DistributedCommitWriter::new(&*state.block_store, &*state.ipns_registry);
     let report = writer
         .commit_datoms(CommitDatomsRequest {
@@ -6460,7 +6810,7 @@ pub async fn graph_query(
     const MAX_QUERY_RESULTS: u64 = 1_000;
     let limit = req.limit.unwrap_or(100).min(MAX_QUERY_RESULTS) as usize;
 
-    let db = require_distributed_datomic_db(&state, &graph_cid, None, None)?;
+    let db = require_distributed_datomic_db(&state, &graph_cid, None, None, None, None)?;
     let mut quads: Vec<_> = db
         .datoms()
         .into_iter()
@@ -7670,25 +8020,26 @@ mod tests {
         append_auth_capability_datoms, atproto_repo_record_entity_cid, atproto_repo_write_datoms,
         datomic_basis_t, datomic_datoms, datomic_db_stats, datomic_entid, datomic_entity,
         datomic_history, datomic_ident, datomic_index_pull, datomic_index_range, datomic_log,
-        datomic_pull, datomic_pull_many, datomic_seek_datoms, datomic_transact, datomic_tx_range,
-        distributed_graph_ipns_name, enforce_datomic_range_tx_scope, is_did_web_ip_host,
-        AtprotoRepoWriteReq, AuthCapabilityProjection, DatomicBasisTReq, DatomicDatomsReq,
-        DatomicDbStatsReq, DatomicEntidReq, DatomicEntityReq, DatomicHistoryReq, DatomicIdentReq,
-        DatomicIndexPullReq, DatomicIndexRangeReq, DatomicLogReq, DatomicPullManyReq,
-        DatomicPullReq, DatomicSeekDatomsReq, DatomicTransactReq, DatomicTxRangeReq,
-        ZCAP_ALLOWED_ACTION_IRI, ZCAP_CONTROLLER_IRI, ZCAP_INVOCATION_PROOF_IRI,
+        datomic_pull, datomic_pull_many, datomic_q, datomic_seek_datoms, datomic_transact,
+        datomic_tx_range, distributed_graph_ipns_name, enforce_datomic_range_tx_scope,
+        is_did_web_ip_host, AtprotoRepoWriteReq, AuthCapabilityProjection, DatomicBasisTReq,
+        DatomicDatomsReq, DatomicDbStatsReq, DatomicEntidReq, DatomicEntityReq, DatomicHistoryReq,
+        DatomicIdentReq, DatomicIndexPullReq, DatomicIndexRangeReq, DatomicLogReq,
+        DatomicPullManyReq, DatomicPullReq, DatomicQReq, DatomicSeekDatomsReq, DatomicTransactReq,
+        DatomicTxRangeReq, ZCAP_ALLOWED_ACTION_IRI, ZCAP_CONTROLLER_IRI, ZCAP_INVOCATION_PROOF_IRI,
         ZCAP_INVOCATION_TARGET_IRI,
     };
     use crate::server::KotobaState;
     use axum::response::IntoResponse;
     use kotoba_core::cid::KotobaCid;
     use kotoba_core::named_graph::GraphVisibility;
+    use kotoba_core::store::BlockStore;
     use kotoba_datomic::distributed::{
         CommitDatomsRequest, DistributedCommitWriter, DistributedDatomReader,
     };
     use kotoba_datomic::Datom;
     use kotoba_edn::EdnValue;
-    use kotoba_ipfs::InMemoryIpnsRegistry;
+    use kotoba_ipfs::{InMemoryIpnsRegistry, IpfsConfig};
     use kotoba_store::MemoryBlockStore;
     use std::sync::Arc;
 
@@ -7818,7 +8169,7 @@ mod tests {
                 tx_cid: Some(tx.clone()),
                 author: "did:key:zIssuer".into(),
                 seq: 1,
-                valid_until: "2026-05-29T00:00:00Z".into(),
+                valid_until: "2030-01-01T00:00:00Z".into(),
                 ttl_secs: Some(60),
                 cacao_proof_cid: None,
                 ipns_controller_did: None,
@@ -7905,7 +8256,7 @@ mod tests {
                 tx_cid: Some(tx.clone()),
                 author: "did:key:zController".into(),
                 seq: 1,
-                valid_until: "2026-05-29T00:00:00Z".into(),
+                valid_until: "2030-01-01T00:00:00Z".into(),
                 ttl_secs: Some(60),
                 cacao_proof_cid: Some(proof_cid.clone()),
                 ipns_controller_did: None,
@@ -8045,6 +8396,179 @@ mod tests {
             .any(|datom| datom.a == ":person/name" && datom.v == EdnValue::string("Alice")));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn datomic_q_xrpc_reads_remote_ipfs_ipns_dag_cbor_prolly_head() {
+        std::env::set_var("KOTOBA_IPFS", "off");
+        std::env::set_var("KOTOBA_IPNS_REQUIRE_SIGNATURE", "false");
+
+        let remote_node = IpfsConfig::new()
+            .with_listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+            .start()
+            .await
+            .unwrap();
+        let remote_peer = remote_node
+            .listen_addrs()
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .to_string();
+
+        let source_store = MemoryBlockStore::new();
+        let source_ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&source_store, &source_ipns);
+        let graph = KotobaCid::from_bytes(b"xrpc-remote-datomic-q-graph");
+        let graph_mb = graph.to_multibase();
+        let ipns_name = distributed_graph_ipns_name(&graph);
+        let tx = KotobaCid::from_bytes(b"xrpc-remote-datomic-q-tx");
+        let report = writer
+            .commit_datoms(CommitDatomsRequest {
+                ipns_name: ipns_name.clone(),
+                graph: graph.clone(),
+                datoms: vec![
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"remote-alice"),
+                        ":person/name".into(),
+                        EdnValue::string("Alice"),
+                        tx.clone(),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"remote-alice"),
+                        ":person/role".into(),
+                        EdnValue::string("admin"),
+                        tx.clone(),
+                    ),
+                ],
+                expected_parent: None,
+                tx_cid: Some(tx),
+                author: "did:key:zRemoteAuthor".into(),
+                seq: 1,
+                valid_until: "2030-01-01T00:00:00Z".into(),
+                ttl_secs: Some(60),
+                cacao_proof_cid: None,
+                ipns_controller_did: None,
+                ipns_signing_key: None,
+            })
+            .unwrap();
+
+        for cid in source_store.all_cids() {
+            let bytes = source_store.get(&cid).unwrap().unwrap();
+            let ipfs_cid = cid.to_standard_cid().unwrap();
+            remote_node.put_block(&ipfs_cid, &bytes).await.unwrap();
+        }
+        remote_node
+            .name_publish(
+                &ipns_name,
+                &report.commit.cid.to_standard_cid().unwrap(),
+                report.ipns_record.valid_until.clone(),
+            )
+            .await
+            .unwrap();
+
+        let state = Arc::new(KotobaState::new(None).unwrap());
+        state.graph_registry.write().await.insert(
+            graph.clone(),
+            (
+                "xrpc-remote-datomic-q-graph".into(),
+                GraphVisibility::Public,
+            ),
+        );
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", test_operator_jwt(&state.operator_did))
+                .parse()
+                .unwrap(),
+        );
+
+        let response = datomic_q(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicQReq {
+                graph: graph_mb.clone(),
+                query_edn:
+                    r#"[:find ?name ?role :where [?e :person/name ?name] [?e :person/role ?role]]"#
+                        .into(),
+                inputs_edn: vec![],
+                as_of: None,
+                since: None,
+                history: false,
+                remote_peer: Some(remote_peer.clone()),
+                remote_ipns_name: Some(ipns_name.clone()),
+                cacao_b64: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body["rows_edn"],
+            serde_json::json!([[r#""Alice""#, r#""admin""#]])
+        );
+        assert_eq!(body["basis_t"], report.commit.tx_cid.to_multibase());
+
+        let pull = datomic_pull(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicPullReq {
+                graph: graph_mb.clone(),
+                entity: KotobaCid::from_bytes(b"remote-alice").to_multibase(),
+                pattern_edn: Some(r#"[:person/name :person/role]"#.into()),
+                as_of: None,
+                since: None,
+                remote_peer: Some(remote_peer.clone()),
+                remote_ipns_name: Some(ipns_name.clone()),
+                cacao_b64: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(pull.status(), axum::http::StatusCode::OK);
+        let pull_body = axum::body::to_bytes(pull.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let pull_body: serde_json::Value = serde_json::from_slice(&pull_body).unwrap();
+        assert!(pull_body["entity_edn"].as_str().unwrap().contains("Alice"));
+        assert!(pull_body["entity_edn"].as_str().unwrap().contains("admin"));
+
+        let tx_range = datomic_tx_range(
+            axum::extract::State(Arc::clone(&state)),
+            headers,
+            axum::Json(DatomicTxRangeReq {
+                graph: graph_mb,
+                start: None,
+                end: None,
+                remote_peer: Some(remote_peer),
+                remote_ipns_name: Some(ipns_name),
+                cacao_b64: None,
+                presentation: None,
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(tx_range.status(), axum::http::StatusCode::OK);
+        let tx_range_body = axum::body::to_bytes(tx_range.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let tx_range_body: serde_json::Value = serde_json::from_slice(&tx_range_body).unwrap();
+        assert_eq!(tx_range_body["tx_count"], 1);
+        assert_eq!(
+            tx_range_body["txes"][0]["tx_cid"],
+            report.commit.tx_cid.to_multibase()
+        );
+    }
+
     #[tokio::test]
     async fn datomic_pull_entity_xrpc_reads_distributed_ipns_head() {
         std::env::set_var("KOTOBA_IPFS", "off");
@@ -8128,6 +8652,8 @@ mod tests {
                 pattern_edn: Some(r#"[:person/name :person/role]"#.into()),
                 as_of: Some(first_tx.clone()),
                 since: None,
+                remote_peer: None,
+                remote_ipns_name: None,
                 cacao_b64: None,
                 presentation: None,
             }),
@@ -8154,6 +8680,8 @@ mod tests {
                 pattern_edn: Some(r#"[:person/name :person/email]"#.into()),
                 as_of: None,
                 since: None,
+                remote_peer: None,
+                remote_ipns_name: None,
                 cacao_b64: None,
                 presentation: None,
             }),
@@ -8181,6 +8709,8 @@ mod tests {
                 pattern_edn: Some(r#"[:person/name]"#.into()),
                 as_of: None,
                 since: None,
+                remote_peer: None,
+                remote_ipns_name: None,
                 cacao_b64: None,
                 presentation: None,
             }),
@@ -8211,6 +8741,8 @@ mod tests {
                 entity: alice.clone(),
                 as_of: Some(first_tx.clone()),
                 since: None,
+                remote_peer: None,
+                remote_ipns_name: None,
                 cacao_b64: None,
                 presentation: None,
             }),
@@ -8234,6 +8766,8 @@ mod tests {
                 ident_edn: ":person/alice".into(),
                 as_of: None,
                 since: None,
+                remote_peer: None,
+                remote_ipns_name: None,
                 cacao_b64: None,
                 presentation: None,
             }),
@@ -8256,6 +8790,8 @@ mod tests {
                 ident_edn: r#"[:person/email "alice@example.com"]"#.into(),
                 as_of: None,
                 since: None,
+                remote_peer: None,
+                remote_ipns_name: None,
                 cacao_b64: None,
                 presentation: None,
             }),
@@ -8279,6 +8815,8 @@ mod tests {
                 entity: bob.clone(),
                 as_of: None,
                 since: Some(first_tx.clone()),
+                remote_peer: None,
+                remote_ipns_name: None,
                 cacao_b64: None,
                 presentation: None,
             }),
@@ -8301,6 +8839,8 @@ mod tests {
                 graph: graph_mb.clone(),
                 as_of: None,
                 since: None,
+                remote_peer: None,
+                remote_ipns_name: None,
                 cacao_b64: None,
                 presentation: None,
             }),
@@ -8322,6 +8862,8 @@ mod tests {
                 graph: graph_mb.clone(),
                 as_of: None,
                 since: None,
+                remote_peer: None,
+                remote_ipns_name: None,
                 cacao_b64: None,
                 presentation: None,
             }),
@@ -8348,6 +8890,8 @@ mod tests {
                 components_edn: vec![":person/name".into()],
                 as_of: Some(first_tx.clone()),
                 since: None,
+                remote_peer: None,
+                remote_ipns_name: None,
                 cacao_b64: None,
                 presentation: None,
                 limit: Some(100),
@@ -8382,6 +8926,8 @@ mod tests {
                 components_edn: vec![":person/name".into()],
                 as_of: None,
                 since: Some(first_tx.clone()),
+                remote_peer: None,
+                remote_ipns_name: None,
                 cacao_b64: None,
                 presentation: None,
                 limit: Some(100),
@@ -8417,6 +8963,8 @@ mod tests {
                 end_edn: Some(r#""C""#.into()),
                 as_of: Some(first_tx.clone()),
                 since: None,
+                remote_peer: None,
+                remote_ipns_name: None,
                 cacao_b64: None,
                 presentation: None,
                 limit: Some(100),
@@ -8452,6 +9000,8 @@ mod tests {
                 pattern_edn: Some(r#"[:person/name :person/role]"#.into()),
                 as_of: None,
                 since: Some(first_tx.clone()),
+                remote_peer: None,
+                remote_ipns_name: None,
                 cacao_b64: None,
                 presentation: None,
                 limit: Some(100),
@@ -8481,6 +9031,8 @@ mod tests {
                 presentation: None,
                 as_of: None,
                 since: Some(first_tx.clone()),
+                remote_peer: None,
+                remote_ipns_name: None,
                 limit: Some(100),
             }),
         )
@@ -8511,6 +9063,8 @@ mod tests {
                 graph: graph_mb.clone(),
                 start: Some(first_tx.clone()),
                 end: None,
+                remote_peer: None,
+                remote_ipns_name: None,
                 cacao_b64: None,
                 presentation: None,
                 limit: Some(10),
@@ -8544,6 +9098,8 @@ mod tests {
                 graph: graph_mb,
                 start: Some(first_tx.clone()),
                 end: None,
+                remote_peer: None,
+                remote_ipns_name: None,
                 cacao_b64: None,
                 presentation: None,
                 limit: Some(10),
@@ -9074,6 +9630,8 @@ mod tests {
                 "pattern_edn",
                 "as_of",
                 "since",
+                "remote_peer",
+                "remote_ipns_name",
                 "cacao_b64",
                 "presentation",
                 "limit",
@@ -9099,7 +9657,16 @@ mod tests {
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/asOf.json"),
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/since.json"),
         ] {
-            assert_lexicon_input_fields(src, &["graph", "tx"], &["cacao_b64", "presentation"]);
+            assert_lexicon_input_fields(
+                src,
+                &["graph", "tx"],
+                &[
+                    "remote_peer",
+                    "remote_ipns_name",
+                    "cacao_b64",
+                    "presentation",
+                ],
+            );
             assert_lexicon_output_fields(
                 src,
                 &[
@@ -9117,7 +9684,13 @@ mod tests {
         assert_lexicon_input_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/sync.json"),
             &["graph"],
-            &["tx", "cacao_b64", "presentation"],
+            &[
+                "tx",
+                "remote_peer",
+                "remote_ipns_name",
+                "cacao_b64",
+                "presentation",
+            ],
         );
         assert_lexicon_output_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/sync.json"),
@@ -9138,6 +9711,8 @@ mod tests {
                 "as_of",
                 "since",
                 "history",
+                "remote_peer",
+                "remote_ipns_name",
                 "cacao_b64",
                 "presentation",
             ],
@@ -9187,7 +9762,12 @@ mod tests {
         assert_lexicon_input_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/tx.json"),
             &["graph", "tx"],
-            &["cacao_b64", "presentation"],
+            &[
+                "remote_peer",
+                "remote_ipns_name",
+                "cacao_b64",
+                "presentation",
+            ],
         );
         assert_lexicon_output_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/tx.json"),
@@ -9304,7 +9884,14 @@ mod tests {
         assert_lexicon_input_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/basisT.json"),
             &["graph"],
-            &["as_of", "since", "cacao_b64", "presentation"],
+            &[
+                "as_of",
+                "since",
+                "remote_peer",
+                "remote_ipns_name",
+                "cacao_b64",
+                "presentation",
+            ],
         );
         assert_lexicon_output_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/basisT.json"),
@@ -9314,7 +9901,14 @@ mod tests {
         assert_lexicon_input_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/dbStats.json"),
             &["graph"],
-            &["as_of", "since", "cacao_b64", "presentation"],
+            &[
+                "as_of",
+                "since",
+                "remote_peer",
+                "remote_ipns_name",
+                "cacao_b64",
+                "presentation",
+            ],
         );
         assert_lexicon_output_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/dbStats.json"),
@@ -9331,7 +9925,14 @@ mod tests {
         assert_lexicon_input_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/entity.json"),
             &["graph", "entity"],
-            &["as_of", "since", "cacao_b64", "presentation"],
+            &[
+                "as_of",
+                "since",
+                "remote_peer",
+                "remote_ipns_name",
+                "cacao_b64",
+                "presentation",
+            ],
         );
         assert_lexicon_output_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/entity.json"),
@@ -9346,7 +9947,14 @@ mod tests {
         assert_lexicon_input_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/ident.json"),
             &["graph", "entity"],
-            &["as_of", "since", "cacao_b64", "presentation"],
+            &[
+                "as_of",
+                "since",
+                "remote_peer",
+                "remote_ipns_name",
+                "cacao_b64",
+                "presentation",
+            ],
         );
         assert_lexicon_output_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/ident.json"),
@@ -9356,7 +9964,14 @@ mod tests {
         assert_lexicon_input_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/entid.json"),
             &["graph", "ident_edn"],
-            &["as_of", "since", "cacao_b64", "presentation"],
+            &[
+                "as_of",
+                "since",
+                "remote_peer",
+                "remote_ipns_name",
+                "cacao_b64",
+                "presentation",
+            ],
         );
         assert_lexicon_output_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/entid.json"),

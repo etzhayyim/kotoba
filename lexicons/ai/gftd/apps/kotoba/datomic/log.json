@@ -4,43 +4,108 @@
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Return a Datomic-style transaction log for a Kotoba graph from the distributed IPNS head.",
+      "description": "Return a Datomic-style transaction log for a Kotoba graph from the distributed IPNS head, and optional remote kotoba-ipfs/IPNS peer reads.",
       "input": {
         "encoding": "application/json",
         "schema": {
           "type": "object",
-          "required": ["graph"],
+          "required": [
+            "graph"
+          ],
           "properties": {
-            "graph": { "type": "string" },
-            "start": { "type": "string" },
-            "end": { "type": "string" },
-            "cacao_b64": { "type": "string" },
+            "graph": {
+              "type": "string"
+            },
+            "start": {
+              "type": "string"
+            },
+            "end": {
+              "type": "string"
+            },
+            "remote_peer": {
+              "type": "string",
+              "description": "Optional host:port or /ip4/<addr>/tcp/<port> kotoba-ipfs peer used to resolve the graph IPNS head and DAG-CBOR/Prolly blocks."
+            },
+            "remote_ipns_name": {
+              "type": "string",
+              "description": "Optional IPNS name override for remote reads. Defaults to the graph canonical k51-kotoba-{graph} head."
+            },
+            "cacao_b64": {
+              "type": "string"
+            },
             "presentation": {
               "type": "object",
-              "required": ["@context", "id", "type"],
+              "required": [
+                "@context",
+                "id",
+                "type"
+              ],
               "properties": {
-                "@context": { "type": "array", "items": { "type": "string" } },
-                "id": { "type": "string" },
-                "type": { "type": "array", "items": { "type": "string" } },
-                "holder": { "type": "string" },
-                "verifiableCredential": { "type": "array", "items": { "type": "object" } },
+                "@context": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "id": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "holder": {
+                  "type": "string"
+                },
+                "verifiableCredential": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                },
                 "proof": {
                   "type": "object",
-                  "required": ["type", "proofPurpose", "verificationMethod", "proofValue"],
+                  "required": [
+                    "type",
+                    "proofPurpose",
+                    "verificationMethod",
+                    "proofValue"
+                  ],
                   "properties": {
-                    "type": { "type": "string" },
-                    "cryptosuite": { "type": "string" },
-                    "proofPurpose": { "type": "string" },
-                    "verificationMethod": { "type": "string" },
-                    "created": { "type": "string" },
-                    "proofValue": { "type": "string" },
-                    "challenge": { "type": "string" },
-                    "domain": { "type": "string" }
+                    "type": {
+                      "type": "string"
+                    },
+                    "cryptosuite": {
+                      "type": "string"
+                    },
+                    "proofPurpose": {
+                      "type": "string"
+                    },
+                    "verificationMethod": {
+                      "type": "string"
+                    },
+                    "created": {
+                      "type": "string"
+                    },
+                    "proofValue": {
+                      "type": "string"
+                    },
+                    "challenge": {
+                      "type": "string"
+                    },
+                    "domain": {
+                      "type": "string"
+                    }
                   }
                 }
               }
             },
-            "limit": { "type": "integer", "minimum": 0 }
+            "limit": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         }
       },
@@ -48,31 +113,70 @@
         "encoding": "application/json",
         "schema": {
           "type": "object",
-          "required": ["graph", "tx_count", "txes"],
+          "required": [
+            "graph",
+            "tx_count",
+            "txes"
+          ],
           "properties": {
-            "graph": { "type": "string" },
-            "basis_t": { "type": "string" },
-            "tx_count": { "type": "integer", "minimum": 0 },
+            "graph": {
+              "type": "string"
+            },
+            "basis_t": {
+              "type": "string"
+            },
+            "tx_count": {
+              "type": "integer",
+              "minimum": 0
+            },
             "txes": {
               "type": "array",
               "items": {
                 "type": "object",
-                "required": ["tx_cid", "datom_count", "datoms"],
+                "required": [
+                  "tx_cid",
+                  "datom_count",
+                  "datoms"
+                ],
                 "properties": {
-                  "tx_cid": { "type": "string" },
-                  "tx_instant_ms": { "type": "integer", "minimum": 1 },
-                  "datom_count": { "type": "integer", "minimum": 0 },
+                  "tx_cid": {
+                    "type": "string"
+                  },
+                  "tx_instant_ms": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "datom_count": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
                   "datoms": {
                     "type": "array",
                     "items": {
                       "type": "object",
-                      "required": ["e", "a", "v_edn", "t", "added"],
+                      "required": [
+                        "e",
+                        "a",
+                        "v_edn",
+                        "t",
+                        "added"
+                      ],
                       "properties": {
-                        "e": { "type": "string" },
-                        "a": { "type": "string" },
-                        "v_edn": { "type": "string" },
-                        "t": { "type": "string" },
-                        "added": { "type": "boolean" }
+                        "e": {
+                          "type": "string"
+                        },
+                        "a": {
+                          "type": "string"
+                        },
+                        "v_edn": {
+                          "type": "string"
+                        },
+                        "t": {
+                          "type": "string"
+                        },
+                        "added": {
+                          "type": "boolean"
+                        }
                       }
                     }
                   }

@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Datomic Datalog query against a Kotoba distributed Datom graph. Supports EDN query forms, inputs, :as-of/:since transaction bases, history queries, pull expressions, rules, Datomic aggregates including median/variance/stddev, fulltext relation bindings, :keys/:strs/:syms map returns as rows_map_edn and rows_map_json, and CACAO or Verifiable Presentation read authorization.",
+      "description": "Datomic Datalog query against a Kotoba distributed Datom graph. Supports EDN query forms, inputs, :as-of/:since transaction bases, history queries, pull expressions, rules, Datomic aggregates including median/variance/stddev, fulltext relation bindings, :keys/:strs/:syms map returns as rows_map_edn and rows_map_json, optional remote kotoba-ipfs/IPNS peer reads, and CACAO or Verifiable Presentation read authorization.",
       "input": {
         "encoding": "application/json",
         "schema": {
@@ -17,6 +17,14 @@
             "as_of": { "type": "string" },
             "since": { "type": "string" },
             "history": { "type": "boolean" },
+            "remote_peer": {
+              "type": "string",
+              "description": "Optional host:port or /ip4/<addr>/tcp/<port> kotoba-ipfs peer used to resolve the graph IPNS head and DAG-CBOR/Prolly blocks."
+            },
+            "remote_ipns_name": {
+              "type": "string",
+              "description": "Optional IPNS name override for remote reads. Defaults to the graph canonical k51-kotoba-{graph} head."
+            },
             "cacao_b64": { "type": "string" },
             "presentation": {
               "type": "object",
