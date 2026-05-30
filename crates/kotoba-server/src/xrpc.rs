@@ -2808,7 +2808,14 @@ fn append_atproto_cid_datoms(
         kotoba_edn::EdnValue::string(at_cid),
         tx_cid.clone(),
     ));
+    out.push(kotoba_datomic::Datom::assert(
+        entity_cid.clone(),
+        "atproto/recordCid".to_string(),
+        kotoba_edn::EdnValue::string(at_cid),
+        tx_cid.clone(),
+    ));
     if let Some(kotoba_cid) = kotoba_graph::at_cid_str_to_kotoba(at_cid) {
+        let kotoba_cid_value = kotoba_cid.to_multibase();
         out.extend([
             kotoba_datomic::Datom::assert(
                 entity_cid.clone(),
@@ -2837,7 +2844,13 @@ fn append_atproto_cid_datoms(
             kotoba_datomic::Datom::assert(
                 entity_cid.clone(),
                 "atproto/kotobaCid".to_string(),
-                kotoba_edn::EdnValue::string(kotoba_cid.to_multibase()),
+                kotoba_edn::EdnValue::string(kotoba_cid_value.clone()),
+                tx_cid.clone(),
+            ),
+            kotoba_datomic::Datom::assert(
+                entity_cid.clone(),
+                "atproto/recordKotobaCid".to_string(),
+                kotoba_edn::EdnValue::string(kotoba_cid_value),
                 tx_cid.clone(),
             ),
         ]);
@@ -9754,7 +9767,8 @@ mod tests {
             })
         };
 
-        assert!(has("atproto/cid", EdnValue::string(at_cid)));
+        assert!(has("atproto/cid", EdnValue::string(at_cid.clone())));
+        assert!(has("atproto/recordCid", EdnValue::string(at_cid.clone())));
         assert!(has(
             "atproto/resource",
             EdnValue::string("at://did:plc:alice/app.bsky.feed.post/r1")
@@ -9773,6 +9787,10 @@ mod tests {
         assert!(has("atproto/cidMultihash", EdnValue::string("sha2-256")));
         assert!(has(
             "atproto/kotobaCid",
+            EdnValue::string(kotoba_cid.to_multibase())
+        ));
+        assert!(has(
+            "atproto/recordKotobaCid",
             EdnValue::string(kotoba_cid.to_multibase())
         ));
     }
