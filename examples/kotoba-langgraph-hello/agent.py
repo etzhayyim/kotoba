@@ -29,6 +29,17 @@ from kotoba_langgraph import (
 )
 from kotoba_langgraph.messages import add_messages
 
+# componentize-py static analysis does not follow the lazy `from kotoba_langgraph._cbor
+# import loads` inside _entry.handle_invoke; import the submodules explicitly at module
+# scope so they are bundled (otherwise the component traps at call time with
+# ModuleNotFoundError). Mirrors aria_kotoba.py (ADR-2605301625 follow-up).
+import kotoba_langgraph._cbor  # noqa: F401
+import kotoba_langgraph._entry  # noqa: F401
+# Same reason: kotoba_langgraph.llm._wit_infer does `from wit_world.imports import llm`
+# lazily inside a function, so componentize-py does not bundle the host llm import.
+# Pull it to module scope so the kotoba:kais/llm WIT import is available at call time.
+import wit_world.imports.llm  # noqa: F401
+
 # ── State ────────────────────────────────────────────────────────────────────
 
 class State(TypedDict):

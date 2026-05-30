@@ -13,12 +13,11 @@
 mod inner {
     use anyhow::{anyhow, Result};
 
-    /// Synchronous HTTP inference engine backed by reqwest + tokio block_in_place.
+    /// Synchronous HTTP inference engine backed by reqwest on a dedicated runtime.
     #[derive(Clone)]
     pub struct HttpInferEngine {
         base_url: String,
         model: String,
-        client: reqwest::Client,
     }
 
     impl HttpInferEngine {
@@ -31,30 +30,42 @@ mod inner {
                 .map_err(|_| anyhow!("KOTOBA_INFERENCE_URL not set"))?;
             let model = std::env::var("KOTOBA_INFERENCE_MODEL")
                 .unwrap_or_else(|_| "gemma4:e4b".to_string());
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()?;
             Ok(Self {
                 base_url: base_url.trim_end_matches('/').to_string(),
                 model,
-                client,
             })
         }
 
-        /// Synchronous generate — blocks the current tokio worker thread.
+        /// Synchronous generate — drives the HTTP call on a dedicated OS thread
+        /// with its own current-thread runtime.
         ///
-        /// Safe to call from `Arc<dyn Fn>` InferenceFn closures that run inside
-        /// a `tokio::task::spawn_blocking` or a multi-threaded runtime.
+        /// The WASM host `llm.infer` import is invoked from the runtime context
+        /// of whatever thread is executing the guest — which may be a tokio
+        /// worker thread (nested `block_on` / nested runtime is illegal) or a
+        /// `spawn_blocking` pool thread (`block_in_place` is illegal). A reqwest
+        /// client is also bound to the reactor of the runtime that built it, so
+        /// reusing a startup-built client here fails with "error sending
+        /// request". Spawning a fresh thread + fresh runtime + fresh client
+        /// (in `generate_async`) sidesteps all three hazards.
         pub fn generate(&self, prompt: &str, max_tokens: usize) -> Result<String> {
-            let engine = self.clone();
-            let prompt = prompt.to_string();
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(engine.generate_async(&prompt, max_tokens))
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()?;
+                        rt.block_on(self.generate_async(prompt, max_tokens))
+                    })
+                    .join()
+                    .map_err(|_| anyhow!("inference thread panicked"))?
             })
         }
 
         async fn generate_async(&self, prompt: &str, max_tokens: usize) -> Result<String> {
+            // Build the client inside the runtime that drives it (see `generate`).
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()?;
             let url = format!("{}/v1/chat/completions", self.base_url);
             let body = serde_json::json!({
                 "model": self.model,
@@ -62,13 +73,22 @@ mod inner {
                 "max_tokens": max_tokens,
                 "stream": false,
             });
-            let resp = self
-                .client
+            let resp = client
                 .post(&url)
                 .header("Content-Type", "application/json")
                 .json(&body)
                 .send()
-                .await?
+                .await
+                .map_err(|e| {
+                    anyhow!(
+                        "http send to {url} failed (timeout={} connect={} request={} body={}): {e} :: source={:?}",
+                        e.is_timeout(),
+                        e.is_connect(),
+                        e.is_request(),
+                        e.is_body(),
+                        std::error::Error::source(&e)
+                    )
+                })?
                 .error_for_status()?;
 
             let json: serde_json::Value = resp.json().await?;
