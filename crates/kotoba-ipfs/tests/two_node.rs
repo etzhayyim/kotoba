@@ -1001,21 +1001,26 @@ async fn kubo_compatible_local_api_surface() {
     assert!(files
         .iter()
         .any(|entry| entry.path == "/docs/empty.txt" && entry.cid == touched.cid));
-    assert_eq!(
-        node.files_ls("/").await.expect("files/ls root"),
-        vec![kotoba_ipfs::MfsEntry {
-            path: "/docs".into(),
-            cid: None,
-        }]
-    );
+    let root_entries = node.files_ls("/").await.expect("files/ls root");
+    assert_eq!(root_entries.len(), 1);
+    let docs_entry = &root_entries[0];
+    assert_eq!(docs_entry.path, "/docs");
+    assert_eq!(docs_entry.cid.expect("directory cid").codec(), CODEC_DAG_PB);
     let docs_stat = node.files_stat("/docs").await.expect("files/stat dir");
     assert_eq!(docs_stat.path, "/docs");
-    assert_eq!(docs_stat.cid, None);
+    assert_eq!(docs_stat.cid, docs_entry.cid);
     assert_eq!(docs_stat.kind, kotoba_ipfs::MfsKind::Directory);
     assert_eq!(docs_stat.kind.as_str(), "directory");
     assert_eq!(docs_stat.size, 17);
-    assert_eq!(docs_stat.cumulative_size, 17);
-    assert_eq!(docs_stat.blocks, 4);
+    assert!(docs_stat.cumulative_size >= docs_stat.size);
+    assert!(docs_stat.blocks >= 5);
+    assert_eq!(
+        node.dag_resolve(&docs_stat.cid.expect("docs cid"), "hello.txt")
+            .await
+            .expect("files/stat directory cid resolves child")
+            .cid,
+        raw
+    );
     assert_eq!(
         node.files_du("/docs/hello.txt", false)
             .await
@@ -1035,7 +1040,7 @@ async fn kubo_compatible_local_api_surface() {
     let docs_after_mkdir = node.files_ls("/docs").await.expect("files/ls mkdir");
     assert!(docs_after_mkdir
         .iter()
-        .any(|entry| entry.path == "/docs/archive" && entry.cid.is_none()));
+        .any(|entry| entry.path == "/docs/archive" && entry.cid.is_some()));
     node.files_mkdir("/docs/empty-dir", true)
         .await
         .expect("files/mkdir empty-dir");
@@ -1053,7 +1058,7 @@ async fn kubo_compatible_local_api_surface() {
     let docs_after_copy = node.files_ls("/docs").await.expect("files/ls after copy");
     assert!(docs_after_copy
         .iter()
-        .any(|entry| entry.path == "/docs/archive" && entry.cid.is_none()));
+        .any(|entry| entry.path == "/docs/archive" && entry.cid.is_some()));
     assert!(!docs_after_copy
         .iter()
         .any(|entry| entry.path == "/docs/archive/hello-copy.txt"));

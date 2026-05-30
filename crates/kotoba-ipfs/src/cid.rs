@@ -135,6 +135,31 @@ pub fn dag_pb_object_block(data: &[u8], links: &[DagPbLink]) -> (Cid, Vec<u8>) {
     (cid_for_bytes(CODEC_DAG_PB, &pb_node), pb_node)
 }
 
+/// Encode a Kubo-compatible UnixFS directory dag-pb block.
+///
+/// PBNode.Data contains a UnixFS Data message with Type=Directory and PBNode
+/// links contain the direct children.  This is the common MFS directory root
+/// shape exposed by Kubo `files/stat` and `files/ls`.
+pub fn unixfs_directory_block(links: &[DagPbLink]) -> (Cid, Vec<u8>) {
+    let mut unixfs = Vec::new();
+    write_varint_field(&mut unixfs, 1, 1);
+
+    let mut pb_node = Vec::new();
+    write_bytes_field(&mut pb_node, 1, &unixfs);
+    for link in links {
+        let mut pb_link = Vec::new();
+        write_bytes_field(&mut pb_link, 1, &link.cid.to_bytes());
+        if !link.name.is_empty() {
+            write_bytes_field(&mut pb_link, 2, link.name.as_bytes());
+        }
+        if let Some(tsize) = link.tsize {
+            write_varint_field(&mut pb_link, 3, tsize);
+        }
+        write_bytes_field(&mut pb_node, 2, &pb_link);
+    }
+    (cid_for_bytes(CODEC_DAG_PB, &pb_node), pb_node)
+}
+
 /// Decode the single-file UnixFS dag-pb block shape produced by
 /// [`unixfs_file_block`].
 pub fn decode_unixfs_file_block(block: &[u8]) -> Result<Vec<u8>, CidError> {

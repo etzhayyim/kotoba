@@ -6,7 +6,8 @@
 
 use crate::cid::{
     cid_for_bytes, dag_cbor_block, dag_pb_object_block, decode_dag_pb_node,
-    decode_unixfs_file_data, raw_cid, unixfs_chunked_file_blocks, unixfs_file_block,
+    decode_unixfs_file_data, raw_cid, unixfs_chunked_file_blocks, unixfs_directory_block,
+    unixfs_file_block,
 };
 use crate::ipns::{IpnsName, IpnsRecord};
 use anyhow::{anyhow, bail, Context, Result};
@@ -1813,16 +1814,17 @@ impl KotobaIpfsNode {
         if path == "/" || self.state.dirs.read().await.contains(&path) {
             let cids = self.mfs_file_cids_under(&path).await;
             let mut size = 0;
-            let mut cumulative_size = 0;
             let mut blocks = HashSet::new();
             for cid in cids {
                 size += self.mfs_file_size(&cid).await?;
-                cumulative_size += self.object_stat(&cid).await?.cumulative_size;
                 self.collect_reachable_blocks(&cid, &mut blocks).await?;
             }
+            let cid = self.materialize_mfs_dir(&path).await?;
+            let cumulative_size = self.object_stat(&cid).await?.cumulative_size;
+            self.collect_reachable_blocks(&cid, &mut blocks).await?;
             return Ok(MfsStat {
                 path,
-                cid: None,
+                cid: Some(cid),
                 kind: MfsKind::Directory,
                 size,
                 cumulative_size,
@@ -1925,10 +1927,15 @@ impl KotobaIpfsNode {
                 entries.entry(child).or_insert(Some(*cid));
             }
         }
-        Ok(entries
-            .into_iter()
-            .map(|(path, cid)| MfsEntry { path, cid })
-            .collect())
+        let mut out = Vec::new();
+        for (path, cid) in entries {
+            let cid = match cid {
+                Some(cid) => Some(cid),
+                None => Some(self.materialize_mfs_dir(&path).await?),
+            };
+            out.push(MfsEntry { path, cid });
+        }
+        Ok(out)
     }
 
     /// Kubo-like MFS `files/rm`.
@@ -2107,6 +2114,56 @@ impl KotobaIpfsNode {
             .filter(|(file_path, _)| *file_path == path || file_path.starts_with(&child_prefix))
             .map(|(_, cid)| *cid)
             .collect()
+    }
+
+    async fn materialize_mfs_dir(&self, path: &str) -> Result<IpldCid> {
+        let path = normalize_mfs_path(path)?;
+        if path != "/" && !self.state.dirs.read().await.contains(&path) {
+            bail!("mfs directory not found: {path}");
+        }
+        let child_prefix = if path == "/" {
+            "/".to_string()
+        } else {
+            format!("{path}/")
+        };
+
+        let dirs = self.state.dirs.read().await;
+        let files = self.state.files.read().await;
+        let mut children = BTreeMap::<String, Option<IpldCid>>::new();
+        for dir in dirs
+            .iter()
+            .filter(|dir| *dir != &path && dir.starts_with(&child_prefix))
+        {
+            if let Some(child) = immediate_mfs_child(&path, dir) {
+                children.entry(child).or_insert(None);
+            }
+        }
+        for (file_path, cid) in files
+            .iter()
+            .filter(|(file_path, _)| *file_path != &path && file_path.starts_with(&child_prefix))
+        {
+            if let Some(child) = immediate_mfs_child(&path, file_path) {
+                children.entry(child).or_insert(Some(*cid));
+            }
+        }
+        drop(files);
+        drop(dirs);
+
+        let mut links = Vec::new();
+        for (child_path, child_cid) in children {
+            let cid = match child_cid {
+                Some(cid) => cid,
+                None => Box::pin(self.materialize_mfs_dir(&child_path)).await?,
+            };
+            links.push(crate::cid::DagPbLink {
+                name: mfs_basename(&child_path).to_string(),
+                tsize: Some(self.object_stat(&cid).await?.cumulative_size),
+                cid,
+            });
+        }
+        let (cid, block) = unixfs_directory_block(&links);
+        self.put_block(&cid, &block).await?;
+        Ok(cid)
     }
 
     async fn dag_resolve_pb(&self, cid: &IpldCid, path: &str) -> Result<DagResolve> {
@@ -2691,6 +2748,10 @@ fn immediate_mfs_child(prefix: &str, path: &str) -> Option<String> {
     } else {
         format!("{prefix}/{name}")
     })
+}
+
+fn mfs_basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 fn is_ipld_path(path: &str) -> bool {
