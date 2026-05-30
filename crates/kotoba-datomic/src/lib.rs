@@ -3355,10 +3355,10 @@ pub(crate) fn query_variadic_predicate(op: &str, args: &[EdnValue]) -> Result<bo
     Ok(match op {
         "=" => args.windows(2).all(|pair| pair[0] == pair[1]),
         "!=" | "not=" => !args.windows(2).all(|pair| pair[0] == pair[1]),
-        ">" => query_chained_ints(args, |a, b| a > b),
-        "<" => query_chained_ints(args, |a, b| a < b),
-        ">=" => query_chained_ints(args, |a, b| a >= b),
-        "<=" => query_chained_ints(args, |a, b| a <= b),
+        ">" => query_chained_numbers(args, |a, b| a > b),
+        "<" => query_chained_numbers(args, |a, b| a < b),
+        ">=" => query_chained_numbers(args, |a, b| a >= b),
+        "<=" => query_chained_numbers(args, |a, b| a <= b),
         "contains?" => {
             if args.len() != 2 {
                 return Err(DatomicError::Query(
@@ -3390,9 +3390,22 @@ pub(crate) fn query_variadic_predicate(op: &str, args: &[EdnValue]) -> Result<bo
     })
 }
 
-fn query_chained_ints(args: &[EdnValue], f: impl Fn(i64, i64) -> bool) -> bool {
+fn query_number_as_f64(value: &EdnValue) -> Option<f64> {
+    match value {
+        EdnValue::Integer(value) => Some(*value as f64),
+        EdnValue::BigInt(value) | EdnValue::BigDec(value) => value.parse().ok(),
+        EdnValue::Float(value) if value.0.is_finite() => Some(value.0),
+        EdnValue::Float(_) => None,
+        _ => None,
+    }
+}
+
+fn query_chained_numbers(args: &[EdnValue], f: impl Fn(f64, f64) -> bool) -> bool {
     args.windows(2).all(|pair| {
-        matches!((&pair[0], &pair[1]), (EdnValue::Integer(a), EdnValue::Integer(b)) if f(*a, *b))
+        matches!(
+            (query_number_as_f64(&pair[0]), query_number_as_f64(&pair[1])),
+            (Some(a), Some(b)) if f(a, b)
+        )
     })
 }
 
@@ -7844,6 +7857,34 @@ mod tests {
         .unwrap();
         let rows = q(odd_query, &conn.db(), &[]).unwrap();
         assert_eq!(rows, vec![vec![EdnValue::Integer(7)]]);
+    }
+
+    #[tokio::test]
+    async fn q_supports_numeric_comparisons_across_edn_number_types() {
+        let conn = Connection::new();
+        conn.transact(
+            parse(
+                r#"[
+                  {:db/id "alice" :metric/score 2.5M}
+                  {:db/id "bob" :metric/score 4.0}
+                ]"#,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let query = parse(
+            r#"{:find [?score]
+                :where [[?e :metric/score ?score]
+                        [(number? ?score)]
+                        [(< 2 ?score 3N)]
+                        [(<= 2.5 ?score 2.5M)]
+                        [(> 10.0 ?score 1)]
+                        [(>= 2.5M ?score 2.5)]]}"#,
+        )
+        .unwrap();
+        let rows = q(query, &conn.db(), &[]).unwrap();
+        assert_eq!(rows, vec![vec![EdnValue::BigDec("2.5".into())]]);
     }
 
     #[tokio::test]
