@@ -96,6 +96,13 @@ impl KotobaSwarm {
             .with_tokio()
             .with_quic()
             .with_behaviour(|_| Ok(behaviour))?
+            // libp2p defaults idle_connection_timeout to 0 → idle connections close
+            // immediately (KeepAliveTimeout) before GossipSub can graft them into a
+            // mesh, so the firehose relay never propagates. Hold idle connections
+            // long enough for the mesh to stabilise.
+            .with_swarm_config(|cfg| {
+                cfg.with_idle_connection_timeout(std::time::Duration::from_secs(60))
+            })
             .build();
 
         swarm.listen_on(listen_addr)?;
