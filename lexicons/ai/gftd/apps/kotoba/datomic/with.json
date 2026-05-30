@@ -15,6 +15,8 @@
             "tx_edn": { "type": "string" },
             "as_of": { "type": "string" },
             "since": { "type": "string" },
+            "remote_peer": { "type": "string" },
+            "remote_ipns_name": { "type": "string" },
             "cacao_b64": { "type": "string" },
             "presentation": {
               "type": "object",

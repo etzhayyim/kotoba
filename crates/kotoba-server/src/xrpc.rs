@@ -130,6 +130,11 @@ pub struct DatomicWithReq {
     pub as_of: Option<String>,
     /// Optional Datomic `since` transaction CID used as the speculative base DB.
     pub since: Option<String>,
+    /// Optional `host:port` for a remote `kotoba-ipfs/1` peer that supplies the
+    /// speculative base DB blocks.
+    pub remote_peer: Option<String>,
+    /// Optional IPNS name override for the speculative base DB.
+    pub remote_ipns_name: Option<String>,
     pub cacao_b64: Option<String>,
     #[serde(default)]
     pub presentation: Option<kotoba_vc::VerifiablePresentation>,
@@ -4293,8 +4298,8 @@ pub async fn datomic_with(
         &graph_cid,
         req.as_of.as_deref(),
         req.since.as_deref(),
-        None,
-        None,
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
     )? {
         Some(db) => db,
         None => kotoba_datomic::Db::from_datoms(Vec::new(), None),
@@ -8046,12 +8051,13 @@ mod tests {
         datomic_basis_t, datomic_datoms, datomic_db_stats, datomic_entid, datomic_entity,
         datomic_history, datomic_ident, datomic_index_pull, datomic_index_range, datomic_log,
         datomic_pull, datomic_pull_many, datomic_q, datomic_seek_datoms, datomic_transact,
-        datomic_tx_range, distributed_graph_ipns_name, enforce_datomic_range_tx_scope,
-        is_did_web_ip_host, AtprotoRepoWriteReq, AuthCapabilityProjection, DatomicBasisTReq,
-        DatomicDatomsReq, DatomicDbStatsReq, DatomicEntidReq, DatomicEntityReq, DatomicHistoryReq,
-        DatomicIdentReq, DatomicIndexPullReq, DatomicIndexRangeReq, DatomicLogReq,
-        DatomicPullManyReq, DatomicPullReq, DatomicQReq, DatomicSeekDatomsReq, DatomicTransactReq,
-        DatomicTxRangeReq, ZCAP_ALLOWED_ACTION_IRI, ZCAP_CONTROLLER_IRI, ZCAP_INVOCATION_PROOF_IRI,
+        datomic_tx_range, datomic_with, distributed_graph_ipns_name,
+        enforce_datomic_range_tx_scope, is_did_web_ip_host, AtprotoRepoWriteReq,
+        AuthCapabilityProjection, DatomicBasisTReq, DatomicDatomsReq, DatomicDbStatsReq,
+        DatomicEntidReq, DatomicEntityReq, DatomicHistoryReq, DatomicIdentReq, DatomicIndexPullReq,
+        DatomicIndexRangeReq, DatomicLogReq, DatomicPullManyReq, DatomicPullReq, DatomicQReq,
+        DatomicSeekDatomsReq, DatomicTransactReq, DatomicTxRangeReq, DatomicWithReq,
+        ZCAP_ALLOWED_ACTION_IRI, ZCAP_CONTROLLER_IRI, ZCAP_INVOCATION_PROOF_IRI,
         ZCAP_INVOCATION_TARGET_IRI,
     };
     use crate::server::KotobaState;
@@ -8518,6 +8524,85 @@ mod tests {
             .unwrap()
             .iter()
             .any(|datom| { datom["a"] == ":person/name" && datom["v_edn"] == r#""Alice""# }));
+    }
+
+    #[tokio::test]
+    async fn datomic_with_xrpc_uses_named_distributed_ipns_head_as_speculative_base() {
+        std::env::set_var("KOTOBA_IPFS", "off");
+        std::env::set_var("KOTOBA_IPNS_REQUIRE_SIGNATURE", "false");
+        let state = Arc::new(KotobaState::new(None).unwrap());
+        let graph = KotobaCid::from_bytes(b"xrpc-with-named-ipns-base-graph");
+        let graph_mb = graph.to_multibase();
+        state.graph_registry.write().await.insert(
+            graph.clone(),
+            (
+                "xrpc-with-named-ipns-base-graph".into(),
+                GraphVisibility::Public,
+            ),
+        );
+        let named_head = "k51-kotoba-xrpc-with-named-base-head".to_string();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", test_operator_jwt(&state.operator_did))
+                .parse()
+                .unwrap(),
+        );
+
+        let write = datomic_transact(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicTransactReq {
+                graph: graph_mb.clone(),
+                tx_edn: r#"[[:db/add "alice" :person/name "Alice"]]"#.into(),
+                ipns_name: Some(named_head.clone()),
+                cacao_b64: None,
+                cacao_proof_cid: None,
+                expected_parent: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(write.status(), axum::http::StatusCode::OK);
+        let write_body = axum::body::to_bytes(write.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let write_body: serde_json::Value = serde_json::from_slice(&write_body).unwrap();
+        let base_tx = write_body["tx_cid"].as_str().unwrap().to_string();
+
+        let speculative = datomic_with(
+            axum::extract::State(state),
+            headers,
+            axum::Json(DatomicWithReq {
+                graph: graph_mb,
+                tx_edn: r#"[[:db/add "alice" :person/role "admin"]]"#.into(),
+                as_of: None,
+                since: None,
+                remote_peer: None,
+                remote_ipns_name: Some(named_head),
+                cacao_b64: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(speculative.status(), axum::http::StatusCode::OK);
+        let speculative_body = axum::body::to_bytes(speculative.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let speculative_body: serde_json::Value =
+            serde_json::from_slice(&speculative_body).unwrap();
+        assert_eq!(speculative_body["db_before_basis_t"], base_tx);
+        let datoms = speculative_body["db_after_datoms"].as_array().unwrap();
+        assert!(datoms
+            .iter()
+            .any(|datom| datom["a"] == ":person/name" && datom["v_edn"] == r#""Alice""#));
+        assert!(datoms
+            .iter()
+            .any(|datom| datom["a"] == ":person/role" && datom["v_edn"] == r#""admin""#));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -9764,9 +9849,9 @@ mod tests {
                 nsid: super::NSID_DATOMIC_WITH,
                 file_name: "with.json",
                 src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/with.json"),
-                distributed_read: false,
+                distributed_read: true,
                 distributed_write: false,
-                remote_read: false,
+                remote_read: true,
                 ipns_write: false,
             },
             DatomicCompatSurface {
@@ -10058,7 +10143,14 @@ mod tests {
         assert_lexicon_input_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/with.json"),
             &["graph", "tx_edn"],
-            &["as_of", "since", "cacao_b64", "presentation"],
+            &[
+                "as_of",
+                "since",
+                "remote_peer",
+                "remote_ipns_name",
+                "cacao_b64",
+                "presentation",
+            ],
         );
         assert_lexicon_output_fields(
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/transact.json"),
