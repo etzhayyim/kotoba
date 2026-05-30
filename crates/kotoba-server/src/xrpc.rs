@@ -12977,7 +12977,15 @@ mod tests {
         );
         assert_lexicon_output_fields(
             graph_sparql,
-            &["ok", "form", "elapsedMs"],
+            &[
+                "ok",
+                "form",
+                "queryEngine",
+                "primaryQuery",
+                "auxiliaryQuery",
+                "storageModel",
+                "elapsedMs",
+            ],
             &["result", "basisT", "count", "maxHops", "quads"],
         );
         assert_lexicon_array_item_fields(

@@ -64,12 +64,32 @@
         "encoding": "application/json",
         "schema": {
           "type": "object",
-          "required": ["ok", "form", "elapsedMs"],
+          "required": ["ok", "form", "queryEngine", "primaryQuery", "auxiliaryQuery", "storageModel", "elapsedMs"],
           "properties": {
             "ok": { "type": "boolean" },
             "form": {
               "type": "string",
               "knownValues": ["select", "ask", "describe", "construct"]
+            },
+            "queryEngine": {
+              "type": "string",
+              "knownValues": ["datomic"],
+              "description": "Primary query engine backing this auxiliary SPARQL response."
+            },
+            "primaryQuery": {
+              "type": "string",
+              "knownValues": ["ai.gftd.apps.kotoba.datomic.q"],
+              "description": "Primary Datomic/Datalog query procedure over the Datom SSoT."
+            },
+            "auxiliaryQuery": {
+              "type": "string",
+              "knownValues": ["ai.gftd.apps.kotoba.graph.sparql"],
+              "description": "This auxiliary SPARQL query procedure over the same Datom SSoT."
+            },
+            "storageModel": {
+              "type": "string",
+              "knownValues": ["ipld-dag-cbor-prolly-tree"],
+              "description": "Distributed storage/index model read by this query."
             },
             "result": { "type": "boolean" },
             "basisT": {

@@ -82,6 +82,8 @@ pub const NSID_KG_EMBED: &str = "ai.gftd.apps.kotobase.kg.embed";
 pub const NSID_KG_SEARCH: &str = "ai.gftd.apps.kotobase.kg.search";
 pub const NSID_KG_QUERY: &str = "ai.gftd.apps.kotobase.kg.query";
 pub const NSID_KG_SPARQL: &str = "ai.gftd.apps.kotoba.graph.sparql";
+const QUERY_ENGINE_DATOMIC: &str = "datomic";
+const STORAGE_MODEL_IPLD_DAG_CBOR_PROLLY_TREE: &str = "ipld-dag-cbor-prolly-tree";
 pub const NSID_KG_INGEST: &str = "ai.gftd.apps.kotobase.kg.ingest";
 pub const NSID_KG_INGEST_BATCH: &str = "ai.gftd.apps.kotobase.kg.ingest_batch";
 pub const NSID_KG_DELETE: &str = "ai.gftd.apps.kotobase.kg.delete";
@@ -1816,6 +1818,10 @@ pub async fn kg_sparql(
         serde_json::json!({
             "ok":        true,
             "form":      "ask",
+            "queryEngine": QUERY_ENGINE_DATOMIC,
+            "primaryQuery": crate::xrpc::NSID_DATOMIC_Q,
+            "auxiliaryQuery": NSID_KG_SPARQL,
+            "storageModel": STORAGE_MODEL_IPLD_DAG_CBOR_PROLLY_TREE,
             "basisT":    basis_t,
             "result":    result,
             "elapsedMs": t0.elapsed().as_millis(),
@@ -1836,6 +1842,10 @@ pub async fn kg_sparql(
         serde_json::json!({
             "ok":        true,
             "form":      "describe",
+            "queryEngine": QUERY_ENGINE_DATOMIC,
+            "primaryQuery": crate::xrpc::NSID_DATOMIC_Q,
+            "auxiliaryQuery": NSID_KG_SPARQL,
+            "storageModel": STORAGE_MODEL_IPLD_DAG_CBOR_PROLLY_TREE,
             "basisT":    basis_t,
             "maxHops":   max_hops,
             "count":     materialised.len(),
@@ -1851,6 +1861,10 @@ pub async fn kg_sparql(
         serde_json::json!({
             "ok":        true,
             "form":      "construct",
+            "queryEngine": QUERY_ENGINE_DATOMIC,
+            "primaryQuery": crate::xrpc::NSID_DATOMIC_Q,
+            "auxiliaryQuery": NSID_KG_SPARQL,
+            "storageModel": STORAGE_MODEL_IPLD_DAG_CBOR_PROLLY_TREE,
             "basisT":    basis_t,
             "count":     materialised.len(),
             "quads":     materialised,
@@ -1865,6 +1879,10 @@ pub async fn kg_sparql(
         serde_json::json!({
             "ok":        true,
             "form":      "select",
+            "queryEngine": QUERY_ENGINE_DATOMIC,
+            "primaryQuery": crate::xrpc::NSID_DATOMIC_Q,
+            "auxiliaryQuery": NSID_KG_SPARQL,
+            "storageModel": STORAGE_MODEL_IPLD_DAG_CBOR_PROLLY_TREE,
             "basisT":    basis_t,
             "count":     materialised.len(),
             "quads":     materialised,
@@ -2012,6 +2030,13 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["form"], "select");
+        assert_eq!(body["queryEngine"], QUERY_ENGINE_DATOMIC);
+        assert_eq!(body["primaryQuery"], crate::xrpc::NSID_DATOMIC_Q);
+        assert_eq!(body["auxiliaryQuery"], NSID_KG_SPARQL);
+        assert_eq!(
+            body["storageModel"],
+            STORAGE_MODEL_IPLD_DAG_CBOR_PROLLY_TREE
+        );
         assert_eq!(body["count"], 1);
         assert_eq!(body["quads"][0]["predicate"], "role");
         assert_eq!(body["quads"][0]["object"]["text"], "admin");
