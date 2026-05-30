@@ -973,8 +973,7 @@ fn op_form_to_datoms(
             }
             let e = entity_ref_to_cid_for_tx(&op[1], tempids, db, &tx_cid)?;
             let a = attr_to_string(&op[2])?;
-            Ok(db
-                .datoms()
+            Ok(current_datoms(&db.datoms())
                 .into_iter()
                 .filter(|d| d.e == e && d.a == a)
                 .map(|d| Datom::retract(d.e, d.a, d.v, tx_cid.clone()))
@@ -6312,6 +6311,42 @@ mod tests {
             .datoms()
             .iter()
             .all(|d| !d.a.starts_with(":person/")));
+    }
+
+    #[tokio::test]
+    async fn retract_attribute_retracts_only_current_values() {
+        let conn = Connection::new();
+        conn.transact(
+            parse(
+                r#"[
+                  {:db/ident :person/age
+                   :db/cardinality :db.cardinality/one}
+                ]"#,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        conn.transact(parse(r#"[[:db/add "alice" :person/age 30]]"#).unwrap())
+            .await
+            .unwrap();
+        conn.transact(parse(r#"[[:db/add "alice" :person/age 31]]"#).unwrap())
+            .await
+            .unwrap();
+
+        let report = conn
+            .transact(parse(r#"[[:db.fn/retractAttribute "alice" :person/age]]"#).unwrap())
+            .await
+            .unwrap();
+
+        assert!(conn.db().datoms().iter().all(|d| d.a != ":person/age"));
+        let retracted_values: Vec<_> = report
+            .tx_data
+            .iter()
+            .filter(|d| d.a == ":person/age" && !d.added)
+            .map(|d| d.v.clone())
+            .collect();
+        assert_eq!(retracted_values, vec![EdnValue::Integer(31)]);
     }
 
     #[tokio::test]
