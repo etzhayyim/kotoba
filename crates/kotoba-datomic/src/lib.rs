@@ -2767,15 +2767,17 @@ fn query_apply_value_function(op: &str, args: Vec<EdnValue>) -> Result<EdnValue>
         "range" | "repeat" => query_sequence_constructor_value(op, args),
         "reduce" => query_reduce_value(args),
         "apply" => query_apply_function_value(args),
-        "seq" | "first" | "second" | "last" | "peek" | "rest" | "next" | "pop" => {
+        "seq" | "first" | "second" | "last" | "peek" | "rest" | "next" | "pop" | "butlast" => {
             match args.as_slice() {
                 [value] => query_collection_value(op, value.clone()),
                 _ => Err(DatomicError::Query(format!("{op} expects one argument"))),
             }
         }
         "nth" => query_nth_value(args),
-        "take" | "drop" | "take-while" | "drop-while" | "split-at" | "split-with" | "partition"
-        | "partition-all" | "subvec" => query_collection_slice_value(op, args),
+        "take" | "drop" | "drop-last" | "take-nth" | "take-while" | "drop-while" | "split-at"
+        | "split-with" | "partition" | "partition-all" | "subvec" => {
+            query_collection_slice_value(op, args)
+        }
         "concat" | "distinct" | "reverse" | "sort" | "flatten" | "interpose" | "interleave" => {
             query_collection_order_value(op, args)
         }
@@ -3240,6 +3242,15 @@ pub(crate) fn query_collection_value(op: &str, value: EdnValue) -> Result<EdnVal
             out.pop();
             EdnValue::Vector(out)
         }
+        "butlast" => {
+            let mut out = values;
+            out.pop();
+            if out.is_empty() {
+                EdnValue::Nil
+            } else {
+                EdnValue::Vector(out)
+            }
+        }
         other => return Err(DatomicError::UnsupportedOperation(other.into())),
     })
 }
@@ -3306,6 +3317,35 @@ pub(crate) fn query_collection_slice_value(op: &str, args: Vec<EdnValue>) -> Res
                 values.into_iter().skip(n).collect()
             };
             Ok(EdnValue::Vector(values))
+        }
+        "drop-last" => {
+            let (n, collection) = match args.as_slice() {
+                [collection] => (1, collection.clone()),
+                [n, collection] => (
+                    query_non_negative_usize(n, "drop-last")?,
+                    collection.clone(),
+                ),
+                _ => {
+                    return Err(DatomicError::Query(
+                        "drop-last expects a collection and optional count".into(),
+                    ))
+                }
+            };
+            let values = query_seq_values(collection)?;
+            let keep = values.len().saturating_sub(n);
+            Ok(EdnValue::Vector(values.into_iter().take(keep).collect()))
+        }
+        "take-nth" => {
+            let [n, collection]: [EdnValue; 2] = args
+                .try_into()
+                .map_err(|_| DatomicError::Query("take-nth expects two arguments".into()))?;
+            let n = query_positive_usize(&n, "take-nth")?;
+            Ok(EdnValue::Vector(
+                query_seq_values(collection)?
+                    .into_iter()
+                    .step_by(n)
+                    .collect(),
+            ))
         }
         "split-at" => {
             let [n, collection]: [EdnValue; 2] = args
@@ -5667,7 +5707,7 @@ fn eval_query_function(
             .map(|arg| resolve_query_value(arg, binding))
             .collect::<Result<Vec<_>>>()
             .and_then(query_apply_function_value),
-        "seq" | "first" | "second" | "last" | "peek" | "rest" | "next" | "pop" => {
+        "seq" | "first" | "second" | "last" | "peek" | "rest" | "next" | "pop" | "butlast" => {
             if args.len() != 1 {
                 return Err(DatomicError::Query(format!("{op} expects one argument")));
             }
@@ -5688,8 +5728,8 @@ fn eval_query_function(
             .map(|arg| resolve_query_value(arg, binding))
             .collect::<Result<Vec<_>>>()
             .and_then(query_into_value),
-        "take" | "drop" | "take-while" | "drop-while" | "split-at" | "split-with" | "partition"
-        | "partition-all" | "subvec" => args
+        "take" | "drop" | "drop-last" | "take-nth" | "take-while" | "drop-while" | "split-at"
+        | "split-with" | "partition" | "partition-all" | "subvec" => args
             .iter()
             .map(|arg| resolve_query_value(arg, binding))
             .collect::<Result<Vec<_>>>()
@@ -8893,7 +8933,7 @@ mod tests {
         .await
         .unwrap();
         let query = parse(
-            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString ?secondScore ?lastScore ?poppedScores ?incScores ?tailedScores ?oddScores ?nonOddScores ?nonEmptyNames ?someName ?scoreSum ?scoreProduct ?scoreMax ?applySum ?applyMax ?scoreSet ?initialOdds ?afterOdds ?splitScores ?splitOdds ?groupedScores ?partitionedScores ?scoreFrequencies ?numberRange ?repeatedScore ?scoreMap ?flatScores ?scoresIntoVector ?concatenatedScores ?distinctScores ?interposedScores ?interleavedScores ?pairs ?windows ?paddedPairs ?allPairs]
+            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString ?secondScore ?lastScore ?poppedScores ?butlastScores ?droppedLastScores ?everyOtherScore ?incScores ?tailedScores ?oddScores ?nonOddScores ?nonEmptyNames ?someName ?scoreSum ?scoreProduct ?scoreMax ?applySum ?applyMax ?scoreSet ?initialOdds ?afterOdds ?splitScores ?splitOdds ?groupedScores ?partitionedScores ?scoreFrequencies ?numberRange ?repeatedScore ?scoreMap ?flatScores ?scoresIntoVector ?concatenatedScores ?distinctScores ?interposedScores ?interleavedScores ?pairs ?windows ?paddedPairs ?allPairs]
                 :where [[?e :person/scores ?scores]
                         [?e :person/names ?names]
                         [(distinct? 1 2 3)]
@@ -8911,6 +8951,9 @@ mod tests {
                         [(second ?scores) ?secondScore]
                         [(peek ?scores) ?lastScore]
                         [(pop ?scores) ?poppedScores]
+                        [(butlast ?scores) ?butlastScores]
+                        [(drop-last 2 [1 2 3 4]) ?droppedLastScores]
+                        [(take-nth 2 [1 2 3 4 5]) ?everyOtherScore]
                         [(map inc ?scores) ?incScores]
                         [(mapcat rest [[0 1] [0 2]]) ?tailedScores]
                         [(filter odd? ?scores) ?oddScores]
@@ -8972,6 +9015,13 @@ mod tests {
                 EdnValue::Integer(2),
                 EdnValue::Integer(3),
                 EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(2)]),
+                EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(2)]),
+                EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(2)]),
+                EdnValue::Vector(vec![
+                    EdnValue::Integer(1),
+                    EdnValue::Integer(3),
+                    EdnValue::Integer(5),
+                ]),
                 EdnValue::Vector(vec![
                     EdnValue::Integer(2),
                     EdnValue::Integer(3),

@@ -1965,7 +1965,7 @@ where
                 .map(|arg| required_query_value(arg, binding))
                 .collect::<Result<Vec<_>, _>>()
                 .and_then(|values| crate::query_apply_function_value(values).map_err(Into::into)),
-            "seq" | "first" | "second" | "last" | "peek" | "rest" | "next" | "pop" => {
+            "seq" | "first" | "second" | "last" | "peek" | "rest" | "next" | "pop" | "butlast" => {
                 if args.len() != 1 {
                     return Err(DatomicError::Query(format!("{op} expects one argument")).into());
                 }
@@ -1987,8 +1987,8 @@ where
                 .map(|arg| required_query_value(arg, binding))
                 .collect::<Result<Vec<_>, _>>()
                 .and_then(|values| crate::query_into_value(values).map_err(Into::into)),
-            "take" | "drop" | "take-while" | "drop-while" | "split-at" | "split-with"
-            | "partition" | "partition-all" | "subvec" => args
+            "take" | "drop" | "drop-last" | "take-nth" | "take-while" | "drop-while"
+            | "split-at" | "split-with" | "partition" | "partition-all" | "subvec" => args
                 .iter()
                 .map(|arg| required_query_value(arg, binding))
                 .collect::<Result<Vec<_>, _>>()
@@ -6947,7 +6947,7 @@ mod tests {
         );
 
         let collection_predicate_query = kotoba_edn::parse(
-            r#"{:find [?allTags ?noNilTags ?notEveryTagString ?tagsVector ?sameTag ?hasTag ?notFalse ?truthyTags ?tagsString ?secondNumber ?lastNumber ?poppedNumbers ?tagKeywords ?tails ?nonStringTags ?keptTags ?someTag ?sum ?product ?max ?applySum ?applyMax ?applySet ?initialOdds ?afterOdds ?splitNumbers ?splitOdds ?groupedNumbers ?partitionedNumbers ?numberFrequencies ?numberRange ?repeatedTag ?tagMap ?flat ?numbersIntoVector ?concatenated ?distinctNumbers ?interposed ?interleaved ?pairs ?windows ?paddedPairs ?allPairs]
+            r#"{:find [?allTags ?noNilTags ?notEveryTagString ?tagsVector ?sameTag ?hasTag ?notFalse ?truthyTags ?tagsString ?secondNumber ?lastNumber ?poppedNumbers ?butlastNumbers ?droppedLastNumbers ?everyOtherNumber ?tagKeywords ?tails ?nonStringTags ?keptTags ?someTag ?sum ?product ?max ?applySum ?applyMax ?applySet ?initialOdds ?afterOdds ?splitNumbers ?splitOdds ?groupedNumbers ?partitionedNumbers ?numberFrequencies ?numberRange ?repeatedTag ?tagMap ?flat ?numbersIntoVector ?concatenated ?distinctNumbers ?interposed ?interleaved ?pairs ?windows ?paddedPairs ?allPairs]
                 :where [[?e :credential/claims ?claims]
                         [(get ?claims :claim/tags) ?tags]
                         [(distinct? :role/admin :role/auditor :role/operator)]
@@ -6964,6 +6964,9 @@ mod tests {
                         [(second [1 2 3]) ?secondNumber]
                         [(peek [1 2 3]) ?lastNumber]
                         [(pop [1 2 3]) ?poppedNumbers]
+                        [(butlast [1 2 3]) ?butlastNumbers]
+                        [(drop-last 2 [1 2 3 4]) ?droppedLastNumbers]
+                        [(take-nth 2 [1 2 3 4 5]) ?everyOtherNumber]
                         [(filter keyword? ?tags) ?tagKeywords]
                         [(mapcat rest [[0 1] [0 2]]) ?tails]
                         [(remove string? ?tags) ?nonStringTags]
@@ -7024,6 +7027,13 @@ mod tests {
                 EdnValue::Integer(2),
                 EdnValue::Integer(3),
                 EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(2)]),
+                EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(2)]),
+                EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(2)]),
+                EdnValue::Vector(vec![
+                    EdnValue::Integer(1),
+                    EdnValue::Integer(3),
+                    EdnValue::Integer(5),
+                ]),
                 EdnValue::Vector(vec![
                     EdnValue::Keyword(Keyword::parse("vc")),
                     EdnValue::Keyword(Keyword::parse("ipld")),
