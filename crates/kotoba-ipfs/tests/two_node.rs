@@ -342,6 +342,17 @@ async fn kubo_compatible_local_api_surface() {
             .expect("cat /ipfs raw"),
         b"hello"[..]
     );
+    assert_eq!(
+        node.resolve_path(raw.to_string())
+            .await
+            .expect("resolve bare CID")
+            .cid,
+        raw
+    );
+    assert_eq!(
+        node.cat_path(raw.to_string()).await.expect("cat bare CID"),
+        b"hello"[..]
+    );
     assert!(node
         .dht_find_providers(&raw)
         .await

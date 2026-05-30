@@ -597,7 +597,7 @@ impl KotobaIpfsNode {
         );
     }
 
-    /// Kubo-like path resolver for `/ipfs/<cid>` and locally published `/ipns/<name>`.
+    /// Kubo-like path resolver for bare CIDs, `/ipfs/<cid>`, and locally published `/ipns/<name>`.
     pub async fn resolve_path(&self, path: impl AsRef<str>) -> Result<PathResolve> {
         let path = path.as_ref();
         let (root, rem_path) = if let Some(rest) = path.strip_prefix("/ipfs/") {
@@ -606,8 +606,10 @@ impl KotobaIpfsNode {
             let (name, rem) = split_ipld_path(rest)?;
             let resolved = self.name_resolve(name).await?;
             (resolved.cid, rem)
+        } else if let Some((cid, rem)) = parse_bare_ipfs_path(path)? {
+            (cid, rem)
         } else {
-            bail!("unsupported path; expected /ipfs/<cid> or /ipns/<name>: {path}");
+            bail!("unsupported path; expected <cid>, /ipfs/<cid>, or /ipns/<name>: {path}");
         };
 
         if rem_path.is_empty() {
@@ -624,7 +626,7 @@ impl KotobaIpfsNode {
         })
     }
 
-    /// Kubo-like `cat` for `/ipfs/<cid>` or `/ipns/<name>` paths.
+    /// Kubo-like `cat` for bare CIDs, `/ipfs/<cid>`, or `/ipns/<name>` paths.
     pub async fn cat_path(&self, path: impl AsRef<str>) -> Result<Bytes> {
         let resolved = self.resolve_path(path).await?;
         if !resolved.rem_path.is_empty() {
@@ -2788,7 +2790,9 @@ fn mfs_basename(path: &str) -> &str {
 }
 
 fn is_ipld_path(path: &str) -> bool {
-    path.starts_with("/ipfs/") || path.starts_with("/ipns/")
+    path.starts_with("/ipfs/")
+        || path.starts_with("/ipns/")
+        || parse_bare_ipfs_path(path).is_ok_and(|parsed| parsed.is_some())
 }
 
 fn split_ipld_path(path: &str) -> Result<(&str, String)> {
@@ -2797,6 +2801,18 @@ fn split_ipld_path(path: &str) -> Result<(&str, String)> {
         bail!("invalid IPLD path: missing root");
     }
     Ok((root, rem.to_string()))
+}
+
+fn parse_bare_ipfs_path(path: &str) -> Result<Option<(IpldCid, String)>> {
+    let path = path.trim();
+    if path.is_empty() || path.starts_with('/') {
+        return Ok(None);
+    }
+    let (root, rem) = split_ipld_path(path)?;
+    match root.parse::<IpldCid>() {
+        Ok(cid) => Ok(Some((cid, rem))),
+        Err(_) => Ok(None),
+    }
 }
 
 fn cbor_value_to_ipld(value: CborValue) -> Result<Ipld> {
