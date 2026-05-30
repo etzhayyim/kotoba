@@ -2675,7 +2675,20 @@ fn query_function_name(value: &EdnValue) -> Result<String> {
     }
 }
 
+fn query_predicate_name(value: &EdnValue) -> Result<String> {
+    match value {
+        EdnValue::Symbol(symbol) => Ok(symbol.to_qualified()),
+        EdnValue::Keyword(keyword) => Ok(keyword.to_qualified()),
+        EdnValue::String(value) => Ok(value.clone()),
+        other => Err(DatomicError::Query(format!(
+            "collection predicate expects a predicate symbol, keyword, or string, got {}",
+            edn_to_string(other)
+        ))),
+    }
+}
+
 fn query_apply_value_function(op: &str, args: Vec<EdnValue>) -> Result<EdnValue> {
+    let op = query_core_op(op);
     match op {
         "identity" => match args.as_slice() {
             [value] => Ok(value.clone()),
@@ -2722,6 +2735,9 @@ fn query_apply_value_function(op: &str, args: Vec<EdnValue>) -> Result<EdnValue>
         | "set/difference" => query_set_operation_value(op, args),
         "hash-map" => query_hash_map_value(args),
         "keys" | "vals" | "merge" | "select-keys" => query_map_operation_value(op, args),
+        "every?" | "not-every?" | "not-any?" => {
+            query_collection_predicate_value(op, args).map(EdnValue::Bool)
+        }
         "count" => match args.as_slice() {
             [value] => query_count_value(value.clone()),
             _ => Err(DatomicError::Query("count expects one argument".into())),
@@ -2749,6 +2765,10 @@ fn query_apply_value_function(op: &str, args: Vec<EdnValue>) -> Result<EdnValue>
             "update function {other}"
         ))),
     }
+}
+
+pub(crate) fn query_core_op(op: &str) -> &str {
+    op.strip_prefix("clojure.core/").unwrap_or(op)
 }
 
 fn assoc_in_path(collection: EdnValue, path: &[EdnValue], value: EdnValue) -> Result<EdnValue> {
@@ -3476,9 +3496,14 @@ pub(crate) fn query_string_search_predicate(
 }
 
 pub(crate) fn query_variadic_predicate(op: &str, args: &[EdnValue]) -> Result<bool> {
+    let op = query_core_op(op);
     Ok(match op {
         "=" => args.windows(2).all(|pair| pair[0] == pair[1]),
         "!=" | "not=" => !args.windows(2).all(|pair| pair[0] == pair[1]),
+        "distinct?" => {
+            let mut seen = BTreeSet::new();
+            args.iter().all(|value| seen.insert(value))
+        }
         ">" => query_chained_numbers(args, |a, b| a > b),
         "<" => query_chained_numbers(args, |a, b| a < b),
         ">=" => query_chained_numbers(args, |a, b| a >= b),
@@ -3526,6 +3551,29 @@ pub(crate) fn query_variadic_predicate(op: &str, args: &[EdnValue]) -> Result<bo
             }
             query_string_search_predicate(op, &args[0], &args[1])?
         }
+        "every?" | "not-every?" | "not-any?" => {
+            query_collection_predicate_value(op, args.iter().cloned().collect::<Vec<_>>())?
+        }
+        other => return Err(DatomicError::UnsupportedOperation(other.into())),
+    })
+}
+
+pub(crate) fn query_collection_predicate_value(op: &str, args: Vec<EdnValue>) -> Result<bool> {
+    if args.len() != 2 {
+        return Err(DatomicError::Query(format!(
+            "{op} expects a predicate and a collection"
+        )));
+    }
+    let predicate = query_predicate_name(&args[0])?;
+    let values = query_seq_values(args[1].clone())?;
+    let matches = values
+        .iter()
+        .map(|value| query_unary_predicate(&predicate, value))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(match op {
+        "every?" => matches.into_iter().all(|matched| matched),
+        "not-every?" => !matches.into_iter().all(|matched| matched),
+        "not-any?" => !matches.into_iter().any(|matched| matched),
         other => return Err(DatomicError::UnsupportedOperation(other.into())),
     })
 }
@@ -3550,6 +3598,7 @@ fn query_chained_numbers(args: &[EdnValue], f: impl Fn(f64, f64) -> bool) -> boo
 }
 
 pub(crate) fn query_unary_predicate(op: &str, value: &EdnValue) -> Result<bool> {
+    let op = query_core_op(op);
     match op {
         "nil?" => Ok(matches!(value, EdnValue::Nil)),
         "some?" => Ok(!matches!(value, EdnValue::Nil)),
@@ -4854,6 +4903,7 @@ fn eval_query_function(
     db: &Db,
     binding: &BTreeMap<String, EdnValue>,
 ) -> Result<EdnValue> {
+    let op = query_core_op(op);
     match op {
         "ground" => {
             if args.len() != 1 {
@@ -5000,6 +5050,12 @@ fn eval_query_function(
             .map(|arg| resolve_query_value(arg, binding))
             .collect::<Result<Vec<_>>>()
             .and_then(|values| query_map_operation_value(op, values)),
+        "every?" | "not-every?" | "not-any?" => args
+            .iter()
+            .map(|arg| resolve_query_value(arg, binding))
+            .collect::<Result<Vec<_>>>()
+            .and_then(|values| query_collection_predicate_value(op, values))
+            .map(EdnValue::Bool),
         "count" => {
             if args.len() != 1 {
                 return Err(DatomicError::Query("count expects one argument".into()));
@@ -8013,11 +8069,11 @@ mod tests {
         let query = parse(
             r#"{:find [?incScore ?decScore ?updatedScore]
                 :where [[?e :person/score ?score]
-                        [(inc ?score) ?incScore]
-                        [(dec ?score) ?decScore]
+                        [(clojure.core/inc ?score) ?incScore]
+                        [(clojure.core/dec ?score) ?decScore]
                         [?e :person/claims ?claims]
-                        [(update ?claims :claim/score inc) ?updatedClaims]
-                        [(get ?updatedClaims :claim/score) ?updatedScore]]}"#,
+                        [(clojure.core/update ?claims :claim/score clojure.core/inc) ?updatedClaims]
+                        [(clojure.core/get ?updatedClaims :claim/score) ?updatedScore]]}"#,
         )
         .unwrap();
         let rows = q(query, &conn.db(), &[]).unwrap();
@@ -8211,6 +8267,47 @@ mod tests {
                 ])),
                 EdnValue::Vector(vec![kw_value(":person/name")]),
                 EdnValue::Vector(vec![EdnValue::String("Alice".into())]),
+            ]]
+        );
+    }
+
+    #[tokio::test]
+    async fn q_supports_clojure_collection_predicates() {
+        let conn = Connection::new();
+        conn.transact(
+            parse(
+                r#"[
+                  {:db/id "alice" :person/scores [1 2 3] :person/names ["Alice" "Alicia"]}
+                ]"#,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let query = parse(
+            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames]
+                :where [[?e :person/scores ?scores]
+                        [?e :person/names ?names]
+                        [(distinct? 1 2 3)]
+                        [(every? integer? ?scores)]
+                        [(every? integer? ?scores) ?allScores]
+                        [(not-every? string? ?scores) ?notEveryScoreString]
+                        [(not-any? nil? ?scores) ?noNilScores]
+                        [(every? string? ?names) ?allNames]
+                        [(= ?allScores true)]
+                        [(= ?notEveryScoreString true)]
+                        [(= ?noNilScores true)]
+                        [(= ?allNames true)]]}"#,
+        )
+        .unwrap();
+        let rows = q(query, &conn.db(), &[]).unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                EdnValue::Bool(true),
+                EdnValue::Bool(true),
+                EdnValue::Bool(true),
+                EdnValue::Bool(true),
             ]]
         );
     }

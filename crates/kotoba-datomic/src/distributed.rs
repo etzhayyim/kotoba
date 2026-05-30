@@ -1614,6 +1614,7 @@ where
         args: &[Value],
         binding: &BTreeMap<String, Value>,
     ) -> Result<Value, DistributedCommitError> {
+        let op = crate::query_core_op(op);
         match op {
             "ground" => {
                 if args.len() != 1 {
@@ -1764,6 +1765,15 @@ where
                 .collect::<Result<Vec<_>, _>>()
                 .and_then(|values| {
                     crate::query_map_operation_value(op, values).map_err(Into::into)
+                }),
+            "every?" | "not-every?" | "not-any?" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| {
+                    crate::query_collection_predicate_value(op, values)
+                        .map(Value::Bool)
+                        .map_err(Into::into)
                 }),
             "count" => {
                 if args.len() != 1 {
@@ -6551,12 +6561,12 @@ mod tests {
                 :where [[(ground :guest) ?guest]
                         [?e :person/name ?name]
                         [?e :person/age ?age]
-                        [(>= ?age 30)]
-                        [(not= ?name "Bob")]
+                        [(clojure.core/>= ?age 30)]
+                        [(clojure.core/not= ?name "Bob")]
                         [(missing? $ ?e :person/ban-reason)]
                         [(identity ?name) ?copy]
                         [(get-else $ ?e :person/role ?guest) ?role]
-                        [(contains? #{:role/admin :role/moderator} ?role)]
+                        [(clojure.core/contains? #{:role/admin :role/moderator} ?role)]
                         [(get-some $ ?e :person/email :person/role) ?found]
                         [(name ?role) ?roleName]
                         [(namespace ?role) ?roleNamespace]
@@ -6569,10 +6579,10 @@ mod tests {
                         [(subs ?uri 19 37) ?collection]
                         [(clojure.core/subs ?uri 38) ?rkey]
                         [(clojure.string/split ?uri "/") ?uriParts]
-                        [(get ?uriParts 3) ?splitCollection]
-                        [(get ?uriParts 4) ?splitRkey]
-                        [(nth ?uriParts 3) ?nthCollection]
-                        [(last ?uriParts) ?lastRkey]
+                        [(clojure.core/get ?uriParts 3) ?splitCollection]
+                        [(clojure.core/get ?uriParts 4) ?splitRkey]
+                        [(clojure.core/nth ?uriParts 3) ?nthCollection]
+                        [(clojure.core/last ?uriParts) ?lastRkey]
                         [(clojure.string/join "/" ?uriParts) ?joinedUri]
                         [(= ?joinedUri ?uri)]
                         [(clojure.string/replace ?uri "at://" "at-uri://") ?normalizedUri]
@@ -6690,6 +6700,32 @@ mod tests {
                 ])),
                 EdnValue::Vector(vec![EdnValue::Keyword(Keyword::parse("claim/type"))]),
                 EdnValue::Vector(vec![EdnValue::String("VerifiableCredential".into())]),
+            ]]
+        );
+
+        let collection_predicate_query = kotoba_edn::parse(
+            r#"{:find [?allTags ?noNilTags ?notEveryTagString]
+                :where [[?e :credential/claims ?claims]
+                        [(get ?claims :claim/tags) ?tags]
+                        [(distinct? :role/admin :role/auditor :role/operator)]
+                        [(every? keyword? ?tags)]
+                        [(every? keyword? ?tags) ?allTags]
+                        [(not-any? nil? ?tags) ?noNilTags]
+                        [(not-every? string? ?tags) ?notEveryTagString]
+                        [(= ?allTags true)]
+                        [(= ?noNilTags true)]
+                        [(= ?notEveryTagString true)]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &collection_predicate_query)
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                EdnValue::Bool(true),
+                EdnValue::Bool(true),
+                EdnValue::Bool(true),
             ]]
         );
 
