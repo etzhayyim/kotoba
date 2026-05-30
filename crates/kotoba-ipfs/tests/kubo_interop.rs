@@ -1,5 +1,6 @@
 use kotoba_ipfs::{
-    decode_dag_pb_node, raw_cid, unixfs_file_block, IpfsConfig, IpldCid, CODEC_DAG_PB, CODEC_RAW,
+    dag_pb_object_block, decode_dag_pb_node, raw_cid, unixfs_file_block, DagPbLink, IpfsConfig,
+    IpldCid, CODEC_DAG_PB, CODEC_RAW,
 };
 use reqwest::blocking::{multipart, Client};
 use serde_json::Value;
@@ -160,6 +161,33 @@ fn kubo_block_put(client: &Client, api: &str, codec: &str, block: Vec<u8>) -> Va
         .expect("kubo block/put json")
 }
 
+fn kubo_refs(client: &Client, api: &str, cid: &IpldCid) -> Vec<IpldCid> {
+    let body = client
+        .post(format!("{api}/refs"))
+        .query(&[("arg", cid.to_string()), ("recursive", "false".into())])
+        .send()
+        .expect("kubo refs")
+        .error_for_status()
+        .expect("kubo refs status")
+        .text()
+        .expect("kubo refs body");
+    body.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let value: Value = serde_json::from_str(line).expect("kubo refs json line");
+            assert!(
+                value.get("Err").and_then(Value::as_str).unwrap_or("").is_empty(),
+                "kubo refs error: {value}"
+            );
+            value["Ref"]
+                .as_str()
+                .expect("refs Ref")
+                .parse()
+                .expect("refs cid")
+        })
+        .collect()
+}
+
 #[test]
 #[ignore = "requires Docker and a local Kubo image; run with --ignored"]
 fn kubo_raw_and_unixfs_blocks_roundtrip_with_kotoba() {
@@ -213,6 +241,33 @@ fn kubo_raw_and_unixfs_blocks_roundtrip_with_kotoba() {
     assert_eq!(unixfs_put["Key"], expected_unixfs.to_string());
     assert_eq!(kubo_cat(&client, &kubo.api, &expected_unixfs), data);
     assert_eq!(expected_raw.codec(), CODEC_RAW);
+}
+
+#[test]
+#[ignore = "requires Docker and a local Kubo image; run with --ignored"]
+fn kotoba_dag_pb_object_links_are_kubo_refs_compatible() {
+    let kubo = start_kubo();
+    let client = Client::new();
+    let child_data = b"linked object payload";
+    let child = raw_cid(child_data);
+    let child_put = kubo_block_put(&client, &kubo.api, "raw", child_data.to_vec());
+    assert_eq!(child_put["Key"], child.to_string());
+
+    let (parent, parent_block) = dag_pb_object_block(
+        b"object metadata",
+        &[DagPbLink {
+            name: "payload.bin".into(),
+            cid: child,
+            tsize: Some(child_data.len() as u64),
+        }],
+    );
+    assert_eq!(parent.codec(), CODEC_DAG_PB);
+    let parent_put = kubo_block_put(&client, &kubo.api, "dag-pb", parent_block.clone());
+    assert_eq!(parent_put["Key"], parent.to_string());
+
+    assert_eq!(kubo_block_get(&client, &kubo.api, &parent), parent_block);
+    assert_eq!(kubo_refs(&client, &kubo.api, &parent), vec![child]);
+    assert_eq!(kubo_cat(&client, &kubo.api, &child), child_data);
 }
 
 #[test]
