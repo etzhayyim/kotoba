@@ -1965,7 +1965,7 @@ where
                 .map(|arg| required_query_value(arg, binding))
                 .collect::<Result<Vec<_>, _>>()
                 .and_then(|values| crate::query_apply_function_value(values).map_err(Into::into)),
-            "seq" | "first" | "last" | "rest" | "next" => {
+            "seq" | "first" | "second" | "last" | "peek" | "rest" | "next" | "pop" => {
                 if args.len() != 1 {
                     return Err(DatomicError::Query(format!("{op} expects one argument")).into());
                 }
@@ -6947,7 +6947,7 @@ mod tests {
         );
 
         let collection_predicate_query = kotoba_edn::parse(
-            r#"{:find [?allTags ?noNilTags ?notEveryTagString ?tagsVector ?sameTag ?hasTag ?notFalse ?truthyTags ?tagsString ?tagKeywords ?tails ?nonStringTags ?keptTags ?someTag ?sum ?product ?max ?applySum ?applyMax ?applySet ?initialOdds ?afterOdds ?splitNumbers ?splitOdds ?groupedNumbers ?partitionedNumbers ?numberFrequencies ?numberRange ?repeatedTag ?tagMap ?flat ?numbersIntoVector ?concatenated ?distinctNumbers ?interposed ?interleaved ?pairs ?windows ?paddedPairs ?allPairs]
+            r#"{:find [?allTags ?noNilTags ?notEveryTagString ?tagsVector ?sameTag ?hasTag ?notFalse ?truthyTags ?tagsString ?secondNumber ?lastNumber ?poppedNumbers ?tagKeywords ?tails ?nonStringTags ?keptTags ?someTag ?sum ?product ?max ?applySum ?applyMax ?applySet ?initialOdds ?afterOdds ?splitNumbers ?splitOdds ?groupedNumbers ?partitionedNumbers ?numberFrequencies ?numberRange ?repeatedTag ?tagMap ?flat ?numbersIntoVector ?concatenated ?distinctNumbers ?interposed ?interleaved ?pairs ?windows ?paddedPairs ?allPairs]
                 :where [[?e :credential/claims ?claims]
                         [(get ?claims :claim/tags) ?tags]
                         [(distinct? :role/admin :role/auditor :role/operator)]
@@ -6961,6 +6961,9 @@ mod tests {
                         [(clojure.core/not false) ?notFalse]
                         [(boolean ?tags) ?truthyTags]
                         [(string? ?tags) ?tagsString]
+                        [(second [1 2 3]) ?secondNumber]
+                        [(peek [1 2 3]) ?lastNumber]
+                        [(pop [1 2 3]) ?poppedNumbers]
                         [(filter keyword? ?tags) ?tagKeywords]
                         [(mapcat rest [[0 1] [0 2]]) ?tails]
                         [(remove string? ?tags) ?nonStringTags]
@@ -7018,6 +7021,9 @@ mod tests {
                 EdnValue::Bool(true),
                 EdnValue::Bool(true),
                 EdnValue::Bool(false),
+                EdnValue::Integer(2),
+                EdnValue::Integer(3),
+                EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(2)]),
                 EdnValue::Vector(vec![
                     EdnValue::Keyword(Keyword::parse("vc")),
                     EdnValue::Keyword(Keyword::parse("ipld")),

@@ -2767,10 +2767,12 @@ fn query_apply_value_function(op: &str, args: Vec<EdnValue>) -> Result<EdnValue>
         "range" | "repeat" => query_sequence_constructor_value(op, args),
         "reduce" => query_reduce_value(args),
         "apply" => query_apply_function_value(args),
-        "seq" | "first" | "last" | "rest" | "next" => match args.as_slice() {
-            [value] => query_collection_value(op, value.clone()),
-            _ => Err(DatomicError::Query(format!("{op} expects one argument"))),
-        },
+        "seq" | "first" | "second" | "last" | "peek" | "rest" | "next" | "pop" => {
+            match args.as_slice() {
+                [value] => query_collection_value(op, value.clone()),
+                _ => Err(DatomicError::Query(format!("{op} expects one argument"))),
+            }
+        }
         "nth" => query_nth_value(args),
         "take" | "drop" | "take-while" | "drop-while" | "split-at" | "split-with" | "partition"
         | "partition-all" | "subvec" => query_collection_slice_value(op, args),
@@ -3221,7 +3223,9 @@ pub(crate) fn query_collection_value(op: &str, value: EdnValue) -> Result<EdnVal
             }
         }
         "first" => values.into_iter().next().unwrap_or(EdnValue::Nil),
+        "second" => values.into_iter().nth(1).unwrap_or(EdnValue::Nil),
         "last" => values.into_iter().next_back().unwrap_or(EdnValue::Nil),
+        "peek" => values.last().cloned().unwrap_or(EdnValue::Nil),
         "rest" => EdnValue::Vector(values.into_iter().skip(1).collect()),
         "next" => {
             let rest = values.into_iter().skip(1).collect::<Vec<_>>();
@@ -3230,6 +3234,11 @@ pub(crate) fn query_collection_value(op: &str, value: EdnValue) -> Result<EdnVal
             } else {
                 EdnValue::Vector(rest)
             }
+        }
+        "pop" => {
+            let mut out = values;
+            out.pop();
+            EdnValue::Vector(out)
         }
         other => return Err(DatomicError::UnsupportedOperation(other.into())),
     })
@@ -5658,7 +5667,7 @@ fn eval_query_function(
             .map(|arg| resolve_query_value(arg, binding))
             .collect::<Result<Vec<_>>>()
             .and_then(query_apply_function_value),
-        "seq" | "first" | "last" | "rest" | "next" => {
+        "seq" | "first" | "second" | "last" | "peek" | "rest" | "next" | "pop" => {
             if args.len() != 1 {
                 return Err(DatomicError::Query(format!("{op} expects one argument")));
             }
@@ -8884,7 +8893,7 @@ mod tests {
         .await
         .unwrap();
         let query = parse(
-            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString ?incScores ?tailedScores ?oddScores ?nonOddScores ?nonEmptyNames ?someName ?scoreSum ?scoreProduct ?scoreMax ?applySum ?applyMax ?scoreSet ?initialOdds ?afterOdds ?splitScores ?splitOdds ?groupedScores ?partitionedScores ?scoreFrequencies ?numberRange ?repeatedScore ?scoreMap ?flatScores ?scoresIntoVector ?concatenatedScores ?distinctScores ?interposedScores ?interleavedScores ?pairs ?windows ?paddedPairs ?allPairs]
+            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString ?secondScore ?lastScore ?poppedScores ?incScores ?tailedScores ?oddScores ?nonOddScores ?nonEmptyNames ?someName ?scoreSum ?scoreProduct ?scoreMax ?applySum ?applyMax ?scoreSet ?initialOdds ?afterOdds ?splitScores ?splitOdds ?groupedScores ?partitionedScores ?scoreFrequencies ?numberRange ?repeatedScore ?scoreMap ?flatScores ?scoresIntoVector ?concatenatedScores ?distinctScores ?interposedScores ?interleavedScores ?pairs ?windows ?paddedPairs ?allPairs]
                 :where [[?e :person/scores ?scores]
                         [?e :person/names ?names]
                         [(distinct? 1 2 3)]
@@ -8899,6 +8908,9 @@ mod tests {
                         [(clojure.core/not false) ?notFalse]
                         [(boolean ?scores) ?truthyScores]
                         [(string? ?names) ?namesString]
+                        [(second ?scores) ?secondScore]
+                        [(peek ?scores) ?lastScore]
+                        [(pop ?scores) ?poppedScores]
                         [(map inc ?scores) ?incScores]
                         [(mapcat rest [[0 1] [0 2]]) ?tailedScores]
                         [(filter odd? ?scores) ?oddScores]
@@ -8957,6 +8969,9 @@ mod tests {
                 EdnValue::Bool(true),
                 EdnValue::Bool(true),
                 EdnValue::Bool(false),
+                EdnValue::Integer(2),
+                EdnValue::Integer(3),
+                EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(2)]),
                 EdnValue::Vector(vec![
                     EdnValue::Integer(2),
                     EdnValue::Integer(3),
