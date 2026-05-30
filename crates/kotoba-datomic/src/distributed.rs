@@ -1676,7 +1676,10 @@ where
             | "str/lower-case"
             | "upper-case"
             | "clojure.string/upper-case"
-            | "str/upper-case" => args
+            | "str/upper-case"
+            | "capitalize"
+            | "clojure.string/capitalize"
+            | "str/capitalize" => args
                 .iter()
                 .map(|arg| required_query_value(arg, binding))
                 .collect::<Result<Vec<_>, _>>()
@@ -1774,6 +1777,20 @@ where
                     crate::query_collection_predicate_value(op, values)
                         .map(Value::Bool)
                         .map_err(Into::into)
+                }),
+            "not" | "boolean" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| {
+                    crate::query_truth_function_value(op, values).map_err(Into::into)
+                }),
+            _ if crate::is_query_predicate_function_op(op) => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| {
+                    crate::query_predicate_function_value(op, values).map_err(Into::into)
                 }),
             "count" => {
                 if args.len() != 1 {
@@ -6557,9 +6574,10 @@ mod tests {
             .unwrap();
 
         let query = kotoba_edn::parse(
-            r#"{:find [?name ?copy ?role ?found ?roleName ?roleNamespace ?resource ?rebuilt ?uri ?collection ?rkey ?splitCollection ?splitRkey ?nthCollection ?lastRkey ?joinedUri ?normalizedUri ?scheme ?trimmedScheme]
+            r#"{:find [?name ?displayName ?copy ?role ?found ?roleName ?roleNamespace ?resource ?rebuilt ?uri ?collection ?rkey ?splitCollection ?splitRkey ?nthCollection ?lastRkey ?joinedUri ?normalizedUri ?scheme ?trimmedScheme]
                 :where [[(ground :guest) ?guest]
                         [?e :person/name ?name]
+                        [(clojure.string/capitalize "alice") ?displayName]
                         [?e :person/age ?age]
                         [(clojure.core/>= ?age 30)]
                         [(clojure.core/not= ?name "Bob")]
@@ -6588,6 +6606,7 @@ mod tests {
                         [(clojure.string/replace ?uri "at://" "at-uri://") ?normalizedUri]
                         [(upper-case "at") ?upperScheme]
                         [(clojure.string/lower-case ?upperScheme) ?scheme]
+                        [(clojure.string/blank? "   ")]
                         [(str/trim "  at  ") ?trimmedScheme]]}"#,
         )
         .unwrap();
@@ -6598,6 +6617,7 @@ mod tests {
         assert_eq!(
             rows,
             vec![vec![
+                EdnValue::String("Alice".into()),
                 EdnValue::String("Alice".into()),
                 EdnValue::String("Alice".into()),
                 EdnValue::Keyword(Keyword::parse("role/admin")),
@@ -6704,7 +6724,7 @@ mod tests {
         );
 
         let collection_predicate_query = kotoba_edn::parse(
-            r#"{:find [?allTags ?noNilTags ?notEveryTagString]
+            r#"{:find [?allTags ?noNilTags ?notEveryTagString ?tagsVector ?sameTag ?hasTag ?notFalse ?truthyTags ?tagsString]
                 :where [[?e :credential/claims ?claims]
                         [(get ?claims :claim/tags) ?tags]
                         [(distinct? :role/admin :role/auditor :role/operator)]
@@ -6712,9 +6732,21 @@ mod tests {
                         [(every? keyword? ?tags) ?allTags]
                         [(not-any? nil? ?tags) ?noNilTags]
                         [(not-every? string? ?tags) ?notEveryTagString]
+                        [(vector? ?tags) ?tagsVector]
+                        [(= :vc :vc) ?sameTag]
+                        [(contains? #{:vc :ipld} :vc) ?hasTag]
+                        [(clojure.core/not false) ?notFalse]
+                        [(boolean ?tags) ?truthyTags]
+                        [(string? ?tags) ?tagsString]
                         [(= ?allTags true)]
                         [(= ?noNilTags true)]
-                        [(= ?notEveryTagString true)]]}"#,
+                        [(= ?notEveryTagString true)]
+                        [(= ?tagsVector true)]
+                        [(= ?sameTag true)]
+                        [(= ?hasTag true)]
+                        [(= ?notFalse true)]
+                        [(= ?truthyTags true)]
+                        [(= ?tagsString false)]]}"#,
         )
         .unwrap();
         let rows = DistributedDatomReader::new(&store, &ipns)
@@ -6726,6 +6758,12 @@ mod tests {
                 EdnValue::Bool(true),
                 EdnValue::Bool(true),
                 EdnValue::Bool(true),
+                EdnValue::Bool(true),
+                EdnValue::Bool(true),
+                EdnValue::Bool(true),
+                EdnValue::Bool(true),
+                EdnValue::Bool(true),
+                EdnValue::Bool(false),
             ]]
         );
 

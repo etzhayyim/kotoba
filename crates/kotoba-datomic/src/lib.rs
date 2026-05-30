@@ -2497,6 +2497,17 @@ pub(crate) fn query_string_case_value(op: &str, args: Vec<EdnValue>) -> Result<E
         "upper-case" | "clojure.string/upper-case" | "str/upper-case" => {
             Ok(EdnValue::String(value.to_uppercase()))
         }
+        "capitalize" | "clojure.string/capitalize" | "str/capitalize" => {
+            let mut chars = value.chars();
+            let Some(first) = chars.next() else {
+                return Ok(EdnValue::String(String::new()));
+            };
+            Ok(EdnValue::String(format!(
+                "{}{}",
+                first.to_uppercase(),
+                chars.as_str().to_lowercase()
+            )))
+        }
         other => Err(DatomicError::UnsupportedOperation(other.into())),
     }
 }
@@ -2707,7 +2718,10 @@ fn query_apply_value_function(op: &str, args: Vec<EdnValue>) -> Result<EdnValue>
         | "str/lower-case"
         | "upper-case"
         | "clojure.string/upper-case"
-        | "str/upper-case" => query_string_case_value(op, args),
+        | "str/upper-case"
+        | "capitalize"
+        | "clojure.string/capitalize"
+        | "str/capitalize" => query_string_case_value(op, args),
         "trim"
         | "clojure.string/trim"
         | "str/trim"
@@ -2761,6 +2775,10 @@ fn query_apply_value_function(op: &str, args: Vec<EdnValue>) -> Result<EdnValue>
         "inc" | "dec" | "abs" | "+" | "-" | "*" | "quot" | "rem" | "mod" | "min" | "max" => {
             query_arithmetic_value(op, args)
         }
+        "not" | "boolean" => query_truth_function_value(op, args),
+        _ if is_query_unary_predicate_op(op) || is_query_variadic_predicate_op(op) => {
+            query_predicate_function_value(op, args)
+        }
         other => Err(DatomicError::UnsupportedOperation(format!(
             "update function {other}"
         ))),
@@ -2769,6 +2787,22 @@ fn query_apply_value_function(op: &str, args: Vec<EdnValue>) -> Result<EdnValue>
 
 pub(crate) fn query_core_op(op: &str) -> &str {
     op.strip_prefix("clojure.core/").unwrap_or(op)
+}
+
+pub(crate) fn query_truthy(value: &EdnValue) -> bool {
+    !matches!(value, EdnValue::Nil | EdnValue::Bool(false))
+}
+
+pub(crate) fn query_truth_function_value(op: &str, args: Vec<EdnValue>) -> Result<EdnValue> {
+    if args.len() != 1 {
+        return Err(DatomicError::Query(format!("{op} expects one argument")));
+    }
+    let truthy = query_truthy(&args[0]);
+    Ok(EdnValue::Bool(match op {
+        "not" => !truthy,
+        "boolean" => truthy,
+        other => return Err(DatomicError::UnsupportedOperation(other.into())),
+    }))
 }
 
 fn assoc_in_path(collection: EdnValue, path: &[EdnValue], value: EdnValue) -> Result<EdnValue> {
@@ -3578,6 +3612,56 @@ pub(crate) fn query_collection_predicate_value(op: &str, args: Vec<EdnValue>) ->
     })
 }
 
+pub(crate) fn query_predicate_function_value(op: &str, args: Vec<EdnValue>) -> Result<EdnValue> {
+    let op = query_core_op(op);
+    if is_query_unary_predicate_op(op) {
+        if args.len() != 1 {
+            return Err(DatomicError::Query(format!("{op} expects one argument")));
+        }
+        return query_unary_predicate(op, &args[0]).map(EdnValue::Bool);
+    }
+    if is_query_variadic_predicate_op(op) {
+        return query_variadic_predicate(op, &args).map(EdnValue::Bool);
+    }
+    Err(DatomicError::UnsupportedOperation(op.into()))
+}
+
+pub(crate) fn is_query_predicate_function_op(op: &str) -> bool {
+    is_query_unary_predicate_op(op) || is_query_variadic_predicate_op(op)
+}
+
+fn is_query_variadic_predicate_op(op: &str) -> bool {
+    matches!(
+        query_core_op(op),
+        "=" | "!="
+            | "not="
+            | "distinct?"
+            | ">"
+            | "<"
+            | ">="
+            | "<="
+            | "contains?"
+            | "subset?"
+            | "clojure.set/subset?"
+            | "set/subset?"
+            | "superset?"
+            | "clojure.set/superset?"
+            | "set/superset?"
+            | "starts-with?"
+            | "clojure.string/starts-with?"
+            | "str/starts-with?"
+            | "includes?"
+            | "clojure.string/includes?"
+            | "str/includes?"
+            | "ends-with?"
+            | "clojure.string/ends-with?"
+            | "str/ends-with?"
+            | "every?"
+            | "not-every?"
+            | "not-any?"
+    )
+}
+
 fn query_number_as_f64(value: &EdnValue) -> Option<f64> {
     match value {
         EdnValue::Integer(value) => Some(*value as f64),
@@ -3595,6 +3679,36 @@ fn query_chained_numbers(args: &[EdnValue], f: impl Fn(f64, f64) -> bool) -> boo
             (Some(a), Some(b)) if f(a, b)
         )
     })
+}
+
+fn is_query_unary_predicate_op(op: &str) -> bool {
+    matches!(
+        query_core_op(op),
+        "nil?"
+            | "some?"
+            | "true?"
+            | "false?"
+            | "empty?"
+            | "boolean?"
+            | "integer?"
+            | "number?"
+            | "zero?"
+            | "pos?"
+            | "neg?"
+            | "even?"
+            | "odd?"
+            | "string?"
+            | "clojure.string/blank?"
+            | "str/blank?"
+            | "keyword?"
+            | "symbol?"
+            | "vector?"
+            | "list?"
+            | "map?"
+            | "set?"
+            | "coll?"
+            | "colls?"
+    )
 }
 
 pub(crate) fn query_unary_predicate(op: &str, value: &EdnValue) -> Result<bool> {
@@ -3617,6 +3731,14 @@ pub(crate) fn query_unary_predicate(op: &str, value: &EdnValue) -> Result<bool> 
         "even?" => Ok(matches!(value, EdnValue::Integer(value) if value % 2 == 0)),
         "odd?" => Ok(matches!(value, EdnValue::Integer(value) if value % 2 != 0)),
         "string?" => Ok(matches!(value, EdnValue::String(_))),
+        "clojure.string/blank?" | "str/blank?" => match value {
+            EdnValue::Nil => Ok(true),
+            EdnValue::String(value) => Ok(value.trim().is_empty()),
+            other => Err(DatomicError::Query(format!(
+                "{op} expects nil or a string, got {}",
+                edn_to_string(other)
+            ))),
+        },
         "keyword?" => Ok(matches!(value, EdnValue::Keyword(_))),
         "symbol?" => Ok(matches!(value, EdnValue::Symbol(_))),
         "vector?" => Ok(matches!(value, EdnValue::Vector(_))),
@@ -4964,7 +5086,10 @@ fn eval_query_function(
         | "str/lower-case"
         | "upper-case"
         | "clojure.string/upper-case"
-        | "str/upper-case" => args
+        | "str/upper-case"
+        | "capitalize"
+        | "clojure.string/capitalize"
+        | "str/capitalize" => args
             .iter()
             .map(|arg| resolve_query_value(arg, binding))
             .collect::<Result<Vec<_>>>()
@@ -5056,6 +5181,16 @@ fn eval_query_function(
             .collect::<Result<Vec<_>>>()
             .and_then(|values| query_collection_predicate_value(op, values))
             .map(EdnValue::Bool),
+        "not" | "boolean" => args
+            .iter()
+            .map(|arg| resolve_query_value(arg, binding))
+            .collect::<Result<Vec<_>>>()
+            .and_then(|values| query_truth_function_value(op, values)),
+        _ if is_query_unary_predicate_op(op) || is_query_variadic_predicate_op(op) => args
+            .iter()
+            .map(|arg| resolve_query_value(arg, binding))
+            .collect::<Result<Vec<_>>>()
+            .and_then(|values| query_predicate_function_value(op, values)),
         "count" => {
             if args.len() != 1 {
                 return Err(DatomicError::Query("count expects one argument".into()));
@@ -7852,7 +7987,7 @@ mod tests {
         .await
         .unwrap();
         let query = parse(
-            r#"{:find [?name ?uri ?collection ?rkey ?splitCollection ?splitRkey ?nthCollection ?lastRkey ?joinedUri ?normalizedUri ?scheme ?trimmedScheme]
+            r#"{:find [?name ?displayName ?uri ?collection ?rkey ?splitCollection ?splitRkey ?nthCollection ?lastRkey ?joinedUri ?normalizedUri ?scheme ?trimmedScheme]
                 :where [[?e :person/role ?role]
                         [(contains? #{:role/admin :role/moderator} ?role)]
                         [?e :atproto/uri ?uri]
@@ -7872,6 +8007,8 @@ mod tests {
                         [(upper-case "at") ?upperScheme]
                         [(clojure.string/lower-case ?upperScheme) ?scheme]
                         [(str/trim "  at  ") ?trimmedScheme]
+                        [(clojure.string/blank? "   ")]
+                        [(clojure.string/capitalize "alice") ?displayName]
                         [?e :person/name ?name]]}"#,
         )
         .unwrap();
@@ -7879,6 +8016,7 @@ mod tests {
         assert_eq!(
             rows,
             vec![vec![
+                EdnValue::String("Alice".into()),
                 EdnValue::String("Alice".into()),
                 EdnValue::String("at://did:plc:alice/app.bsky.feed.post/r1".into()),
                 EdnValue::String("app.bsky.feed.post".into()),
@@ -8285,7 +8423,7 @@ mod tests {
         .await
         .unwrap();
         let query = parse(
-            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames]
+            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString]
                 :where [[?e :person/scores ?scores]
                         [?e :person/names ?names]
                         [(distinct? 1 2 3)]
@@ -8294,10 +8432,22 @@ mod tests {
                         [(not-every? string? ?scores) ?notEveryScoreString]
                         [(not-any? nil? ?scores) ?noNilScores]
                         [(every? string? ?names) ?allNames]
+                        [(vector? ?scores) ?scoresVector]
+                        [(= 3 3) ?sameScore]
+                        [(contains? #{:role/admin :role/auditor} :role/admin) ?hasAdmin]
+                        [(clojure.core/not false) ?notFalse]
+                        [(boolean ?scores) ?truthyScores]
+                        [(string? ?names) ?namesString]
                         [(= ?allScores true)]
                         [(= ?notEveryScoreString true)]
                         [(= ?noNilScores true)]
-                        [(= ?allNames true)]]}"#,
+                        [(= ?allNames true)]
+                        [(= ?scoresVector true)]
+                        [(= ?sameScore true)]
+                        [(= ?hasAdmin true)]
+                        [(= ?notFalse true)]
+                        [(= ?truthyScores true)]
+                        [(= ?namesString false)]]}"#,
         )
         .unwrap();
         let rows = q(query, &conn.db(), &[]).unwrap();
@@ -8308,6 +8458,12 @@ mod tests {
                 EdnValue::Bool(true),
                 EdnValue::Bool(true),
                 EdnValue::Bool(true),
+                EdnValue::Bool(true),
+                EdnValue::Bool(true),
+                EdnValue::Bool(true),
+                EdnValue::Bool(true),
+                EdnValue::Bool(true),
+                EdnValue::Bool(false),
             ]]
         );
     }
