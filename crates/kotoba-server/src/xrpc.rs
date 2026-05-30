@@ -2814,6 +2814,12 @@ fn atproto_repo_write_datoms(
         ),
         kotoba_datomic::Datom::assert(
             entity_cid.clone(),
+            "atproto/resource".to_string(),
+            kotoba_edn::EdnValue::string(&req.uri),
+            tx_cid.clone(),
+        ),
+        kotoba_datomic::Datom::assert(
+            entity_cid.clone(),
             "atproto/authority".to_string(),
             kotoba_edn::EdnValue::string(&uri.authority),
             tx_cid.clone(),
@@ -2933,6 +2939,7 @@ fn atproto_repo_delete_datoms(
                 && !matches!(
                     datom.a.as_str(),
                     "atproto/uri"
+                        | "atproto/resource"
                         | "atproto/entityCid"
                         | "atproto/wireFormat"
                         | "atproto/authority"
@@ -2954,6 +2961,12 @@ fn atproto_repo_delete_datoms(
         kotoba_datomic::Datom::assert(
             entity_cid.clone(),
             "atproto/uri".to_string(),
+            kotoba_edn::EdnValue::string(&req.uri),
+            tx_cid.clone(),
+        ),
+        kotoba_datomic::Datom::assert(
+            entity_cid.clone(),
+            "atproto/resource".to_string(),
             kotoba_edn::EdnValue::string(&req.uri),
             tx_cid.clone(),
         ),
@@ -8371,12 +8384,12 @@ pub async fn agent_sync_close(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_auth_capability_datoms, atproto_repo_record_entity_cid, atproto_repo_write,
-        atproto_repo_write_datoms, datomic_basis_t, datomic_datoms, datomic_db_stats,
-        datomic_entid, datomic_entity, datomic_history, datomic_ident, datomic_index_pull,
-        datomic_index_range, datomic_log, datomic_pull, datomic_pull_many, datomic_q,
-        datomic_seek_datoms, datomic_sync, datomic_transact, datomic_tx_range, datomic_with,
-        did_document_publish, didcomm_send, distributed_graph_ipns_name,
+        append_auth_capability_datoms, atproto_repo_delete_datoms, atproto_repo_record_entity_cid,
+        atproto_repo_write, atproto_repo_write_datoms, datomic_basis_t, datomic_datoms,
+        datomic_db_stats, datomic_entid, datomic_entity, datomic_history, datomic_ident,
+        datomic_index_pull, datomic_index_range, datomic_log, datomic_pull, datomic_pull_many,
+        datomic_q, datomic_seek_datoms, datomic_sync, datomic_transact, datomic_tx_range,
+        datomic_with, did_document_publish, didcomm_send, distributed_graph_ipns_name,
         enforce_datomic_range_tx_scope, is_did_web_ip_host, protocol_payload_tx_cid, vc_issue,
         AtprotoRepoWriteReq, AuthCapabilityProjection, DatomicBasisTReq, DatomicDatomsReq,
         DatomicDbStatsReq, DatomicEntidReq, DatomicEntityReq, DatomicHistoryReq, DatomicIdentReq,
@@ -8601,13 +8614,14 @@ mod tests {
 
         let reader = DistributedDatomReader::new(&store, &ipns);
         let query = kotoba_edn::parse(
-            r#"{:find [?issuer ?status ?proofPurpose ?thread ?threadScope ?text]
+            r#"{:find [?issuer ?status ?proofPurpose ?thread ?threadScope ?atprotoResource ?text]
                 :where [[?vc :credential/issuer ?issuer]
                         [?vc :credential/subject/role "issuer"]
                         [?vc :credential/status/id ?status]
                         [?vc :credential/proof/proofPurpose ?proofPurpose]
                         [?msg :didcomm/thread ?thread]
                         [?msg :didcomm/threadScope ?threadScope]
+                        [?post :atproto/resource ?atprotoResource]
                         [?post :atproto/record/text ?text]]}"#,
         )
         .unwrap();
@@ -8621,6 +8635,7 @@ mod tests {
                 EdnValue::string("assertionMethod"),
                 EdnValue::string("thread-normalized-1"),
                 EdnValue::string("didcomm://thread/thread-normalized-1"),
+                EdnValue::string("at://did:plc:alice/app.bsky.feed.post/r1"),
                 EdnValue::string("hello from ATProto"),
             ]]
         );
@@ -9587,6 +9602,10 @@ mod tests {
 
         assert!(has("atproto/cid", EdnValue::string(at_cid)));
         assert!(has(
+            "atproto/resource",
+            EdnValue::string("at://did:plc:alice/app.bsky.feed.post/r1")
+        ));
+        assert!(has(
             "atproto/recordWireFormat",
             EdnValue::string("application/dag-cbor")
         ));
@@ -9597,6 +9616,53 @@ mod tests {
             "atproto/kotobaCid",
             EdnValue::string(kotoba_cid.to_multibase())
         ));
+    }
+
+    #[test]
+    fn atproto_repo_delete_preserves_resource_scope_projection() {
+        let tx_cid = KotobaCid::from_bytes(b"atproto-delete-resource-scope-tx");
+        let delete_tx_cid = KotobaCid::from_bytes(b"atproto-delete-resource-scope-delete-tx");
+        let uri_value = "at://did:plc:alice/app.bsky.feed.post/r-delete";
+        let create_req = AtprotoRepoWriteReq {
+            graph: KotobaCid::from_bytes(b"atproto-delete-resource-scope-graph").to_multibase(),
+            uri: uri_value.into(),
+            operation: Some("create".into()),
+            cid: None,
+            record: Some(serde_json::json!({
+                "$type": "app.bsky.feed.post",
+                "text": "delete me"
+            })),
+            cacao_b64: None,
+            auth_presentation: None,
+        };
+        let uri = kotoba_graph::AtUri::parse(&create_req.uri).unwrap();
+        let entity_cid = atproto_repo_record_entity_cid(&create_req.uri);
+        let create_datoms = atproto_repo_write_datoms(&create_req, &uri, &entity_cid, &tx_cid);
+        let db = kotoba_datomic::Db::from_datoms(create_datoms, None);
+        let delete_req = AtprotoRepoWriteReq {
+            operation: Some("delete".into()),
+            record: None,
+            cid: None,
+            ..create_req
+        };
+
+        let delete_datoms =
+            atproto_repo_delete_datoms(&db, &delete_req, &uri, &entity_cid, &delete_tx_cid);
+
+        assert!(delete_datoms.iter().any(|datom| {
+            datom.e == entity_cid
+                && datom.a == "atproto/resource"
+                && datom.v == EdnValue::string(uri_value)
+                && datom.t == delete_tx_cid
+                && datom.added
+        }));
+        assert!(delete_datoms.iter().any(|datom| {
+            datom.e == entity_cid
+                && datom.a == "atproto/deleted"
+                && datom.v == EdnValue::Bool(true)
+                && datom.t == delete_tx_cid
+                && datom.added
+        }));
     }
 
     #[tokio::test]
