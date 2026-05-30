@@ -346,7 +346,32 @@ impl KuboIpnsRegistry {
         // boot); resolve_kubo will still work for aliases that get re-published
         // in this process lifetime.
         if let Err(e) = registry.bootstrap_aliases_from_kubo() {
-            tracing::warn!(err = %e, "KuboIpnsRegistry: alias bootstrap from key/list failed");
+            tracing::warn!(
+                err = %e,
+                "KuboIpnsRegistry: alias bootstrap failed at boot (kubo likely not ready); retrying in background"
+            );
+            // The embedded Kubo sidecar is frequently not reachable at process
+            // start (observed ~30s warm-up). A single best-effort call therefore
+            // leaves the alias→id map empty, so names published by previous runs
+            // stay unresolvable (datomic.* reads 404). Retry in the background —
+            // `KuboIpnsRegistry` is `Clone` and shares the `alias_id` Arc, so the
+            // live registry sees the hydrated map once kubo comes up.
+            let probe = registry.clone();
+            std::thread::spawn(move || {
+                for attempt in 1..=30u32 {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    match probe.bootstrap_aliases_from_kubo() {
+                        Ok(()) => {
+                            tracing::info!(
+                                attempt,
+                                "KuboIpnsRegistry: alias bootstrap succeeded on background retry"
+                            );
+                            break;
+                        }
+                        Err(_) => continue,
+                    }
+                }
+            });
         }
         registry
     }

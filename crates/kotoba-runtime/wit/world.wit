@@ -207,6 +207,7 @@ world kotoba-node {
     import llm;
     import chain;
     import evm;
+    import wasi:http/outgoing-handler@0.2.0;
 
     /// Entry point called by KotobaRuntime for each Invoke ChainEntry.
     /// ctx-cbor: CBOR-encoded InvokeContext { graph, session_cid, args }
@@ -222,3 +223,5 @@ world kotoba-udf {
     /// UDF entry: input rows as CBOR list<quad>, returns output rows
     export eval: func(rows: list<list<u8>>) -> result<list<list<u8>>, string>;
 }
+
+// Attempting to add wasi:http import
