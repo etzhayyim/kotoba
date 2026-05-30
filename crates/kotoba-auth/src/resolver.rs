@@ -126,7 +126,10 @@ impl DidMethod {
         let Some(method) = parts.next() else {
             return Err(DidResolverError::InvalidDid(did.to_string()));
         };
-        if parts.next().is_none() {
+        let Some(method_specific_id) = parts.next() else {
+            return Err(DidResolverError::InvalidDid(did.to_string()));
+        };
+        if method.is_empty() || method_specific_id.is_empty() {
             return Err(DidResolverError::InvalidDid(did.to_string()));
         }
         Ok(match method {
@@ -695,6 +698,28 @@ mod tests {
             DidMethod::parse("did:example:123").unwrap(),
             DidMethod::Other("example".into())
         );
+    }
+
+    #[test]
+    fn did_method_parse_rejects_empty_method_or_identifier() {
+        for did in [
+            "did", "did:", "did::abc", "did:key:", "did:web:", "did:plc:",
+        ] {
+            assert!(matches!(
+                DidMethod::parse(did),
+                Err(DidResolverError::InvalidDid(invalid)) if invalid == did
+            ));
+        }
+    }
+
+    #[test]
+    fn did_plc_resolver_rejects_empty_identifier_before_fetch() {
+        let resolver = DidPlcResolver::new(Arc::new(InMemoryDidDocumentFetcher::new()));
+
+        assert!(matches!(
+            resolver.url_for("did:plc:"),
+            Err(DidResolverError::InvalidDid(invalid)) if invalid == "did:plc:"
+        ));
     }
 
     #[test]
