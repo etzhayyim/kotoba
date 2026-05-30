@@ -2762,6 +2762,7 @@ fn query_apply_value_function(op: &str, args: Vec<EdnValue>) -> Result<EdnValue>
         },
         "map" | "filter" | "remove" | "keep" => query_collection_transform_value(op, args),
         "reduce" => query_reduce_value(args),
+        "apply" => query_apply_function_value(args),
         "seq" | "first" | "last" | "rest" | "next" => match args.as_slice() {
             [value] => query_collection_value(op, value.clone()),
             _ => Err(DatomicError::Query(format!("{op} expects one argument"))),
@@ -2876,6 +2877,18 @@ pub(crate) fn query_reduce_value(args: Vec<EdnValue>) -> Result<EdnValue> {
         acc = query_apply_value_function(&function, vec![acc, value])?;
     }
     Ok(acc)
+}
+
+pub(crate) fn query_apply_function_value(args: Vec<EdnValue>) -> Result<EdnValue> {
+    if args.len() < 2 {
+        return Err(DatomicError::Query(
+            "apply expects a function and at least one collection argument".into(),
+        ));
+    }
+    let function = query_function_name(&args[0])?;
+    let mut fn_args = args[1..args.len() - 1].to_vec();
+    fn_args.extend(query_seq_values(args[args.len() - 1].clone())?);
+    query_apply_value_function(&function, fn_args)
 }
 
 fn assoc_in_path(collection: EdnValue, path: &[EdnValue], value: EdnValue) -> Result<EdnValue> {
@@ -5286,6 +5299,11 @@ fn eval_query_function(
             .map(|arg| resolve_query_value(arg, binding))
             .collect::<Result<Vec<_>>>()
             .and_then(query_reduce_value),
+        "apply" => args
+            .iter()
+            .map(|arg| resolve_query_value(arg, binding))
+            .collect::<Result<Vec<_>>>()
+            .and_then(query_apply_function_value),
         "seq" | "first" | "last" | "rest" | "next" => {
             if args.len() != 1 {
                 return Err(DatomicError::Query(format!("{op} expects one argument")));
@@ -8506,7 +8524,7 @@ mod tests {
         .await
         .unwrap();
         let query = parse(
-            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString ?incScores ?oddScores ?nonOddScores ?nonEmptyNames ?scoreSum ?scoreProduct ?scoreMax]
+            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString ?incScores ?oddScores ?nonOddScores ?nonEmptyNames ?scoreSum ?scoreProduct ?scoreMax ?applySum ?applyMax ?scoreSet]
                 :where [[?e :person/scores ?scores]
                         [?e :person/names ?names]
                         [(distinct? 1 2 3)]
@@ -8528,6 +8546,9 @@ mod tests {
                         [(reduce + 0 ?scores) ?scoreSum]
                         [(reduce * ?scores) ?scoreProduct]
                         [(reduce max ?scores) ?scoreMax]
+                        [(apply + ?scores) ?applySum]
+                        [(apply max ?scores) ?applyMax]
+                        [(apply hash-set ?scores) ?scoreSet]
                         [(= ?allScores true)]
                         [(= ?notEveryScoreString true)]
                         [(= ?noNilScores true)]
@@ -8568,6 +8589,13 @@ mod tests {
                 EdnValue::Integer(6),
                 EdnValue::Integer(6),
                 EdnValue::Integer(3),
+                EdnValue::Integer(6),
+                EdnValue::Integer(3),
+                EdnValue::Set(BTreeSet::from([
+                    EdnValue::Integer(1),
+                    EdnValue::Integer(2),
+                    EdnValue::Integer(3),
+                ])),
             ]]
         );
     }

@@ -1818,6 +1818,11 @@ where
                 .map(|arg| required_query_value(arg, binding))
                 .collect::<Result<Vec<_>, _>>()
                 .and_then(|values| crate::query_reduce_value(values).map_err(Into::into)),
+            "apply" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_apply_function_value(values).map_err(Into::into)),
             "seq" | "first" | "last" | "rest" | "next" => {
                 if args.len() != 1 {
                     return Err(DatomicError::Query(format!("{op} expects one argument")).into());
@@ -6736,7 +6741,7 @@ mod tests {
         );
 
         let collection_predicate_query = kotoba_edn::parse(
-            r#"{:find [?allTags ?noNilTags ?notEveryTagString ?tagsVector ?sameTag ?hasTag ?notFalse ?truthyTags ?tagsString ?tagKeywords ?nonStringTags ?keptTags ?sum ?product ?max]
+            r#"{:find [?allTags ?noNilTags ?notEveryTagString ?tagsVector ?sameTag ?hasTag ?notFalse ?truthyTags ?tagsString ?tagKeywords ?nonStringTags ?keptTags ?sum ?product ?max ?applySum ?applyMax ?applySet]
                 :where [[?e :credential/claims ?claims]
                         [(get ?claims :claim/tags) ?tags]
                         [(distinct? :role/admin :role/auditor :role/operator)]
@@ -6756,6 +6761,9 @@ mod tests {
                         [(reduce + 0 [1 2 3]) ?sum]
                         [(reduce * [1 2 3]) ?product]
                         [(reduce max [1 2 3]) ?max]
+                        [(apply + [1 2 3]) ?applySum]
+                        [(apply max [1 2 3]) ?applyMax]
+                        [(apply hash-set [1 2 3]) ?applySet]
                         [(= ?allTags true)]
                         [(= ?noNilTags true)]
                         [(= ?notEveryTagString true)]
@@ -6797,6 +6805,13 @@ mod tests {
                 EdnValue::Integer(6),
                 EdnValue::Integer(6),
                 EdnValue::Integer(3),
+                EdnValue::Integer(6),
+                EdnValue::Integer(3),
+                EdnValue::Set(BTreeSet::from([
+                    EdnValue::Integer(1),
+                    EdnValue::Integer(2),
+                    EdnValue::Integer(3),
+                ])),
             ]]
         );
 
