@@ -4127,6 +4127,7 @@ mod tests {
     use super::*;
     use crate::EdnValue;
     use ed25519_dalek::SigningKey;
+    use kotoba_edn::Symbol;
     use kotoba_ipfs::{InMemoryIpnsRegistry, KuboIpnsRegistry, SignedIpnsRegistry};
     use kotoba_store::MemoryBlockStore;
     use std::sync::Arc;
@@ -7511,6 +7512,110 @@ mod tests {
                 ],
             ]
         );
+    }
+
+    #[test]
+    fn reader_evaluates_distributed_edn_type_predicates() {
+        let store = MemoryBlockStore::new();
+        let ipns = InMemoryIpnsRegistry::new();
+        let writer = DistributedCommitWriter::new(&store, &ipns);
+        let graph = KotobaCid::from_bytes(b"graph");
+        let entity = KotobaCid::from_bytes(b"value");
+        let tx = KotobaCid::from_bytes(b"tx1");
+        let report = writer
+            .commit_datoms(request(
+                "k51-kotoba-db",
+                graph,
+                vec![
+                    Datom::assert(
+                        entity.clone(),
+                        ":value/char".into(),
+                        EdnValue::Char('k'),
+                        tx.clone(),
+                    ),
+                    Datom::assert(
+                        entity.clone(),
+                        ":value/float".into(),
+                        EdnValue::float(1.5),
+                        tx.clone(),
+                    ),
+                    Datom::assert(
+                        entity.clone(),
+                        ":value/bigint".into(),
+                        EdnValue::BigInt("42".into()),
+                        tx.clone(),
+                    ),
+                    Datom::assert(
+                        entity.clone(),
+                        ":value/bigdec".into(),
+                        EdnValue::BigDec("2.5".into()),
+                        tx.clone(),
+                    ),
+                    Datom::assert(
+                        entity.clone(),
+                        ":value/inst".into(),
+                        EdnValue::Tagged {
+                            tag: Symbol::bare("inst"),
+                            value: Box::new(EdnValue::String("2026-05-30T00:00:00Z".into())),
+                        },
+                        tx.clone(),
+                    ),
+                    Datom::assert(
+                        entity,
+                        ":value/uuid".into(),
+                        EdnValue::Tagged {
+                            tag: Symbol::bare("uuid"),
+                            value: Box::new(EdnValue::String(
+                                "123e4567-e89b-12d3-a456-426614174000".into(),
+                            )),
+                        },
+                        tx,
+                    ),
+                ],
+            ))
+            .unwrap();
+
+        let query = kotoba_edn::parse(
+            r#"{:find [?char ?float ?bigint ?bigdec ?inst ?uuid]
+                :where [[?e :value/char ?char]
+                        [?e :value/float ?float]
+                        [?e :value/bigint ?bigint]
+                        [?e :value/bigdec ?bigdec]
+                        [?e :value/inst ?inst]
+                        [?e :value/uuid ?uuid]
+                        [(char? ?char)]
+                        [(float? ?float)]
+                        [(double? ?float)]
+                        [(bigint? ?bigint)]
+                        [(number? ?bigdec)]
+                        [(decimal? ?bigdec)]
+                        [(inst? ?inst)]
+                        [(uuid? ?uuid)]
+                        [(simple-keyword? :ready)]
+                        [(qualified-keyword? :state/ready)]
+                        [(simple-symbol? ready)]
+                        [(qualified-symbol? state/ready)]
+                        [(ident? :state/ready)]
+                        [(ident? state/ready)]
+                        [(simple-ident? ready)]
+                        [(qualified-ident? state/ready)]
+                        [(seqable? nil)]
+                        [(seqable? "abc")]
+                        [(sequential? [1 2])]
+                        [(associative? {:a 1})]
+                        [(associative? [1 2])]
+                        [(counted? #{1 2})]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &query)
+            .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], EdnValue::Char('k'));
+        assert_eq!(rows[0][1], EdnValue::float(1.5));
+        assert_eq!(rows[0][2], EdnValue::BigInt("42".into()));
+        assert_eq!(rows[0][3], EdnValue::BigDec("2.5".into()));
     }
 
     #[test]

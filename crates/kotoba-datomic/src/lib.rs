@@ -4213,24 +4213,43 @@ fn is_query_unary_predicate_op(op: &str) -> bool {
             | "false?"
             | "empty?"
             | "boolean?"
+            | "char?"
             | "integer?"
+            | "int?"
+            | "bigint?"
             | "number?"
+            | "float?"
+            | "double?"
+            | "decimal?"
             | "zero?"
             | "pos?"
             | "neg?"
             | "even?"
             | "odd?"
+            | "inst?"
+            | "uuid?"
             | "string?"
             | "clojure.string/blank?"
             | "str/blank?"
             | "keyword?"
+            | "simple-keyword?"
+            | "qualified-keyword?"
             | "symbol?"
+            | "simple-symbol?"
+            | "qualified-symbol?"
+            | "ident?"
+            | "simple-ident?"
+            | "qualified-ident?"
             | "vector?"
             | "list?"
             | "map?"
             | "set?"
             | "coll?"
             | "colls?"
+            | "seqable?"
+            | "sequential?"
+            | "associative?"
+            | "counted?"
     )
 }
 
@@ -4243,16 +4262,29 @@ pub(crate) fn query_unary_predicate(op: &str, value: &EdnValue) -> Result<bool> 
         "false?" => Ok(matches!(value, EdnValue::Bool(false))),
         "empty?" => query_empty_predicate(value),
         "boolean?" => Ok(matches!(value, EdnValue::Bool(_))),
+        "char?" => Ok(matches!(value, EdnValue::Char(_))),
         "integer?" => Ok(matches!(value, EdnValue::Integer(_))),
+        "int?" => Ok(matches!(value, EdnValue::Integer(_))),
+        "bigint?" => Ok(matches!(value, EdnValue::BigInt(_))),
         "number?" => Ok(matches!(
             value,
             EdnValue::Integer(_) | EdnValue::BigInt(_) | EdnValue::Float(_) | EdnValue::BigDec(_)
         )),
+        "float?" | "double?" => Ok(matches!(value, EdnValue::Float(_))),
+        "decimal?" => Ok(matches!(value, EdnValue::BigDec(_))),
         "zero?" => Ok(matches!(value, EdnValue::Integer(0))),
         "pos?" => Ok(matches!(value, EdnValue::Integer(value) if *value > 0)),
         "neg?" => Ok(matches!(value, EdnValue::Integer(value) if *value < 0)),
         "even?" => Ok(matches!(value, EdnValue::Integer(value) if value % 2 == 0)),
         "odd?" => Ok(matches!(value, EdnValue::Integer(value) if value % 2 != 0)),
+        "inst?" => Ok(matches!(
+            value,
+            EdnValue::Tagged { tag, .. } if tag.to_qualified() == "inst"
+        )),
+        "uuid?" => Ok(matches!(
+            value,
+            EdnValue::Tagged { tag, .. } if tag.to_qualified() == "uuid"
+        )),
         "string?" => Ok(matches!(value, EdnValue::String(_))),
         "clojure.string/blank?" | "str/blank?" => match value {
             EdnValue::Nil => Ok(true),
@@ -4263,7 +4295,28 @@ pub(crate) fn query_unary_predicate(op: &str, value: &EdnValue) -> Result<bool> 
             ))),
         },
         "keyword?" => Ok(matches!(value, EdnValue::Keyword(_))),
+        "simple-keyword?" => {
+            Ok(matches!(value, EdnValue::Keyword(keyword) if keyword.namespace().is_none()))
+        }
+        "qualified-keyword?" => {
+            Ok(matches!(value, EdnValue::Keyword(keyword) if keyword.namespace().is_some()))
+        }
         "symbol?" => Ok(matches!(value, EdnValue::Symbol(_))),
+        "simple-symbol?" => {
+            Ok(matches!(value, EdnValue::Symbol(symbol) if symbol.namespace.is_none()))
+        }
+        "qualified-symbol?" => {
+            Ok(matches!(value, EdnValue::Symbol(symbol) if symbol.namespace.is_some()))
+        }
+        "ident?" => Ok(matches!(value, EdnValue::Keyword(_) | EdnValue::Symbol(_))),
+        "simple-ident?" => Ok(matches!(
+            value,
+            EdnValue::Keyword(keyword) if keyword.namespace().is_none()
+        ) || matches!(value, EdnValue::Symbol(symbol) if symbol.namespace.is_none())),
+        "qualified-ident?" => Ok(matches!(
+            value,
+            EdnValue::Keyword(keyword) if keyword.namespace().is_some()
+        ) || matches!(value, EdnValue::Symbol(symbol) if symbol.namespace.is_some())),
         "vector?" => Ok(matches!(value, EdnValue::Vector(_))),
         "list?" => Ok(matches!(value, EdnValue::List(_))),
         "map?" => Ok(matches!(value, EdnValue::Map(_))),
@@ -4271,6 +4324,25 @@ pub(crate) fn query_unary_predicate(op: &str, value: &EdnValue) -> Result<bool> 
         "coll?" | "colls?" => Ok(matches!(
             value,
             EdnValue::List(_) | EdnValue::Vector(_) | EdnValue::Map(_) | EdnValue::Set(_)
+        )),
+        "seqable?" => Ok(matches!(
+            value,
+            EdnValue::Nil
+                | EdnValue::String(_)
+                | EdnValue::List(_)
+                | EdnValue::Vector(_)
+                | EdnValue::Map(_)
+                | EdnValue::Set(_)
+        )),
+        "sequential?" => Ok(matches!(value, EdnValue::List(_) | EdnValue::Vector(_))),
+        "associative?" => Ok(matches!(value, EdnValue::Map(_) | EdnValue::Vector(_))),
+        "counted?" => Ok(matches!(
+            value,
+            EdnValue::String(_)
+                | EdnValue::List(_)
+                | EdnValue::Vector(_)
+                | EdnValue::Map(_)
+                | EdnValue::Set(_)
         )),
         other => Err(DatomicError::UnsupportedOperation(other.into())),
     }
@@ -9240,6 +9312,81 @@ mod tests {
                     EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(2)]),
                     EdnValue::Vector(vec![EdnValue::Integer(3)]),
                 ]),
+            ]]
+        );
+    }
+
+    #[tokio::test]
+    async fn q_supports_edn_type_predicates() {
+        let conn = Connection::new();
+        conn.transact(
+            parse(
+                r#"[
+                  {:db/id "value"
+                   :value/char \k
+                   :value/float 1.5
+                   :value/bigint 42N
+                   :value/bigdec 2.5M
+                   :value/inst #inst "2026-05-30T00:00:00Z"
+                   :value/uuid #uuid "123e4567-e89b-12d3-a456-426614174000"}
+                ]"#,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let query = parse(
+            r#"{:find [?char ?float ?bigint ?bigdec ?inst ?uuid]
+                :where [[?e :value/char ?char]
+                        [?e :value/float ?float]
+                        [?e :value/bigint ?bigint]
+                        [?e :value/bigdec ?bigdec]
+                        [?e :value/inst ?inst]
+                        [?e :value/uuid ?uuid]
+                        [(char? ?char)]
+                        [(float? ?float)]
+                        [(double? ?float)]
+                        [(bigint? ?bigint)]
+                        [(number? ?bigdec)]
+                        [(decimal? ?bigdec)]
+                        [(inst? ?inst)]
+                        [(uuid? ?uuid)]
+                        [(simple-keyword? :ready)]
+                        [(qualified-keyword? :state/ready)]
+                        [(simple-symbol? ready)]
+                        [(qualified-symbol? state/ready)]
+                        [(ident? :state/ready)]
+                        [(ident? state/ready)]
+                        [(simple-ident? ready)]
+                        [(qualified-ident? state/ready)]
+                        [(seqable? nil)]
+                        [(seqable? "abc")]
+                        [(sequential? [1 2])]
+                        [(associative? {:a 1})]
+                        [(associative? [1 2])]
+                        [(counted? #{1 2})]]}"#,
+        )
+        .unwrap();
+
+        let rows = q(query, &conn.db(), &[]).unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                EdnValue::Char('k'),
+                EdnValue::float(1.5),
+                EdnValue::BigInt("42".into()),
+                EdnValue::BigDec("2.5".into()),
+                EdnValue::Tagged {
+                    tag: Symbol::bare("inst"),
+                    value: Box::new(EdnValue::String("2026-05-30T00:00:00Z".into())),
+                },
+                EdnValue::Tagged {
+                    tag: Symbol::bare("uuid"),
+                    value: Box::new(EdnValue::String(
+                        "123e4567-e89b-12d3-a456-426614174000".into()
+                    )),
+                },
             ]]
         );
     }
