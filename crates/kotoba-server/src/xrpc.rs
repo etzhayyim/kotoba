@@ -9738,6 +9738,310 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct DatomicCompatSurface {
+        nsid: &'static str,
+        file_name: &'static str,
+        src: &'static str,
+        distributed_read: bool,
+        distributed_write: bool,
+        remote_read: bool,
+        ipns_write: bool,
+    }
+
+    fn datomic_compat_surface() -> Vec<DatomicCompatSurface> {
+        vec![
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_TRANSACT,
+                file_name: "transact.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/transact.json"),
+                distributed_read: false,
+                distributed_write: true,
+                remote_read: false,
+                ipns_write: true,
+            },
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_WITH,
+                file_name: "with.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/with.json"),
+                distributed_read: false,
+                distributed_write: false,
+                remote_read: false,
+                ipns_write: false,
+            },
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_DATOMS,
+                file_name: "datoms.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/datoms.json"),
+                distributed_read: true,
+                distributed_write: false,
+                remote_read: true,
+                ipns_write: false,
+            },
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_SEEK_DATOMS,
+                file_name: "seekDatoms.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/seekDatoms.json"),
+                distributed_read: true,
+                distributed_write: false,
+                remote_read: true,
+                ipns_write: false,
+            },
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_INDEX_RANGE,
+                file_name: "indexRange.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/indexRange.json"),
+                distributed_read: true,
+                distributed_write: false,
+                remote_read: true,
+                ipns_write: false,
+            },
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_INDEX_PULL,
+                file_name: "indexPull.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/indexPull.json"),
+                distributed_read: true,
+                distributed_write: false,
+                remote_read: true,
+                ipns_write: false,
+            },
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_PULL,
+                file_name: "pull.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/pull.json"),
+                distributed_read: true,
+                distributed_write: false,
+                remote_read: true,
+                ipns_write: false,
+            },
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_PULL_MANY,
+                file_name: "pullMany.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/pullMany.json"),
+                distributed_read: true,
+                distributed_write: false,
+                remote_read: true,
+                ipns_write: false,
+            },
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_Q,
+                file_name: "q.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/q.json"),
+                distributed_read: true,
+                distributed_write: false,
+                remote_read: true,
+                ipns_write: false,
+            },
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_AS_OF,
+                file_name: "asOf.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/asOf.json"),
+                distributed_read: true,
+                distributed_write: false,
+                remote_read: true,
+                ipns_write: false,
+            },
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_SINCE,
+                file_name: "since.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/since.json"),
+                distributed_read: true,
+                distributed_write: false,
+                remote_read: true,
+                ipns_write: false,
+            },
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_SYNC,
+                file_name: "sync.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/sync.json"),
+                distributed_read: true,
+                distributed_write: false,
+                remote_read: true,
+                ipns_write: false,
+            },
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_HISTORY,
+                file_name: "history.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/history.json"),
+                distributed_read: true,
+                distributed_write: false,
+                remote_read: true,
+                ipns_write: false,
+            },
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_TX,
+                file_name: "tx.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/tx.json"),
+                distributed_read: true,
+                distributed_write: false,
+                remote_read: true,
+                ipns_write: false,
+            },
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_TX_RANGE,
+                file_name: "txRange.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/txRange.json"),
+                distributed_read: true,
+                distributed_write: false,
+                remote_read: true,
+                ipns_write: false,
+            },
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_LOG,
+                file_name: "log.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/log.json"),
+                distributed_read: true,
+                distributed_write: false,
+                remote_read: true,
+                ipns_write: false,
+            },
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_BASIS_T,
+                file_name: "basisT.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/basisT.json"),
+                distributed_read: true,
+                distributed_write: false,
+                remote_read: true,
+                ipns_write: false,
+            },
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_DB_STATS,
+                file_name: "dbStats.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/dbStats.json"),
+                distributed_read: true,
+                distributed_write: false,
+                remote_read: true,
+                ipns_write: false,
+            },
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_ENTITY,
+                file_name: "entity.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/entity.json"),
+                distributed_read: true,
+                distributed_write: false,
+                remote_read: true,
+                ipns_write: false,
+            },
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_IDENT,
+                file_name: "ident.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/ident.json"),
+                distributed_read: true,
+                distributed_write: false,
+                remote_read: true,
+                ipns_write: false,
+            },
+            DatomicCompatSurface {
+                nsid: super::NSID_DATOMIC_ENTID,
+                file_name: "entid.json",
+                src: include_str!("../../../lexicons/ai/gftd/apps/kotoba/datomic/entid.json"),
+                distributed_read: true,
+                distributed_write: false,
+                remote_read: true,
+                ipns_write: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn datomic_compat_surface_maps_all_lexicons_and_distributed_modes() {
+        let surface = datomic_compat_surface();
+        let expected_files: std::collections::BTreeSet<_> = surface
+            .iter()
+            .map(|entry| entry.file_name.to_string())
+            .collect();
+        let lexicon_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../lexicons/ai/gftd/apps/kotoba/datomic");
+        let actual_files: std::collections::BTreeSet<_> = std::fs::read_dir(&lexicon_dir)
+            .expect("read datomic lexicon dir")
+            .map(|entry| {
+                entry
+                    .expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(
+            actual_files, expected_files,
+            "Datomic compat surface must enumerate every Datomic lexicon"
+        );
+
+        let expected_nsids: std::collections::BTreeSet<_> = [
+            super::NSID_DATOMIC_TRANSACT,
+            super::NSID_DATOMIC_WITH,
+            super::NSID_DATOMIC_DATOMS,
+            super::NSID_DATOMIC_SEEK_DATOMS,
+            super::NSID_DATOMIC_INDEX_RANGE,
+            super::NSID_DATOMIC_INDEX_PULL,
+            super::NSID_DATOMIC_PULL,
+            super::NSID_DATOMIC_PULL_MANY,
+            super::NSID_DATOMIC_Q,
+            super::NSID_DATOMIC_AS_OF,
+            super::NSID_DATOMIC_SINCE,
+            super::NSID_DATOMIC_SYNC,
+            super::NSID_DATOMIC_HISTORY,
+            super::NSID_DATOMIC_TX,
+            super::NSID_DATOMIC_TX_RANGE,
+            super::NSID_DATOMIC_LOG,
+            super::NSID_DATOMIC_BASIS_T,
+            super::NSID_DATOMIC_DB_STATS,
+            super::NSID_DATOMIC_ENTITY,
+            super::NSID_DATOMIC_IDENT,
+            super::NSID_DATOMIC_ENTID,
+        ]
+        .into_iter()
+        .collect();
+        let actual_nsids: std::collections::BTreeSet<_> =
+            surface.iter().map(|entry| entry.nsid).collect();
+        assert_eq!(
+            actual_nsids, expected_nsids,
+            "Datomic compat surface must enumerate every public Datomic NSID"
+        );
+
+        for entry in surface {
+            let value: serde_json::Value = serde_json::from_str(entry.src).expect("lexicon JSON");
+            assert_eq!(value["id"], entry.nsid);
+
+            if entry.remote_read {
+                assert!(
+                    entry.distributed_read,
+                    "{} cannot be a remote read without distributed read support",
+                    entry.nsid
+                );
+                assert_lexicon_input_fields(
+                    entry.src,
+                    &["graph"],
+                    &[
+                        "remote_peer",
+                        "remote_ipns_name",
+                        "cacao_b64",
+                        "presentation",
+                    ],
+                );
+            }
+            if entry.distributed_write {
+                assert_lexicon_input_fields(
+                    entry.src,
+                    &["graph"],
+                    &["cacao_b64", "presentation", "cacao_proof_cid"],
+                );
+            }
+            if entry.ipns_write {
+                assert_lexicon_input_fields(
+                    entry.src,
+                    &["graph"],
+                    &["ipns_name", "expected_parent"],
+                );
+                assert_lexicon_output_fields(
+                    entry.src,
+                    &["graph", "tx_cid", "commit_cid", "ipns_name", "index_roots"],
+                    &["ipns_sequence", "ipns_valid_until"],
+                );
+            }
+        }
+    }
+
     #[test]
     fn datomic_lexicons_expose_distributed_datomic_api_fields() {
         assert_lexicon_input_fields(
