@@ -2760,6 +2760,7 @@ fn query_apply_value_function(op: &str, args: Vec<EdnValue>) -> Result<EdnValue>
             [value] => query_not_empty_value(value.clone()),
             _ => Err(DatomicError::Query("not-empty expects one argument".into())),
         },
+        "map" | "filter" | "remove" | "keep" => query_collection_transform_value(op, args),
         "seq" | "first" | "last" | "rest" | "next" => match args.as_slice() {
             [value] => query_collection_value(op, value.clone()),
             _ => Err(DatomicError::Query(format!("{op} expects one argument"))),
@@ -2803,6 +2804,47 @@ pub(crate) fn query_truth_function_value(op: &str, args: Vec<EdnValue>) -> Resul
         "boolean" => truthy,
         other => return Err(DatomicError::UnsupportedOperation(other.into())),
     }))
+}
+
+pub(crate) fn query_collection_transform_value(op: &str, args: Vec<EdnValue>) -> Result<EdnValue> {
+    if args.len() != 2 {
+        return Err(DatomicError::Query(format!(
+            "{op} expects a function and one collection"
+        )));
+    }
+    let function = query_function_name(&args[0])?;
+    let values = query_seq_values(args[1].clone())?;
+    let out = match op {
+        "map" => values
+            .into_iter()
+            .map(|value| query_apply_value_function(&function, vec![value]))
+            .collect::<Result<Vec<_>>>()?,
+        "filter" | "remove" => {
+            let keep_matching = op == "filter";
+            values
+                .into_iter()
+                .filter_map(|value| {
+                    match query_apply_value_function(&function, vec![value.clone()]) {
+                        Ok(result) if query_truthy(&result) == keep_matching => Some(Ok(value)),
+                        Ok(_) => None,
+                        Err(err) => Some(Err(err)),
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?
+        }
+        "keep" => values
+            .into_iter()
+            .filter_map(
+                |value| match query_apply_value_function(&function, vec![value]) {
+                    Ok(EdnValue::Nil) => None,
+                    Ok(value) => Some(Ok(value)),
+                    Err(err) => Some(Err(err)),
+                },
+            )
+            .collect::<Result<Vec<_>>>()?,
+        other => return Err(DatomicError::UnsupportedOperation(other.into())),
+    };
+    Ok(EdnValue::Vector(out))
 }
 
 fn assoc_in_path(collection: EdnValue, path: &[EdnValue], value: EdnValue) -> Result<EdnValue> {
@@ -5203,6 +5245,11 @@ fn eval_query_function(
             }
             query_not_empty_value(resolve_query_value(&args[0], binding)?)
         }
+        "map" | "filter" | "remove" | "keep" => args
+            .iter()
+            .map(|arg| resolve_query_value(arg, binding))
+            .collect::<Result<Vec<_>>>()
+            .and_then(|values| query_collection_transform_value(op, values)),
         "seq" | "first" | "last" | "rest" | "next" => {
             if args.len() != 1 {
                 return Err(DatomicError::Query(format!("{op} expects one argument")));
@@ -8415,7 +8462,7 @@ mod tests {
         conn.transact(
             parse(
                 r#"[
-                  {:db/id "alice" :person/scores [1 2 3] :person/names ["Alice" "Alicia"]}
+                  {:db/id "alice" :person/scores [1 2 3] :person/names ["Alice" "" "Alicia"]}
                 ]"#,
             )
             .unwrap(),
@@ -8423,7 +8470,7 @@ mod tests {
         .await
         .unwrap();
         let query = parse(
-            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString]
+            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString ?incScores ?oddScores ?nonOddScores ?nonEmptyNames]
                 :where [[?e :person/scores ?scores]
                         [?e :person/names ?names]
                         [(distinct? 1 2 3)]
@@ -8438,6 +8485,10 @@ mod tests {
                         [(clojure.core/not false) ?notFalse]
                         [(boolean ?scores) ?truthyScores]
                         [(string? ?names) ?namesString]
+                        [(map inc ?scores) ?incScores]
+                        [(filter odd? ?scores) ?oddScores]
+                        [(remove odd? ?scores) ?nonOddScores]
+                        [(keep not-empty ?names) ?nonEmptyNames]
                         [(= ?allScores true)]
                         [(= ?notEveryScoreString true)]
                         [(= ?noNilScores true)]
@@ -8464,6 +8515,17 @@ mod tests {
                 EdnValue::Bool(true),
                 EdnValue::Bool(true),
                 EdnValue::Bool(false),
+                EdnValue::Vector(vec![
+                    EdnValue::Integer(2),
+                    EdnValue::Integer(3),
+                    EdnValue::Integer(4),
+                ]),
+                EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(3)]),
+                EdnValue::Vector(vec![EdnValue::Integer(2)]),
+                EdnValue::Vector(vec![
+                    EdnValue::String("Alice".into()),
+                    EdnValue::String("Alicia".into()),
+                ]),
             ]]
         );
     }
