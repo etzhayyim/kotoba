@@ -665,6 +665,7 @@ async fn kubo_compatible_local_api_surface() {
         .is_pinned(&updated_pin)
         .await
         .expect("updated pin after rm"));
+    assert!(node.pin_rm(&updated_pin).await.is_err());
     node.pin_add(&raw).await.expect("pin/add raw again");
     node.pin_rm(&raw).await.expect("pin/rm");
     assert!(!node.is_pinned(&raw).await.expect("is pinned after rm"));

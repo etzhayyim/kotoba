@@ -1140,7 +1140,11 @@ impl KotobaIpfsNode {
 
     /// Kubo-like `pin/rm`.
     pub async fn pin_rm(&self, cid: &IpldCid) -> Result<()> {
-        self.unpin(cid).await
+        if self.state.pins.write().await.remove(cid).is_none() {
+            bail!("pin not found: {cid}");
+        }
+        remove_pin_file(&self.state, cid).await?;
+        Ok(())
     }
 
     /// Kubo-like `pin/update`: replace one recursive pin with another.
