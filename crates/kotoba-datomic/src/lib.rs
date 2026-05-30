@@ -2768,8 +2768,8 @@ fn query_apply_value_function(op: &str, args: Vec<EdnValue>) -> Result<EdnValue>
             _ => Err(DatomicError::Query(format!("{op} expects one argument"))),
         },
         "nth" => query_nth_value(args),
-        "take" | "drop" | "take-while" | "drop-while" | "partition" | "partition-all"
-        | "subvec" => query_collection_slice_value(op, args),
+        "take" | "drop" | "take-while" | "drop-while" | "split-at" | "split-with" | "partition"
+        | "partition-all" | "subvec" => query_collection_slice_value(op, args),
         "reverse" | "sort" | "flatten" | "interpose" | "interleave" => {
             query_collection_order_value(op, args)
         }
@@ -3145,6 +3145,18 @@ pub(crate) fn query_collection_slice_value(op: &str, args: Vec<EdnValue>) -> Res
             };
             Ok(EdnValue::Vector(values))
         }
+        "split-at" => {
+            let [n, collection]: [EdnValue; 2] = args
+                .try_into()
+                .map_err(|_| DatomicError::Query("split-at expects two arguments".into()))?;
+            let n = query_non_negative_usize(&n, "split-at")?;
+            let values = query_seq_values(collection)?;
+            let split = n.min(values.len());
+            Ok(EdnValue::Vector(vec![
+                EdnValue::Vector(values[..split].to_vec()),
+                EdnValue::Vector(values[split..].to_vec()),
+            ]))
+        }
         "subvec" => {
             let (collection, start, end) = match args.as_slice() {
                 [collection, start] => (collection.clone(), start, None),
@@ -3201,6 +3213,28 @@ pub(crate) fn query_collection_slice_value(op: &str, args: Vec<EdnValue>) -> Res
                 }
             }
             Ok(EdnValue::Vector(out))
+        }
+        "split-with" => {
+            let [predicate, collection]: [EdnValue; 2] = args
+                .try_into()
+                .map_err(|_| DatomicError::Query("split-with expects two arguments".into()))?;
+            let predicate = query_function_name(&predicate)?;
+            let values = query_seq_values(collection)?;
+            let mut split = values.len();
+            for (index, value) in values.iter().enumerate() {
+                let matched = query_truthy(&query_apply_value_function(
+                    &predicate,
+                    vec![value.clone()],
+                )?);
+                if !matched {
+                    split = index;
+                    break;
+                }
+            }
+            Ok(EdnValue::Vector(vec![
+                EdnValue::Vector(values[..split].to_vec()),
+                EdnValue::Vector(values[split..].to_vec()),
+            ]))
         }
         "partition" | "partition-all" => query_partition_value(op, args),
         other => Err(DatomicError::UnsupportedOperation(other.into())),
@@ -5456,8 +5490,8 @@ fn eval_query_function(
             .map(|arg| resolve_query_value(arg, binding))
             .collect::<Result<Vec<_>>>()
             .and_then(query_cons_value),
-        "take" | "drop" | "take-while" | "drop-while" | "partition" | "partition-all"
-        | "subvec" => args
+        "take" | "drop" | "take-while" | "drop-while" | "split-at" | "split-with" | "partition"
+        | "partition-all" | "subvec" => args
             .iter()
             .map(|arg| resolve_query_value(arg, binding))
             .collect::<Result<Vec<_>>>()
@@ -8661,7 +8695,7 @@ mod tests {
         .await
         .unwrap();
         let query = parse(
-            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString ?incScores ?oddScores ?nonOddScores ?nonEmptyNames ?scoreSum ?scoreProduct ?scoreMax ?applySum ?applyMax ?scoreSet ?initialOdds ?afterOdds ?flatScores ?interposedScores ?interleavedScores ?pairs ?windows ?paddedPairs ?allPairs]
+            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString ?incScores ?oddScores ?nonOddScores ?nonEmptyNames ?scoreSum ?scoreProduct ?scoreMax ?applySum ?applyMax ?scoreSet ?initialOdds ?afterOdds ?splitScores ?splitOdds ?flatScores ?interposedScores ?interleavedScores ?pairs ?windows ?paddedPairs ?allPairs]
                 :where [[?e :person/scores ?scores]
                         [?e :person/names ?names]
                         [(distinct? 1 2 3)]
@@ -8688,6 +8722,8 @@ mod tests {
                         [(apply hash-set ?scores) ?scoreSet]
                         [(take-while odd? ?scores) ?initialOdds]
                         [(drop-while odd? ?scores) ?afterOdds]
+                        [(split-at 2 ?scores) ?splitScores]
+                        [(split-with odd? ?scores) ?splitOdds]
                         [(flatten [[1 2 3] [4 [5]]]) ?flatScores]
                         [(interpose 0 ?scores) ?interposedScores]
                         [(interleave ?scores [:a :b :c]) ?interleavedScores]
@@ -8744,6 +8780,14 @@ mod tests {
                 ])),
                 EdnValue::Vector(vec![EdnValue::Integer(1)]),
                 EdnValue::Vector(vec![EdnValue::Integer(2), EdnValue::Integer(3)]),
+                EdnValue::Vector(vec![
+                    EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(2)]),
+                    EdnValue::Vector(vec![EdnValue::Integer(3)]),
+                ]),
+                EdnValue::Vector(vec![
+                    EdnValue::Vector(vec![EdnValue::Integer(1)]),
+                    EdnValue::Vector(vec![EdnValue::Integer(2), EdnValue::Integer(3)]),
+                ]),
                 EdnValue::Vector(vec![
                     EdnValue::Integer(1),
                     EdnValue::Integer(2),

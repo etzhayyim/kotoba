@@ -1840,8 +1840,8 @@ where
                 .map(|arg| required_query_value(arg, binding))
                 .collect::<Result<Vec<_>, _>>()
                 .and_then(|values| crate::query_cons_value(values).map_err(Into::into)),
-            "take" | "drop" | "take-while" | "drop-while" | "partition" | "partition-all"
-            | "subvec" => args
+            "take" | "drop" | "take-while" | "drop-while" | "split-at" | "split-with"
+            | "partition" | "partition-all" | "subvec" => args
                 .iter()
                 .map(|arg| required_query_value(arg, binding))
                 .collect::<Result<Vec<_>, _>>()
@@ -6742,7 +6742,7 @@ mod tests {
         );
 
         let collection_predicate_query = kotoba_edn::parse(
-            r#"{:find [?allTags ?noNilTags ?notEveryTagString ?tagsVector ?sameTag ?hasTag ?notFalse ?truthyTags ?tagsString ?tagKeywords ?nonStringTags ?keptTags ?sum ?product ?max ?applySum ?applyMax ?applySet ?initialOdds ?afterOdds ?flat ?interposed ?interleaved ?pairs ?windows ?paddedPairs ?allPairs]
+            r#"{:find [?allTags ?noNilTags ?notEveryTagString ?tagsVector ?sameTag ?hasTag ?notFalse ?truthyTags ?tagsString ?tagKeywords ?nonStringTags ?keptTags ?sum ?product ?max ?applySum ?applyMax ?applySet ?initialOdds ?afterOdds ?splitNumbers ?splitOdds ?flat ?interposed ?interleaved ?pairs ?windows ?paddedPairs ?allPairs]
                 :where [[?e :credential/claims ?claims]
                         [(get ?claims :claim/tags) ?tags]
                         [(distinct? :role/admin :role/auditor :role/operator)]
@@ -6767,6 +6767,8 @@ mod tests {
                         [(apply hash-set [1 2 3]) ?applySet]
                         [(take-while odd? [1 3 2 5]) ?initialOdds]
                         [(drop-while odd? [1 3 2 5]) ?afterOdds]
+                        [(split-at 2 [1 2 3]) ?splitNumbers]
+                        [(split-with odd? [1 3 2 5]) ?splitOdds]
                         [(flatten [[1 2] [3 [4]]]) ?flat]
                         [(interpose 0 [1 2 3]) ?interposed]
                         [(interleave [1 2 3] [:a :b :c]) ?interleaved]
@@ -6824,6 +6826,14 @@ mod tests {
                 ])),
                 EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(3)]),
                 EdnValue::Vector(vec![EdnValue::Integer(2), EdnValue::Integer(5)]),
+                EdnValue::Vector(vec![
+                    EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(2)]),
+                    EdnValue::Vector(vec![EdnValue::Integer(3)]),
+                ]),
+                EdnValue::Vector(vec![
+                    EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(3)]),
+                    EdnValue::Vector(vec![EdnValue::Integer(2), EdnValue::Integer(5)]),
+                ]),
                 EdnValue::Vector(vec![
                     EdnValue::Integer(1),
                     EdnValue::Integer(2),
