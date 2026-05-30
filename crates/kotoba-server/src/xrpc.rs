@@ -8831,6 +8831,272 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn datomic_transact_xrpc_covers_advanced_datomic_forms_on_distributed_head() {
+        std::env::set_var("KOTOBA_IPFS", "off");
+        std::env::set_var("KOTOBA_IPNS_REQUIRE_SIGNATURE", "false");
+        let state = Arc::new(KotobaState::new(None).unwrap());
+        let graph = KotobaCid::from_bytes(b"xrpc-datomic-advanced-forms-graph");
+        let graph_mb = graph.to_multibase();
+        state.graph_registry.write().await.insert(
+            graph.clone(),
+            (
+                "xrpc-datomic-advanced-forms-graph".into(),
+                GraphVisibility::Public,
+            ),
+        );
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", test_operator_jwt(&state.operator_did))
+                .parse()
+                .unwrap(),
+        );
+
+        let schema = datomic_transact(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicTransactReq {
+                graph: graph_mb.clone(),
+                tx_edn: r#"[
+                  {:db/id "email" :db/ident :person/email :db/unique :db.unique/identity}
+                  {:db/id "address" :db/ident :person/address :db/valueType :db.type/ref :db/isComponent true}
+                  {:db/id "secret" :db/ident :person/secret :db/noHistory true}
+                ]"#
+                .into(),
+                ipns_name: None,
+                cacao_b64: None,
+                cacao_proof_cid: None,
+                expected_parent: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(schema.status(), axum::http::StatusCode::OK);
+
+        let seed = datomic_transact(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicTransactReq {
+                graph: graph_mb.clone(),
+                tx_edn: r#"[
+                  {:db/id "alice"
+                   :person/email "a@example.com"
+                   :person/name "Alice"
+                   :person/age 30
+                   :person/address "addr"
+                   :person/secret "old"}
+                  {:db/id "addr" :address/city "Tokyo"}
+                ]"#
+                .into(),
+                ipns_name: None,
+                cacao_b64: None,
+                cacao_proof_cid: None,
+                expected_parent: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(seed.status(), axum::http::StatusCode::OK);
+
+        let advanced = datomic_transact(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicTransactReq {
+                graph: graph_mb.clone(),
+                tx_edn: r#"[
+                  {:db/id "alice-again"
+                   :person/email "a@example.com"
+                   :person/role "admin"}
+                  [:db.fn/cas [:person/email "a@example.com"] :person/age 30 31]
+                  [:db/add [:person/email "a@example.com"] :person/secret "new"]
+                ]"#
+                .into(),
+                ipns_name: None,
+                cacao_b64: None,
+                cacao_proof_cid: None,
+                expected_parent: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(advanced.status(), axum::http::StatusCode::OK);
+
+        let current = datomic_q(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicQReq {
+                graph: graph_mb.clone(),
+                query_edn: r#"{:find [?name ?age ?role ?secret]
+                    :where [[[:person/email "a@example.com"] :person/name ?name]
+                            [[:person/email "a@example.com"] :person/age ?age]
+                            [[:person/email "a@example.com"] :person/role ?role]
+                            [[:person/email "a@example.com"] :person/secret ?secret]]}"#
+                    .into(),
+                inputs_edn: vec![],
+                as_of: None,
+                since: None,
+                history: false,
+                remote_peer: None,
+                remote_ipns_name: None,
+                cacao_b64: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(current.status(), axum::http::StatusCode::OK);
+        let current_body = axum::body::to_bytes(current.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let current_body: serde_json::Value = serde_json::from_slice(&current_body).unwrap();
+        assert_eq!(
+            current_body["rows_edn"],
+            serde_json::json!([[r#""Alice""#, "31", r#""admin""#, r#""new""#]])
+        );
+
+        let secret_history = datomic_q(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicQReq {
+                graph: graph_mb.clone(),
+                query_edn: r#"{:find [?secret ?added]
+                    :where [[$history ?e :person/secret ?secret ?tx ?added]]}"#
+                    .into(),
+                inputs_edn: vec![],
+                as_of: None,
+                since: None,
+                history: true,
+                remote_peer: None,
+                remote_ipns_name: None,
+                cacao_b64: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(secret_history.status(), axum::http::StatusCode::OK);
+        let secret_history_body = axum::body::to_bytes(secret_history.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let secret_history_body: serde_json::Value =
+            serde_json::from_slice(&secret_history_body).unwrap();
+        let secret_rows = secret_history_body["rows_edn"].as_array().unwrap();
+        assert!(secret_rows
+            .iter()
+            .all(|row| row[0] != serde_json::Value::String(r#""old""#.into())));
+
+        let retract = datomic_transact(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicTransactReq {
+                graph: graph_mb.clone(),
+                tx_edn: r#"[
+                  [:db.fn/retractEntity [:person/email "a@example.com"]]
+                ]"#
+                .into(),
+                ipns_name: None,
+                cacao_b64: None,
+                cacao_proof_cid: None,
+                expected_parent: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(retract.status(), axum::http::StatusCode::OK);
+
+        let component_history = datomic_q(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicQReq {
+                graph: graph_mb.clone(),
+                query_edn: r#"{:find [?city ?added]
+                    :where [[$history ?addr :address/city ?city ?tx ?added]]}"#
+                    .into(),
+                inputs_edn: vec![],
+                as_of: None,
+                since: None,
+                history: true,
+                remote_peer: None,
+                remote_ipns_name: None,
+                cacao_b64: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(component_history.status(), axum::http::StatusCode::OK);
+        let component_history_body =
+            axum::body::to_bytes(component_history.into_body(), usize::MAX)
+                .await
+                .unwrap();
+        let component_history_body: serde_json::Value =
+            serde_json::from_slice(&component_history_body).unwrap();
+        assert!(component_history_body["rows_edn"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row == &serde_json::json!([r#""Tokyo""#, "false"])));
+
+        let excise = datomic_transact(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicTransactReq {
+                graph: graph_mb.clone(),
+                tx_edn: r#"[{:db/excise :person/secret}]"#.into(),
+                ipns_name: None,
+                cacao_b64: None,
+                cacao_proof_cid: None,
+                expected_parent: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(excise.status(), axum::http::StatusCode::OK);
+
+        let after_excise = datomic_q(
+            axum::extract::State(state),
+            headers,
+            axum::Json(DatomicQReq {
+                graph: graph_mb,
+                query_edn: r#"{:find [?secret]
+                    :where [[$history ?e :person/secret ?secret ?tx ?added]]}"#
+                    .into(),
+                inputs_edn: vec![],
+                as_of: None,
+                since: None,
+                history: true,
+                remote_peer: None,
+                remote_ipns_name: None,
+                cacao_b64: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(after_excise.status(), axum::http::StatusCode::OK);
+        let after_excise_body = axum::body::to_bytes(after_excise.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let after_excise_body: serde_json::Value =
+            serde_json::from_slice(&after_excise_body).unwrap();
+        assert!(after_excise_body["rows_edn"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn datomic_transact_xrpc_writes_named_ipns_head_readable_by_override() {
         std::env::set_var("KOTOBA_IPFS", "off");
         std::env::set_var("KOTOBA_IPNS_REQUIRE_SIGNATURE", "false");
