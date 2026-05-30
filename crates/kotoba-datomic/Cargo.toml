@@ -17,6 +17,7 @@ ed25519-dalek.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 hex.workspace = true
+regex.workspace = true
 
 [dev-dependencies]
 kotoba-store = { path = "../kotoba-store" }

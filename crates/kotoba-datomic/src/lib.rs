@@ -2433,6 +2433,53 @@ pub(crate) fn query_replace_value(args: Vec<EdnValue>) -> Result<EdnValue> {
     Ok(EdnValue::String(value.replace(&pattern, &replacement)))
 }
 
+pub(crate) fn query_regex_value(op: &str, args: Vec<EdnValue>) -> Result<EdnValue> {
+    let [pattern, value]: [EdnValue; 2] = args
+        .try_into()
+        .map_err(|_| DatomicError::Query(format!("{op} expects pattern and string")))?;
+    let EdnValue::String(pattern) = pattern else {
+        return Err(DatomicError::Query(format!(
+            "{op} expects a string pattern, got {}",
+            edn_to_string(&pattern)
+        )));
+    };
+    let EdnValue::String(value) = value else {
+        return Err(DatomicError::Query(format!(
+            "{op} expects a string value, got {}",
+            edn_to_string(&value)
+        )));
+    };
+    let regex = regex::Regex::new(&pattern)
+        .map_err(|err| DatomicError::Query(format!("{op} invalid regex: {err}")))?;
+    let Some(captures) = regex.captures(&value) else {
+        return Ok(EdnValue::Nil);
+    };
+    if matches!(op, "re-matches" | "clojure.core/re-matches") {
+        let whole = captures
+            .get(0)
+            .expect("regex captures always include whole match");
+        if whole.start() != 0 || whole.end() != value.len() {
+            return Ok(EdnValue::Nil);
+        }
+    }
+    if captures.len() == 1 {
+        return Ok(captures
+            .get(0)
+            .map(|matched| EdnValue::String(matched.as_str().to_string()))
+            .unwrap_or(EdnValue::Nil));
+    }
+    Ok(EdnValue::Vector(
+        (0..captures.len())
+            .map(|idx| {
+                captures
+                    .get(idx)
+                    .map(|matched| EdnValue::String(matched.as_str().to_string()))
+                    .unwrap_or(EdnValue::Nil)
+            })
+            .collect(),
+    ))
+}
+
 pub(crate) fn query_string_case_value(op: &str, args: Vec<EdnValue>) -> Result<EdnValue> {
     let [value]: [EdnValue; 1] = args
         .try_into()
@@ -2639,6 +2686,9 @@ fn query_apply_value_function(op: &str, args: Vec<EdnValue>) -> Result<EdnValue>
         "split" | "clojure.string/split" | "str/split" => query_split_value(args),
         "join" | "clojure.string/join" | "str/join" => query_join_value(args),
         "replace" | "clojure.string/replace" | "str/replace" => query_replace_value(args),
+        "re-find" | "clojure.core/re-find" | "re-matches" | "clojure.core/re-matches" => {
+            query_regex_value(op, args)
+        }
         "lower-case"
         | "clojure.string/lower-case"
         | "str/lower-case"
@@ -4650,6 +4700,11 @@ fn eval_query_function(
             .map(|arg| resolve_query_value(arg, binding))
             .collect::<Result<Vec<_>>>()
             .and_then(query_replace_value),
+        "re-find" | "clojure.core/re-find" | "re-matches" | "clojure.core/re-matches" => args
+            .iter()
+            .map(|arg| resolve_query_value(arg, binding))
+            .collect::<Result<Vec<_>>>()
+            .and_then(|values| query_regex_value(op, values)),
         "lower-case"
         | "clojure.string/lower-case"
         | "str/lower-case"
@@ -7789,6 +7844,44 @@ mod tests {
         .unwrap();
         let rows = q(odd_query, &conn.db(), &[]).unwrap();
         assert_eq!(rows, vec![vec![EdnValue::Integer(7)]]);
+    }
+
+    #[tokio::test]
+    async fn q_supports_regex_function_bindings() {
+        let conn = Connection::new();
+        conn.transact(
+            parse(
+                r#"[
+                  {:db/id "task1" :task/code "KOTOBA-42"}
+                  {:db/id "task2" :task/code "kotoba-99"}
+                  {:db/id "task3" :task/code "KOTOBA-42-extra"}
+                ]"#,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let query = parse(
+            r#"{:find [?code ?project ?number ?whole]
+                :where [[?e :task/code ?code]
+                        [(re-find "([A-Z]+)-([0-9]+)" ?code) ?found]
+                        [(some? ?found)]
+                        [(get ?found 1) ?project]
+                        [(get ?found 2) ?number]
+                        [(clojure.core/re-matches "[A-Z]+-[0-9]+" ?code) ?whole]
+                        [(some? ?whole)]]}"#,
+        )
+        .unwrap();
+        let rows = q(query, &conn.db(), &[]).unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                EdnValue::String("KOTOBA-42".into()),
+                EdnValue::String("KOTOBA".into()),
+                EdnValue::String("42".into()),
+                EdnValue::String("KOTOBA-42".into()),
+            ]]
+        );
     }
 
     #[tokio::test]

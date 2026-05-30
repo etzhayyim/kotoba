@@ -3606,6 +3606,7 @@ dependencies = [
  "kotoba-ipfs",
  "kotoba-kqe",
  "kotoba-store",
+ "regex",
  "serde",
  "thiserror 1.0.69",
  "tokio",

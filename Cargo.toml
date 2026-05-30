@@ -73,6 +73,7 @@ object_store = { version = "0.10", features = ["aws"] }  # used by kotoba-kse (J
 # query
 sqlparser = "0.47"
 spargebra = "0.4"
+regex = "1"
 
 # networking
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
