@@ -29,6 +29,12 @@ pub const ATTR_DIDCOMM_EXPIRES_TIME: &str = "didcomm/expiresTime";
 pub const ATTR_DIDCOMM_BODY: &str = "didcomm/body";
 pub const ATTR_DIDCOMM_BODY_FIELD_PREFIX: &str = "didcomm/body/";
 pub const ATTR_DIDCOMM_ATTACHMENT: &str = "didcomm/attachment";
+pub const ATTR_DIDCOMM_ATTACHMENT_CID: &str = "didcomm/attachmentCid";
+pub const ATTR_DIDCOMM_ATTACHMENT_MESSAGE_CID: &str = "didcomm/attachment/messageCid";
+pub const ATTR_DIDCOMM_ATTACHMENT_ID: &str = "didcomm/attachment/id";
+pub const ATTR_DIDCOMM_ATTACHMENT_DESCRIPTION: &str = "didcomm/attachment/description";
+pub const ATTR_DIDCOMM_ATTACHMENT_MEDIA_TYPE: &str = "didcomm/attachment/mediaType";
+pub const ATTR_DIDCOMM_ATTACHMENT_DATA: &str = "didcomm/attachment/data";
 pub const ATTR_DIDCOMM_WIRE_ID: &str = "id";
 pub const ATTR_DIDCOMM_WIRE_TYPE: &str = "type";
 pub const ATTR_DIDCOMM_WIRE_FROM: &str = "from";
@@ -239,6 +245,13 @@ impl DidCommMessage {
             ));
         }
         for attachment in &self.attachments {
+            let attachment_cid = attachment.cid()?;
+            out.push(datom(
+                &e,
+                ATTR_DIDCOMM_ATTACHMENT_CID,
+                EdnValue::string(attachment_cid.to_multibase()),
+                &tx,
+            ));
             out.push(datom(
                 &e,
                 ATTR_DIDCOMM_ATTACHMENT,
@@ -251,8 +264,67 @@ impl DidCommMessage {
                 attachment_to_edn(attachment),
                 &tx,
             ));
+            out.extend(attachment.to_datoms(&e, &tx)?);
         }
         out.push(datom(&e, &self.message_type, json_to_edn(&self.body), &tx));
+        Ok(out)
+    }
+}
+
+impl Attachment {
+    pub fn cid(&self) -> Result<KotobaCid, DidCommError> {
+        let bytes = serde_json::to_vec(self).map_err(|e| DidCommError::Json(e.to_string()))?;
+        Ok(KotobaCid::from_bytes(&bytes))
+    }
+
+    pub fn to_datoms(
+        &self,
+        message_cid: &KotobaCid,
+        tx: &KotobaCid,
+    ) -> Result<Vec<Datom>, DidCommError> {
+        let e = self.cid()?;
+        let mut out = vec![
+            datom(
+                &e,
+                ATTR_DIDCOMM_ATTACHMENT_CID,
+                EdnValue::string(e.to_multibase()),
+                tx,
+            ),
+            datom(
+                &e,
+                ATTR_DIDCOMM_ATTACHMENT_MESSAGE_CID,
+                EdnValue::string(message_cid.to_multibase()),
+                tx,
+            ),
+            datom(
+                &e,
+                ATTR_DIDCOMM_ATTACHMENT_ID,
+                EdnValue::string(&self.id),
+                tx,
+            ),
+            datom(
+                &e,
+                ATTR_DIDCOMM_ATTACHMENT_DATA,
+                json_to_edn(&self.data),
+                tx,
+            ),
+        ];
+        if let Some(description) = &self.description {
+            out.push(datom(
+                &e,
+                ATTR_DIDCOMM_ATTACHMENT_DESCRIPTION,
+                EdnValue::string(description),
+                tx,
+            ));
+        }
+        if let Some(media_type) = &self.media_type {
+            out.push(datom(
+                &e,
+                ATTR_DIDCOMM_ATTACHMENT_MEDIA_TYPE,
+                EdnValue::string(media_type),
+                tx,
+            ));
+        }
         Ok(out)
     }
 }
@@ -351,6 +423,7 @@ mod tests {
         };
         let datoms = msg.to_datoms(KotobaCid::from_bytes(b"tx")).unwrap();
         let e = msg.cid().unwrap();
+        let attachment_cid = msg.attachments[0].cid().unwrap();
         assert!(datoms
             .iter()
             .any(|d| d.a == ATTR_DIDCOMM_CID && d.v == EdnValue::string(e.to_multibase())));
@@ -396,6 +469,36 @@ mod tests {
             .iter()
             .any(|d| d.a == "didcomm/body/tags"
                 && kotoba_edn::to_string(&d.v).contains("[\"chat\"]")));
+        assert!(datoms.iter().any(|d| {
+            d.e == e
+                && d.a == ATTR_DIDCOMM_ATTACHMENT_CID
+                && d.v == EdnValue::string(attachment_cid.to_multibase())
+        }));
+        assert!(datoms.iter().any(|d| {
+            d.e == attachment_cid
+                && d.a == ATTR_DIDCOMM_ATTACHMENT_MESSAGE_CID
+                && d.v == EdnValue::string(e.to_multibase())
+        }));
+        assert!(datoms.iter().any(|d| {
+            d.e == attachment_cid
+                && d.a == ATTR_DIDCOMM_ATTACHMENT_ID
+                && d.v == EdnValue::string("att-1")
+        }));
+        assert!(datoms.iter().any(|d| {
+            d.e == attachment_cid
+                && d.a == ATTR_DIDCOMM_ATTACHMENT_DESCRIPTION
+                && d.v == EdnValue::string("profile")
+        }));
+        assert!(datoms.iter().any(|d| {
+            d.e == attachment_cid
+                && d.a == ATTR_DIDCOMM_ATTACHMENT_MEDIA_TYPE
+                && d.v == EdnValue::string("application/json")
+        }));
+        assert!(datoms.iter().any(|d| {
+            d.e == attachment_cid
+                && d.a == ATTR_DIDCOMM_ATTACHMENT_DATA
+                && kotoba_edn::to_string(&d.v).contains(":json {:name \"Alice\"")
+        }));
         let attachment_edn = datoms
             .iter()
             .find(|d| d.a == ATTR_DIDCOMM_ATTACHMENT)

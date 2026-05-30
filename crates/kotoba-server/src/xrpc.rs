@@ -8660,7 +8660,12 @@ mod tests {
             created_time: Some(1),
             expires_time: None,
             body: json!({"content": "hello from DIDComm"}),
-            attachments: vec![],
+            attachments: vec![kotoba_didcomm::Attachment {
+                id: "attachment-normalized-1".into(),
+                description: Some("DIDComm attachment normalized as datom entity".into()),
+                media_type: Some("application/json".into()),
+                data: json!({"profile": {"name": "Alice"}}),
+            }],
         };
         let atproto_req = AtprotoRepoWriteReq {
             graph: graph.to_multibase(),
@@ -8707,13 +8712,18 @@ mod tests {
 
         let reader = DistributedDatomReader::new(&store, &ipns);
         let query = kotoba_edn::parse(
-            r#"{:find [?issuer ?status ?proofPurpose ?thread ?threadScope ?atprotoResource ?text]
+            r#"{:find [?issuer ?status ?proofPurpose ?thread ?threadScope ?attachmentMedia ?attachmentName ?atprotoResource ?text]
                 :where [[?vc :credential/issuer ?issuer]
                         [?vc :credential/subject/role "issuer"]
                         [?vc :credential/status/id ?status]
                         [?vc :credential/proof/proofPurpose ?proofPurpose]
                         [?msg :didcomm/thread ?thread]
                         [?msg :didcomm/threadScope ?threadScope]
+                        [?msg :didcomm/attachmentCid ?attachmentCid]
+                        [?attachment :didcomm/attachmentCid ?attachmentCid]
+                        [?attachment :didcomm/attachment/mediaType ?attachmentMedia]
+                        [?attachment :didcomm/attachment/data ?attachmentData]
+                        [(get-in ?attachmentData [:profile :name]) ?attachmentName]
                         [?post :atproto/resource ?atprotoResource]
                         [?post :atproto/record/text ?text]]}"#,
         )
@@ -8728,6 +8738,8 @@ mod tests {
                 EdnValue::string("assertionMethod"),
                 EdnValue::string("thread-normalized-1"),
                 EdnValue::string("didcomm://thread/thread-normalized-1"),
+                EdnValue::string("application/json"),
+                EdnValue::string("Alice"),
                 EdnValue::string("at://did:plc:alice/app.bsky.feed.post/r1"),
                 EdnValue::string("hello from ATProto"),
             ]]
