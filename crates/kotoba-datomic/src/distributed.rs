@@ -1847,7 +1847,7 @@ where
                 .and_then(|values| {
                     crate::query_collection_slice_value(op, values).map_err(Into::into)
                 }),
-            "reverse" | "sort" => args
+            "reverse" | "sort" | "flatten" | "interpose" | "interleave" => args
                 .iter()
                 .map(|arg| required_query_value(arg, binding))
                 .collect::<Result<Vec<_>, _>>()
@@ -6741,7 +6741,7 @@ mod tests {
         );
 
         let collection_predicate_query = kotoba_edn::parse(
-            r#"{:find [?allTags ?noNilTags ?notEveryTagString ?tagsVector ?sameTag ?hasTag ?notFalse ?truthyTags ?tagsString ?tagKeywords ?nonStringTags ?keptTags ?sum ?product ?max ?applySum ?applyMax ?applySet ?initialOdds ?afterOdds]
+            r#"{:find [?allTags ?noNilTags ?notEveryTagString ?tagsVector ?sameTag ?hasTag ?notFalse ?truthyTags ?tagsString ?tagKeywords ?nonStringTags ?keptTags ?sum ?product ?max ?applySum ?applyMax ?applySet ?initialOdds ?afterOdds ?flat ?interposed ?interleaved]
                 :where [[?e :credential/claims ?claims]
                         [(get ?claims :claim/tags) ?tags]
                         [(distinct? :role/admin :role/auditor :role/operator)]
@@ -6766,6 +6766,9 @@ mod tests {
                         [(apply hash-set [1 2 3]) ?applySet]
                         [(take-while odd? [1 3 2 5]) ?initialOdds]
                         [(drop-while odd? [1 3 2 5]) ?afterOdds]
+                        [(flatten [[1 2] [3 [4]]]) ?flat]
+                        [(interpose 0 [1 2 3]) ?interposed]
+                        [(interleave [1 2 3] [:a :b :c]) ?interleaved]
                         [(= ?allTags true)]
                         [(= ?noNilTags true)]
                         [(= ?notEveryTagString true)]
@@ -6816,6 +6819,27 @@ mod tests {
                 ])),
                 EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(3)]),
                 EdnValue::Vector(vec![EdnValue::Integer(2), EdnValue::Integer(5)]),
+                EdnValue::Vector(vec![
+                    EdnValue::Integer(1),
+                    EdnValue::Integer(2),
+                    EdnValue::Integer(3),
+                    EdnValue::Integer(4),
+                ]),
+                EdnValue::Vector(vec![
+                    EdnValue::Integer(1),
+                    EdnValue::Integer(0),
+                    EdnValue::Integer(2),
+                    EdnValue::Integer(0),
+                    EdnValue::Integer(3),
+                ]),
+                EdnValue::Vector(vec![
+                    EdnValue::Integer(1),
+                    EdnValue::Keyword(Keyword::parse("a")),
+                    EdnValue::Integer(2),
+                    EdnValue::Keyword(Keyword::parse("b")),
+                    EdnValue::Integer(3),
+                    EdnValue::Keyword(Keyword::parse("c")),
+                ]),
             ]]
         );
 

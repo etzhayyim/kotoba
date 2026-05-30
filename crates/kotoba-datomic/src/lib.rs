@@ -2771,7 +2771,9 @@ fn query_apply_value_function(op: &str, args: Vec<EdnValue>) -> Result<EdnValue>
         "take" | "drop" | "take-while" | "drop-while" | "subvec" => {
             query_collection_slice_value(op, args)
         }
-        "reverse" | "sort" => query_collection_order_value(op, args),
+        "reverse" | "sort" | "flatten" | "interpose" | "interleave" => {
+            query_collection_order_value(op, args)
+        }
         "cons" => query_cons_value(args),
         "conj" => query_conj_value(args),
         "assoc" => query_assoc_value(args),
@@ -3206,16 +3208,69 @@ pub(crate) fn query_collection_slice_value(op: &str, args: Vec<EdnValue>) -> Res
 }
 
 pub(crate) fn query_collection_order_value(op: &str, args: Vec<EdnValue>) -> Result<EdnValue> {
-    let [collection]: [EdnValue; 1] = args
-        .try_into()
-        .map_err(|_| DatomicError::Query(format!("{op} expects one argument")))?;
-    let mut values = query_seq_values(collection)?;
     match op {
-        "reverse" => values.reverse(),
-        "sort" => values.sort_by(query_sort_order),
+        "reverse" | "sort" | "flatten" => {
+            let [collection]: [EdnValue; 1] = args
+                .try_into()
+                .map_err(|_| DatomicError::Query(format!("{op} expects one argument")))?;
+            let mut values = query_seq_values(collection)?;
+            match op {
+                "reverse" => values.reverse(),
+                "sort" => values.sort_by(query_sort_order),
+                "flatten" => {
+                    let mut out = Vec::new();
+                    query_flatten_into(values, &mut out);
+                    values = out;
+                }
+                _ => unreachable!("matched collection order op"),
+            }
+            Ok(EdnValue::Vector(values))
+        }
+        "interpose" => {
+            let [separator, collection]: [EdnValue; 2] = args
+                .try_into()
+                .map_err(|_| DatomicError::Query("interpose expects two arguments".into()))?;
+            let values = query_seq_values(collection)?;
+            let mut out = Vec::with_capacity(values.len().saturating_mul(2).saturating_sub(1));
+            for (idx, value) in values.into_iter().enumerate() {
+                if idx > 0 {
+                    out.push(separator.clone());
+                }
+                out.push(value);
+            }
+            Ok(EdnValue::Vector(out))
+        }
+        "interleave" => {
+            if args.is_empty() {
+                return Err(DatomicError::Query(
+                    "interleave expects at least one collection".into(),
+                ));
+            }
+            let columns = args
+                .into_iter()
+                .map(query_seq_values)
+                .collect::<Result<Vec<_>>>()?;
+            let min_len = columns.iter().map(Vec::len).min().unwrap_or(0);
+            let mut out = Vec::with_capacity(min_len.saturating_mul(columns.len()));
+            for idx in 0..min_len {
+                for column in &columns {
+                    out.push(column[idx].clone());
+                }
+            }
+            Ok(EdnValue::Vector(out))
+        }
         other => return Err(DatomicError::UnsupportedOperation(other.into())),
     }
-    Ok(EdnValue::Vector(values))
+}
+
+fn query_flatten_into(values: Vec<EdnValue>, out: &mut Vec<EdnValue>) {
+    for value in values {
+        match value {
+            EdnValue::Vector(values) | EdnValue::List(values) => query_flatten_into(values, out),
+            EdnValue::Set(values) => query_flatten_into(values.into_iter().collect(), out),
+            other => out.push(other),
+        }
+    }
 }
 
 fn query_sort_order(left: &EdnValue, right: &EdnValue) -> std::cmp::Ordering {
@@ -5353,7 +5408,7 @@ fn eval_query_function(
             .map(|arg| resolve_query_value(arg, binding))
             .collect::<Result<Vec<_>>>()
             .and_then(|values| query_collection_slice_value(op, values)),
-        "reverse" | "sort" => args
+        "reverse" | "sort" | "flatten" | "interpose" | "interleave" => args
             .iter()
             .map(|arg| resolve_query_value(arg, binding))
             .collect::<Result<Vec<_>>>()
@@ -8552,7 +8607,7 @@ mod tests {
         .await
         .unwrap();
         let query = parse(
-            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString ?incScores ?oddScores ?nonOddScores ?nonEmptyNames ?scoreSum ?scoreProduct ?scoreMax ?applySum ?applyMax ?scoreSet ?initialOdds ?afterOdds]
+            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString ?incScores ?oddScores ?nonOddScores ?nonEmptyNames ?scoreSum ?scoreProduct ?scoreMax ?applySum ?applyMax ?scoreSet ?initialOdds ?afterOdds ?flatScores ?interposedScores ?interleavedScores]
                 :where [[?e :person/scores ?scores]
                         [?e :person/names ?names]
                         [(distinct? 1 2 3)]
@@ -8579,6 +8634,9 @@ mod tests {
                         [(apply hash-set ?scores) ?scoreSet]
                         [(take-while odd? ?scores) ?initialOdds]
                         [(drop-while odd? ?scores) ?afterOdds]
+                        [(flatten [[1 2 3] [4 [5]]]) ?flatScores]
+                        [(interpose 0 ?scores) ?interposedScores]
+                        [(interleave ?scores [:a :b :c]) ?interleavedScores]
                         [(= ?allScores true)]
                         [(= ?notEveryScoreString true)]
                         [(= ?noNilScores true)]
@@ -8628,6 +8686,28 @@ mod tests {
                 ])),
                 EdnValue::Vector(vec![EdnValue::Integer(1)]),
                 EdnValue::Vector(vec![EdnValue::Integer(2), EdnValue::Integer(3)]),
+                EdnValue::Vector(vec![
+                    EdnValue::Integer(1),
+                    EdnValue::Integer(2),
+                    EdnValue::Integer(3),
+                    EdnValue::Integer(4),
+                    EdnValue::Integer(5),
+                ]),
+                EdnValue::Vector(vec![
+                    EdnValue::Integer(1),
+                    EdnValue::Integer(0),
+                    EdnValue::Integer(2),
+                    EdnValue::Integer(0),
+                    EdnValue::Integer(3),
+                ]),
+                EdnValue::Vector(vec![
+                    EdnValue::Integer(1),
+                    kw_value(":a"),
+                    EdnValue::Integer(2),
+                    kw_value(":b"),
+                    EdnValue::Integer(3),
+                    kw_value(":c"),
+                ]),
             ]]
         );
     }
