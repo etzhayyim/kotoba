@@ -65,7 +65,8 @@
                         "type": "union",
                         "refs": [
                           "#serviceEndpointString",
-                          "#serviceEndpointStringArray"
+                          "#serviceEndpointStringArray",
+                          "#serviceEndpointObject"
                         ]
                       }
                     }
@@ -149,6 +150,21 @@
     "serviceEndpointStringArray": {
       "type": "array",
       "items": { "type": "string" }
+    },
+    "serviceEndpointObject": {
+      "type": "object",
+      "properties": {
+        "uri": { "type": "string" },
+        "endpoint": { "type": "string" },
+        "accept": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "routingKeys": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
     }
   }
 }

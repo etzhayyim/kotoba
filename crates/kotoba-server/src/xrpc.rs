@@ -8387,8 +8387,9 @@ mod tests {
     };
     use crate::server::KotobaState;
     use axum::response::IntoResponse;
+    use kotoba_auth::did_document::ServiceEndpointValue;
     use kotoba_auth::{
-        DidDocument, ATPROTO_PDS_SERVICE, DIDCOMM_MESSAGING_SERVICE,
+        DidDocument, ServiceEndpoint, ATPROTO_PDS_SERVICE, DIDCOMM_MESSAGING_SERVICE,
         KOTOBA_GRAPH_MEMBERSHIP_SERVICE, KOTOBA_NODE_SERVICE,
     };
     use kotoba_core::cid::KotobaCid;
@@ -9354,11 +9355,20 @@ mod tests {
 
         let did = "did:plc:xrpcdistributedagent";
         let mut document = DidDocument::empty(did);
-        document.push_single_service(
-            "didcomm",
-            DIDCOMM_MESSAGING_SERVICE,
-            "didcomm://mediator/xrpcdistributedagent",
-        );
+        document.service.push(ServiceEndpoint {
+            id: format!("{did}#didcomm"),
+            service_type: DIDCOMM_MESSAGING_SERVICE.into(),
+            endpoint: ServiceEndpointValue::Object(
+                serde_json::json!({
+                    "uri": "didcomm://mediator/xrpcdistributedagent",
+                    "accept": ["didcomm/v2"],
+                    "routingKeys": ["did:key:zMediator#key-x25519"]
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        });
         document.push_single_service(
             "atproto-pds",
             ATPROTO_PDS_SERVICE,
@@ -9406,6 +9416,27 @@ mod tests {
             resolved.didcomm_endpoint(),
             Some("didcomm://mediator/xrpcdistributedagent")
         );
+        match &resolved
+            .service_by_type(DIDCOMM_MESSAGING_SERVICE)
+            .expect("didcomm service")
+            .endpoint
+        {
+            ServiceEndpointValue::Object(endpoint) => {
+                assert_eq!(
+                    endpoint.get("uri").and_then(serde_json::Value::as_str),
+                    Some("didcomm://mediator/xrpcdistributedagent")
+                );
+                assert_eq!(
+                    endpoint
+                        .get("accept")
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|values| values.first())
+                        .and_then(serde_json::Value::as_str),
+                    Some("didcomm/v2")
+                );
+            }
+            other => panic!("expected object DIDComm service endpoint, got {other:?}"),
+        }
         assert_eq!(
             resolved.atproto_pds_endpoint(),
             Some("https://pds.xrpcdistributedagent.example")
@@ -12562,7 +12593,11 @@ mod tests {
             "service",
             "serviceEndpoint",
             "union",
-            &["#serviceEndpointString", "#serviceEndpointStringArray"],
+            &[
+                "#serviceEndpointString",
+                "#serviceEndpointStringArray",
+                "#serviceEndpointObject",
+            ],
         );
         assert_lexicon_output_fields(
             src,
