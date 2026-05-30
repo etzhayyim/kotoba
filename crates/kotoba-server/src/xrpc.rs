@@ -2785,6 +2785,10 @@ fn atproto_repo_record_entity_cid(uri: &str) -> kotoba_core::cid::KotobaCid {
     kotoba_core::cid::KotobaCid::from_bytes(uri.as_bytes())
 }
 
+fn atproto_did_derived_cid(did: &str) -> kotoba_core::cid::KotobaCid {
+    kotoba_core::cid::KotobaCid::from_bytes(did.as_bytes())
+}
+
 fn append_atproto_cid_datoms(
     out: &mut Vec<kotoba_datomic::Datom>,
     entity_cid: &kotoba_core::cid::KotobaCid,
@@ -2898,12 +2902,22 @@ fn atproto_repo_write_datoms(
         ),
     ];
     if uri.authority.starts_with("did:") {
-        out.push(kotoba_datomic::Datom::assert(
-            entity_cid.clone(),
-            "atproto/did".to_string(),
-            kotoba_edn::EdnValue::string(&uri.authority),
-            tx_cid.clone(),
-        ));
+        out.extend([
+            kotoba_datomic::Datom::assert(
+                entity_cid.clone(),
+                "atproto/did".to_string(),
+                kotoba_edn::EdnValue::string(&uri.authority),
+                tx_cid.clone(),
+            ),
+            kotoba_datomic::Datom::assert(
+                entity_cid.clone(),
+                "atproto/didCid".to_string(),
+                kotoba_edn::EdnValue::string(
+                    atproto_did_derived_cid(&uri.authority).to_multibase(),
+                ),
+                tx_cid.clone(),
+            ),
+        ]);
     }
     if let Some(record_edn) = &record_edn {
         out.push(kotoba_datomic::Datom::assert(
@@ -2989,6 +3003,7 @@ fn atproto_repo_delete_datoms(
                         | "atproto/nsid"
                         | "atproto/rkey"
                         | "atproto/did"
+                        | "atproto/didCid"
                 )
         })
         .map(|datom| kotoba_datomic::Datom::retract(datom.e, datom.a, datom.v, tx_cid.clone()))
@@ -3056,12 +3071,22 @@ fn atproto_repo_delete_datoms(
         ),
     ]);
     if uri.authority.starts_with("did:") {
-        out.push(kotoba_datomic::Datom::assert(
-            entity_cid.clone(),
-            "atproto/did".to_string(),
-            kotoba_edn::EdnValue::string(&uri.authority),
-            tx_cid.clone(),
-        ));
+        out.extend([
+            kotoba_datomic::Datom::assert(
+                entity_cid.clone(),
+                "atproto/did".to_string(),
+                kotoba_edn::EdnValue::string(&uri.authority),
+                tx_cid.clone(),
+            ),
+            kotoba_datomic::Datom::assert(
+                entity_cid.clone(),
+                "atproto/didCid".to_string(),
+                kotoba_edn::EdnValue::string(
+                    atproto_did_derived_cid(&uri.authority).to_multibase(),
+                ),
+                tx_cid.clone(),
+            ),
+        ]);
     }
     out
 }
@@ -9725,6 +9750,11 @@ mod tests {
             "atproto/resource",
             EdnValue::string("at://did:plc:alice/app.bsky.feed.post/r1")
         ));
+        assert!(has("atproto/did", EdnValue::string("did:plc:alice")));
+        assert!(has(
+            "atproto/didCid",
+            EdnValue::string(KotobaCid::from_bytes(b"did:plc:alice").to_multibase())
+        ));
         assert!(has(
             "atproto/recordWireFormat",
             EdnValue::string("application/dag-cbor")
@@ -9780,6 +9810,14 @@ mod tests {
             datom.e == entity_cid
                 && datom.a == "atproto/deleted"
                 && datom.v == EdnValue::Bool(true)
+                && datom.t == delete_tx_cid
+                && datom.added
+        }));
+        assert!(delete_datoms.iter().any(|datom| {
+            datom.e == entity_cid
+                && datom.a == "atproto/didCid"
+                && datom.v
+                    == EdnValue::string(KotobaCid::from_bytes(b"did:plc:alice").to_multibase())
                 && datom.t == delete_tx_cid
                 && datom.added
         }));
