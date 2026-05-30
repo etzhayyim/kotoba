@@ -12000,6 +12000,19 @@ mod tests {
         );
 
         let graph_sparql = include_str!("../../../lexicons/ai/gftd/apps/kotoba/graph/sparql.json");
+        let graph_sparql_value: serde_json::Value =
+            serde_json::from_str(graph_sparql).expect("graph.sparql lexicon JSON");
+        let graph_sparql_description = graph_sparql_value["defs"]["main"]["description"]
+            .as_str()
+            .expect("graph.sparql description");
+        assert!(
+            graph_sparql_description.contains("auxiliary SPARQL"),
+            "graph.sparql must remain an auxiliary query surface over Datomic/Datoms"
+        );
+        assert!(
+            graph_sparql_description.contains("primary Kotoba distributed Datomic/Datom graph"),
+            "graph.sparql must not be described as the primary source of truth"
+        );
         assert_lexicon_input_fields(
             graph_sparql,
             &["query"],

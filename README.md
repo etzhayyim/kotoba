@@ -9,7 +9,7 @@ KOTOBA ≝ Datom[CID/T] × EAVT[KSE Topic] × Pregel[BSP] × Datalog[Δ]
 
 Kotoba is a distributed, content-addressed knowledge graph database designed
 for decentralized AI agent systems.  It combines Datomic-style immutable
-datoms, Pregel BSP graph computation, a real SPARQL 1.1 executor over IPFS
+datoms, Pregel BSP graph computation, an auxiliary SPARQL 1.1 executor over IPFS
 storage, native CACAO authentication, and WASM Component Model execution.
 
 ## Install
@@ -45,7 +45,8 @@ cargo install --locked --path crates/kotoba-cli --bin kotoba
 
 ## Quick start
 
-The full IPFS + CACAO + SPARQL stack runs as four single-shot commands:
+The full IPFS + CACAO + Datomic/Datalog stack, with SPARQL as an auxiliary
+query surface, runs as four single-shot commands:
 
 ```bash
 # 1. One-time: generate Ed25519 + X25519 + DID, persist to macOS Keychain
@@ -131,10 +132,15 @@ exactly how to silence or fix it.
 - **AT Protocol native** — Datom projection backed by commit DAG and JetStream
 - **WASM runtime** — arbitrary graph logic as Component Model guests
 - **E2E encryption** — Signal Protocol + CACAO auth for consent-gated data
-- **SPARQL 1.1 + Datalog** — the same Datom-backed projection answers both; CID-addressed MV cache turns repeat queries into µs lookups
+- **Datomic/Datalog primary, SPARQL auxiliary** — the distributed Datom DB is the source of truth; SPARQL 1.1 reads the same projection for RDF-compatible query and federation
 - **CACAO-native authz** — depth-2 delegation chains, multi-graph grants, anti-replay nonce
 
-## SPARQL surface
+## Query Surfaces
+
+Primary query/write semantics are Datomic-style Datom APIs and Datalog over
+the immutable `(E,A,V,T,Added)` history. SPARQL is intentionally a secondary
+RDF-compatible query surface over that Datomic/IPLD head, not a competing
+source of truth.
 
 Server endpoint: `POST /xrpc/ai.gftd.apps.kotoba.graph.sparql`
 

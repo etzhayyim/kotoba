@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Execute SPARQL SELECT, ASK, DESCRIBE, or CONSTRUCT over a Kotoba distributed Datom graph.",
+      "description": "Execute auxiliary SPARQL SELECT, ASK, DESCRIBE, or CONSTRUCT over the primary Kotoba distributed Datomic/Datom graph.",
       "input": {
         "encoding": "application/json",
         "schema": {
