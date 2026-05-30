@@ -208,6 +208,26 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn generic_xrpc_dispatch_resolves() {
+        use axum::http::Request;
+        use tower::ServiceExt;
+        
+        let state = std::sync::Arc::new(super::server::KotobaState::new(None).expect("state"));
+        let app = super::build_router(state);
+        
+        let req = Request::builder()
+            .method("POST")
+            .uri("/xrpc/ai.gftd.apps.yata.some_method")
+            .body(axum::body::Body::empty())
+            .unwrap();
+            
+        let response = app.oneshot(req).await.unwrap();
+        // Since we provided empty body, we expect a 400 Bad Request or 401 Unauthorized,
+        // but definitely NOT a 404 Not Found (which means no route matched)
+        assert_ne!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    }
 }
 
 pub fn build_router(state: Arc<KotobaState>) -> Router {
@@ -542,6 +562,8 @@ pub fn build_router(state: Arc<KotobaState>) -> Router {
             &format!("/xrpc/{}", firehose::NSID_SYNC_EVENTS),
             get(firehose::events),
         )
+        // ── Generic XRPC dispatch ──────────────────────────────────────────
+        .route("/xrpc/:nsid", post(xrpc::generic_invoke))
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             fingerprint::fingerprint_middleware,

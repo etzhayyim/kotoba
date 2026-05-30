@@ -1,3 +1,4 @@
+pub mod atmst;
 pub mod atproto;
 pub mod commit;
 pub mod jetstream;

@@ -8,6 +8,7 @@ use kotoba_auth::eth::{abi, token::erc20};
 use wasmtime::component::{Component, ComponentType, Lift, Linker, Lower};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
+use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
 
 /// Type alias for a synchronous local inference function.
 ///
@@ -86,6 +87,10 @@ pub struct HostState {
     /// Dense embedding function — routes to HttpEmbedClient when configured.
     /// Type-erased to avoid kotoba-runtime → kotoba-ingest dependency.
     pub embed_fn: Option<EmbedFn>,
+    /// WASI HTTP context for wasi:http egress.
+    pub wasi_http_ctx: WasiHttpCtx,
+    /// Optional allow-list for outbound HTTP host glob patterns (None = allow all).
+    pub http_egress_allow: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +104,16 @@ pub struct PendingQuad {
 impl HostState {
     pub fn new(agent_did: impl Into<String>, gas_limit: u64) -> Self {
         let wasi_ctx = WasiCtxBuilder::new().inherit_stderr().build();
+        let allow_list = std::env::var("KOTOBA_HTTP_EGRESS_ALLOW")
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| !v.is_empty());
+
         Self {
             agent_did: agent_did.into(),
             gas_remaining: gas_limit,
@@ -115,6 +130,8 @@ impl HostState {
             kse_inbox: Vec::new(),
             source_chain_head: None,
             embed_fn: None,
+            wasi_http_ctx: WasiHttpCtx::new(),
+            http_egress_allow: allow_list,
         }
     }
 
@@ -197,6 +214,45 @@ impl WasiView for HostState {
     }
 }
 
+impl WasiHttpView for HostState {
+    fn ctx(&mut self) -> &mut WasiHttpCtx {
+        &mut self.wasi_http_ctx
+    }
+
+    fn table(&mut self) -> &mut ResourceTable {
+        &mut self.wasi_table
+    }
+
+    fn send_request(
+        &mut self,
+        request: hyper::Request<wasmtime_wasi_http::body::HyperOutgoingBody>,
+        config: wasmtime_wasi_http::types::OutgoingRequestConfig,
+    ) -> wasmtime_wasi_http::HttpResult<wasmtime_wasi_http::types::HostFutureIncomingResponse> {
+        // Charge gas for outbound HTTP
+        if let Err(_) = self.charge_gas(1000) {
+            return Err(wasmtime_wasi_http::bindings::http::types::ErrorCode::InternalError(Some("gas exhausted".to_string())).into());
+        }
+
+        // Check allow-list
+        if let Some(allow_list) = &self.http_egress_allow {
+            let host = request.uri().host().unwrap_or("");
+            let allowed = allow_list.iter().any(|pattern| {
+                if pattern.starts_with("*.") {
+                    let suffix = &pattern[1..];
+                    host == &pattern[2..] || host.ends_with(suffix)
+                } else {
+                    host == pattern
+                }
+            });
+            if !allowed {
+                return Err(wasmtime_wasi_http::bindings::http::types::ErrorCode::HttpRequestDenied.into());
+            }
+        }
+
+        Ok(wasmtime_wasi_http::types::default_send_request(request, config))
+    }
+}
+
 /// Central wasmtime Engine shared across all invocations (thread-safe, clone is cheap).
 #[derive(Clone)]
 pub struct KotobaEngine(Engine);
@@ -242,6 +298,8 @@ impl KotobaLinker {
     pub fn bind_kotoba_interfaces(&mut self) -> Result<()> {
         // WASI preview2 — needed by all wasm32-wasip2 components
         wasmtime_wasi::add_to_linker_sync(&mut self.0)?;
+        // WASI HTTP preview2
+        wasmtime_wasi_http::add_only_http_to_linker_sync(&mut self.0)?;
         // Kotoba host interfaces
         bind_kqe(&mut self.0)?;
         bind_kse(&mut self.0)?;

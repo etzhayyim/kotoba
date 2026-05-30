@@ -48,12 +48,14 @@ mod tests {
     use wasmtime::component::{Component, Linker};
     use wasmtime::{Config, Engine, Store};
     use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
+    use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
 
     use crate::host::WitQuad;
 
     struct TestState {
         wasi_ctx: WasiCtx,
         wasi_table: ResourceTable,
+        wasi_http_ctx: WasiHttpCtx,
     }
     impl WasiView for TestState {
         fn ctx(&mut self) -> &mut WasiCtx {
@@ -61,6 +63,21 @@ mod tests {
         }
         fn table(&mut self) -> &mut ResourceTable {
             &mut self.wasi_table
+        }
+    }
+    impl WasiHttpView for TestState {
+        fn ctx(&mut self) -> &mut WasiHttpCtx {
+            &mut self.wasi_http_ctx
+        }
+        fn table(&mut self) -> &mut ResourceTable {
+            &mut self.wasi_table
+        }
+        fn send_request(
+            &mut self,
+            request: hyper::Request<wasmtime_wasi_http::body::HyperOutgoingBody>,
+            config: wasmtime_wasi_http::types::OutgoingRequestConfig,
+        ) -> wasmtime_wasi_http::HttpResult<wasmtime_wasi_http::types::HostFutureIncomingResponse> {
+            Ok(wasmtime_wasi_http::types::default_send_request(request, config))
         }
     }
 
@@ -79,6 +96,7 @@ mod tests {
 
         let mut linker: Linker<TestState> = Linker::new(&engine);
         wasmtime_wasi::add_to_linker_sync(&mut linker)?;
+        wasmtime_wasi_http::add_only_http_to_linker_sync(&mut linker)?;
 
         {
             let mut inst = linker.instance("kotoba:kais/kqe@0.1.0")?;
@@ -320,6 +338,7 @@ mod tests {
         let state = TestState {
             wasi_ctx: WasiCtxBuilder::new().inherit_stderr().build(),
             wasi_table: ResourceTable::new(),
+            wasi_http_ctx: WasiHttpCtx::new(),
         };
         let mut store = Store::new(&engine, state);
         let _instance = linker
@@ -435,5 +454,62 @@ mod tests {
     fn host_state_embed_fn_none_on_new() {
         let state = crate::host::HostState::new("did:plc:test", 1_000);
         assert!(state.embed_fn.is_none());
+    }
+}
+
+#[cfg(test)]
+mod wasi_http_tests {
+    use anyhow::Result;
+    use wasmtime::component::{Component, Linker};
+    use wasmtime::{Config, Engine, Store};
+    use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
+    use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
+
+    struct TestState {
+        wasi_ctx: WasiCtx,
+        wasi_table: ResourceTable,
+        wasi_http_ctx: WasiHttpCtx,
+    }
+    impl WasiView for TestState {
+        fn ctx(&mut self) -> &mut WasiCtx { &mut self.wasi_ctx }
+        fn table(&mut self) -> &mut ResourceTable { &mut self.wasi_table }
+    }
+    impl WasiHttpView for TestState {
+        fn ctx(&mut self) -> &mut WasiHttpCtx { &mut self.wasi_http_ctx }
+        fn table(&mut self) -> &mut ResourceTable { &mut self.wasi_table }
+        fn send_request(
+            &mut self,
+            request: hyper::Request<wasmtime_wasi_http::body::HyperOutgoingBody>,
+            config: wasmtime_wasi_http::types::OutgoingRequestConfig,
+        ) -> wasmtime_wasi_http::HttpResult<wasmtime_wasi_http::types::HostFutureIncomingResponse> {
+            Ok(wasmtime_wasi_http::types::default_send_request(request, config))
+        }
+    }
+
+    #[test]
+    fn test_wasi_http_instantiates() -> Result<()> {
+        let mut config = Config::new();
+        config.wasm_component_model(true);
+        let engine = Engine::new(&config)?;
+        
+        let wat = r#"
+        (component
+            (import "wasi:http/outgoing-handler@0.2.0" (instance))
+        )
+        "#;
+        let component = Component::new(&engine, wat)?;
+        
+        let mut linker: Linker<TestState> = Linker::new(&engine);
+        wasmtime_wasi_http::add_only_http_to_linker_sync(&mut linker)?;
+        
+        let state = TestState {
+            wasi_ctx: WasiCtxBuilder::new().build(),
+            wasi_table: ResourceTable::new(),
+            wasi_http_ctx: WasiHttpCtx::new(),
+        };
+        let mut store = Store::new(&engine, state);
+        
+        let _instance = linker.instantiate(&mut store, &component)?;
+        Ok(())
     }
 }

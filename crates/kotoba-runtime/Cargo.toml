@@ -29,6 +29,10 @@ wasmtime-wasi-http = { version = "25" }
 # Caching compiled WASM components
 dashmap = "5"
 
+# HTTP
+http = "1"
+hyper = "1"
+
 # EVM JSON-RPC bridge (CALL_FOREIGN class, 5s timeout)
 hex.workspace  = true
 ureq           = { version = "2", features = ["json"] }

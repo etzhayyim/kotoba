@@ -125,6 +125,7 @@ world kotoba-node {
     import llm;
     import chain;
     import evm;
+    
 
     /// Entry point called by KotobaRuntime for each Invoke ChainEntry.
     /// ctx-cbor: CBOR-encoded InvokeContext { graph, session_cid, args }

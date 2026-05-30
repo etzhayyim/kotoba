@@ -13524,3 +13524,88 @@ mod tests {
         assert_eq!(super::MAX_CACAO_B64_LEN, 8 * 1024);
     }
 }
+
+// ── Generic XRPC dispatch ──────────────────────────────────────────────────
+
+#[cfg(feature = "wasm-runtime")]
+pub async fn generic_invoke(
+    axum::extract::Path(nsid): axum::extract::Path<String>,
+    State(state): State<Arc<KotobaState>>,
+    headers: axum::http::HeaderMap,
+    Json(req_body): Json<serde_json::Value>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    crate::graph_auth::require_operator_auth(&headers, &state.operator_did)?;
+
+    let parts: Vec<&str> = nsid.split('.').collect();
+    if parts.len() < 5 || parts[0..3] != ["ai", "gftd", "apps"] {
+        return Err((StatusCode::BAD_REQUEST, "invalid generic nsid".into()));
+    }
+    let app = parts[3];
+
+    let graph_cid = kotoba_core::cid::KotobaCid::from_bytes(b"kotoba/network/nodes");
+    let ipns_name = distributed_graph_ipns_name(&graph_cid);
+    let mut program_cid = app.to_string();
+
+    if let Ok(Some(db)) = DistributedDatomReader::new(&*state.block_store, &*state.ipns_registry).current_db_for_name(&ipns_name) {
+        for datom in db.datoms() {
+            if datom.a == "node/did" {
+                if let kotoba_datomic::Value::String(s) = &datom.v {
+                    if s == app || s.ends_with(&format!("{app}.gftd.co.jp")) {
+                        if let Some(endpoint) = db.datoms().iter().find(|d| d.e == datom.e && d.a == "node/endpoint") {
+                            if let kotoba_datomic::Value::String(ep) = &endpoint.v {
+                                program_cid = ep.to_string();
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut ctx_cbor = Vec::new();
+    ciborium::into_writer(&req_body, &mut ctx_cbor).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("cbor encode: {e}")))?;
+
+    let agent_did = state.operator_did.clone();
+    let router = Arc::clone(&state.router);
+
+    let result = tokio::task::spawn_blocking(move || {
+        router.dispatch_with_snapshot(
+            &program_cid,
+            kotoba_dht::source_chain::ProgramType::WasmNode,
+            &agent_did,
+            0,
+            None,
+            ctx_cbor,
+            None,
+            None,
+            &[],
+            10_000,
+            vec![],
+            std::collections::HashMap::new(),
+        )
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    match result {
+        kotoba_vm::DispatchResult::Wasm(r) => {
+            let out_val: serde_json::Value = ciborium::from_reader(r.output_cbor.as_slice())
+                .unwrap_or(serde_json::json!({ "output_bytes": r.output_cbor }));
+            Ok(Json(out_val))
+        }
+        _ => Err((StatusCode::INTERNAL_SERVER_ERROR, "expected wasm result".into())),
+    }
+}
+
+#[cfg(not(feature = "wasm-runtime"))]
+pub async fn generic_invoke(
+    axum::extract::Path(_nsid): axum::extract::Path<String>,
+    State(state): State<Arc<KotobaState>>,
+    headers: axum::http::HeaderMap,
+    Json(_req_body): Json<serde_json::Value>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    crate::graph_auth::require_operator_auth(&headers, &state.operator_did)?;
+    Err((StatusCode::SERVICE_UNAVAILABLE, "generic dispatch requires the `wasm-runtime` feature".to_string()))
+}

@@ -13,6 +13,7 @@ kotoba-kse.workspace = true
 kotoba-kqe.workspace = true
 kotoba-auth = { path = "../kotoba-auth" }
 ciborium.workspace = true
+sha2.workspace = true
 anyhow.workspace = true
 dashmap.workspace = true
 tokio.workspace = true
