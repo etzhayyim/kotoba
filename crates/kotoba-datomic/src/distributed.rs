@@ -1813,6 +1813,11 @@ where
                 .and_then(|values| {
                     crate::query_collection_transform_value(op, values).map_err(Into::into)
                 }),
+            "reduce" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_reduce_value(values).map_err(Into::into)),
             "seq" | "first" | "last" | "rest" | "next" => {
                 if args.len() != 1 {
                     return Err(DatomicError::Query(format!("{op} expects one argument")).into());
@@ -6731,7 +6736,7 @@ mod tests {
         );
 
         let collection_predicate_query = kotoba_edn::parse(
-            r#"{:find [?allTags ?noNilTags ?notEveryTagString ?tagsVector ?sameTag ?hasTag ?notFalse ?truthyTags ?tagsString ?tagKeywords ?nonStringTags ?keptTags]
+            r#"{:find [?allTags ?noNilTags ?notEveryTagString ?tagsVector ?sameTag ?hasTag ?notFalse ?truthyTags ?tagsString ?tagKeywords ?nonStringTags ?keptTags ?sum ?product ?max]
                 :where [[?e :credential/claims ?claims]
                         [(get ?claims :claim/tags) ?tags]
                         [(distinct? :role/admin :role/auditor :role/operator)]
@@ -6748,6 +6753,9 @@ mod tests {
                         [(filter keyword? ?tags) ?tagKeywords]
                         [(remove string? ?tags) ?nonStringTags]
                         [(keep identity ?tags) ?keptTags]
+                        [(reduce + 0 [1 2 3]) ?sum]
+                        [(reduce * [1 2 3]) ?product]
+                        [(reduce max [1 2 3]) ?max]
                         [(= ?allTags true)]
                         [(= ?noNilTags true)]
                         [(= ?notEveryTagString true)]
@@ -6786,6 +6794,9 @@ mod tests {
                     EdnValue::Keyword(Keyword::parse("vc")),
                     EdnValue::Keyword(Keyword::parse("ipld")),
                 ]),
+                EdnValue::Integer(6),
+                EdnValue::Integer(6),
+                EdnValue::Integer(3),
             ]]
         );
 

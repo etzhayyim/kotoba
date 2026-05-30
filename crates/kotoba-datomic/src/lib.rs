@@ -2761,6 +2761,7 @@ fn query_apply_value_function(op: &str, args: Vec<EdnValue>) -> Result<EdnValue>
             _ => Err(DatomicError::Query("not-empty expects one argument".into())),
         },
         "map" | "filter" | "remove" | "keep" => query_collection_transform_value(op, args),
+        "reduce" => query_reduce_value(args),
         "seq" | "first" | "last" | "rest" | "next" => match args.as_slice() {
             [value] => query_collection_value(op, value.clone()),
             _ => Err(DatomicError::Query(format!("{op} expects one argument"))),
@@ -2845,6 +2846,36 @@ pub(crate) fn query_collection_transform_value(op: &str, args: Vec<EdnValue>) ->
         other => return Err(DatomicError::UnsupportedOperation(other.into())),
     };
     Ok(EdnValue::Vector(out))
+}
+
+pub(crate) fn query_reduce_value(args: Vec<EdnValue>) -> Result<EdnValue> {
+    let (function, mut values, mut acc) = match args.as_slice() {
+        [function, collection] => {
+            let mut values = query_seq_values(collection.clone())?.into_iter();
+            let acc = values.next().map(Ok).unwrap_or_else(|| {
+                query_apply_value_function(&query_function_name(function)?, vec![])
+            })?;
+            (
+                query_function_name(function)?,
+                values.collect::<Vec<_>>(),
+                acc,
+            )
+        }
+        [function, init, collection] => (
+            query_function_name(function)?,
+            query_seq_values(collection.clone())?,
+            init.clone(),
+        ),
+        _ => {
+            return Err(DatomicError::Query(
+                "reduce expects a function, optional init, and one collection".into(),
+            ))
+        }
+    };
+    for value in values.drain(..) {
+        acc = query_apply_value_function(&function, vec![acc, value])?;
+    }
+    Ok(acc)
 }
 
 fn assoc_in_path(collection: EdnValue, path: &[EdnValue], value: EdnValue) -> Result<EdnValue> {
@@ -5250,6 +5281,11 @@ fn eval_query_function(
             .map(|arg| resolve_query_value(arg, binding))
             .collect::<Result<Vec<_>>>()
             .and_then(|values| query_collection_transform_value(op, values)),
+        "reduce" => args
+            .iter()
+            .map(|arg| resolve_query_value(arg, binding))
+            .collect::<Result<Vec<_>>>()
+            .and_then(query_reduce_value),
         "seq" | "first" | "last" | "rest" | "next" => {
             if args.len() != 1 {
                 return Err(DatomicError::Query(format!("{op} expects one argument")));
@@ -8470,7 +8506,7 @@ mod tests {
         .await
         .unwrap();
         let query = parse(
-            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString ?incScores ?oddScores ?nonOddScores ?nonEmptyNames]
+            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString ?incScores ?oddScores ?nonOddScores ?nonEmptyNames ?scoreSum ?scoreProduct ?scoreMax]
                 :where [[?e :person/scores ?scores]
                         [?e :person/names ?names]
                         [(distinct? 1 2 3)]
@@ -8489,6 +8525,9 @@ mod tests {
                         [(filter odd? ?scores) ?oddScores]
                         [(remove odd? ?scores) ?nonOddScores]
                         [(keep not-empty ?names) ?nonEmptyNames]
+                        [(reduce + 0 ?scores) ?scoreSum]
+                        [(reduce * ?scores) ?scoreProduct]
+                        [(reduce max ?scores) ?scoreMax]
                         [(= ?allScores true)]
                         [(= ?notEveryScoreString true)]
                         [(= ?noNilScores true)]
@@ -8526,6 +8565,9 @@ mod tests {
                     EdnValue::String("Alice".into()),
                     EdnValue::String("Alicia".into()),
                 ]),
+                EdnValue::Integer(6),
+                EdnValue::Integer(6),
+                EdnValue::Integer(3),
             ]]
         );
     }
