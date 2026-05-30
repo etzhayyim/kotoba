@@ -2760,7 +2760,8 @@ fn query_apply_value_function(op: &str, args: Vec<EdnValue>) -> Result<EdnValue>
             [value] => query_not_empty_value(value.clone()),
             _ => Err(DatomicError::Query("not-empty expects one argument".into())),
         },
-        "map" | "mapcat" | "filter" | "remove" | "keep" | "some" | "group-by" | "partition-by" => {
+        "map" | "mapcat" | "map-indexed" | "filter" | "remove" | "keep" | "keep-indexed"
+        | "some" | "group-by" | "partition-by" | "sort-by" => {
             query_collection_transform_value(op, args)
         }
         "frequencies" => query_frequencies_value(args),
@@ -2843,6 +2844,13 @@ pub(crate) fn query_collection_transform_value(op: &str, args: Vec<EdnValue>) ->
             }
             out
         }
+        "map-indexed" => values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                query_apply_value_function(&function, vec![EdnValue::Integer(index as i64), value])
+            })
+            .collect::<Result<Vec<_>>>()?,
         "filter" | "remove" => {
             let keep_matching = op == "filter";
             values
@@ -2865,6 +2873,20 @@ pub(crate) fn query_collection_transform_value(op: &str, args: Vec<EdnValue>) ->
                     Err(err) => Some(Err(err)),
                 },
             )
+            .collect::<Result<Vec<_>>>()?,
+        "keep-indexed" => values
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, value)| {
+                match query_apply_value_function(
+                    &function,
+                    vec![EdnValue::Integer(index as i64), value],
+                ) {
+                    Ok(EdnValue::Nil) => None,
+                    Ok(value) => Some(Ok(value)),
+                    Err(err) => Some(Err(err)),
+                }
+            })
             .collect::<Result<Vec<_>>>()?,
         "some" => {
             for value in values {
@@ -2915,6 +2937,20 @@ pub(crate) fn query_collection_transform_value(op: &str, args: Vec<EdnValue>) ->
                 out.push(EdnValue::Vector(current_values));
             }
             out
+        }
+        "sort-by" => {
+            let mut keyed = values
+                .into_iter()
+                .map(|value| {
+                    query_apply_value_function(&function, vec![value.clone()])
+                        .map(|key| (key, value))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            keyed.sort_by(|(left_key, left_value), (right_key, right_value)| {
+                query_sort_order(left_key, right_key)
+                    .then_with(|| query_sort_order(left_value, right_value))
+            });
+            keyed.into_iter().map(|(_, value)| value).collect()
         }
         other => return Err(DatomicError::UnsupportedOperation(other.into())),
     };
@@ -5681,12 +5717,12 @@ fn eval_query_function(
             }
             query_not_empty_value(resolve_query_value(&args[0], binding)?)
         }
-        "map" | "mapcat" | "filter" | "remove" | "keep" | "some" | "group-by" | "partition-by" => {
-            args.iter()
-                .map(|arg| resolve_query_value(arg, binding))
-                .collect::<Result<Vec<_>>>()
-                .and_then(|values| query_collection_transform_value(op, values))
-        }
+        "map" | "mapcat" | "map-indexed" | "filter" | "remove" | "keep" | "keep-indexed"
+        | "some" | "group-by" | "partition-by" | "sort-by" => args
+            .iter()
+            .map(|arg| resolve_query_value(arg, binding))
+            .collect::<Result<Vec<_>>>()
+            .and_then(|values| query_collection_transform_value(op, values)),
         "frequencies" => args
             .iter()
             .map(|arg| resolve_query_value(arg, binding))
@@ -8933,7 +8969,7 @@ mod tests {
         .await
         .unwrap();
         let query = parse(
-            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString ?secondScore ?lastScore ?poppedScores ?butlastScores ?droppedLastScores ?everyOtherScore ?incScores ?tailedScores ?oddScores ?nonOddScores ?nonEmptyNames ?someName ?scoreSum ?scoreProduct ?scoreMax ?applySum ?applyMax ?scoreSet ?initialOdds ?afterOdds ?splitScores ?splitOdds ?groupedScores ?partitionedScores ?scoreFrequencies ?numberRange ?repeatedScore ?scoreMap ?flatScores ?scoresIntoVector ?concatenatedScores ?distinctScores ?interposedScores ?interleavedScores ?pairs ?windows ?paddedPairs ?allPairs]
+            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString ?secondScore ?lastScore ?poppedScores ?butlastScores ?droppedLastScores ?everyOtherScore ?incScores ?indexedScores ?indexedNames ?sortedNestedScores ?tailedScores ?oddScores ?nonOddScores ?nonEmptyNames ?someName ?scoreSum ?scoreProduct ?scoreMax ?applySum ?applyMax ?scoreSet ?initialOdds ?afterOdds ?splitScores ?splitOdds ?groupedScores ?partitionedScores ?scoreFrequencies ?numberRange ?repeatedScore ?scoreMap ?flatScores ?scoresIntoVector ?concatenatedScores ?distinctScores ?interposedScores ?interleavedScores ?pairs ?windows ?paddedPairs ?allPairs]
                 :where [[?e :person/scores ?scores]
                         [?e :person/names ?names]
                         [(distinct? 1 2 3)]
@@ -8955,6 +8991,9 @@ mod tests {
                         [(drop-last 2 [1 2 3 4]) ?droppedLastScores]
                         [(take-nth 2 [1 2 3 4 5]) ?everyOtherScore]
                         [(map inc ?scores) ?incScores]
+                        [(map-indexed vector ?scores) ?indexedScores]
+                        [(keep-indexed vector ?names) ?indexedNames]
+                        [(sort-by count [[1 2 3] [1] [1 2]]) ?sortedNestedScores]
                         [(mapcat rest [[0 1] [0 2]]) ?tailedScores]
                         [(filter odd? ?scores) ?oddScores]
                         [(remove odd? ?scores) ?nonOddScores]
@@ -9026,6 +9065,28 @@ mod tests {
                     EdnValue::Integer(2),
                     EdnValue::Integer(3),
                     EdnValue::Integer(4),
+                ]),
+                EdnValue::Vector(vec![
+                    EdnValue::Vector(vec![EdnValue::Integer(0), EdnValue::Integer(1)]),
+                    EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(2)]),
+                    EdnValue::Vector(vec![EdnValue::Integer(2), EdnValue::Integer(3)]),
+                ]),
+                EdnValue::Vector(vec![
+                    EdnValue::Vector(vec![EdnValue::Integer(0), EdnValue::String("Alice".into()),]),
+                    EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::String("".into())]),
+                    EdnValue::Vector(vec![
+                        EdnValue::Integer(2),
+                        EdnValue::String("Alicia".into()),
+                    ]),
+                ]),
+                EdnValue::Vector(vec![
+                    EdnValue::Vector(vec![EdnValue::Integer(1)]),
+                    EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(2)]),
+                    EdnValue::Vector(vec![
+                        EdnValue::Integer(1),
+                        EdnValue::Integer(2),
+                        EdnValue::Integer(3),
+                    ]),
                 ]),
                 EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(2)]),
                 EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(3)]),

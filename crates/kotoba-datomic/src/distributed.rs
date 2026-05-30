@@ -1935,8 +1935,8 @@ where
                 crate::query_not_empty_value(required_query_value(&args[0], binding)?)
                     .map_err(Into::into)
             }
-            "map" | "mapcat" | "filter" | "remove" | "keep" | "some" | "group-by"
-            | "partition-by" => args
+            "map" | "mapcat" | "map-indexed" | "filter" | "remove" | "keep" | "keep-indexed"
+            | "some" | "group-by" | "partition-by" | "sort-by" => args
                 .iter()
                 .map(|arg| required_query_value(arg, binding))
                 .collect::<Result<Vec<_>, _>>()
@@ -6947,7 +6947,7 @@ mod tests {
         );
 
         let collection_predicate_query = kotoba_edn::parse(
-            r#"{:find [?allTags ?noNilTags ?notEveryTagString ?tagsVector ?sameTag ?hasTag ?notFalse ?truthyTags ?tagsString ?secondNumber ?lastNumber ?poppedNumbers ?butlastNumbers ?droppedLastNumbers ?everyOtherNumber ?tagKeywords ?tails ?nonStringTags ?keptTags ?someTag ?sum ?product ?max ?applySum ?applyMax ?applySet ?initialOdds ?afterOdds ?splitNumbers ?splitOdds ?groupedNumbers ?partitionedNumbers ?numberFrequencies ?numberRange ?repeatedTag ?tagMap ?flat ?numbersIntoVector ?concatenated ?distinctNumbers ?interposed ?interleaved ?pairs ?windows ?paddedPairs ?allPairs]
+            r#"{:find [?allTags ?noNilTags ?notEveryTagString ?tagsVector ?sameTag ?hasTag ?notFalse ?truthyTags ?tagsString ?secondNumber ?lastNumber ?poppedNumbers ?butlastNumbers ?droppedLastNumbers ?everyOtherNumber ?indexedTags ?indexedNumbers ?sortedNested ?tagKeywords ?tails ?nonStringTags ?keptTags ?someTag ?sum ?product ?max ?applySum ?applyMax ?applySet ?initialOdds ?afterOdds ?splitNumbers ?splitOdds ?groupedNumbers ?partitionedNumbers ?numberFrequencies ?numberRange ?repeatedTag ?tagMap ?flat ?numbersIntoVector ?concatenated ?distinctNumbers ?interposed ?interleaved ?pairs ?windows ?paddedPairs ?allPairs]
                 :where [[?e :credential/claims ?claims]
                         [(get ?claims :claim/tags) ?tags]
                         [(distinct? :role/admin :role/auditor :role/operator)]
@@ -6967,6 +6967,9 @@ mod tests {
                         [(butlast [1 2 3]) ?butlastNumbers]
                         [(drop-last 2 [1 2 3 4]) ?droppedLastNumbers]
                         [(take-nth 2 [1 2 3 4 5]) ?everyOtherNumber]
+                        [(map-indexed vector ?tags) ?indexedTags]
+                        [(keep-indexed vector [1 2]) ?indexedNumbers]
+                        [(sort-by count [[1 2 3] [1] [1 2]]) ?sortedNested]
                         [(filter keyword? ?tags) ?tagKeywords]
                         [(mapcat rest [[0 1] [0 2]]) ?tails]
                         [(remove string? ?tags) ?nonStringTags]
@@ -7033,6 +7036,29 @@ mod tests {
                     EdnValue::Integer(1),
                     EdnValue::Integer(3),
                     EdnValue::Integer(5),
+                ]),
+                EdnValue::Vector(vec![
+                    EdnValue::Vector(vec![
+                        EdnValue::Integer(0),
+                        EdnValue::Keyword(Keyword::parse("vc")),
+                    ]),
+                    EdnValue::Vector(vec![
+                        EdnValue::Integer(1),
+                        EdnValue::Keyword(Keyword::parse("ipld")),
+                    ]),
+                ]),
+                EdnValue::Vector(vec![
+                    EdnValue::Vector(vec![EdnValue::Integer(0), EdnValue::Integer(1)]),
+                    EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(2)]),
+                ]),
+                EdnValue::Vector(vec![
+                    EdnValue::Vector(vec![EdnValue::Integer(1)]),
+                    EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(2)]),
+                    EdnValue::Vector(vec![
+                        EdnValue::Integer(1),
+                        EdnValue::Integer(2),
+                        EdnValue::Integer(3),
+                    ]),
                 ]),
                 EdnValue::Vector(vec![
                     EdnValue::Keyword(Keyword::parse("vc")),
