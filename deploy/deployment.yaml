@@ -19,6 +19,13 @@ spec:
         app.kubernetes.io/name: kotoba
         app.kubernetes.io/part-of: kotoba-gftd-ai
     spec:
+      # PVC contains 350k+ Kubo block files; without OnRootMismatch the kubelet
+      # recursively chowns all of them on every pod start (~4 min each time and
+      # pod stuck ContainerCreating).  OnRootMismatch only fixes ownership when
+      # the mount root UID/GID actually differs.
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       imagePullSecrets:
         - name: ghcr-creds
 
@@ -135,6 +142,12 @@ spec:
               if [ ! -f /data/ipfs/config ]; then
                 ipfs init --profile=server,lowpower
               fi
+              # Clean up stale lock from previous pod termination.  Without
+              # this the readiness probe loops on "lock /data/ipfs/repo.lock:
+              # someone else has the lock" because Kubo refuses to start.
+              # Safe to run unconditionally: only this pod ever touches the
+              # PVC (Recreate strategy + single replica).
+              rm -f /data/ipfs/repo.lock /data/ipfs/api
               # Pod-local only (kotoba container reaches us via localhost).
               ipfs config Addresses.API     /ip4/127.0.0.1/tcp/5001
               ipfs config Addresses.Gateway /ip4/127.0.0.1/tcp/8081

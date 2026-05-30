@@ -21,14 +21,18 @@ use serde::Deserialize;
 ///   KOTOBA_IPFS_ENDPOINT  — base URL (default: http://localhost:5001)
 ///   KOTOBA_IPFS_TOKEN     — optional Bearer JWT
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const KUBO_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const KUBO_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const KUBO_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const KUBO_POOL_MAX_IDLE_PER_HOST: usize = 8;
+/// After a connect failure, wait this long before letting the next op
+/// re-probe Kubo. Avoids a permanently-stuck `available=false` state where
+/// every block silently drops while Kubo has already recovered.
+const KUBO_FAILURE_COOLDOWN_SECS: u64 = 5;
 
 #[derive(Deserialize)]
 struct BlockPutResponse {
@@ -41,8 +45,13 @@ pub struct KuboBlockStore {
     endpoint: String,
     token: Option<String>,
     pinned: Arc<RwLock<HashSet<[u8; 36]>>>,
-    /// Cleared on connect failure; set on success.  Fast-fails all ops when false.
-    available: Arc<AtomicBool>,
+    /// Unix-seconds timestamp of the most recent connect failure.
+    /// `is_available()` returns false only while we're within
+    /// `KUBO_FAILURE_COOLDOWN_SECS` of that timestamp.  This lets a stuck
+    /// store recover automatically: when Kubo comes back, the next op after
+    /// the cooldown probes it and resumes normal operation.  `0` means
+    /// "never failed".
+    failed_at_unix: Arc<AtomicU64>,
 }
 
 impl KuboBlockStore {
@@ -57,7 +66,7 @@ impl KuboBlockStore {
             endpoint: endpoint.into(),
             token: None,
             pinned: Arc::new(RwLock::new(HashSet::new())),
-            available: Arc::new(AtomicBool::new(true)),
+            failed_at_unix: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -100,7 +109,7 @@ impl KuboBlockStore {
             endpoint,
             token,
             pinned: Arc::new(RwLock::new(HashSet::new())),
-            available: Arc::new(AtomicBool::new(true)),
+            failed_at_unix: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -109,13 +118,25 @@ impl KuboBlockStore {
     }
 
     fn mark_unavailable(&self) {
-        self.available.store(false, Ordering::Relaxed);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.failed_at_unix.store(now, Ordering::Relaxed);
     }
     fn mark_available(&self) {
-        self.available.store(true, Ordering::Relaxed);
+        self.failed_at_unix.store(0, Ordering::Relaxed);
     }
     pub fn is_available(&self) -> bool {
-        self.available.load(Ordering::Relaxed)
+        let failed_at = self.failed_at_unix.load(Ordering::Relaxed);
+        if failed_at == 0 {
+            return true;
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        now.saturating_sub(failed_at) >= KUBO_FAILURE_COOLDOWN_SECS
     }
 }
 
@@ -136,7 +157,7 @@ impl Clone for KuboBlockStore {
             endpoint: self.endpoint.clone(),
             token: self.token.clone(),
             pinned: Arc::clone(&self.pinned),
-            available: Arc::clone(&self.available),
+            failed_at_unix: Arc::clone(&self.failed_at_unix),
         }
     }
 }
@@ -342,6 +363,7 @@ mod tests {
         assert_eq!(KUBO_REQUEST_TIMEOUT, Duration::from_secs(30));
         assert_eq!(KUBO_POOL_IDLE_TIMEOUT, Duration::from_secs(30));
         assert_eq!(KUBO_POOL_MAX_IDLE_PER_HOST, 8);
+        assert_eq!(KUBO_FAILURE_COOLDOWN_SECS, 5);
     }
 
     #[test]
@@ -371,6 +393,24 @@ mod tests {
         store.mark_unavailable();
         let cid = KotobaCid::from_bytes(b"any");
         assert!(!store.has(&cid));
+    }
+
+    #[test]
+    fn kubo_store_retries_after_failure_cooldown() {
+        let store = KuboBlockStore::new("http://localhost:5001");
+        store.mark_unavailable();
+        assert!(!store.is_available());
+
+        let stale_failure = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+            .saturating_sub(KUBO_FAILURE_COOLDOWN_SECS + 1);
+        store.failed_at_unix.store(stale_failure, Ordering::Relaxed);
+
+        assert!(store.is_available());
+        store.mark_available();
+        assert_eq!(store.failed_at_unix.load(Ordering::Relaxed), 0);
     }
 
     #[test]
