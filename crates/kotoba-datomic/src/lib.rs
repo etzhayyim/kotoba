@@ -2768,9 +2768,8 @@ fn query_apply_value_function(op: &str, args: Vec<EdnValue>) -> Result<EdnValue>
             _ => Err(DatomicError::Query(format!("{op} expects one argument"))),
         },
         "nth" => query_nth_value(args),
-        "take" | "drop" | "take-while" | "drop-while" | "subvec" => {
-            query_collection_slice_value(op, args)
-        }
+        "take" | "drop" | "take-while" | "drop-while" | "partition" | "partition-all"
+        | "subvec" => query_collection_slice_value(op, args),
         "reverse" | "sort" | "flatten" | "interpose" | "interleave" => {
             query_collection_order_value(op, args)
         }
@@ -3203,8 +3202,54 @@ pub(crate) fn query_collection_slice_value(op: &str, args: Vec<EdnValue>) -> Res
             }
             Ok(EdnValue::Vector(out))
         }
+        "partition" | "partition-all" => query_partition_value(op, args),
         other => Err(DatomicError::UnsupportedOperation(other.into())),
     }
+}
+
+fn query_partition_value(op: &str, args: Vec<EdnValue>) -> Result<EdnValue> {
+    let (n, step, pad, collection) = match args.as_slice() {
+        [n, collection] => (
+            query_positive_usize(n, op)?,
+            query_positive_usize(n, op)?,
+            None,
+            collection.clone(),
+        ),
+        [n, step, collection] => (
+            query_positive_usize(n, op)?,
+            query_positive_usize(step, op)?,
+            None,
+            collection.clone(),
+        ),
+        [n, step, pad, collection] if op == "partition" => (
+            query_positive_usize(n, op)?,
+            query_positive_usize(step, op)?,
+            Some(query_seq_values(pad.clone())?),
+            collection.clone(),
+        ),
+        _ => {
+            return Err(DatomicError::Query(format!(
+                "{op} expects n, optional step, optional pad, and a collection"
+            )))
+        }
+    };
+    let values = query_seq_values(collection)?;
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < values.len() {
+        let end = (start + n).min(values.len());
+        let mut chunk = values[start..end].to_vec();
+        if chunk.len() == n {
+            out.push(EdnValue::Vector(chunk));
+        } else if op == "partition-all" {
+            out.push(EdnValue::Vector(chunk));
+        } else if let Some(pad) = &pad {
+            chunk.extend(pad.iter().take(n - chunk.len()).cloned());
+            out.push(EdnValue::Vector(chunk));
+        }
+        start += step;
+    }
+    Ok(EdnValue::Vector(out))
 }
 
 pub(crate) fn query_collection_order_value(op: &str, args: Vec<EdnValue>) -> Result<EdnValue> {
@@ -3306,6 +3351,14 @@ fn query_non_negative_usize(value: &EdnValue, op: &str) -> Result<usize> {
     };
     usize::try_from(*value)
         .map_err(|_| DatomicError::Query(format!("{op} index must be non-negative, got {value}")))
+}
+
+fn query_positive_usize(value: &EdnValue, op: &str) -> Result<usize> {
+    let value = query_non_negative_usize(value, op)?;
+    if value == 0 {
+        return Err(DatomicError::Query(format!("{op} size must be positive")));
+    }
+    Ok(value)
 }
 
 pub(crate) fn query_conj_value(args: Vec<EdnValue>) -> Result<EdnValue> {
@@ -5403,7 +5456,8 @@ fn eval_query_function(
             .map(|arg| resolve_query_value(arg, binding))
             .collect::<Result<Vec<_>>>()
             .and_then(query_cons_value),
-        "take" | "drop" | "take-while" | "drop-while" | "subvec" => args
+        "take" | "drop" | "take-while" | "drop-while" | "partition" | "partition-all"
+        | "subvec" => args
             .iter()
             .map(|arg| resolve_query_value(arg, binding))
             .collect::<Result<Vec<_>>>()
@@ -8607,7 +8661,7 @@ mod tests {
         .await
         .unwrap();
         let query = parse(
-            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString ?incScores ?oddScores ?nonOddScores ?nonEmptyNames ?scoreSum ?scoreProduct ?scoreMax ?applySum ?applyMax ?scoreSet ?initialOdds ?afterOdds ?flatScores ?interposedScores ?interleavedScores]
+            r#"{:find [?allScores ?notEveryScoreString ?noNilScores ?allNames ?scoresVector ?sameScore ?hasAdmin ?notFalse ?truthyScores ?namesString ?incScores ?oddScores ?nonOddScores ?nonEmptyNames ?scoreSum ?scoreProduct ?scoreMax ?applySum ?applyMax ?scoreSet ?initialOdds ?afterOdds ?flatScores ?interposedScores ?interleavedScores ?pairs ?windows ?paddedPairs ?allPairs]
                 :where [[?e :person/scores ?scores]
                         [?e :person/names ?names]
                         [(distinct? 1 2 3)]
@@ -8637,6 +8691,10 @@ mod tests {
                         [(flatten [[1 2 3] [4 [5]]]) ?flatScores]
                         [(interpose 0 ?scores) ?interposedScores]
                         [(interleave ?scores [:a :b :c]) ?interleavedScores]
+                        [(partition 2 ?scores) ?pairs]
+                        [(partition 2 1 ?scores) ?windows]
+                        [(partition 2 2 [0] ?scores) ?paddedPairs]
+                        [(partition-all 2 ?scores) ?allPairs]
                         [(= ?allScores true)]
                         [(= ?notEveryScoreString true)]
                         [(= ?noNilScores true)]
@@ -8707,6 +8765,22 @@ mod tests {
                     kw_value(":b"),
                     EdnValue::Integer(3),
                     kw_value(":c"),
+                ]),
+                EdnValue::Vector(vec![EdnValue::Vector(vec![
+                    EdnValue::Integer(1),
+                    EdnValue::Integer(2),
+                ])]),
+                EdnValue::Vector(vec![
+                    EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(2)]),
+                    EdnValue::Vector(vec![EdnValue::Integer(2), EdnValue::Integer(3)]),
+                ]),
+                EdnValue::Vector(vec![
+                    EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(2)]),
+                    EdnValue::Vector(vec![EdnValue::Integer(3), EdnValue::Integer(0)]),
+                ]),
+                EdnValue::Vector(vec![
+                    EdnValue::Vector(vec![EdnValue::Integer(1), EdnValue::Integer(2)]),
+                    EdnValue::Vector(vec![EdnValue::Integer(3)]),
                 ]),
             ]]
         );
