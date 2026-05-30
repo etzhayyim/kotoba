@@ -48,7 +48,7 @@ use kotoba_kqe::{
     arrangement::Arrangement,
     datom::{Datom, Value as DatomValue},
     delta::Delta,
-    quad::{Quad, QuadObject},
+    quad::{LegacyQuad as Quad, LegacyQuadObject as QuadObject},
 };
 use kotoba_runtime::host::InferenceFn;
 use std::collections::HashMap;

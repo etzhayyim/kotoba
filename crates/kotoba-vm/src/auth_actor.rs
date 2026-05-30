@@ -1,6 +1,6 @@
 use kotoba_auth::{cacao::Cacao, delegation::DelegationChain};
 use kotoba_core::{cid::KotobaCid, policy::DataPolicy};
-use kotoba_kqe::quad::LegacyQuad;
+use kotoba_kqe::quad::LegacyQuad as Quad;
 /// Actor-first, crypto-aware Pregel types.
 ///
 /// The PRE proxy in kotoba-server decrypts all inbound messages and encrypts
