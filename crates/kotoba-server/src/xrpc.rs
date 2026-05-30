@@ -6050,6 +6050,15 @@ pub async fn didcomm_send(
     headers: axum::http::HeaderMap,
     Json(req): Json<DidCommSendReq>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let graph_cid = parse_graph_cid(&req.graph)?;
+    let entity_cid = req
+        .message
+        .cid()
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("didcomm cid: {e}")))?;
+    let message_bytes = serde_json::to_vec(&req.message)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("didcomm json: {e}")))?;
+    let tx_cid = protocol_payload_tx_cid("didcomm.send", &req.graph, &entity_cid, message_bytes);
+
     let mut author = state.operator_did.clone();
     let mut auth_proof_cid = None;
     let mut auth_capability = None;
@@ -6070,6 +6079,7 @@ pub async fn didcomm_send(
                     format!("CACAO missing DIDComm thread scope {thread_scope}"),
                 ));
             }
+            enforce_datomic_write_tx_scope(&payload, &tx_cid)?;
             author = payload.iss.clone();
             auth_proof_cid = Some(persist_cacao_auth_proof(&state, cacao_b64)?);
             auth_capability = Some(cacao_capability_projection(
@@ -6084,6 +6094,16 @@ pub async fn didcomm_send(
                 kotoba_auth::CacaoPayload::OP_DIDCOMM_SEND,
                 Some(&thread_scope),
             )?;
+            if vc_presentation_declares_tx_scope(presentation) {
+                let tx_scope = format!("kotoba://tx/{}", tx_cid.to_multibase());
+                verify_vc_presentation_capability_scope(
+                    &state,
+                    &req.graph,
+                    presentation,
+                    kotoba_auth::CacaoPayload::OP_DIDCOMM_SEND,
+                    Some(&tx_scope),
+                )?;
+            }
             author = presentation
                 .holder
                 .clone()
@@ -6098,14 +6118,6 @@ pub async fn didcomm_send(
         }
     }
 
-    let graph_cid = parse_graph_cid(&req.graph)?;
-    let entity_cid = req
-        .message
-        .cid()
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("didcomm cid: {e}")))?;
-    let message_bytes = serde_json::to_vec(&req.message)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("didcomm json: {e}")))?;
-    let tx_cid = protocol_payload_tx_cid("didcomm.send", &req.graph, &entity_cid, message_bytes);
     let datoms = req
         .message
         .to_datoms(tx_cid.clone())
@@ -6140,6 +6152,21 @@ pub async fn atproto_repo_write(
             "atproto repo.write uri must include collection and rkey".to_string(),
         ));
     }
+    let graph_cid = parse_graph_cid(&req.graph)?;
+    let entity_cid = atproto_repo_record_entity_cid(&req.uri);
+    let operation = req.operation.as_deref().unwrap_or("create");
+    let tx_cid = kotoba_core::cid::KotobaCid::from_bytes(
+        serde_json::to_vec(&serde_json::json!({
+            "op": "atproto.repo.write",
+            "graph": &req.graph,
+            "uri": &req.uri,
+            "operation": operation,
+            "cid": &req.cid,
+            "record": &req.record,
+        }))
+        .unwrap_or_default()
+        .as_slice(),
+    );
 
     let mut author = state.operator_did.clone();
     let mut auth_proof_cid = None;
@@ -6160,6 +6187,7 @@ pub async fn atproto_repo_write(
                     format!("CACAO missing ATProto scope {}", req.uri),
                 ));
             }
+            enforce_datomic_write_tx_scope(&payload, &tx_cid)?;
             author = payload.iss.clone();
             auth_proof_cid = Some(persist_cacao_auth_proof(&state, cacao_b64)?);
             auth_capability = Some(cacao_capability_projection(
@@ -6174,6 +6202,16 @@ pub async fn atproto_repo_write(
                 kotoba_auth::CacaoPayload::OP_ATPROTO_REPO_WRITE,
                 Some(&req.uri),
             )?;
+            if vc_presentation_declares_tx_scope(presentation) {
+                let tx_scope = format!("kotoba://tx/{}", tx_cid.to_multibase());
+                verify_vc_presentation_capability_scope(
+                    &state,
+                    &req.graph,
+                    presentation,
+                    kotoba_auth::CacaoPayload::OP_ATPROTO_REPO_WRITE,
+                    Some(&tx_scope),
+                )?;
+            }
             author = presentation
                 .holder
                 .clone()
@@ -6188,21 +6226,6 @@ pub async fn atproto_repo_write(
         }
     }
 
-    let graph_cid = parse_graph_cid(&req.graph)?;
-    let entity_cid = atproto_repo_record_entity_cid(&req.uri);
-    let operation = req.operation.as_deref().unwrap_or("create");
-    let tx_cid = kotoba_core::cid::KotobaCid::from_bytes(
-        serde_json::to_vec(&serde_json::json!({
-            "op": "atproto.repo.write",
-            "graph": req.graph,
-            "uri": req.uri,
-            "operation": operation,
-            "cid": req.cid,
-            "record": req.record,
-        }))
-        .unwrap_or_default()
-        .as_slice(),
-    );
     let datoms = if operation == "delete" {
         let db = distributed_datomic_db(&state, &graph_cid, None, None, None, None)?
             .unwrap_or_else(|| kotoba_datomic::Db::from_datoms(Vec::new(), None));
@@ -8276,13 +8299,14 @@ mod tests {
         datomic_index_range, datomic_log, datomic_pull, datomic_pull_many, datomic_q,
         datomic_seek_datoms, datomic_sync, datomic_transact, datomic_tx_range, datomic_with,
         did_document_publish, didcomm_send, distributed_graph_ipns_name,
-        enforce_datomic_range_tx_scope, is_did_web_ip_host, vc_issue, AtprotoRepoWriteReq,
-        AuthCapabilityProjection, DatomicBasisTReq, DatomicDatomsReq, DatomicDbStatsReq,
-        DatomicEntidReq, DatomicEntityReq, DatomicHistoryReq, DatomicIdentReq, DatomicIndexPullReq,
-        DatomicIndexRangeReq, DatomicLogReq, DatomicPullManyReq, DatomicPullReq, DatomicQReq,
-        DatomicSeekDatomsReq, DatomicSyncReq, DatomicTransactReq, DatomicTxRangeReq,
-        DatomicWithReq, DidCommSendReq, DidDocumentPublishReq, VcIssueReq, ZCAP_ALLOWED_ACTION_IRI,
-        ZCAP_CONTROLLER_IRI, ZCAP_INVOCATION_PROOF_IRI, ZCAP_INVOCATION_TARGET_IRI,
+        enforce_datomic_range_tx_scope, is_did_web_ip_host, protocol_payload_tx_cid, vc_issue,
+        AtprotoRepoWriteReq, AuthCapabilityProjection, DatomicBasisTReq, DatomicDatomsReq,
+        DatomicDbStatsReq, DatomicEntidReq, DatomicEntityReq, DatomicHistoryReq, DatomicIdentReq,
+        DatomicIndexPullReq, DatomicIndexRangeReq, DatomicLogReq, DatomicPullManyReq,
+        DatomicPullReq, DatomicQReq, DatomicSeekDatomsReq, DatomicSyncReq, DatomicTransactReq,
+        DatomicTxRangeReq, DatomicWithReq, DidCommSendReq, DidDocumentPublishReq, VcIssueReq,
+        ZCAP_ALLOWED_ACTION_IRI, ZCAP_CONTROLLER_IRI, ZCAP_INVOCATION_PROOF_IRI,
+        ZCAP_INVOCATION_TARGET_IRI,
     };
     use crate::server::KotobaState;
     use axum::response::IntoResponse;
@@ -8772,6 +8796,201 @@ mod tests {
                 r#""""#
             ])
         }));
+    }
+
+    #[tokio::test]
+    async fn didcomm_xrpc_enforces_declared_cacao_tx_scope_against_transaction_cid() {
+        std::env::set_var("KOTOBA_IPFS", "off");
+        std::env::set_var("KOTOBA_IPNS_REQUIRE_SIGNATURE", "false");
+        let state = Arc::new(KotobaState::new(None).unwrap());
+        let graph = KotobaCid::from_bytes(b"xrpc-didcomm-cacao-tx-scope-graph");
+        let graph_mb = graph.to_multibase();
+        state.graph_registry.write().await.insert(
+            graph.clone(),
+            (
+                "xrpc-didcomm-cacao-tx-scope-graph".into(),
+                GraphVisibility::Public,
+            ),
+        );
+
+        let thread_id = "thread-cacao-tx-scope-1";
+        let message = kotoba_didcomm::DidCommMessage {
+            id: "msg-cacao-tx-scope-1".into(),
+            message_type: "https://didcomm.org/basicmessage/2.0/message".into(),
+            from: Some(state.operator_did.clone()),
+            to: vec!["did:key:zRecipient".into()],
+            thid: Some(thread_id.into()),
+            pthid: None,
+            created_time: Some(1),
+            expires_time: None,
+            body: serde_json::json!({"content": "tx scoped DIDComm"}),
+            attachments: vec![],
+        };
+        let entity_cid = message.cid().unwrap();
+        let message_bytes = serde_json::to_vec(&message).unwrap();
+        let tx_cid = protocol_payload_tx_cid("didcomm.send", &graph_mb, &entity_cid, message_bytes);
+        let thread_scope = format!("didcomm://thread/{thread_id}");
+        let wrong_tx_scope = format!(
+            "kotoba://tx/{}",
+            KotobaCid::from_bytes(b"xrpc-didcomm-wrong-tx-scope").to_multibase()
+        );
+        let rejected_cacao = signed_cacao_b64(
+            &state,
+            &graph_mb,
+            kotoba_auth::CacaoPayload::OP_DIDCOMM_SEND,
+            "xrpc-didcomm-wrong-tx-scope-nonce-1",
+            [thread_scope.clone(), wrong_tx_scope],
+        );
+
+        let rejected = match didcomm_send(
+            axum::extract::State(Arc::clone(&state)),
+            axum::http::HeaderMap::new(),
+            axum::Json(DidCommSendReq {
+                graph: graph_mb.clone(),
+                message: message.clone(),
+                cacao_b64: Some(rejected_cacao),
+                auth_presentation: None,
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("wrong tx-scoped DIDComm CACAO must be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(rejected.0, axum::http::StatusCode::UNAUTHORIZED);
+        assert!(
+            rejected
+                .1
+                .contains(&format!("kotoba://tx/{}", tx_cid.to_multibase())),
+            "{}",
+            rejected.1
+        );
+
+        let accepted_cacao = signed_cacao_b64(
+            &state,
+            &graph_mb,
+            kotoba_auth::CacaoPayload::OP_DIDCOMM_SEND,
+            "xrpc-didcomm-correct-tx-scope-nonce-1",
+            [
+                thread_scope,
+                format!("kotoba://tx/{}", tx_cid.to_multibase()),
+            ],
+        );
+        let accepted = didcomm_send(
+            axum::extract::State(state),
+            axum::http::HeaderMap::new(),
+            axum::Json(DidCommSendReq {
+                graph: graph_mb,
+                message,
+                cacao_b64: Some(accepted_cacao),
+                auth_presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(accepted.status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn atproto_xrpc_enforces_declared_cacao_tx_scope_against_transaction_cid() {
+        std::env::set_var("KOTOBA_IPFS", "off");
+        std::env::set_var("KOTOBA_IPNS_REQUIRE_SIGNATURE", "false");
+        let state = Arc::new(KotobaState::new(None).unwrap());
+        let graph = KotobaCid::from_bytes(b"xrpc-atproto-cacao-tx-scope-graph");
+        let graph_mb = graph.to_multibase();
+        state.graph_registry.write().await.insert(
+            graph.clone(),
+            (
+                "xrpc-atproto-cacao-tx-scope-graph".into(),
+                GraphVisibility::Public,
+            ),
+        );
+
+        let at_uri = "at://did:plc:alice/app.bsky.feed.post/r-cacao-tx-scope";
+        let record = serde_json::json!({
+            "$type": "app.bsky.feed.post",
+            "text": "tx scoped ATProto",
+            "createdAt": "2026-05-30T00:00:00Z"
+        });
+        let tx_cid = KotobaCid::from_bytes(
+            serde_json::to_vec(&serde_json::json!({
+                "op": "atproto.repo.write",
+                "graph": &graph_mb,
+                "uri": at_uri,
+                "operation": "create",
+                "cid": &Some("bafyreicacaotxscope".to_string()),
+                "record": &Some(record.clone()),
+            }))
+            .unwrap()
+            .as_slice(),
+        );
+        let wrong_tx_scope = format!(
+            "kotoba://tx/{}",
+            KotobaCid::from_bytes(b"xrpc-atproto-wrong-tx-scope").to_multibase()
+        );
+        let rejected_cacao = signed_cacao_b64(
+            &state,
+            &graph_mb,
+            kotoba_auth::CacaoPayload::OP_ATPROTO_REPO_WRITE,
+            "xrpc-atproto-wrong-tx-scope-nonce-1",
+            [at_uri.to_string(), wrong_tx_scope],
+        );
+
+        let rejected = match atproto_repo_write(
+            axum::extract::State(Arc::clone(&state)),
+            axum::http::HeaderMap::new(),
+            axum::Json(AtprotoRepoWriteReq {
+                graph: graph_mb.clone(),
+                uri: at_uri.into(),
+                operation: Some("create".into()),
+                cid: Some("bafyreicacaotxscope".into()),
+                record: Some(record.clone()),
+                cacao_b64: Some(rejected_cacao),
+                auth_presentation: None,
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("wrong tx-scoped ATProto CACAO must be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(rejected.0, axum::http::StatusCode::UNAUTHORIZED);
+        assert!(
+            rejected
+                .1
+                .contains(&format!("kotoba://tx/{}", tx_cid.to_multibase())),
+            "{}",
+            rejected.1
+        );
+
+        let accepted_cacao = signed_cacao_b64(
+            &state,
+            &graph_mb,
+            kotoba_auth::CacaoPayload::OP_ATPROTO_REPO_WRITE,
+            "xrpc-atproto-correct-tx-scope-nonce-1",
+            [
+                at_uri.to_string(),
+                format!("kotoba://tx/{}", tx_cid.to_multibase()),
+            ],
+        );
+        let accepted = atproto_repo_write(
+            axum::extract::State(state),
+            axum::http::HeaderMap::new(),
+            axum::Json(AtprotoRepoWriteReq {
+                graph: graph_mb,
+                uri: at_uri.into(),
+                operation: Some("create".into()),
+                cid: Some("bafyreicacaotxscope".into()),
+                record: Some(record),
+                cacao_b64: Some(accepted_cacao),
+                auth_presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(accepted.status(), axum::http::StatusCode::OK);
     }
 
     #[tokio::test]
