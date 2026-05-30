@@ -113,7 +113,7 @@ impl ServiceEndpointValue {
     fn primary_uri(&self) -> Option<&str> {
         match self {
             Self::Single(value) => Some(value.as_str()),
-            Self::Multiple(_) => None,
+            Self::Multiple(values) => values.first().map(String::as_str),
             Self::Object(value) => value
                 .get("uri")
                 .or_else(|| value.get("endpoint"))
@@ -804,13 +804,16 @@ mod tests {
     }
 
     #[test]
-    fn kotoba_endpoint_returns_none_for_multiple_value() {
+    fn kotoba_endpoint_returns_first_uri_for_multiple_value() {
         let doc = with_service(
             base_doc("did:key:zTest"),
             "KotobaNode",
-            ServiceEndpointValue::Multiple(vec!["/ip4/1.2.3.4/tcp/4001".to_string()]),
+            ServiceEndpointValue::Multiple(vec![
+                "/ip4/1.2.3.4/tcp/4001".to_string(),
+                "/ip4/5.6.7.8/tcp/4001".to_string(),
+            ]),
         );
-        assert!(doc.kotoba_endpoint().is_none());
+        assert_eq!(doc.kotoba_endpoint(), Some("/ip4/1.2.3.4/tcp/4001"));
     }
 
     // ── graph_memberships ─────────────────────────────────────────────────────
@@ -851,6 +854,61 @@ mod tests {
 
         assert_eq!(doc.didcomm_endpoint(), Some("didcomm://mediator/abc"));
         assert_eq!(doc.atproto_pds_endpoint(), Some("https://pds.example.com"));
+    }
+
+    #[test]
+    fn protocol_service_helpers_accept_endpoint_arrays() {
+        let mut doc = DidDocument::empty("did:plc:arrayservices");
+        doc.service.push(ServiceEndpoint {
+            id: "did:plc:arrayservices#didcomm".into(),
+            service_type: DIDCOMM_MESSAGING_SERVICE.into(),
+            endpoint: ServiceEndpointValue::Multiple(vec![
+                "didcomm://mediator/primary".into(),
+                "didcomm://mediator/backup".into(),
+            ]),
+        });
+        doc.service.push(ServiceEndpoint {
+            id: "did:plc:arrayservices#atproto-pds".into(),
+            service_type: ATPROTO_PDS_SERVICE.into(),
+            endpoint: ServiceEndpointValue::Multiple(vec![
+                "https://pds.primary.example".into(),
+                "https://pds.backup.example".into(),
+            ]),
+        });
+        doc.service.push(ServiceEndpoint {
+            id: "did:plc:arrayservices#kotoba-node".into(),
+            service_type: KOTOBA_NODE_SERVICE.into(),
+            endpoint: ServiceEndpointValue::Multiple(vec![
+                "/ip4/127.0.0.1/tcp/4001".into(),
+                "/ip4/127.0.0.1/tcp/4002".into(),
+            ]),
+        });
+        doc.push_graph_membership_service(["kotoba://graph/array"]);
+
+        assert_eq!(doc.didcomm_endpoint(), Some("didcomm://mediator/primary"));
+        assert_eq!(
+            doc.atproto_pds_endpoint(),
+            Some("https://pds.primary.example")
+        );
+        assert_eq!(doc.kotoba_endpoint(), Some("/ip4/127.0.0.1/tcp/4001"));
+        assert!(doc.has_kotoba_protocol_services());
+
+        let datoms = doc.to_datoms(kotoba_core::cid::KotobaCid::from_bytes(
+            b"did-array-services-tx",
+        ));
+        let restored =
+            DidDocument::from_datoms("did:plc:arrayservices", &datoms).expect("restore DID doc");
+
+        assert_eq!(
+            restored.didcomm_endpoint(),
+            Some("didcomm://mediator/primary")
+        );
+        assert_eq!(
+            restored.atproto_pds_endpoint(),
+            Some("https://pds.primary.example")
+        );
+        assert_eq!(restored.kotoba_endpoint(), Some("/ip4/127.0.0.1/tcp/4001"));
+        assert!(restored.has_kotoba_protocol_services());
     }
 
     #[test]
