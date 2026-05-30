@@ -26,6 +26,7 @@ pub const ATTR_CREDENTIAL_SUBJECT_DID_CID: &str = "credential/subject/didCid";
 pub const ATTR_CREDENTIAL_VALID_FROM: &str = "credential/validFrom";
 pub const ATTR_CREDENTIAL_VALID_UNTIL: &str = "credential/validUntil";
 pub const ATTR_CREDENTIAL_STATUS: &str = "credential/status";
+pub const ATTR_CREDENTIAL_STATUS_CID: &str = "credential/status/cid";
 pub const ATTR_CREDENTIAL_STATUS_ID: &str = "credential/status/id";
 pub const ATTR_CREDENTIAL_STATUS_TYPE: &str = "credential/status/type";
 pub const ATTR_CREDENTIAL_PROOF: &str = "credential/proof";
@@ -594,6 +595,20 @@ fn append_credential_status_datoms(
     status: &CredentialStatus,
     tx: &KotobaCid,
 ) {
+    let status_entity = KotobaCid::from_bytes(status.id.as_bytes());
+    let status_entity_value = EdnValue::string(status_entity.to_multibase());
+    out.push(datom(
+        e,
+        ATTR_CREDENTIAL_STATUS_CID,
+        status_entity_value.clone(),
+        tx,
+    ));
+    out.push(datom(
+        e,
+        ATTR_VC_CREDENTIAL_STATUS_IRI,
+        EdnValue::string(&status.id),
+        tx,
+    ));
     out.push(datom(
         e,
         ATTR_CREDENTIAL_STATUS_ID,
@@ -603,6 +618,36 @@ fn append_credential_status_datoms(
     out.push(datom(
         e,
         ATTR_CREDENTIAL_STATUS_TYPE,
+        EdnValue::string(&status.status_type),
+        tx,
+    ));
+    out.push(datom(
+        &status_entity,
+        ATTR_CREDENTIAL_STATUS_CID,
+        status_entity_value,
+        tx,
+    ));
+    out.push(datom(
+        &status_entity,
+        ATTR_CREDENTIAL_STATUS_ID,
+        EdnValue::string(&status.id),
+        tx,
+    ));
+    out.push(datom(
+        &status_entity,
+        ATTR_VC_ID_IRI,
+        EdnValue::string(&status.id),
+        tx,
+    ));
+    out.push(datom(
+        &status_entity,
+        ATTR_CREDENTIAL_STATUS_TYPE,
+        EdnValue::string(&status.status_type),
+        tx,
+    ));
+    out.push(datom(
+        &status_entity,
+        ATTR_VC_TYPE_IRI,
         EdnValue::string(&status.status_type),
         tx,
     ));
@@ -1018,8 +1063,30 @@ mod tests {
             d.a == ATTR_CREDENTIAL_STATUS_ID
                 && d.v == EdnValue::string("kotoba://credential/status/1")
         }));
+        let status_entity = KotobaCid::from_bytes(b"kotoba://credential/status/1");
+        let status_cid = status_entity.to_multibase();
+        assert!(datoms.iter().any(|d| {
+            d.e == vc.cid().unwrap()
+                && d.a == ATTR_CREDENTIAL_STATUS_CID
+                && d.v == EdnValue::string(&status_cid)
+        }));
+        assert!(datoms.iter().any(|d| {
+            d.e == vc.cid().unwrap()
+                && d.a == ATTR_VC_CREDENTIAL_STATUS_IRI
+                && d.v == EdnValue::string("kotoba://credential/status/1")
+        }));
         assert!(datoms.iter().any(|d| {
             d.a == ATTR_CREDENTIAL_STATUS_TYPE && d.v == EdnValue::string("KotobaCredentialStatus")
+        }));
+        assert!(datoms.iter().any(|d| {
+            d.e == status_entity
+                && d.a == ATTR_VC_ID_IRI
+                && d.v == EdnValue::string("kotoba://credential/status/1")
+        }));
+        assert!(datoms.iter().any(|d| {
+            d.e == status_entity
+                && d.a == ATTR_VC_TYPE_IRI
+                && d.v == EdnValue::string("KotobaCredentialStatus")
         }));
         for (attr, value) in [
             (ATTR_CREDENTIAL_PROOF_TYPE, "DataIntegrityProof"),
