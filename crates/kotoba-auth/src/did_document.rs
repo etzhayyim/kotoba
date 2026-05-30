@@ -93,6 +93,7 @@ pub struct ServiceEndpoint {
 pub enum ServiceEndpointValue {
     Single(String),
     Multiple(Vec<String>),
+    Object(serde_json::Map<String, serde_json::Value>),
 }
 
 impl ServiceEndpointValue {
@@ -100,6 +101,23 @@ impl ServiceEndpointValue {
         match self {
             Self::Single(value) => vec![value.as_str()],
             Self::Multiple(values) => values.iter().map(String::as_str).collect(),
+            Self::Object(value) => value
+                .get("uri")
+                .or_else(|| value.get("endpoint"))
+                .and_then(serde_json::Value::as_str)
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    fn primary_uri(&self) -> Option<&str> {
+        match self {
+            Self::Single(value) => Some(value.as_str()),
+            Self::Multiple(_) => None,
+            Self::Object(value) => value
+                .get("uri")
+                .or_else(|| value.get("endpoint"))
+                .and_then(serde_json::Value::as_str),
         }
     }
 }
@@ -127,26 +145,17 @@ impl DidDocument {
 
     pub fn kotoba_endpoint(&self) -> Option<&str> {
         self.service_by_type(KOTOBA_NODE_SERVICE)
-            .and_then(|s| match &s.endpoint {
-                ServiceEndpointValue::Single(u) => Some(u.as_str()),
-                _ => None,
-            })
+            .and_then(|s| s.endpoint.primary_uri())
     }
 
     pub fn didcomm_endpoint(&self) -> Option<&str> {
         self.service_by_type(DIDCOMM_MESSAGING_SERVICE)
-            .and_then(|s| match &s.endpoint {
-                ServiceEndpointValue::Single(u) => Some(u.as_str()),
-                _ => None,
-            })
+            .and_then(|s| s.endpoint.primary_uri())
     }
 
     pub fn atproto_pds_endpoint(&self) -> Option<&str> {
         self.service_by_type(ATPROTO_PDS_SERVICE)
-            .and_then(|s| match &s.endpoint {
-                ServiceEndpointValue::Single(u) => Some(u.as_str()),
-                _ => None,
-            })
+            .and_then(|s| s.endpoint.primary_uri())
     }
 
     pub fn graph_memberships(&self) -> Vec<&str> {
@@ -154,6 +163,7 @@ impl DidDocument {
             .and_then(|s| match &s.endpoint {
                 ServiceEndpointValue::Single(u) => Some(vec![u.as_str()]),
                 ServiceEndpointValue::Multiple(v) => Some(v.iter().map(|s| s.as_str()).collect()),
+                ServiceEndpointValue::Object(_) => None,
             })
             .unwrap_or_default()
     }
@@ -615,6 +625,7 @@ fn service_endpoint_value(endpoint: &ServiceEndpointValue) -> kotoba_datomic::Va
     match endpoint {
         ServiceEndpointValue::Single(endpoint) => kotoba_datomic::Value::string(endpoint),
         ServiceEndpointValue::Multiple(endpoints) => string_vec(endpoints),
+        ServiceEndpointValue::Object(endpoint) => json_object_to_datomic_value(endpoint),
     }
 }
 
@@ -655,8 +666,92 @@ fn service_endpoint_from_value(value: &kotoba_datomic::Value) -> Option<ServiceE
     if let Some(endpoint) = value.as_string() {
         return Some(ServiceEndpointValue::Single(endpoint.to_string()));
     }
+    if let Some(map) = value.as_map() {
+        return Some(ServiceEndpointValue::Object(datomic_map_to_json_object(
+            map,
+        )));
+    }
     let endpoints = string_list(value);
     (!endpoints.is_empty()).then_some(ServiceEndpointValue::Multiple(endpoints))
+}
+
+fn json_object_to_datomic_value(
+    value: &serde_json::Map<String, serde_json::Value>,
+) -> kotoba_datomic::Value {
+    kotoba_datomic::Value::map(value.iter().map(|(key, value)| {
+        (
+            kotoba_datomic::Value::kw_bare(key),
+            json_to_datomic_value(value),
+        )
+    }))
+}
+
+fn json_to_datomic_value(value: &serde_json::Value) -> kotoba_datomic::Value {
+    match value {
+        serde_json::Value::Null => kotoba_datomic::Value::Nil,
+        serde_json::Value::Bool(value) => kotoba_datomic::Value::Bool(*value),
+        serde_json::Value::Number(value) => value
+            .as_i64()
+            .map(kotoba_datomic::Value::Integer)
+            .or_else(|| value.as_f64().map(kotoba_datomic::Value::float))
+            .unwrap_or_else(|| kotoba_datomic::Value::string(value.to_string())),
+        serde_json::Value::String(value) => kotoba_datomic::Value::string(value),
+        serde_json::Value::Array(values) => {
+            kotoba_datomic::Value::vector(values.iter().map(json_to_datomic_value))
+        }
+        serde_json::Value::Object(value) => json_object_to_datomic_value(value),
+    }
+}
+
+fn datomic_map_to_json_object(
+    map: &std::collections::BTreeMap<kotoba_datomic::Value, kotoba_datomic::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    map.iter()
+        .filter_map(|(key, value)| {
+            datomic_key_to_json_key(key).map(|key| (key, datomic_value_to_json(value)))
+        })
+        .collect()
+}
+
+fn datomic_key_to_json_key(value: &kotoba_datomic::Value) -> Option<String> {
+    match value {
+        kotoba_datomic::Value::Keyword(keyword) => Some(keyword.to_qualified()),
+        kotoba_datomic::Value::String(value) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn datomic_value_to_json(value: &kotoba_datomic::Value) -> serde_json::Value {
+    match value {
+        kotoba_datomic::Value::Nil => serde_json::Value::Null,
+        kotoba_datomic::Value::Bool(value) => serde_json::Value::Bool(*value),
+        kotoba_datomic::Value::Integer(value) => serde_json::Value::Number((*value).into()),
+        kotoba_datomic::Value::BigInt(value) | kotoba_datomic::Value::BigDec(value) => {
+            serde_json::Value::String(value.clone())
+        }
+        kotoba_datomic::Value::Float(value) => serde_json::Number::from_f64(value.into_inner())
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        kotoba_datomic::Value::Char(value) => serde_json::Value::String(value.to_string()),
+        kotoba_datomic::Value::String(value) => serde_json::Value::String(value.clone()),
+        kotoba_datomic::Value::Symbol(symbol) => serde_json::Value::String(symbol.to_qualified()),
+        kotoba_datomic::Value::Keyword(keyword) => {
+            serde_json::Value::String(keyword.to_qualified())
+        }
+        kotoba_datomic::Value::Vector(values) | kotoba_datomic::Value::List(values) => {
+            serde_json::Value::Array(values.iter().map(datomic_value_to_json).collect())
+        }
+        kotoba_datomic::Value::Set(values) => {
+            serde_json::Value::Array(values.iter().map(datomic_value_to_json).collect())
+        }
+        kotoba_datomic::Value::Map(map) => {
+            serde_json::Value::Object(datomic_map_to_json_object(map))
+        }
+        kotoba_datomic::Value::Tagged { tag, value } => serde_json::json!({
+            "tag": tag.to_qualified(),
+            "value": datomic_value_to_json(value),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -756,6 +851,84 @@ mod tests {
 
         assert_eq!(doc.didcomm_endpoint(), Some("didcomm://mediator/abc"));
         assert_eq!(doc.atproto_pds_endpoint(), Some("https://pds.example.com"));
+    }
+
+    #[test]
+    fn didcomm_object_service_endpoint_roundtrips_through_datoms() {
+        let mut doc = DidDocument::empty("did:plc:didcommobject");
+        doc.service.push(ServiceEndpoint {
+            id: "did:plc:didcommobject#didcomm".into(),
+            service_type: DIDCOMM_MESSAGING_SERVICE.into(),
+            endpoint: ServiceEndpointValue::Object(
+                serde_json::json!({
+                    "uri": "didcomm://mediator/object",
+                    "accept": ["didcomm/v2"],
+                    "routingKeys": ["did:key:zMediator#key-x25519"]
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        });
+        doc.push_single_service(
+            "atproto-pds",
+            ATPROTO_PDS_SERVICE,
+            "https://pds.example.com",
+        );
+        doc.push_single_service(
+            "kotoba-node",
+            KOTOBA_NODE_SERVICE,
+            "/ip4/127.0.0.1/tcp/4001",
+        );
+        doc.push_graph_membership_service(["kotoba://graph/object"]);
+
+        let datoms = doc.to_datoms(kotoba_core::cid::KotobaCid::from_bytes(
+            b"didcomm-object-service-tx",
+        ));
+        assert!(datoms.iter().any(|datom| {
+            datom.a == ATTR_DID_DIDCOMM_MESSAGING_ENDPOINT
+                && datom
+                    .v
+                    .as_map()
+                    .and_then(|map| map.get(&kotoba_datomic::Value::kw_bare("uri")))
+                    == Some(&kotoba_datomic::Value::string("didcomm://mediator/object"))
+        }));
+
+        let restored =
+            DidDocument::from_datoms("did:plc:didcommobject", &datoms).expect("restore DID doc");
+        assert_eq!(
+            restored.didcomm_endpoint(),
+            Some("didcomm://mediator/object")
+        );
+        let endpoint = &restored
+            .service_by_type(DIDCOMM_MESSAGING_SERVICE)
+            .expect("didcomm service")
+            .endpoint;
+        match endpoint {
+            ServiceEndpointValue::Object(endpoint) => {
+                assert_eq!(
+                    endpoint.get("uri").and_then(serde_json::Value::as_str),
+                    Some("didcomm://mediator/object")
+                );
+                assert_eq!(
+                    endpoint
+                        .get("accept")
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|values| values.first())
+                        .and_then(serde_json::Value::as_str),
+                    Some("didcomm/v2")
+                );
+                assert_eq!(
+                    endpoint
+                        .get("routingKeys")
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|values| values.first())
+                        .and_then(serde_json::Value::as_str),
+                    Some("did:key:zMediator#key-x25519")
+                );
+            }
+            _ => panic!("DIDComm service endpoint must remain object-valued"),
+        }
     }
 
     #[test]
