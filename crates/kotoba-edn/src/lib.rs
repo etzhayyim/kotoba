@@ -7,12 +7,12 @@
 //! - Scalars: nil, true/false, integers (i64 + arbitrary-precision string fallback),
 //!   floats, big-decimals, characters, strings (with escape sequences), symbols,
 //!   keywords (namespaced and bare).
-//! - Collections: list `(...)`, vector `[...]`, map `{...}`, set `#{...}`.
+//! - Collections: list `(...)`, vector `[...]`, map `{...}`, set `#{...}`,
+//!   namespaced map `#:ns{...}`.
 //! - Tagged literals: `#tag value` (built-ins recognised: `#inst`, `#uuid`).
 //! - Discard `#_form`, line comments `; ...`, `,` whitespace.
 //!
-//! Not covered (out of EDN spec): namespaced map syntax `#:ns{...}` is parsed
-//! transparently (`:ns/k` keys are emitted), `#?` reader conditionals (Clojure-only).
+//! Not covered (Clojure-only): `#?` reader conditionals.
 
 mod parser;
 pub mod value;

@@ -179,7 +179,8 @@ mod tests {
     #[test]
     fn rt_scalars() {
         for s in [
-            "nil", "true", "false", "42", "-7", "3.14", "\"hi\"", ":db/id", "foo", "\\a",
+            "nil", "true", "false", "42", "-7", "3.14", "##Inf", "##-Inf", "##NaN", "\"hi\"",
+            ":db/id", "foo", "\\a",
         ] {
             roundtrip(s);
         }
@@ -191,6 +192,7 @@ mod tests {
             "[1 2 3]",
             "(a b c)",
             "{:a 1 :b 2}",
+            "#:person{:name \"Alice\" :age 30}",
             "#{1 2 3}",
             "#inst \"2024\"",
         ] {

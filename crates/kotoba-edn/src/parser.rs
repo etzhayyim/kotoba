@@ -3,11 +3,12 @@
 //! Grammar (informal):
 //! ```text
 //! value     := nil | bool | number | char | string | keyword | symbol
-//!            | list | vector | map | set | tagged
+//!            | list | vector | map | set | namespaced-map | tagged
 //! list      := '(' value* ')'
 //! vector    := '[' value* ']'
 //! map       := '{' (value value)* '}'
 //! set       := '#{' value* '}'
+//! ns-map    := '#:' symbol map
 //! tagged    := '#' symbol value
 //! discard   := '#_' value
 //! comment   := ';' .* '\n'
@@ -238,6 +239,8 @@ impl<'a> Parser<'a> {
         self.pos += 1; // '#'
         match self.peek() {
             Some(b'{') => self.parse_set(),
+            Some(b':') => self.parse_namespaced_map(),
+            Some(b'#') => self.parse_symbolic_float(off),
             Some(b'_') => {
                 self.pos += 1;
                 self.parse_value()?; // discard
@@ -266,6 +269,47 @@ impl<'a> Parser<'a> {
             }),
             None => Err(ParseError::UnexpectedEof(off)),
         }
+    }
+
+    fn parse_symbolic_float(&mut self, off: usize) -> Result<EdnValue, ParseError> {
+        self.pos += 1; // second '#'
+        let literal = self.read_symbol_chars();
+        match literal.as_str() {
+            "Inf" => Ok(EdnValue::float(f64::INFINITY)),
+            "-Inf" => Ok(EdnValue::float(f64::NEG_INFINITY)),
+            "NaN" => Ok(EdnValue::float(f64::NAN)),
+            _ => Err(ParseError::InvalidNumber {
+                literal: format!("##{literal}"),
+                offset: off,
+            }),
+        }
+    }
+
+    fn parse_namespaced_map(&mut self) -> Result<EdnValue, ParseError> {
+        let off = self.pos;
+        self.pos += 1; // ':'
+        let namespace = self.read_symbol_chars();
+        if namespace.is_empty() {
+            return Err(ParseError::UnexpectedChar {
+                ch: ':',
+                offset: off,
+            });
+        }
+        self.skip_ws();
+        if self.peek() != Some(b'{') {
+            return Err(ParseError::UnexpectedChar {
+                ch: self.peek().unwrap_or_default() as char,
+                offset: self.pos,
+            });
+        }
+        let EdnValue::Map(map) = self.parse_map()? else {
+            unreachable!("parse_map always returns a map");
+        };
+        Ok(EdnValue::Map(
+            map.into_iter()
+                .map(|(k, v)| (qualify_namespaced_map_key(k, &namespace), v))
+                .collect(),
+        ))
     }
 
     fn parse_string(&mut self) -> Result<EdnValue, ParseError> {
@@ -481,6 +525,18 @@ fn parse_number_literal(lit: &str, off: usize) -> Result<EdnValue, ParseError> {
     }
 }
 
+fn qualify_namespaced_map_key(key: EdnValue, namespace: &str) -> EdnValue {
+    match key {
+        EdnValue::Keyword(keyword) if keyword.namespace().is_none() => {
+            EdnValue::Keyword(Keyword::namespaced(namespace, keyword.name()))
+        }
+        EdnValue::Symbol(symbol) if symbol.namespace.is_none() => {
+            EdnValue::Symbol(Symbol::namespaced(namespace, symbol.name))
+        }
+        other => other,
+    }
+}
+
 fn is_terminator(b: u8) -> bool {
     matches!(
         b,
@@ -565,6 +621,28 @@ mod tests {
     }
 
     #[test]
+    fn namespaced_map_qualifies_unqualified_keys() {
+        let v = parse("#:person{:name \"Alice\" :age 30 :db/id \"alice\" plain true}").unwrap();
+        let EdnValue::Map(m) = v else { panic!() };
+        assert_eq!(
+            m.get(&EdnValue::kw("person", "name")),
+            Some(&EdnValue::String("Alice".into()))
+        );
+        assert_eq!(
+            m.get(&EdnValue::kw("person", "age")),
+            Some(&EdnValue::Integer(30))
+        );
+        assert_eq!(
+            m.get(&EdnValue::kw("db", "id")),
+            Some(&EdnValue::String("alice".into()))
+        );
+        assert_eq!(
+            m.get(&EdnValue::Symbol(Symbol::namespaced("person", "plain"))),
+            Some(&EdnValue::Bool(true))
+        );
+    }
+
+    #[test]
     fn tagged_and_discard() {
         let v = parse("#inst \"2024-01-01\"").unwrap();
         if let EdnValue::Tagged { tag, value } = v {
@@ -617,6 +695,16 @@ mod tests {
     fn bigint_and_bigdec() {
         assert_eq!(parse("123N").unwrap(), EdnValue::BigInt("123".into()));
         assert_eq!(parse("3.14M").unwrap(), EdnValue::BigDec("3.14".into()));
+    }
+
+    #[test]
+    fn symbolic_floats() {
+        assert_eq!(parse("##Inf").unwrap(), EdnValue::float(f64::INFINITY));
+        assert_eq!(parse("##-Inf").unwrap(), EdnValue::float(f64::NEG_INFINITY));
+        let EdnValue::Float(nan) = parse("##NaN").unwrap() else {
+            panic!()
+        };
+        assert!(nan.is_nan());
     }
 
     #[test]
