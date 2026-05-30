@@ -6572,7 +6572,7 @@ pub async fn invoke_run(
             Err((code, msg)) => {
                 return (
                     code,
-                    Json(json!({"error": format!("invoke graph snapshot: {msg}")})),
+                    Json(serde_json::json!({"error": format!("invoke graph snapshot: {msg}")})),
                 )
                     .into_response();
             }
@@ -6596,7 +6596,7 @@ pub async fn invoke_run(
             Err(e) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("invoke graph head: {e}")})),
+                    Json(serde_json::json!({"error": format!("invoke graph head: {e}")})),
                 )
                     .into_response();
             }
