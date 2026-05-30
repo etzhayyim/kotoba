@@ -21,6 +21,14 @@
               "type": "string",
               "description": "Optional IPNS name override for SPARQL reads. Defaults to the graph canonical k51-kotoba-{graph} head."
             },
+            "asOf": {
+              "type": "string",
+              "description": "Optional Datomic as-of transaction CID. Reads the graph DB at the end of this transaction."
+            },
+            "since": {
+              "type": "string",
+              "description": "Optional Datomic since transaction CID. Reads facts strictly after this transaction."
+            },
             "cacaoB64": { "type": "string" },
             "limit": { "type": "integer", "minimum": 1, "maximum": 100000 },
             "maxHops": { "type": "integer", "minimum": 0, "maximum": 16 }
@@ -39,6 +47,10 @@
               "knownValues": ["select", "ask", "describe", "construct"]
             },
             "result": { "type": "boolean" },
+            "basisT": {
+              "type": "string",
+              "description": "Datomic basis transaction CID for distributed, as-of, since, or remote SPARQL reads."
+            },
             "count": { "type": "integer", "minimum": 0 },
             "maxHops": { "type": "integer", "minimum": 0, "maximum": 16 },
             "elapsedMs": { "type": "integer", "minimum": 0 },

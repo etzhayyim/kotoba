@@ -11932,6 +11932,8 @@ mod tests {
                 "graph",
                 "remotePeer",
                 "remoteIpnsName",
+                "asOf",
+                "since",
                 "cacaoB64",
                 "limit",
                 "maxHops",
@@ -11940,7 +11942,7 @@ mod tests {
         assert_lexicon_output_fields(
             graph_sparql,
             &["ok", "form", "elapsedMs"],
-            &["result", "count", "maxHops", "quads"],
+            &["result", "basisT", "count", "maxHops", "quads"],
         );
         assert_lexicon_array_item_fields(
             graph_sparql,

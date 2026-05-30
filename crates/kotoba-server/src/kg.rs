@@ -197,25 +197,32 @@ async fn current_graph_deltas(
 async fn distributed_query_store(
     state: &Arc<KotobaState>,
     graph_cid: &KotobaCid,
+    as_of: Option<&str>,
+    since: Option<&str>,
     remote_peer: Option<&str>,
     remote_ipns_name: Option<&str>,
-) -> Result<QuadStore, (StatusCode, String)> {
-    let quads = if remote_peer.is_some() || remote_ipns_name.is_some() {
+) -> Result<(QuadStore, Option<String>), (StatusCode, String)> {
+    let (quads, basis_t) = if remote_peer.is_some()
+        || remote_ipns_name.is_some()
+        || as_of.is_some()
+        || since.is_some()
+    {
         let db = crate::xrpc::require_distributed_datomic_db(
             state,
             graph_cid,
-            None,
-            None,
+            as_of,
+            since,
             remote_peer,
             remote_ipns_name,
         )?;
-        datomic_db_quads(graph_cid, db)
+        let basis_t = db.basis_t.as_ref().map(KotobaCid::to_multibase);
+        (datomic_db_quads(graph_cid, db), basis_t)
     } else {
-        current_graph_quads(state, graph_cid).await?
+        (current_graph_quads(state, graph_cid).await?, None)
     };
     let query_store = QuadStore::new(Arc::new(Journal::new()), Arc::new(MemoryBlockStore::new()));
     query_store.assert_batch_silent(quads).await;
-    Ok(query_store)
+    Ok((query_store, basis_t))
 }
 
 fn datomic_db_quads(graph_cid: &KotobaCid, db: kotoba_datomic::Db) -> Vec<LegacyQuad> {
@@ -1619,6 +1626,10 @@ pub struct SparqlReq {
     /// Optional IPNS name override for SPARQL reads. Defaults to the graph's
     /// canonical `k51-kotoba-{graphCid}` head.
     pub remote_ipns_name: Option<String>,
+    /// Optional Datomic `as-of` transaction CID for SPARQL reads.
+    pub as_of: Option<String>,
+    /// Optional Datomic `since` transaction CID for SPARQL reads.
+    pub since: Option<String>,
     /// CACAO delegation chain (DAG-CBOR + base64) for private graphs.
     pub cacao_b64: Option<String>,
     /// Maximum results to materialise (defaults to 10000).
@@ -1697,9 +1708,11 @@ pub async fn kg_sparql(
         .take(10)
         .collect::<String>()
         .to_ascii_uppercase();
-    let qs = distributed_query_store(
+    let (qs, basis_t) = distributed_query_store(
         &state,
         &graph_cid,
+        req.as_of.as_deref(),
+        req.since.as_deref(),
         req.remote_peer.as_deref(),
         req.remote_ipns_name.as_deref(),
     )
@@ -1713,6 +1726,7 @@ pub async fn kg_sparql(
         serde_json::json!({
             "ok":        true,
             "form":      "ask",
+            "basisT":    basis_t,
             "result":    result,
             "elapsedMs": t0.elapsed().as_millis(),
         })
@@ -1732,6 +1746,7 @@ pub async fn kg_sparql(
         serde_json::json!({
             "ok":        true,
             "form":      "describe",
+            "basisT":    basis_t,
             "maxHops":   max_hops,
             "count":     materialised.len(),
             "quads":     materialised,
@@ -1746,6 +1761,7 @@ pub async fn kg_sparql(
         serde_json::json!({
             "ok":        true,
             "form":      "construct",
+            "basisT":    basis_t,
             "count":     materialised.len(),
             "quads":     materialised,
             "elapsedMs": t0.elapsed().as_millis(),
@@ -1759,6 +1775,7 @@ pub async fn kg_sparql(
         serde_json::json!({
             "ok":        true,
             "form":      "select",
+            "basisT":    basis_t,
             "count":     materialised.len(),
             "quads":     materialised,
             "elapsedMs": t0.elapsed().as_millis(),
@@ -1821,9 +1838,11 @@ mod tests {
 
         let ipns_name = "k51-kotoba-kg-sparql-named-head".to_string();
         let tx = KotobaCid::from_bytes(b"kg-sparql-named-ipns-tx");
+        let second_tx = KotobaCid::from_bytes(b"kg-sparql-named-ipns-second-tx");
         let alice = KotobaCid::from_bytes(b"kg-sparql-alice");
+        let bob = KotobaCid::from_bytes(b"kg-sparql-bob");
         let writer = DistributedCommitWriter::new(&*state.block_store, &*state.ipns_registry);
-        writer
+        let first = writer
             .commit_datoms(CommitDatomsRequest {
                 ipns_name: ipns_name.clone(),
                 graph: graph.clone(),
@@ -1837,9 +1856,38 @@ mod tests {
                     Datom::assert(alice, "name".into(), EdnValue::string("Alice"), tx.clone()),
                 ],
                 expected_parent: None,
-                tx_cid: Some(tx),
+                tx_cid: Some(tx.clone()),
                 author: "did:key:zSparqlAuthor".into(),
                 seq: 1,
+                valid_until: "2030-01-01T00:00:00Z".into(),
+                ttl_secs: Some(60),
+                cacao_proof_cid: None,
+                ipns_controller_did: None,
+                ipns_signing_key: None,
+            })
+            .unwrap();
+        writer
+            .commit_datoms(CommitDatomsRequest {
+                ipns_name: ipns_name.clone(),
+                graph: graph.clone(),
+                datoms: vec![
+                    Datom::assert(
+                        bob.clone(),
+                        "role".into(),
+                        EdnValue::string("editor"),
+                        second_tx.clone(),
+                    ),
+                    Datom::assert(
+                        bob,
+                        "name".into(),
+                        EdnValue::string("Bob"),
+                        second_tx.clone(),
+                    ),
+                ],
+                expected_parent: Some(first.commit.cid.clone()),
+                tx_cid: Some(second_tx.clone()),
+                author: "did:key:zSparqlAuthor".into(),
+                seq: 2,
                 valid_until: "2030-01-01T00:00:00Z".into(),
                 ttl_secs: Some(60),
                 cacao_proof_cid: None,
@@ -1853,9 +1901,11 @@ mod tests {
             HeaderMap::new(),
             Json(SparqlReq {
                 query: r#"SELECT ?s WHERE { ?s <role> "admin" }"#.into(),
-                graph: Some(graph_mb),
+                graph: Some(graph_mb.clone()),
                 remote_peer: None,
-                remote_ipns_name: Some(ipns_name),
+                remote_ipns_name: Some(ipns_name.clone()),
+                as_of: None,
+                since: None,
                 cacao_b64: None,
                 limit: None,
                 max_hops: 0,
@@ -1873,6 +1923,59 @@ mod tests {
         assert_eq!(body["count"], 1);
         assert_eq!(body["quads"][0]["predicate"], "role");
         assert_eq!(body["quads"][0]["object"]["text"], "admin");
+
+        let as_of = kg_sparql(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Json(SparqlReq {
+                query: r#"SELECT ?s WHERE { ?s <role> "editor" }"#.into(),
+                graph: Some(graph_mb.clone()),
+                remote_peer: None,
+                remote_ipns_name: Some(ipns_name.clone()),
+                as_of: Some(tx.to_multibase()),
+                since: None,
+                cacao_b64: None,
+                limit: None,
+                max_hops: 0,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(as_of.status(), StatusCode::OK);
+        let as_of_body = axum::body::to_bytes(as_of.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let as_of_body: serde_json::Value = serde_json::from_slice(&as_of_body).unwrap();
+        assert_eq!(as_of_body["basisT"], tx.to_multibase());
+        assert_eq!(as_of_body["count"], 0);
+
+        let since = kg_sparql(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Json(SparqlReq {
+                query: r#"SELECT ?s WHERE { ?s <role> "editor" }"#.into(),
+                graph: Some(graph_mb),
+                remote_peer: None,
+                remote_ipns_name: Some(ipns_name),
+                as_of: None,
+                since: Some(tx.to_multibase()),
+                cacao_b64: None,
+                limit: None,
+                max_hops: 0,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(since.status(), StatusCode::OK);
+        let since_body = axum::body::to_bytes(since.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let since_body: serde_json::Value = serde_json::from_slice(&since_body).unwrap();
+        assert_eq!(since_body["basisT"], second_tx.to_multibase());
+        assert_eq!(since_body["count"], 1);
+        assert_eq!(since_body["quads"][0]["object"]["text"], "editor");
     }
 
     // ── obj_to_json ───────────────────────────────────────────────────────────
