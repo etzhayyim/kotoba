@@ -607,9 +607,88 @@ pub(crate) fn query_result_window(
         .map(|value| query_non_negative_usize(value, ":limit"))
         .transpose()?;
     let iter = rows.into_iter().skip(offset);
-    Ok(match limit {
+    let rows = match limit {
         Some(limit) => iter.take(limit).collect(),
         None => iter.collect(),
+    };
+    project_query_named_results(query, rows)
+}
+
+fn project_query_named_results(
+    query: &BTreeMap<EdnValue, EdnValue>,
+    rows: Vec<Vec<EdnValue>>,
+) -> Result<Vec<Vec<EdnValue>>> {
+    let projections = [
+        ("keys", QueryNamedProjection::Keys),
+        ("strs", QueryNamedProjection::Strs),
+        ("syms", QueryNamedProjection::Syms),
+    ]
+    .into_iter()
+    .filter_map(|(name, projection)| query.get(&kw(name)).map(|value| (projection, value)))
+    .collect::<Vec<_>>();
+    if projections.is_empty() {
+        return Ok(rows);
+    }
+    if projections.len() > 1 {
+        return Err(DatomicError::Query(
+            "only one of :keys, :strs, or :syms may be used".into(),
+        ));
+    }
+    let (projection, aliases) = projections[0];
+    let aliases = aliases
+        .as_seq()
+        .ok_or_else(|| DatomicError::Query(":keys/:strs/:syms must be a vector/list".into()))?;
+    for row in &rows {
+        if row.len() != aliases.len() {
+            return Err(DatomicError::Query(format!(
+                ":keys/:strs/:syms count {} must match :find result width {}",
+                aliases.len(),
+                row.len()
+            )));
+        }
+    }
+    let keys = aliases
+        .iter()
+        .map(|alias| query_named_projection_key(projection, alias))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            vec![EdnValue::Map(
+                keys.iter().cloned().zip(row).collect::<BTreeMap<_, _>>(),
+            )]
+        })
+        .collect())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum QueryNamedProjection {
+    Keys,
+    Strs,
+    Syms,
+}
+
+fn query_named_projection_key(
+    projection: QueryNamedProjection,
+    alias: &EdnValue,
+) -> Result<EdnValue> {
+    let name = match alias {
+        EdnValue::Symbol(symbol) => symbol.to_qualified(),
+        EdnValue::Keyword(keyword) => keyword.to_qualified(),
+        EdnValue::String(value) => value.clone(),
+        other => {
+            return Err(DatomicError::Query(format!(
+                ":keys/:strs/:syms aliases must be symbols, keywords, or strings, got {}",
+                edn_to_string(other)
+            )))
+        }
+    };
+    Ok(match projection {
+        QueryNamedProjection::Keys => {
+            EdnValue::Keyword(Keyword::parse(name.trim_start_matches(':')))
+        }
+        QueryNamedProjection::Strs => EdnValue::String(name.trim_start_matches(':').to_string()),
+        QueryNamedProjection::Syms => EdnValue::Symbol(Symbol::parse(name.trim_start_matches(':'))),
     })
 }
 
@@ -6802,6 +6881,84 @@ mod tests {
                 EdnValue::String("Carol".into()),
                 EdnValue::Integer(20)
             ]]
+        );
+    }
+
+    #[tokio::test]
+    async fn q_supports_datomic_keys_strs_and_syms_named_results() {
+        let conn = Connection::new();
+        conn.transact(
+            parse(
+                r#"[
+                  {:db/id "alice" :person/name "Alice" :person/age 30}
+                ]"#,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let keys_rows = q(
+            parse(
+                r#"{:find [?name ?age]
+                   :keys [person/name age]
+                   :where [[?e :person/name ?name]
+                           [?e :person/age ?age]]}"#,
+            )
+            .unwrap(),
+            &conn.db(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            keys_rows,
+            vec![vec![EdnValue::map([
+                (kw_value(":person/name"), EdnValue::String("Alice".into())),
+                (kw_value(":age"), EdnValue::Integer(30)),
+            ])]]
+        );
+
+        let strs_rows = q(
+            parse(
+                r#"{:find [?name ?age]
+                   :strs [name age]
+                   :where [[?e :person/name ?name]
+                           [?e :person/age ?age]]}"#,
+            )
+            .unwrap(),
+            &conn.db(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            strs_rows,
+            vec![vec![EdnValue::map([
+                (
+                    EdnValue::String("name".into()),
+                    EdnValue::String("Alice".into())
+                ),
+                (EdnValue::String("age".into()), EdnValue::Integer(30)),
+            ])]]
+        );
+
+        let syms_rows = q(
+            parse(
+                r#"{:find [?name ?age]
+                   :syms [name age]
+                   :where [[?e :person/name ?name]
+                           [?e :person/age ?age]]}"#,
+            )
+            .unwrap(),
+            &conn.db(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            syms_rows,
+            vec![vec![EdnValue::map([
+                (EdnValue::sym("name"), EdnValue::String("Alice".into())),
+                (EdnValue::sym("age"), EdnValue::Integer(30)),
+            ])]]
         );
     }
 
