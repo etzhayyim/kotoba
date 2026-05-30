@@ -102,13 +102,13 @@ exactly how to silence or fix it.
 
 | Crate              | Role                                                                       |
 |--------------------|----------------------------------------------------------------------------|
-| `kotoba-core`      | CIDv1 blake3, KAIS 8-bit frame, Prolly Tree                                |
+| `kotoba-core`      | CIDv1 dag-cbor sha2-256, KAIS 8-bit frame, Prolly Tree                     |
 | `kotoba-kse`       | Journal (Merkle WAL), Vault (CDC chunker), Topic, Shelf, AgentIdentity     |
 | `kotoba-kqe`       | Datalog engine, Arrangement (EAVT/AEVT/AVET/VAET), Delta, MV               |
 | `kotoba-dht`       | Source Chain, Warrant, Neighborhood (DHT)                                  |
 | `kotoba-net`       | libp2p QUIC/Noise/GossipSub                                                |
 | `kotoba-auth`      | CACAO chain (depth-2), multi-graph grants, EdDSA verify, did:key, Passkey  |
-| `kotoba-graph`     | Quad API, SPARQL 1.1 (BGP/Filter/Union/Optional/Group/Path/Service/…), Datalog cold, CID-MV cache, Commit DAG, N-hop DESCRIBE |
+| `kotoba-graph`     | Datom projection API, SPARQL 1.1 (BGP/Filter/Union/Optional/Group/Path/Service/…), Datalog cold, CID-MV cache, Commit DAG, N-hop DESCRIBE |
 | `kotoba-vm`        | Invoke/Result ChainEntry, CALL_FOREIGN bridge                              |
 | `kotoba-llm`       | Weight blob (FP8), LoRA Delta, KV-cache, WebGPU train + infer (Gemma 4)     |
 | `kotoba-runtime`   | WASM Component Model host: WasmExecutor + UdfExecutor + WIT bindings       |
@@ -116,22 +116,22 @@ exactly how to silence or fix it.
 | `kotoba-store-web` | Browser IndexedDB block store (wasm32)                                     |
 | `kotoba-crypto`    | AEAD (AES-256-GCM), HKDF, key wrap                                         |
 | `kotoba-signal`    | Signal Protocol (X3DH + Double Ratchet + MLS)                              |
-| `kotoba-ingest`    | Gmail OAuth2 poll + RFC 2822 parse + E2E encrypt → QuadStore               |
+| `kotoba-ingest`    | Gmail OAuth2 poll + RFC 2822 parse + E2E encrypt → Datom projection        |
 | `kotoba-server`    | XRPC / MCP endpoints (kg.ingest / kg.ingest_batch / kg.query / kg.sparql)  |
 | `kotoba-cli`       | `kotoba` binary (init, serve, demo, bench, sparql, …)                      |
 | `kotoba-guest`     | WASM guest SDK (WIT bindings for kotoba nodes)                             |
 
 ## Properties
 
-- **Content-addressed** — every block keyed by CIDv1 blake3 + dag-cbor
-- **Immutable datoms** — Datomic-style EAVT with Delta (assert/retract)
-- **4-index arrangement** — EAVT / AEVT / AVET / VAET for O(1)–O(log n) access
+- **Content-addressed** — IPFS-compatible CIDv1 sha2-256 over raw / dag-pb / dag-cbor blocks
+- **Immutable datoms** — Datomic-style 5-tuple `(E,A,V,T,Added)` with retract tombstones
+- **5-index arrangement** — EAVT / AEVT / AVET / VAET / TEA for O(1)–O(log n) access
 - **Prolly Tree storage** — deterministic, hash-consistent B-tree over blocks
 - **Distributed Pregel** — BSP graph computation across nodes via libp2p
-- **AT Protocol native** — quad store backed by commit DAG and JetStream
+- **AT Protocol native** — Datom projection backed by commit DAG and JetStream
 - **WASM runtime** — arbitrary graph logic as Component Model guests
 - **E2E encryption** — Signal Protocol + CACAO auth for consent-gated data
-- **SPARQL 1.1 + Datalog** — same QuadStore answers both; CID-addressed MV cache turns repeat queries into µs lookups
+- **SPARQL 1.1 + Datalog** — the same Datom-backed projection answers both; CID-addressed MV cache turns repeat queries into µs lookups
 - **CACAO-native authz** — depth-2 delegation chains, multi-graph grants, anti-replay nonce
 
 ## SPARQL surface
@@ -139,7 +139,7 @@ exactly how to silence or fix it.
 Server endpoint: `POST /xrpc/ai.gftd.apps.kotoba.graph.sparql`
 
 Auto-detects the form from the leading keyword and dispatches to the
-matching `QuadStore` cold-path method:
+matching Datom-backed cold-path method:
 
 - `SELECT` — BGP / Filter / Union / Optional / Sub-SELECT / VALUES / GROUP BY / HAVING / ORDER BY / LIMIT / OFFSET / Property paths `+ * ? ^ |` / Sequence
 - `DESCRIBE` — explicit IRIs and `?var WHERE { … }` forms; parallel per-subject fetch
