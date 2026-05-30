@@ -197,11 +197,46 @@ async fn current_graph_deltas(
 async fn distributed_query_store(
     state: &Arc<KotobaState>,
     graph_cid: &KotobaCid,
+    remote_peer: Option<&str>,
+    remote_ipns_name: Option<&str>,
 ) -> Result<QuadStore, (StatusCode, String)> {
-    let quads = current_graph_quads(state, graph_cid).await?;
+    let quads = if remote_peer.is_some() || remote_ipns_name.is_some() {
+        let db = crate::xrpc::require_distributed_datomic_db(
+            state,
+            graph_cid,
+            None,
+            None,
+            remote_peer,
+            remote_ipns_name,
+        )?;
+        datomic_db_quads(graph_cid, db)
+    } else {
+        current_graph_quads(state, graph_cid).await?
+    };
     let query_store = QuadStore::new(Arc::new(Journal::new()), Arc::new(MemoryBlockStore::new()));
     query_store.assert_batch_silent(quads).await;
     Ok(query_store)
+}
+
+fn datomic_db_quads(graph_cid: &KotobaCid, db: kotoba_datomic::Db) -> Vec<LegacyQuad> {
+    db.datoms()
+        .into_iter()
+        .map(|datom| {
+            let substrate = datom.to_kqe().unwrap_or_else(|_| KqeDatom {
+                e: datom.e,
+                a: datom.a,
+                v: KqeValue::Text(kotoba_edn::to_string(&datom.v)),
+                tx: datom.t,
+                op: datom.added,
+            });
+            LegacyQuad {
+                graph: graph_cid.clone(),
+                subject: substrate.e,
+                predicate: substrate.a,
+                object: substrate.v.into(),
+            }
+        })
+        .collect()
 }
 
 fn kg_subject_by_predicate_value(
@@ -1578,6 +1613,12 @@ pub struct SparqlReq {
     pub query: String,
     /// Optional named graph CID (multibase).  Defaults to the kg-graph CID.
     pub graph: Option<String>,
+    /// Optional `host:port` or `/ip4/<addr>/tcp/<port>` kotoba-ipfs peer used
+    /// to resolve a remote graph head and DAG-CBOR/Prolly blocks.
+    pub remote_peer: Option<String>,
+    /// Optional IPNS name override for SPARQL reads. Defaults to the graph's
+    /// canonical `k51-kotoba-{graphCid}` head.
+    pub remote_ipns_name: Option<String>,
     /// CACAO delegation chain (DAG-CBOR + base64) for private graphs.
     pub cacao_b64: Option<String>,
     /// Maximum results to materialise (defaults to 10000).
@@ -1656,7 +1697,13 @@ pub async fn kg_sparql(
         .take(10)
         .collect::<String>()
         .to_ascii_uppercase();
-    let qs = distributed_query_store(&state, &graph_cid).await?;
+    let qs = distributed_query_store(
+        &state,
+        &graph_cid,
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
+    )
+    .await?;
 
     let response = if upper.starts_with("ASK") {
         let result = qs
@@ -1744,7 +1791,12 @@ fn quad_to_json(q: kotoba_kqe::quad::LegacyQuad) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
     use kotoba_core::cid::KotobaCid;
+    use kotoba_core::named_graph::GraphVisibility;
+    use kotoba_datomic::distributed::CommitDatomsRequest;
+    use kotoba_datomic::Datom;
+    use kotoba_edn::EdnValue;
 
     // ── kg_graph_cid ──────────────────────────────────────────────────────────
 
@@ -1753,6 +1805,74 @@ mod tests {
         let a = kg_graph_cid();
         let b = kg_graph_cid();
         assert_eq!(a, b);
+    }
+
+    #[tokio::test]
+    async fn kg_sparql_reads_named_distributed_ipns_head() {
+        std::env::set_var("KOTOBA_IPFS", "off");
+        std::env::set_var("KOTOBA_IPNS_REQUIRE_SIGNATURE", "false");
+        let state = Arc::new(KotobaState::new(None).unwrap());
+        let graph = KotobaCid::from_bytes(b"kg-sparql-named-ipns-graph");
+        let graph_mb = graph.to_multibase();
+        state.graph_registry.write().await.insert(
+            graph.clone(),
+            ("kg-sparql-named-ipns-graph".into(), GraphVisibility::Public),
+        );
+
+        let ipns_name = "k51-kotoba-kg-sparql-named-head".to_string();
+        let tx = KotobaCid::from_bytes(b"kg-sparql-named-ipns-tx");
+        let alice = KotobaCid::from_bytes(b"kg-sparql-alice");
+        let writer = DistributedCommitWriter::new(&*state.block_store, &*state.ipns_registry);
+        writer
+            .commit_datoms(CommitDatomsRequest {
+                ipns_name: ipns_name.clone(),
+                graph: graph.clone(),
+                datoms: vec![
+                    Datom::assert(
+                        alice.clone(),
+                        "role".into(),
+                        EdnValue::string("admin"),
+                        tx.clone(),
+                    ),
+                    Datom::assert(alice, "name".into(), EdnValue::string("Alice"), tx.clone()),
+                ],
+                expected_parent: None,
+                tx_cid: Some(tx),
+                author: "did:key:zSparqlAuthor".into(),
+                seq: 1,
+                valid_until: "2030-01-01T00:00:00Z".into(),
+                ttl_secs: Some(60),
+                cacao_proof_cid: None,
+                ipns_controller_did: None,
+                ipns_signing_key: None,
+            })
+            .unwrap();
+
+        let response = kg_sparql(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Json(SparqlReq {
+                query: r#"SELECT ?s WHERE { ?s <role> "admin" }"#.into(),
+                graph: Some(graph_mb),
+                remote_peer: None,
+                remote_ipns_name: Some(ipns_name),
+                cacao_b64: None,
+                limit: None,
+                max_hops: 0,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["form"], "select");
+        assert_eq!(body["count"], 1);
+        assert_eq!(body["quads"][0]["predicate"], "role");
+        assert_eq!(body["quads"][0]["object"]["text"], "admin");
     }
 
     // ── obj_to_json ───────────────────────────────────────────────────────────

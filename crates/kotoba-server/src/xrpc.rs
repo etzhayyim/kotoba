@@ -3310,7 +3310,7 @@ fn missing_distributed_datomic_head(
     )
 }
 
-fn require_distributed_datomic_db(
+pub(crate) fn require_distributed_datomic_db(
     state: &KotobaState,
     graph_cid: &kotoba_core::cid::KotobaCid,
     as_of: Option<&str>,
@@ -8563,6 +8563,24 @@ mod tests {
                         EdnValue::string("admin"),
                         tx.clone(),
                     ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"remote-alice"),
+                        ":person/score".into(),
+                        EdnValue::Integer(10),
+                        tx.clone(),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"remote-bob"),
+                        ":person/role".into(),
+                        EdnValue::string("admin"),
+                        tx.clone(),
+                    ),
+                    Datom::assert(
+                        KotobaCid::from_bytes(b"remote-bob"),
+                        ":person/score".into(),
+                        EdnValue::Integer(20),
+                        tx.clone(),
+                    ),
                 ],
                 expected_parent: None,
                 tx_cid: Some(tx),
@@ -8637,6 +8655,40 @@ mod tests {
             serde_json::json!([[r#""Alice""#, r#""admin""#]])
         );
         assert_eq!(body["basis_t"], report.commit.tx_cid.to_multibase());
+
+        let aggregate = datomic_q(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicQReq {
+                graph: graph_mb.clone(),
+                query_edn: r#"{:find [(count ?e) (sum ?score)]
+                        :keys [total totalScore]
+                        :where [[?e :person/role "admin"]
+                                [?e :person/score ?score]]}"#
+                    .into(),
+                inputs_edn: vec![],
+                as_of: None,
+                since: None,
+                history: false,
+                remote_peer: Some(remote_peer.clone()),
+                remote_ipns_name: Some(ipns_name.clone()),
+                cacao_b64: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(aggregate.status(), axum::http::StatusCode::OK);
+        let aggregate_body = axum::body::to_bytes(aggregate.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let aggregate_body: serde_json::Value = serde_json::from_slice(&aggregate_body).unwrap();
+        assert_eq!(aggregate_body["rows_edn"], serde_json::json!([["2", "30"]]));
+        assert_eq!(
+            aggregate_body["rows_map_json"],
+            serde_json::json!([{ ":total": "2", ":totalScore": "30" }])
+        );
 
         let pull = datomic_pull(
             axum::extract::State(Arc::clone(&state)),
@@ -10258,7 +10310,14 @@ mod tests {
         assert_lexicon_input_fields(
             graph_sparql,
             &["query"],
-            &["graph", "cacaoB64", "limit", "maxHops"],
+            &[
+                "graph",
+                "remotePeer",
+                "remoteIpnsName",
+                "cacaoB64",
+                "limit",
+                "maxHops",
+            ],
         );
         assert_lexicon_output_fields(
             graph_sparql,
