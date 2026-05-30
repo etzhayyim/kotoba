@@ -18,7 +18,9 @@ pub const ATTR_DIDCOMM_SERVICE_TYPE: &str = "didcomm/serviceType";
 pub const ATTR_DIDCOMM_WIRE_FORMAT: &str = "didcomm/wireFormat";
 pub const ATTR_DIDCOMM_TYPE: &str = "didcomm/type";
 pub const ATTR_DIDCOMM_FROM: &str = "didcomm/from";
+pub const ATTR_DIDCOMM_FROM_CID: &str = "didcomm/fromCid";
 pub const ATTR_DIDCOMM_TO: &str = "didcomm/to";
+pub const ATTR_DIDCOMM_TO_CID: &str = "didcomm/toCid";
 pub const ATTR_DIDCOMM_THREAD: &str = "didcomm/thread";
 pub const ATTR_DIDCOMM_THREAD_SCOPE: &str = "didcomm/threadScope";
 pub const ATTR_DIDCOMM_PARENT_THREAD: &str = "didcomm/parentThread";
@@ -164,6 +166,14 @@ impl DidCommMessage {
             datom(&e, ATTR_DIDCOMM_BODY, json_to_edn(&self.body), &tx),
             datom(&e, ATTR_DIDCOMM_WIRE_BODY, json_to_edn(&self.body), &tx),
         ];
+        for to in &self.to {
+            out.push(datom(
+                &e,
+                ATTR_DIDCOMM_TO_CID,
+                EdnValue::string(did_derived_cid(to).to_multibase()),
+                &tx,
+            ));
+        }
         append_json_field_datoms(
             &mut out,
             &e,
@@ -173,6 +183,12 @@ impl DidCommMessage {
         );
         if let Some(from) = &self.from {
             out.push(datom(&e, ATTR_DIDCOMM_FROM, EdnValue::string(from), &tx));
+            out.push(datom(
+                &e,
+                ATTR_DIDCOMM_FROM_CID,
+                EdnValue::string(did_derived_cid(from).to_multibase()),
+                &tx,
+            ));
             out.push(datom(
                 &e,
                 ATTR_DIDCOMM_WIRE_FROM,
@@ -243,6 +259,10 @@ impl DidCommMessage {
 
 fn datom(e: &KotobaCid, a: &str, v: EdnValue, tx: &KotobaCid) -> Datom {
     Datom::assert(e.clone(), a.to_string(), v, tx.clone())
+}
+
+fn did_derived_cid(did: &str) -> KotobaCid {
+    KotobaCid::from_bytes(did.as_bytes())
 }
 
 fn string_vec(xs: &[String]) -> EdnValue {
@@ -342,6 +362,10 @@ mod tests {
             && d.v == EdnValue::string(DIDCOMM_MESSAGING_SERVICE)));
         assert!(datoms.iter().any(|d| d.a == ATTR_DIDCOMM_WIRE_FORMAT
             && d.v == EdnValue::string("application/didcomm-plain+json")));
+        assert!(datoms.iter().any(|d| d.a == ATTR_DIDCOMM_FROM_CID
+            && d.v == EdnValue::string(KotobaCid::from_bytes(b"did:key:zAlice").to_multibase())));
+        assert!(datoms.iter().any(|d| d.a == ATTR_DIDCOMM_TO_CID
+            && d.v == EdnValue::string(KotobaCid::from_bytes(b"did:key:zBob").to_multibase())));
         assert!(datoms.iter().any(|d| d.a == ATTR_DIDCOMM_THREAD));
         assert!(datoms.iter().any(|d| {
             d.a == ATTR_DIDCOMM_THREAD_SCOPE && d.v == EdnValue::string("didcomm://thread/thread-1")
