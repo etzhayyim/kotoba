@@ -1917,15 +1917,11 @@ fn verify_datomic_cacao_payload_with_operations(
     let nonce = cacao.p.nonce.clone();
     let payload = cacao.p.clone();
     let chain = kotoba_auth::DelegationChain::new(cacao);
+    let resolver = local_first_did_resolver(state);
     let mut issuer = None;
     for operation in operations {
         let verified_issuer = chain
-            .verify_with_aud_and_resolver(
-                graph,
-                operation,
-                &state.operator_did,
-                state.did_resolver.as_ref(),
-            )
+            .verify_with_aud_and_resolver(graph, operation, &state.operator_did, &resolver)
             .map_err(|e| (StatusCode::UNAUTHORIZED, format!("cacao delegation: {e}")))?;
         issuer = Some(verified_issuer);
     }
@@ -1982,15 +1978,11 @@ fn verify_datomic_cacao_payload_with_any_operation(
     let nonce = cacao.p.nonce.clone();
     let payload = cacao.p.clone();
     let chain = kotoba_auth::DelegationChain::new(cacao);
+    let resolver = local_first_did_resolver(state);
     let mut issuer = None;
     let mut last_error = None;
     for operation in operations {
-        match chain.verify_with_aud_and_resolver(
-            graph,
-            operation,
-            &state.operator_did,
-            state.did_resolver.as_ref(),
-        ) {
+        match chain.verify_with_aud_and_resolver(graph, operation, &state.operator_did, &resolver) {
             Ok(verified_issuer) => {
                 issuer = Some(verified_issuer);
                 break;
@@ -8047,18 +8039,19 @@ pub async fn agent_sync_close(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_auth_capability_datoms, atproto_repo_record_entity_cid, atproto_repo_write_datoms,
-        datomic_basis_t, datomic_datoms, datomic_db_stats, datomic_entid, datomic_entity,
-        datomic_history, datomic_ident, datomic_index_pull, datomic_index_range, datomic_log,
-        datomic_pull, datomic_pull_many, datomic_q, datomic_seek_datoms, datomic_transact,
-        datomic_tx_range, datomic_with, did_document_publish, distributed_graph_ipns_name,
+        append_auth_capability_datoms, atproto_repo_record_entity_cid, atproto_repo_write,
+        atproto_repo_write_datoms, datomic_basis_t, datomic_datoms, datomic_db_stats,
+        datomic_entid, datomic_entity, datomic_history, datomic_ident, datomic_index_pull,
+        datomic_index_range, datomic_log, datomic_pull, datomic_pull_many, datomic_q,
+        datomic_seek_datoms, datomic_transact, datomic_tx_range, datomic_with,
+        did_document_publish, didcomm_send, distributed_graph_ipns_name,
         enforce_datomic_range_tx_scope, is_did_web_ip_host, vc_issue, AtprotoRepoWriteReq,
         AuthCapabilityProjection, DatomicBasisTReq, DatomicDatomsReq, DatomicDbStatsReq,
         DatomicEntidReq, DatomicEntityReq, DatomicHistoryReq, DatomicIdentReq, DatomicIndexPullReq,
         DatomicIndexRangeReq, DatomicLogReq, DatomicPullManyReq, DatomicPullReq, DatomicQReq,
         DatomicSeekDatomsReq, DatomicTransactReq, DatomicTxRangeReq, DatomicWithReq,
-        DidDocumentPublishReq, VcIssueReq, ZCAP_ALLOWED_ACTION_IRI, ZCAP_CONTROLLER_IRI,
-        ZCAP_INVOCATION_PROOF_IRI, ZCAP_INVOCATION_TARGET_IRI,
+        DidCommSendReq, DidDocumentPublishReq, VcIssueReq, ZCAP_ALLOWED_ACTION_IRI,
+        ZCAP_CONTROLLER_IRI, ZCAP_INVOCATION_PROOF_IRI, ZCAP_INVOCATION_TARGET_IRI,
     };
     use crate::server::KotobaState;
     use axum::response::IntoResponse;
@@ -8103,6 +8096,52 @@ mod tests {
             version: "1".into(),
             resources,
         }
+    }
+
+    fn signed_cacao_b64(
+        state: &KotobaState,
+        graph: &str,
+        operation: &str,
+        nonce: &str,
+        extra_resources: impl IntoIterator<Item = impl Into<String>>,
+    ) -> String {
+        use base64::Engine as _;
+        use base64::{engine::general_purpose::STANDARD, engine::general_purpose::URL_SAFE_NO_PAD};
+        use ed25519_dalek::Signer as _;
+
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let issuer_did =
+            kotoba_auth::ed25519_pubkey_to_did_key(&signing_key.verifying_key().to_bytes());
+        let mut resources = vec![
+            format!("kotoba://op/{operation}"),
+            format!("kotoba://graph/{graph}"),
+        ];
+        resources.extend(extra_resources.into_iter().map(Into::into));
+        let mut cacao = kotoba_auth::Cacao {
+            h: kotoba_auth::CacaoHeader {
+                t: "eip4361".into(),
+            },
+            p: kotoba_auth::CacaoPayload {
+                iss: issuer_did,
+                aud: state.operator_did.clone(),
+                issued_at: "2026-05-30T00:00:00Z".into(),
+                expiry: Some("2099-01-01T00:00:00Z".into()),
+                nonce: nonce.into(),
+                domain: "kotoba.test".into(),
+                statement: None,
+                version: "1".into(),
+                resources,
+            },
+            s: kotoba_auth::CacaoSig {
+                t: "EdDSA".into(),
+                s: String::new(),
+            },
+        };
+        let signature = signing_key.sign(cacao.siwe_message().as_bytes());
+        cacao.s.s = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&cacao, &mut cbor).expect("cacao cbor");
+        STANDARD.encode(cbor)
     }
     use serde_json::json;
 
@@ -8355,6 +8394,153 @@ mod tests {
                 r#""kotoba.vc.issue""#
             ]])
         );
+    }
+
+    #[tokio::test]
+    async fn didcomm_and_atproto_xrpc_writes_record_cacao_operation_and_resource_scopes() {
+        std::env::set_var("KOTOBA_IPFS", "off");
+        std::env::set_var("KOTOBA_IPNS_REQUIRE_SIGNATURE", "false");
+        let state = Arc::new(KotobaState::new(None).unwrap());
+        let graph = KotobaCid::from_bytes(b"xrpc-cacao-protocol-scope-graph");
+        let graph_mb = graph.to_multibase();
+        state.graph_registry.write().await.insert(
+            graph.clone(),
+            (
+                "xrpc-cacao-protocol-scope-graph".into(),
+                GraphVisibility::Public,
+            ),
+        );
+        let operator_headers = {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {}", test_operator_jwt(&state.operator_did))
+                    .parse()
+                    .unwrap(),
+            );
+            headers
+        };
+        let no_operator_headers = axum::http::HeaderMap::new();
+
+        let thread_id = "thread-cacao-scope-1";
+        let didcomm_scope = format!("didcomm://thread/{thread_id}");
+        let didcomm_cacao = signed_cacao_b64(
+            &state,
+            &graph_mb,
+            kotoba_auth::CacaoPayload::OP_DIDCOMM_SEND,
+            "xrpc-didcomm-scope-nonce-1",
+            [didcomm_scope.clone()],
+        );
+        let didcomm_response = didcomm_send(
+            axum::extract::State(Arc::clone(&state)),
+            no_operator_headers.clone(),
+            axum::Json(DidCommSendReq {
+                graph: graph_mb.clone(),
+                message: kotoba_didcomm::DidCommMessage {
+                    id: "msg-cacao-scope-1".into(),
+                    message_type: "https://didcomm.org/basicmessage/2.0/message".into(),
+                    from: Some(state.operator_did.clone()),
+                    to: vec!["did:key:zRecipient".into()],
+                    thid: Some(thread_id.into()),
+                    pthid: None,
+                    created_time: Some(1),
+                    expires_time: None,
+                    body: serde_json::json!({"content": "scoped DIDComm"}),
+                    attachments: vec![],
+                },
+                cacao_b64: Some(didcomm_cacao),
+                auth_presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(didcomm_response.status(), axum::http::StatusCode::OK);
+
+        let at_uri = "at://did:plc:alice/app.bsky.feed.post/r-cacao-scope";
+        let atproto_cacao = signed_cacao_b64(
+            &state,
+            &graph_mb,
+            kotoba_auth::CacaoPayload::OP_ATPROTO_REPO_WRITE,
+            "xrpc-atproto-scope-nonce-1",
+            [at_uri.to_string()],
+        );
+        let atproto_response = atproto_repo_write(
+            axum::extract::State(Arc::clone(&state)),
+            no_operator_headers,
+            axum::Json(AtprotoRepoWriteReq {
+                graph: graph_mb.clone(),
+                uri: at_uri.into(),
+                operation: Some("create".into()),
+                cid: Some("bafyreicacaoscope".into()),
+                record: Some(serde_json::json!({
+                    "$type": "app.bsky.feed.post",
+                    "text": "scoped ATProto",
+                    "createdAt": "2026-05-30T00:00:00Z"
+                })),
+                cacao_b64: Some(atproto_cacao),
+                auth_presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(atproto_response.status(), axum::http::StatusCode::OK);
+
+        let scope_query = datomic_q(
+            axum::extract::State(state),
+            operator_headers,
+            axum::Json(DatomicQReq {
+                graph: graph_mb.clone(),
+                query_edn: r#"{:find [?operation ?resource ?didcommThread ?atprotoResource]
+                    :where [[?tx :capability/operation ?operation]
+                            [?tx :capability/resource ?resource]
+                            [(get-else $ ?tx :capability/didcommThread "") ?didcommThread]
+                            [(get-else $ ?tx :capability/atprotoResource "") ?atprotoResource]]}"#
+                    .into(),
+                inputs_edn: vec![],
+                as_of: None,
+                since: None,
+                history: false,
+                remote_peer: None,
+                remote_ipns_name: None,
+                cacao_b64: None,
+                presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(scope_query.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(scope_query.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let rows = body["rows_edn"].as_array().expect("rows_edn array");
+        assert!(rows.iter().any(|row| {
+            row == &serde_json::json!([
+                r#""didcomm:send""#,
+                format!(r#""{didcomm_scope}""#),
+                format!(r#""{thread_id}""#),
+                r#""""#
+            ])
+        }));
+        assert!(rows.iter().any(|row| {
+            row == &serde_json::json!([
+                r#""atproto:repo.write""#,
+                format!(r#""{at_uri}""#),
+                r#""""#,
+                format!(r#""{at_uri}""#)
+            ])
+        }));
+        assert!(rows.iter().any(|row| {
+            row == &serde_json::json!([
+                r#""didcomm:send""#,
+                format!(r#""kotoba://graph/{graph_mb}""#),
+                format!(r#""{thread_id}""#),
+                r#""""#
+            ])
+        }));
     }
 
     #[test]
