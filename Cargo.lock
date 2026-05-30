@@ -2157,7 +2157,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a8f2f12607f92c69b12ed746fabf9ca4f5c482cba46679c1a75b874ed7c26adb"
 dependencies = [
  "futures-io",
- "rustls",
+ "rustls 0.23.40",
  "rustls-pki-types",
 ]
 
@@ -3004,10 +3004,10 @@ dependencies = [
  "http 1.4.0",
  "hyper 1.9.0",
  "hyper-util",
- "rustls",
+ "rustls 0.23.40",
  "rustls-native-certs",
  "tokio",
- "tokio-rustls",
+ "tokio-rustls 0.26.4",
  "tower-service",
  "webpki-roots 1.0.7",
 ]
@@ -3855,6 +3855,7 @@ dependencies = [
  "ureq",
  "wasmtime",
  "wasmtime-wasi",
+ "wasmtime-wasi-http",
 ]
 
 [[package]]
@@ -3869,6 +3870,7 @@ dependencies = [
  "ciborium",
  "dashmap",
  "ed25519-dalek",
+ "futures",
  "hex",
  "kotoba-auth",
  "kotoba-core",
@@ -4399,7 +4401,7 @@ dependencies = [
  "quinn",
  "rand 0.8.6",
  "ring 0.17.14",
- "rustls",
+ "rustls 0.23.40",
  "socket2 0.5.10",
  "thiserror 1.0.69",
  "tokio",
@@ -4491,7 +4493,7 @@ dependencies = [
  "libp2p-identity",
  "rcgen",
  "ring 0.17.14",
- "rustls",
+ "rustls 0.23.40",
  "rustls-webpki 0.101.7",
  "thiserror 1.0.69",
  "x509-parser",
@@ -5800,7 +5802,7 @@ dependencies = [
  "quinn-proto",
  "quinn-udp",
  "rustc-hash 2.1.2",
- "rustls",
+ "rustls 0.23.40",
  "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
@@ -5820,7 +5822,7 @@ dependencies = [
  "rand 0.9.4",
  "ring 0.17.14",
  "rustc-hash 2.1.2",
- "rustls",
+ "rustls 0.23.40",
  "rustls-pki-types",
  "slab",
  "thiserror 2.0.18",
@@ -6144,7 +6146,7 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "quinn",
- "rustls",
+ "rustls 0.23.40",
  "rustls-native-certs",
  "rustls-pki-types",
  "serde",
@@ -6152,7 +6154,7 @@ dependencies = [
  "serde_urlencoded",
  "sync_wrapper 1.0.2",
  "tokio",
- "tokio-rustls",
+ "tokio-rustls 0.26.4",
  "tokio-util",
  "tower",
  "tower-http 0.6.11",
@@ -6311,6 +6313,20 @@ dependencies = [
 
 [[package]]
 name = "rustls"
+version = "0.22.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf4ef73721ac7bcd79b2b315da7779d8fc09718c6b3d2d1b2d94850eb8c18432"
+dependencies = [
+ "log",
+ "ring 0.17.14",
+ "rustls-pki-types",
+ "rustls-webpki 0.102.8",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "rustls"
 version = "0.23.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
@@ -6362,6 +6378,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b6275d1ee7a1cd780b64aca7726599a1dbc893b1e64144529e55c3c2f745765"
 dependencies = [
  "ring 0.17.14",
+ "untrusted 0.9.0",
+]
+
+[[package]]
+name = "rustls-webpki"
+version = "0.102.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64ca1bc8749bd4cf37b5ce386cc146580777b4e8572c7b97baf22c83f444bee9"
+dependencies = [
+ "ring 0.17.14",
+ "rustls-pki-types",
  "untrusted 0.9.0",
 ]
 
@@ -7283,11 +7310,22 @@ dependencies = [
 
 [[package]]
 name = "tokio-rustls"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "775e0c0f0adb3a2f22a00c4745d728b479985fc15ee7ca6a2608388c5569860f"
+dependencies = [
+ "rustls 0.22.4",
+ "rustls-pki-types",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-rustls"
 version = "0.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
 dependencies = [
- "rustls",
+ "rustls 0.23.40",
  "tokio",
 ]
 
@@ -7710,7 +7748,7 @@ dependencies = [
  "log",
  "native-tls",
  "once_cell",
- "rustls",
+ "rustls 0.23.40",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -8323,6 +8361,29 @@ dependencies = [
  "wasmtime",
  "wiggle",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "wasmtime-wasi-http"
+version = "25.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c05413b3d301555af887e3e21f5ab4c52a1590946035066f80622b257977e69"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "futures",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "http-body-util",
+ "hyper 1.9.0",
+ "rustls 0.22.4",
+ "tokio",
+ "tokio-rustls 0.25.0",
+ "tracing",
+ "wasmtime",
+ "wasmtime-wasi",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

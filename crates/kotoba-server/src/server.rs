@@ -41,6 +41,10 @@ pub enum NodeRole {
     Pin,
     /// Execution provider — earns gas/consumed_mkoto Quad per WASM superstep.
     Compute,
+    /// Firehose relay — bridges the local KSE Journal onto the libp2p `firehose`
+    /// gossip topic and forwards peers' firehose entries (the mesh half of the
+    /// D+E federation surface, 2026-05-30). Opt-in: not in the default set.
+    Relay,
 }
 
 impl NodeRole {
@@ -52,6 +56,7 @@ impl NodeRole {
             match part.trim().to_ascii_lowercase().as_str() {
                 "pin" => roles.push(NodeRole::Pin),
                 "compute" => roles.push(NodeRole::Compute),
+                "relay" => roles.push(NodeRole::Relay),
                 other => tracing::warn!(role = other, "unknown KOTOBA_NODE_ROLES value, ignoring"),
             }
         }
@@ -66,6 +71,7 @@ impl NodeRole {
         match self {
             NodeRole::Pin => "pin",
             NodeRole::Compute => "compute",
+            NodeRole::Relay => "relay",
         }
     }
 }
