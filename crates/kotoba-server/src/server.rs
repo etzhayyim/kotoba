@@ -12,12 +12,14 @@ use kotoba_core::cid::KotobaCid;
 use kotoba_core::named_graph::{GraphVisibility, NamedGraph};
 use kotoba_core::store::BlockStore;
 use kotoba_crypto::AgentCrypto;
-use kotoba_datomic::distributed::DistributedDatomReader;
+use kotoba_datomic::distributed::{
+    CommitDatomsRequest, DistributedCommitWriter, DistributedDatomReader,
+};
 use kotoba_dht::{neighborhood::Neighborhood, node_id::NodeId};
 use kotoba_graph::QuadStore;
 use kotoba_ingest::embed_client::{EmbedClient, HttpEmbedClient};
 use kotoba_ipfs::{
-    InMemoryIpnsRegistry, IpnsRecord, IpnsRegistry, KuboIpnsRegistry, SignedIpnsRegistry,
+    InMemoryIpnsRegistry, IpnsName, IpnsRecord, IpnsRegistry, KuboIpnsRegistry, SignedIpnsRegistry,
 };
 use kotoba_kqe::{quad::LegacyQuad as Quad, Datom as KqeDatom, Value as KqeValue};
 use kotoba_kse::SecureVault;
@@ -801,7 +803,9 @@ impl KotobaState {
             .unwrap_or(false)
     }
 
-    /// Write node registration Quads to the `kotoba/network/nodes` graph (ADR-2605260005).
+    /// Write node registration Datoms to the distributed
+    /// `kotoba/network/nodes` head and mirror them into the legacy Quad view
+    /// for backward-compatible peers (ADR-2605260005).
     ///
     /// Called once at startup (from `main.rs`) and re-callable via the
     /// `kotoba_node_register` MCP tool to refresh the registration timestamp.
@@ -861,13 +865,70 @@ impl KotobaState {
             ));
         }
 
-        for datom in datoms {
-            self.assert_datom_compat(graph_cid.clone(), datom).await;
+        let ipns_name = distributed_graph_ipns_name(&graph_cid);
+        let current_head = match self
+            .ipns_registry
+            .resolve(&IpnsName::new(ipns_name.clone()))
+        {
+            Ok(record) => Some(record),
+            Err(kotoba_ipfs::IpnsRegistryError::NotFound(_)) => None,
+            Err(err) => {
+                tracing::warn!(error = %err, "node registration IPNS resolve failed; falling back to legacy projection");
+                None
+            }
+        };
+        let expected_parent = current_head
+            .as_ref()
+            .and_then(|record| KotobaCid::from_multibase(&record.value));
+        let seq = current_head
+            .as_ref()
+            .map(|record| record.sequence + 1)
+            .unwrap_or(1);
+
+        let distributed_datoms = datoms
+            .iter()
+            .cloned()
+            .map(kotoba_datomic::Datom::from_kqe)
+            .collect::<Vec<_>>();
+        let distributed = DistributedCommitWriter::new(&*self.block_store, &*self.ipns_registry)
+            .commit_datoms(CommitDatomsRequest {
+                ipns_name: ipns_name.clone(),
+                graph: graph_cid.clone(),
+                datoms: distributed_datoms,
+                expected_parent,
+                tx_cid: None,
+                author: self.operator_did.clone(),
+                seq,
+                valid_until: "2099-01-01T00:00:00Z".to_string(),
+                ttl_secs: Some(60),
+                cacao_proof_cid: None,
+                ipns_controller_did: Some(self.operator_did.clone()),
+                ipns_signing_key: Some(self.ipns_signing_key()),
+            });
+
+        let tx_cid = match distributed {
+            Ok(report) => Some(report.commit.tx_cid),
+            Err(err) => {
+                tracing::warn!(error = %err, "node registration distributed Datomic commit failed; falling back to legacy projection");
+                None
+            }
+        };
+
+        for mut datom in datoms {
+            datom.op = true;
+            if let Some(tx_cid) = &tx_cid {
+                datom.tx = tx_cid.clone();
+            }
+            self.journal_assert_datom(&graph_cid, &datom).await;
+            self.quad_store
+                .apply_journaled_datom(graph_cid.clone(), datom)
+                .await;
         }
         tracing::info!(
             did   = %self.operator_did,
             roles = ?self.node_roles.iter().map(NodeRole::as_str).collect::<Vec<_>>(),
-            "node registered in kotoba/network/nodes"
+            ipns_name = %ipns_name,
+            "node registered in distributed kotoba/network/nodes"
         );
     }
 
@@ -1087,7 +1148,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_node_writes_quads() {
+    async fn register_node_writes_distributed_datomic_head_and_quads() {
         let state = KotobaState::new(None).expect("new");
         state.register_node().await;
 
@@ -1106,6 +1167,29 @@ mod tests {
         assert!(
             !registered_at_values.is_empty(),
             "node/registered_at datom should exist"
+        );
+
+        let ipns_name = distributed_graph_ipns_name(&graph_cid);
+        let db = DistributedDatomReader::new(&*state.block_store, &*state.ipns_registry)
+            .current_db_for_name(&ipns_name)
+            .expect("distributed node registry head should read")
+            .expect("distributed node registry head should exist");
+        let datoms = db.datoms();
+        assert!(
+            datoms.iter().any(|datom| {
+                datom.e == subject_cid
+                    && datom.a == "node/did"
+                    && datom.v == kotoba_datomic::Value::string(&state.operator_did)
+            }),
+            "node/did must be readable from the distributed Datomic/IPNS head"
+        );
+        assert!(
+            datoms.iter().any(|datom| {
+                datom.e == subject_cid
+                    && datom.a == "node/registered_at"
+                    && matches!(datom.v, kotoba_datomic::Value::Integer(_))
+            }),
+            "node/registered_at must be readable from the distributed Datomic/IPNS head"
         );
     }
 
