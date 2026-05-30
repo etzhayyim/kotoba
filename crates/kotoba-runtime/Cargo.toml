@@ -22,8 +22,8 @@ ciborium.workspace    = true
 bytes.workspace       = true
 
 # WASM component model runtime
-wasmtime        = { version = "22", features = ["component-model"] }
-wasmtime-wasi   = { version = "22" }
+wasmtime        = { version = "25", features = ["component-model"] }
+wasmtime-wasi   = { version = "25" }
 
 # Caching compiled WASM components
 dashmap = "5"
