@@ -10,10 +10,9 @@
 ///   llm.*  → CALL_FOREIGN(0xF) bridge to AgentGateway MCP
 package kotoba:kais@0.1.0;
 
-/// KQE (Kotoba Query Engine) — Datalog/legacy-quad read-write interface
+/// KQE (Kotoba Query Engine) — Datalog/Quad read-write interface
 interface kqe {
-    /// Legacy graph projection of a Datom: graph + (entity, attribute, value).
-    /// The host assigns transaction CID and Added when this is committed.
+    /// Quad ≅ Datomic Datom (Subject, Predicate, Object, Graph)
     record quad {
         graph:     string,
         subject:   string,
@@ -22,10 +21,10 @@ interface kqe {
         object-cbor: list<u8>,
     }
 
-    /// ASSERT frame (0x1): append a Datom assertion through the legacy graph projection
+    /// ASSERT frame (0x1): append Delta(quad, +1) to Arrangement
     assert-quad: func(q: quad) -> result<_, string>;
 
-    /// RETRACT frame (0xD): append a Datom retract tombstone through the legacy graph projection
+    /// RETRACT frame (0xD): append Delta(quad, -1) to Arrangement
     retract-quad: func(q: quad) -> result<_, string>;
 
     /// QUERY frame (0x2): evaluate Datalog program, return matching quads
@@ -37,7 +36,7 @@ interface kqe {
     /// Read Commit CID for a named graph head
     get-head: func(graph-name: string) -> option<string>;
 
-    /// Evaluate a set of Datalog rules against the current Datom projection snapshot.
+    /// Evaluate a set of Datalog rules against the current quad snapshot.
     /// rules-cbor: CBOR-encoded list<DatalogRule> (ciborium serialised).
     /// Returns newly derived quads (subject/predicate from head relation).
     evaluate-rules: func(rules-cbor: list<u8>) -> result<list<quad>, string>;

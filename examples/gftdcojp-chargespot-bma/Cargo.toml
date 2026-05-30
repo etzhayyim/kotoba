@@ -3,7 +3,7 @@ name        = "gftdcojp-chargespot-bma"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "gftdcojp: Chargespot-type business model — global competitor analysis stored as kotoba Datom projections"
+description = "gftdcojp: Chargespot-type business model — global competitor analysis stored as kotoba Quads"
 
 [[bin]]
 name = "gftdcojp-chargespot-bma"

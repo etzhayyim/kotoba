@@ -3,7 +3,7 @@ name        = "ashiba-bmc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "ashiba.gftd.ai Lean BMC stored as kotoba Datom projections with Datalog coverage scoring"
+description = "ashiba.gftd.ai Lean BMC stored as kotoba Quads with Datalog coverage scoring"
 
 [[bin]]
 name = "ashiba-bmc"
@@ -15,8 +15,6 @@ kotoba-kse.workspace   = true
 kotoba-kqe.workspace   = true
 kotoba-graph.workspace = true
 kotoba-store.workspace = true
-kotoba-datomic.workspace = true
-kotoba-edn.workspace   = true
 serde.workspace        = true
 serde_json.workspace   = true
 bytes.workspace        = true

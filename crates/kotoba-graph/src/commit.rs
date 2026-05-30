@@ -183,8 +183,7 @@ impl CommitDag {
     /// Compute the set of all live block CIDs referenced by every commit in the DAG.
     ///
     /// Includes: commit blocks + all ProllyTree block CIDs reachable from each commit's
-    /// Index roots, including the Datom-native TEA root when present.
-    /// Used by `QuadStore::gc_dead_blocks`.
+    /// 4 index roots (eavt, aevt, avet, vaet).  Used by `QuadStore::gc_dead_blocks`.
     pub fn all_live_cids(
         &self,
         store: &dyn BlockStore,

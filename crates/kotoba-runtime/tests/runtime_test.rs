@@ -1,5 +1,5 @@
 use kotoba_runtime::{
-    host::{EmbedFn, WitQuad},
+    host::{EmbedFn, KotobaLinker, WitQuad},
     program::ProgramStore,
     HostState, KotobaEngine, UdfExecutor, WasmExecutor,
 };
@@ -258,7 +258,7 @@ fn llm_embed_fn_none_without_configuration() {
 #[test]
 fn kqe_evaluate_rules_datalog_cbor_roundtrip() {
     use kotoba_kqe::datalog::{Atom, BodyLiteral, Term};
-    use kotoba_kqe::DatalogRule;
+    use kotoba_kqe::{DatalogProgram, DatalogRule};
 
     // Rule: knows(X, Z) :- knows(X, Y), knows(Y, Z)  (transitivity)
     let rule = DatalogRule {
@@ -343,13 +343,13 @@ fn kqe_evaluate_rules_derives_transitive_facts() {
     // Base facts: alice knows bob, bob knows carol
     let graph = cid("g");
     let input = vec![
-        Delta::assert_legacy_quad(Quad {
+        Delta::assert(Quad {
             graph: graph.clone(),
             subject: cid("alice"),
             predicate: "knows".into(),
             object: QuadObject::Cid(cid("bob")),
         }),
-        Delta::assert_legacy_quad(Quad {
+        Delta::assert(Quad {
             graph: graph.clone(),
             subject: cid("bob"),
             predicate: "knows".into(),
@@ -363,21 +363,17 @@ fn kqe_evaluate_rules_derives_transitive_facts() {
     let derived_text: Vec<String> = derived
         .iter()
         .filter(|d| d.is_assert())
-        .map(|d| {
-            let q = d.to_legacy_quad();
-            format!("{} -> {}", q.subject, q.predicate)
-        })
+        .map(|d| format!("{} -> {}", d.quad().subject, d.quad().predicate))
         .collect();
     assert!(
         !derived.is_empty(),
         "expected at least 1 derived fact, derived: {derived_text:?}"
     );
     let alice_knows_carol = derived.iter().any(|d| {
-        let q = d.to_legacy_quad();
         d.is_assert()
-            && q.subject == cid("alice")
-            && q.predicate == "knows"
-            && q.object == QuadObject::Cid(cid("carol"))
+            && d.quad().subject == cid("alice")
+            && d.quad().predicate == "knows"
+            && d.quad().object == QuadObject::Cid(cid("carol"))
     });
     assert!(
         alice_knows_carol,

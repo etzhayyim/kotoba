@@ -79,15 +79,14 @@ static mut _RET_AREA: _RetArea = _RetArea(
 #[allow(dead_code, clippy::all)]
 pub mod kotoba {
     pub mod kais {
-        /// KQE (Kotoba Query Engine) — Datalog/legacy-quad read-write interface
+        /// KQE (Kotoba Query Engine) — Datalog/Quad read-write interface
         #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
         pub mod kqe {
             #[used]
             #[doc(hidden)]
             static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
             use super::super::super::_rt;
-            /// Legacy graph projection of a Datom: graph + (entity, attribute, value).
-            /// The host assigns transaction CID and Added when this is committed.
+            /// Quad ≅ Datomic Datom (Subject, Predicate, Object, Graph)
             #[derive(Clone)]
             pub struct Quad {
                 pub graph: _rt::String,
@@ -110,7 +109,7 @@ pub mod kotoba {
                 }
             }
             #[allow(unused_unsafe, clippy::all)]
-            /// ASSERT frame (0x1): append a Datom assertion through the legacy graph projection
+            /// ASSERT frame (0x1): append Delta(quad, +1) to Arrangement
             pub fn assert_quad(q: &Quad) -> Result<(), _rt::String> {
                 unsafe {
                     #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
@@ -216,7 +215,7 @@ pub mod kotoba {
                 }
             }
             #[allow(unused_unsafe, clippy::all)]
-            /// RETRACT frame (0xD): append a Datom retract tombstone through the legacy graph projection
+            /// RETRACT frame (0xD): append Delta(quad, -1) to Arrangement
             pub fn retract_quad(q: &Quad) -> Result<(), _rt::String> {
                 unsafe {
                     #[cfg_attr(target_pointer_width = "64", repr(align(8)))]

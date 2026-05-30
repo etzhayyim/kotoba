@@ -30,7 +30,7 @@ pub enum AccessError {
     Internal(String),
 }
 
-/// QuadStore — legacy graph projection API with Datom-native ProllyTree commit
+/// QuadStore — Quad write/read API with 3-index Journal publish + ProllyTree commit
 pub struct QuadStore {
     journal: Arc<Journal>,
     block_store: Arc<dyn BlockStore + Send + Sync>,
@@ -238,7 +238,7 @@ impl QuadStore {
             .await;
     }
 
-    /// Write a legacy graph projection: publish to graph topics and update Arrangement.
+    /// Write quad: publish to 4-index Topics (SPO/PSO/POS/OSP) + update Arrangement.
     pub async fn assert(&self, quad: Quad) -> Delta {
         let g = quad.graph.to_multibase();
         self.publish_legacy_quad_assert(&quad).await;
@@ -1739,7 +1739,7 @@ impl QuadStore {
     /// Recursive SPARQL pattern executor.
     ///
     /// Handles: BGP, Filter, Union, LeftJoin (OPTIONAL).
-    /// Multi-triple BGPs are dispatched to the cold-path index router.
+    /// Multi-triple BGPs are dispatched to the 4-index cold-path router.
     async fn execute_sparql_graph_pattern(
         &self,
         graph_cid: &KotobaCid,
@@ -3410,7 +3410,7 @@ impl QuadStore {
         }
         // ─────────────────────────────────────────────────────────────────────────
 
-        tracing::info!(%cid, author, seq, "QuadStore committed");
+        tracing::info!(%cid, author, seq, "QuadStore committed (4-index)");
         Ok(cid)
     }
 

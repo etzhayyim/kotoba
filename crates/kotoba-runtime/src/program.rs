@@ -7,7 +7,7 @@ use crate::host::KotobaEngine;
 
 /// ProgramStore caches compiled WASM Components by their program_cid.
 ///
-/// program_cid = IPFS-compatible Kotoba CIDv1 sha2-256 of the raw .wasm bytes.
+/// program_cid = Kotoba CIDv1 blake3 of the raw .wasm bytes.
 /// Compiled Component is reused across invocations (amortises Cranelift JIT cost).
 #[derive(Clone)]
 pub struct ProgramStore {
@@ -35,7 +35,7 @@ impl ProgramStore {
         Ok(component)
     }
 
-    /// Evict a program (e.g., after retracting the program Datom projection)
+    /// Evict a program (e.g., after RETRACT of a program Quad)
     pub fn evict(&self, program_cid: &str) {
         self.cache.remove(program_cid);
     }

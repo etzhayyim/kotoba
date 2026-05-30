@@ -1,8 +1,8 @@
-//! ashiba.gftd.ai Lean BMC — kotoba Datomic-on-IPFS pipeline (Datom projection →
-//! Journal WAL → ProllyTree indexes → Kubo cold tier → AEAD summary → IPFS self-pin) + Datalog
+//! ashiba.gftd.ai Lean BMC — kotoba Datomic-on-IPFS pipeline (Quad → Journal WAL →
+//! 4 ProllyTrees → Kubo cold tier → AEAD-sealed summary → IPFS self-pin) + Datalog
 //! coverage scoring.
 //!
-//! Data source:  `60-apps/ai-gftd-project-jp-ashiba/docs/bmc/ashiba-lean-bmc-v51.toml`
+//! Data source:  `60-apps/ai-gftd-project-jp-ashiba/docs/bmc/ashiba-lean-bmc-v50.toml`
 //! Rules source: `60-apps/ai-gftd-project-jp-ashiba/docs/bmc/coverage.dl`
 //!
 //! Requires a running Kubo daemon (default `http://localhost:5001`); override with
@@ -16,7 +16,7 @@ use kotoba_graph::QuadStore;
 use kotoba_kqe::{
     datalog::{Atom, BodyLiteral, DatalogProgram, DatalogRule, Term},
     delta::Delta,
-    quad::{LegacyQuad as Quad, LegacyQuadObject as QuadObject},
+    quad::{Quad, QuadObject},
 };
 use kotoba_kse::{Journal, SecureVault, Vault};
 use kotoba_store::{
@@ -173,16 +173,14 @@ const HYPOTHESES: &[(&str, &str, &str, bool)] = &[
     ("sol_datomic_rust_pipeline",      "solution",   "kotoba-datomic Rust pipeline ✓ (iter-49) — Connection.transact(EDN) → 2 tx / 371 datoms / 126 entities, Datalog q() で per-block validated count 9 行返却", true),
     ("sol_satellite_detector_datomic", "solution",   "satellite_detector Datomic-first refactor ✓ (iter-50) — slim Input/Output, conn.transact 6 Datoms, WRITTEN_ATTRIBUTES 公開", true),
     ("sol_owner_resolver_datomic",     "solution",   "owner_resolver Datomic-first refactor ✓ (iter-50) — PULL_QUERY_EDN で q() pull, conn.transact 5 Datoms", true),
-    ("sol_outbound_emailer_datomic",   "solution",   "outbound_emailer Datomic-first ✓ (iter-51) — Pull join 2 actor 6-var q() → Murakumo + vendor 3社 + mailer XRPC → transact 5 Datoms", true),
-    ("sol_safety_predictor_datomic",   "solution",   "safety_predictor Datomic-first ✓ (iter-51) — Pull image_cid q() → EVO-X2 v7 multimodal → transact 4 Datoms + alert escalator", true),
-    ("sol_actors_datomic_complete",    "solution",   "4 actor 全部 Datomic-first 完成 ✓ (iter-51) — Pull-Transact pattern, BPMN slim, Datom 5-tuple SSoT", true),
+    ("sol_actor_datomic_remaining",    "solution",   "outbound_emailer + safety_predictor Datomic refactor (iter-51+ 残り)", false),
 ];
 
 fn cid(s: &str) -> KotobaCid {
     KotobaCid::from_bytes(s.as_bytes())
 }
 fn graph_cid() -> KotobaCid {
-    cid("bmc:ashiba:v51")
+    cid("bmc:ashiba:v50")
 }
 fn quad(subject: &str, predicate: &str, object: QuadObject) -> Quad {
     Quad {
@@ -195,17 +193,17 @@ fn quad(subject: &str, predicate: &str, object: QuadObject) -> Quad {
 
 fn build_bmc_facts() -> Vec<Delta> {
     let mut deltas = Vec::new();
-    deltas.push(Delta::assert_legacy_quad(quad(
+    deltas.push(Delta::assert(quad(
         "bmc:ashiba",
         "bmc/version",
-        QuadObject::Text("v51".into()),
+        QuadObject::Text("v50".into()),
     )));
-    deltas.push(Delta::assert_legacy_quad(quad(
+    deltas.push(Delta::assert(quad(
         "bmc:ashiba",
         "bmc/product",
         QuadObject::Text("ashiba.gftd.ai".into()),
     )));
-    deltas.push(Delta::assert_legacy_quad(quad(
+    deltas.push(Delta::assert(quad(
         "bmc:ashiba",
         "bmc/model",
         QuadObject::Text("lean-canvas-hybrid".into()),
@@ -213,23 +211,23 @@ fn build_bmc_facts() -> Vec<Delta> {
 
     for (block_name, maturity) in BMC_BLOCKS {
         let block_id = format!("bmc:ashiba:block:{block_name}");
-        deltas.push(Delta::assert_legacy_quad(quad(
+        deltas.push(Delta::assert(quad(
             "bmc:ashiba",
             "bmc/block",
             QuadObject::Cid(cid(&block_id)),
         )));
-        deltas.push(Delta::assert_legacy_quad(quad(
+        deltas.push(Delta::assert(quad(
             &block_id,
             "bmc/block_name",
             QuadObject::Text(block_name.to_string()),
         )));
-        deltas.push(Delta::assert_legacy_quad(quad(
+        deltas.push(Delta::assert(quad(
             &block_id,
             "bmc/maturity",
             QuadObject::Integer(*maturity),
         )));
         let entry_id = format!("bmc:ashiba:entry:{block_name}:default");
-        deltas.push(Delta::assert_legacy_quad(quad(
+        deltas.push(Delta::assert(quad(
             &entry_id,
             "entry/block",
             QuadObject::Cid(cid(&block_id)),
@@ -239,17 +237,17 @@ fn build_bmc_facts() -> Vec<Delta> {
     for (entry_id, block_name, hypothesis, validated) in HYPOTHESES {
         let full_entry_id = format!("bmc:ashiba:entry:{block_name}:{entry_id}");
         let block_id = format!("bmc:ashiba:block:{block_name}");
-        deltas.push(Delta::assert_legacy_quad(quad(
+        deltas.push(Delta::assert(quad(
             &full_entry_id,
             "entry/block",
             QuadObject::Cid(cid(&block_id)),
         )));
-        deltas.push(Delta::assert_legacy_quad(quad(
+        deltas.push(Delta::assert(quad(
             &full_entry_id,
             "bmc/hypothesis",
             QuadObject::Text(hypothesis.to_string()),
         )));
-        deltas.push(Delta::assert_legacy_quad(quad(
+        deltas.push(Delta::assert(quad(
             &full_entry_id,
             "bmc/validated",
             QuadObject::Bool(*validated),
@@ -318,7 +316,7 @@ fn print_score_report(derived_covered: usize, derived_at_risk: usize) {
     println!("╔══════════════════════════════════════════════════════════╗");
     println!("║     ashiba.gftd.ai Lean BMC — kotoba Scoring Report      ║");
     println!("╠══════════════════════════════════════════════════════════╣");
-    println!("║  Iteration : 43 (2026-05-28) [iter-51 4 actor 全 Datomic-first]║");
+    println!("║  Iteration : 43 (2026-05-28) [iter-50 Datomic-first refactor]║");
     println!("║  Model     : Lean Canvas Hybrid (9 blocks)                ║");
     println!("╠══════════════════════════════════════════════════════════╣");
     println!(
@@ -372,7 +370,7 @@ async fn main() -> Result<()> {
     ));
     println!("Journal:    Merkle WAL on block_store (head={store_path}.journal-head.json)");
 
-    // 3. Datom projection store — wraps Journal + BlockStore; provides Arrangement + ProllyTree commit.
+    // 3. QuadStore — wraps Journal + BlockStore; provides 4-index Arrangement + ProllyTree commit.
     let quad_store = QuadStore::new(Arc::clone(&journal), Arc::clone(&block_store));
 
     // 4. SecureVault — AES-256-GCM-sealed blob store over the same block_store.
@@ -397,7 +395,7 @@ async fn main() -> Result<()> {
     let t0 = std::time::Instant::now();
     let mut deltas: Vec<Delta> = Vec::with_capacity(facts.len());
     for d in &facts {
-        deltas.push(quad_store.assert(d.to_legacy_quad()).await);
+        deltas.push(quad_store.assert(d.quad.clone()).await);
     }
     println!("  ingested in {} ms", t0.elapsed().as_millis());
 
@@ -406,13 +404,13 @@ async fn main() -> Result<()> {
     let derived = prog.evaluate_delta(&deltas);
     let covered_blocks: std::collections::HashSet<_> = derived
         .iter()
-        .filter(|d| d.to_legacy_quad().predicate == "covered" && d.is_assert())
-        .map(|d| d.to_legacy_quad().subject)
+        .filter(|d| d.quad.predicate == "covered" && d.is_assert())
+        .map(|d| d.quad.subject.clone())
         .collect();
     let at_risk_entries: std::collections::HashSet<_> = derived
         .iter()
-        .filter(|d| d.to_legacy_quad().predicate == "at_risk" && d.is_assert())
-        .map(|d| d.to_legacy_quad().subject)
+        .filter(|d| d.quad.predicate == "at_risk" && d.is_assert())
+        .map(|d| d.quad.subject.clone())
         .collect();
     println!(
         "Datalog derived {} facts (covered={}, at_risk={})",

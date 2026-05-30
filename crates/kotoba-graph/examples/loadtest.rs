@@ -3,11 +3,11 @@ use kotoba_core::cid::KotobaCid;
 use kotoba_graph::quad_store::QuadStore;
 use kotoba_kqe::{
     arrangement::Arrangement,
-    quad::{LegacyQuad as Quad, LegacyQuadObject as QuadObject},
+    quad::{Quad, QuadObject},
 };
 use kotoba_kse::journal::Journal;
 use kotoba_store::{DistributedBlockStore, MemoryBlockStore};
-/// Load test: legacy Arrangement + Datom-backed commit cycle + cold-path queries.
+/// Load test: Arrangement 4-index + QuadStore commit cycle + cold-path queries.
 ///
 /// Usage:
 ///   cargo run --release --example loadtest -p kotoba-graph
@@ -178,7 +178,7 @@ fn query_latencies(
 // ─── Phase 1: pure Arrangement (in-memory) ───────────────────────────────────
 
 fn phase1(targets: &[u64]) {
-    println!("\n=== Phase 1: Arrangement (in-memory legacy graph indexes) ===");
+    println!("\n=== Phase 1: Arrangement (in-memory, 4-index) ===");
     println!(
         "{:<12}  {:>10}  {:>10}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}",
         "quads", "insert_ms", "MB_rss", "p50_us", "p95_us", "p99_us", "quad/s", "MB/Mquad"

@@ -253,7 +253,7 @@ pub struct KotobaState {
     /// DID resolver abstraction for did:key, did:web, and did:plc controller checks.
     pub did_resolver: Arc<dyn DidDocumentResolver>,
     // ── QuadStore ────────────────────────────────────────────────────────────
-    /// Legacy graph projection write/read with Datom-native ProllyTree commit.
+    /// Quad write/read with ProllyTree commit + 3-index Journal publish.
     pub quad_store: Arc<QuadStore>,
     // ── kotobase Pinning ─────────────────────────────────────────────────────────
     /// Optional kotobase.gftd.ai XRPC pin client (KOTOBA_PIN_TOKEN).
@@ -1003,7 +1003,7 @@ impl KotobaState {
     }
 
     /// Apply a legacy Quad caller through the Datom-native graph-store path
-    /// while preserving legacy graph projection publication.
+    /// while preserving `QuadStore`'s 4-index legacy Journal publication.
     pub async fn assert_quad_store_datom(&self, quad: Quad) {
         let graph_cid = quad.graph.clone();
         let datom = KqeDatom::from_legacy_quad(quad, true);

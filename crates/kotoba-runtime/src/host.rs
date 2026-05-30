@@ -129,7 +129,7 @@ impl HostState {
         self
     }
 
-    /// Pre-populate the Datom projection snapshot for `kqe.query` lookups during WASM execution.
+    /// Pre-populate the quad snapshot for `kqe.query` lookups during WASM execution.
     pub fn with_snapshot(mut self, snapshot: Vec<WitQuad>) -> Self {
         self.quad_snapshot = snapshot;
         self

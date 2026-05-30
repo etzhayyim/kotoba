@@ -1,4 +1,4 @@
-//! yatabase KG entity lookup endpoint backed by kotoba Datom projection indexes.
+//! yatabase KG entity lookup endpoint backed by kotoba QuadStore.
 //!
 //! NSID: ai.gftd.apps.kotobase.kg.entity
 //! All KG quads live in the named graph `kotobase-kg-v1`.
@@ -1117,7 +1117,7 @@ const MAX_KG_BATCH_SIZE: usize = 1_000;
 /// Ingest up to `MAX_KG_BATCH_SIZE` entities in a single HTTP request.
 /// Validation is run once before any writes; if any entity fails the entire
 /// batch is rejected (all-or-nothing semantics).  Inserts are then performed
-/// serially through the same Datom projection path as single-ingest, amortising the
+/// serially through the same QuadStore path as single-ingest, amortising the
 /// HTTP + JSON + auth-gate cost across the whole batch.
 pub async fn kg_ingest_batch(
     State(state): State<Arc<KotobaState>>,
@@ -1594,7 +1594,7 @@ pub struct KgQueryReq {
 }
 
 /// POST /xrpc/ai.gftd.apps.kotobase.kg.query
-/// Execute a SPARQL SELECT or Cypher MATCH/RETURN against the Datom projection.
+/// Execute a SPARQL SELECT or Cypher MATCH/RETURN against the QuadStore.
 ///
 /// Both compilers enforce binary-relation arity (exactly 2 RETURN variables).
 /// Results are returned as `[{ "a": "<cid>", "b": "<cid>" }]` pairs where

@@ -384,8 +384,6 @@ dependencies = [
  "blake3",
  "bytes",
  "kotoba-core",
- "kotoba-datomic",
- "kotoba-edn",
  "kotoba-graph",
  "kotoba-kqe",
  "kotoba-kse",
