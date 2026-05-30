@@ -6765,7 +6765,7 @@ mod tests {
             .unwrap();
 
         let grouped = kotoba_edn::parse(
-            r#"{:find [?role (count ?e) (sum ?score) (min ?score) (max ?score) (min 2 ?score) (max 2 ?score) (avg ?score) (median ?score) (variance ?score) (stddev ?score)]
+            r#"{:find [?role (count ?e) (sum ?score) (min ?score) (max ?score) (min 2 ?score) (max 2 ?score) (min 0 ?score) (max 0 ?score) (avg ?score) (median ?score) (variance ?score) (stddev ?score)]
                 :where [[?e :person/role ?role]
                         [?e :person/score ?score]]
                 :order-by [[(count ?e) :desc] [?role :asc]]}"#,
@@ -6785,6 +6785,8 @@ mod tests {
                     EdnValue::Integer(8),
                     EdnValue::Vector(vec![EdnValue::Integer(3), EdnValue::Integer(8)]),
                     EdnValue::Vector(vec![EdnValue::Integer(8), EdnValue::Integer(3)]),
+                    EdnValue::Vector(vec![]),
+                    EdnValue::Vector(vec![]),
                     EdnValue::float(5.5),
                     EdnValue::float(5.5),
                     EdnValue::float(6.25),
@@ -6798,6 +6800,8 @@ mod tests {
                     EdnValue::Integer(10),
                     EdnValue::Vector(vec![EdnValue::Integer(10)]),
                     EdnValue::Vector(vec![EdnValue::Integer(10)]),
+                    EdnValue::Vector(vec![]),
+                    EdnValue::Vector(vec![]),
                     EdnValue::float(10.0),
                     EdnValue::Integer(10),
                     EdnValue::float(0.0),

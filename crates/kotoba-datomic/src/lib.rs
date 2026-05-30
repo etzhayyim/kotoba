@@ -8221,7 +8221,7 @@ mod tests {
         .await
         .unwrap();
         let query = parse(
-            r#"{:find [?role (sum ?score) (min ?score) (max ?score) (min 2 ?score) (max 2 ?score)]
+            r#"{:find [?role (sum ?score) (min ?score) (max ?score) (min 2 ?score) (max 2 ?score) (min 0 ?score) (max 0 ?score)]
                 :where [[?e :person/role ?role]
                         [?e :person/score ?score]]}"#,
         )
@@ -8236,7 +8236,9 @@ mod tests {
                     EdnValue::Integer(10),
                     EdnValue::Integer(10),
                     EdnValue::Vector(vec![EdnValue::Integer(10)]),
-                    EdnValue::Vector(vec![EdnValue::Integer(10)])
+                    EdnValue::Vector(vec![EdnValue::Integer(10)]),
+                    EdnValue::Vector(vec![]),
+                    EdnValue::Vector(vec![])
                 ],
                 vec![
                     kw_value(":guest"),
@@ -8244,7 +8246,9 @@ mod tests {
                     EdnValue::Integer(3),
                     EdnValue::Integer(7),
                     EdnValue::Vector(vec![EdnValue::Integer(3), EdnValue::Integer(7)]),
-                    EdnValue::Vector(vec![EdnValue::Integer(7), EdnValue::Integer(3)])
+                    EdnValue::Vector(vec![EdnValue::Integer(7), EdnValue::Integer(3)]),
+                    EdnValue::Vector(vec![]),
+                    EdnValue::Vector(vec![])
                 ]
             ]
         );
