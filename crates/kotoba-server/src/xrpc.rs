@@ -8051,17 +8051,21 @@ mod tests {
         datomic_basis_t, datomic_datoms, datomic_db_stats, datomic_entid, datomic_entity,
         datomic_history, datomic_ident, datomic_index_pull, datomic_index_range, datomic_log,
         datomic_pull, datomic_pull_many, datomic_q, datomic_seek_datoms, datomic_transact,
-        datomic_tx_range, datomic_with, distributed_graph_ipns_name,
+        datomic_tx_range, datomic_with, did_document_publish, distributed_graph_ipns_name,
         enforce_datomic_range_tx_scope, is_did_web_ip_host, AtprotoRepoWriteReq,
         AuthCapabilityProjection, DatomicBasisTReq, DatomicDatomsReq, DatomicDbStatsReq,
         DatomicEntidReq, DatomicEntityReq, DatomicHistoryReq, DatomicIdentReq, DatomicIndexPullReq,
         DatomicIndexRangeReq, DatomicLogReq, DatomicPullManyReq, DatomicPullReq, DatomicQReq,
         DatomicSeekDatomsReq, DatomicTransactReq, DatomicTxRangeReq, DatomicWithReq,
-        ZCAP_ALLOWED_ACTION_IRI, ZCAP_CONTROLLER_IRI, ZCAP_INVOCATION_PROOF_IRI,
-        ZCAP_INVOCATION_TARGET_IRI,
+        DidDocumentPublishReq, ZCAP_ALLOWED_ACTION_IRI, ZCAP_CONTROLLER_IRI,
+        ZCAP_INVOCATION_PROOF_IRI, ZCAP_INVOCATION_TARGET_IRI,
     };
     use crate::server::KotobaState;
     use axum::response::IntoResponse;
+    use kotoba_auth::{
+        DidDocument, ATPROTO_PDS_SERVICE, DIDCOMM_MESSAGING_SERVICE,
+        KOTOBA_GRAPH_MEMBERSHIP_SERVICE, KOTOBA_NODE_SERVICE,
+    };
     use kotoba_core::cid::KotobaCid;
     use kotoba_core::named_graph::GraphVisibility;
     use kotoba_core::store::BlockStore;
@@ -8336,6 +8340,101 @@ mod tests {
         assert!(has(ZCAP_INVOCATION_PROOF_IRI, &proof_cid.to_multibase()));
         assert!(has(":capability/credential", "urn:uuid:capability-vc-1"));
         assert!(tea_datoms.iter().all(|datom| datom.t == tx));
+    }
+
+    #[tokio::test]
+    async fn did_document_publish_xrpc_writes_distributed_registry_resolvable_by_did_resolver() {
+        std::env::set_var("KOTOBA_IPFS", "off");
+        std::env::set_var("KOTOBA_IPNS_REQUIRE_SIGNATURE", "false");
+        let state = Arc::new(KotobaState::new(None).unwrap());
+        let graph = KotobaCid::from_bytes(b"xrpc-did-document-publish-graph");
+        let graph_mb = graph.to_multibase();
+        state.graph_registry.write().await.insert(
+            graph.clone(),
+            (
+                "xrpc-did-document-publish-graph".into(),
+                GraphVisibility::Public,
+            ),
+        );
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", test_operator_jwt(&state.operator_did))
+                .parse()
+                .unwrap(),
+        );
+
+        let did = "did:plc:xrpcdistributedagent";
+        let mut document = DidDocument::empty(did);
+        document.push_single_service(
+            "didcomm",
+            DIDCOMM_MESSAGING_SERVICE,
+            "didcomm://mediator/xrpcdistributedagent",
+        );
+        document.push_single_service(
+            "atproto-pds",
+            ATPROTO_PDS_SERVICE,
+            "https://pds.xrpcdistributedagent.example",
+        );
+        document.push_single_service(
+            "kotoba-node",
+            KOTOBA_NODE_SERVICE,
+            "/ip4/127.0.0.1/tcp/4102",
+        );
+        document.push_graph_membership_service(["kotoba://graph/xrpc-a", "kotoba://graph/xrpc-b"]);
+
+        let response = did_document_publish(
+            axum::extract::State(Arc::clone(&state)),
+            headers,
+            axum::Json(DidDocumentPublishReq {
+                graph: graph_mb,
+                document,
+                cacao_b64: None,
+                auth_presentation: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["ipns_name"], distributed_graph_ipns_name(&graph));
+
+        let registry_ipns_name = super::did_document_ipns_name(did);
+        let registry_head = state
+            .ipns_registry
+            .resolve(&kotoba_ipfs::IpnsName::new(registry_ipns_name))
+            .expect("DID registry IPNS head");
+        assert_eq!(registry_head.sequence, 1);
+
+        let resolved = state
+            .did_resolver
+            .resolve(did)
+            .expect("distributed DID doc");
+        assert_eq!(
+            resolved.didcomm_endpoint(),
+            Some("didcomm://mediator/xrpcdistributedagent")
+        );
+        assert_eq!(
+            resolved.atproto_pds_endpoint(),
+            Some("https://pds.xrpcdistributedagent.example")
+        );
+        assert_eq!(resolved.kotoba_endpoint(), Some("/ip4/127.0.0.1/tcp/4102"));
+        assert_eq!(
+            resolved.graph_memberships(),
+            vec!["kotoba://graph/xrpc-a", "kotoba://graph/xrpc-b"]
+        );
+        assert!(resolved
+            .service_by_type(DIDCOMM_MESSAGING_SERVICE)
+            .is_some());
+        assert!(resolved.service_by_type(ATPROTO_PDS_SERVICE).is_some());
+        assert!(resolved.service_by_type(KOTOBA_NODE_SERVICE).is_some());
+        assert!(resolved
+            .service_by_type(KOTOBA_GRAPH_MEMBERSHIP_SERVICE)
+            .is_some());
     }
 
     #[tokio::test]
