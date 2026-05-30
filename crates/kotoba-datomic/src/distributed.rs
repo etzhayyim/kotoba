@@ -1665,6 +1665,11 @@ where
                 .map(|arg| required_query_value(arg, binding))
                 .collect::<Result<Vec<_>, _>>()
                 .and_then(|values| crate::query_replace_value(values).map_err(Into::into)),
+            "re-find" | "clojure.core/re-find" | "re-matches" | "clojure.core/re-matches" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| crate::query_regex_value(op, values).map_err(Into::into)),
             "lower-case"
             | "clojure.string/lower-case"
             | "str/lower-case"
@@ -6685,6 +6690,30 @@ mod tests {
                 ])),
                 EdnValue::Vector(vec![EdnValue::Keyword(Keyword::parse("claim/type"))]),
                 EdnValue::Vector(vec![EdnValue::String("VerifiableCredential".into())]),
+            ]]
+        );
+
+        let regex_query = kotoba_edn::parse(
+            r#"{:find [?did ?collection ?rkey ?whole]
+                :where [[?e :atproto/uri ?uri]
+                        [(re-find "at://([^/]+)/([^/]+)/([^/]+)" ?uri) ?found]
+                        [(get ?found 1) ?did]
+                        [(get ?found 2) ?collection]
+                        [(get ?found 3) ?rkey]
+                        [(clojure.core/re-matches "at://[^/]+/[^/]+/[^/]+" ?uri) ?whole]
+                        [(some? ?whole)]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &regex_query)
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                EdnValue::String("did:plc:alice".into()),
+                EdnValue::String("app.bsky.feed.post".into()),
+                EdnValue::String("r1".into()),
+                EdnValue::String("at://did:plc:alice/app.bsky.feed.post/r1".into()),
             ]]
         );
 
