@@ -1753,6 +1753,13 @@ where
                 .map(|arg| required_query_value(arg, binding))
                 .collect::<Result<Vec<_>, _>>()
                 .and_then(|values| crate::query_hash_map_value(values).map_err(Into::into)),
+            "keys" | "vals" | "merge" | "select-keys" => args
+                .iter()
+                .map(|arg| required_query_value(arg, binding))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| {
+                    crate::query_map_operation_value(op, values).map_err(Into::into)
+                }),
             "count" => {
                 if args.len() != 1 {
                     return Err(DatomicError::Query("count expects one argument".into()).into());
@@ -6644,6 +6651,40 @@ mod tests {
                     EdnValue::Keyword(Keyword::parse("role/admin")),
                     EdnValue::Keyword(Keyword::parse("role/operator")),
                 ])),
+            ]]
+        );
+
+        let map_query = kotoba_edn::parse(
+            r#"{:find [?selected ?merged ?keys ?vals]
+                :where [[?e :credential/claims ?claims]
+                        [(select-keys ?claims [:claim/type]) ?selected]
+                        [(merge ?selected {:claim/source :distributed}) ?merged]
+                        [(keys ?selected) ?keys]
+                        [(vals ?selected) ?vals]]}"#,
+        )
+        .unwrap();
+        let rows = DistributedDatomReader::new(&store, &ipns)
+            .q_triples(&report.commit.cid, &map_query)
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                EdnValue::Map(BTreeMap::from([(
+                    EdnValue::Keyword(Keyword::parse("claim/type")),
+                    EdnValue::String("VerifiableCredential".into()),
+                )])),
+                EdnValue::Map(BTreeMap::from([
+                    (
+                        EdnValue::Keyword(Keyword::parse("claim/source")),
+                        EdnValue::Keyword(Keyword::parse("distributed")),
+                    ),
+                    (
+                        EdnValue::Keyword(Keyword::parse("claim/type")),
+                        EdnValue::String("VerifiableCredential".into()),
+                    ),
+                ])),
+                EdnValue::Vector(vec![EdnValue::Keyword(Keyword::parse("claim/type"))]),
+                EdnValue::Vector(vec![EdnValue::String("VerifiableCredential".into())]),
             ]]
         );
 

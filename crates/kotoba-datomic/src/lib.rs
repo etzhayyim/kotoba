@@ -2721,6 +2721,7 @@ fn query_apply_value_function(op: &str, args: Vec<EdnValue>) -> Result<EdnValue>
         | "clojure.set/difference"
         | "set/difference" => query_set_operation_value(op, args),
         "hash-map" => query_hash_map_value(args),
+        "keys" | "vals" | "merge" | "select-keys" => query_map_operation_value(op, args),
         "count" => match args.as_slice() {
             [value] => query_count_value(value.clone()),
             _ => Err(DatomicError::Query("count expects one argument".into())),
@@ -2839,6 +2840,70 @@ pub(crate) fn query_hash_map_value(args: Vec<EdnValue>) -> Result<EdnValue> {
             .map(|pair| (pair[0].clone(), pair[1].clone()))
             .collect(),
     ))
+}
+
+pub(crate) fn query_map_operation_value(op: &str, args: Vec<EdnValue>) -> Result<EdnValue> {
+    match op {
+        "keys" => {
+            let [value]: [EdnValue; 1] = args
+                .try_into()
+                .map_err(|_| DatomicError::Query("keys expects one argument".into()))?;
+            match value {
+                EdnValue::Map(values) => Ok(EdnValue::Vector(values.into_keys().collect())),
+                other => Err(DatomicError::Query(format!(
+                    "keys expects a map, got {}",
+                    edn_to_string(&other)
+                ))),
+            }
+        }
+        "vals" => {
+            let [value]: [EdnValue; 1] = args
+                .try_into()
+                .map_err(|_| DatomicError::Query("vals expects one argument".into()))?;
+            match value {
+                EdnValue::Map(values) => Ok(EdnValue::Vector(values.into_values().collect())),
+                other => Err(DatomicError::Query(format!(
+                    "vals expects a map, got {}",
+                    edn_to_string(&other)
+                ))),
+            }
+        }
+        "merge" => {
+            let mut out = BTreeMap::new();
+            for arg in args {
+                match arg {
+                    EdnValue::Nil => {}
+                    EdnValue::Map(values) => out.extend(values),
+                    other => {
+                        return Err(DatomicError::Query(format!(
+                            "merge expects map or nil arguments, got {}",
+                            edn_to_string(&other)
+                        )))
+                    }
+                }
+            }
+            Ok(EdnValue::Map(out))
+        }
+        "select-keys" => {
+            let [value, keys]: [EdnValue; 2] = args
+                .try_into()
+                .map_err(|_| DatomicError::Query("select-keys expects map and keys".into()))?;
+            let EdnValue::Map(values) = value else {
+                return Err(DatomicError::Query(format!(
+                    "select-keys expects a map, got {}",
+                    edn_to_string(&value)
+                )));
+            };
+            let mut out = BTreeMap::new();
+            for key in query_seq_values(keys)? {
+                if let Some(value) = values.get(&key) {
+                    out.insert(key, value.clone());
+                }
+            }
+            Ok(EdnValue::Map(out))
+        }
+        other => Err(DatomicError::UnsupportedOperation(other.into())),
+    }
 }
 
 pub(crate) fn query_count_value(value: EdnValue) -> Result<EdnValue> {
@@ -4930,6 +4995,11 @@ fn eval_query_function(
             .map(|arg| resolve_query_value(arg, binding))
             .collect::<Result<Vec<_>>>()
             .and_then(query_hash_map_value),
+        "keys" | "vals" | "merge" | "select-keys" => args
+            .iter()
+            .map(|arg| resolve_query_value(arg, binding))
+            .collect::<Result<Vec<_>>>()
+            .and_then(|values| query_map_operation_value(op, values)),
         "count" => {
             if args.len() != 1 {
                 return Err(DatomicError::Query("count expects one argument".into()));
@@ -8101,6 +8171,46 @@ mod tests {
                     kw_value(":role/admin"),
                     kw_value(":role/operator"),
                 ])),
+            ]]
+        );
+    }
+
+    #[tokio::test]
+    async fn q_supports_clojure_map_function_bindings() {
+        let conn = Connection::new();
+        conn.transact(
+            parse(
+                r#"[
+                  {:db/id "alice" :person/profile {:person/name "Alice" :person/role :admin}}
+                ]"#,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let query = parse(
+            r#"{:find [?selected ?merged ?keys ?vals]
+                :where [[?e :person/profile ?profile]
+                        [(select-keys ?profile [:person/name]) ?selected]
+                        [(merge ?selected {:person/active true}) ?merged]
+                        [(keys ?selected) ?keys]
+                        [(vals ?selected) ?vals]]}"#,
+        )
+        .unwrap();
+        let rows = q(query, &conn.db(), &[]).unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                EdnValue::Map(BTreeMap::from([(
+                    kw_value(":person/name"),
+                    EdnValue::String("Alice".into()),
+                )])),
+                EdnValue::Map(BTreeMap::from([
+                    (kw_value(":person/active"), EdnValue::Bool(true)),
+                    (kw_value(":person/name"), EdnValue::String("Alice".into())),
+                ])),
+                EdnValue::Vector(vec![kw_value(":person/name")]),
+                EdnValue::Vector(vec![EdnValue::String("Alice".into())]),
             ]]
         );
     }
