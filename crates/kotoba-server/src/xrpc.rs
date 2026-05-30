@@ -2612,6 +2612,24 @@ fn json_value_to_edn(value: &serde_json::Value) -> kotoba_edn::EdnValue {
     }
 }
 
+fn protocol_payload_tx_cid(
+    operation: &str,
+    graph: &str,
+    entity_cid: &kotoba_core::cid::KotobaCid,
+    payload: impl AsRef<[u8]>,
+) -> kotoba_core::cid::KotobaCid {
+    let entity_multibase = entity_cid.to_multibase();
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(operation.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(graph.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(entity_multibase.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(payload.as_ref());
+    kotoba_core::cid::KotobaCid::from_bytes(&bytes)
+}
+
 fn append_json_record_field_datoms(
     out: &mut Vec<kotoba_datomic::Datom>,
     entity_cid: &kotoba_core::cid::KotobaCid,
@@ -5853,13 +5871,13 @@ pub async fn did_document_publish(
 
     let graph_cid = parse_graph_cid(&req.graph)?;
     let entity_cid = req.document.entity_cid();
-    let tx_cid = kotoba_core::cid::KotobaCid::from_bytes(
-        format!(
-            "did.document.publish:{}:{}",
-            req.graph,
-            entity_cid.to_multibase()
-        )
-        .as_bytes(),
+    let document_bytes = serde_json::to_vec(&req.document)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("did document json: {e}")))?;
+    let tx_cid = protocol_payload_tx_cid(
+        "did.document.publish",
+        &req.graph,
+        &entity_cid,
+        document_bytes,
     );
     let datoms = req.document.to_datoms(tx_cid.clone());
     let did = req.document.id.clone();
@@ -5952,9 +5970,9 @@ pub async fn didcomm_send(
         .message
         .cid()
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("didcomm cid: {e}")))?;
-    let tx_cid = kotoba_core::cid::KotobaCid::from_bytes(
-        format!("didcomm.send:{}:{}", req.graph, req.message.thread_id()).as_bytes(),
-    );
+    let message_bytes = serde_json::to_vec(&req.message)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("didcomm json: {e}")))?;
+    let tx_cid = protocol_payload_tx_cid("didcomm.send", &req.graph, &entity_cid, message_bytes);
     let datoms = req
         .message
         .to_datoms(tx_cid.clone())
@@ -8621,6 +8639,157 @@ mod tests {
                 r#""""#
             ])
         }));
+    }
+
+    #[tokio::test]
+    async fn didcomm_xrpc_uses_message_payload_for_distinct_thread_transaction_cids() {
+        std::env::set_var("KOTOBA_IPFS", "off");
+        std::env::set_var("KOTOBA_IPNS_REQUIRE_SIGNATURE", "false");
+        let state = Arc::new(KotobaState::new(None).unwrap());
+        let graph = KotobaCid::from_bytes(b"xrpc-didcomm-distinct-thread-tx-graph");
+        let graph_mb = graph.to_multibase();
+        state.graph_registry.write().await.insert(
+            graph.clone(),
+            (
+                "xrpc-didcomm-distinct-thread-tx-graph".into(),
+                GraphVisibility::Public,
+            ),
+        );
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", test_operator_jwt(&state.operator_did))
+                .parse()
+                .unwrap(),
+        );
+
+        async fn send_msg(
+            state: Arc<KotobaState>,
+            headers: axum::http::HeaderMap,
+            graph: String,
+            id: &str,
+            content: &str,
+        ) -> serde_json::Value {
+            let response = didcomm_send(
+                axum::extract::State(state),
+                headers,
+                axum::Json(DidCommSendReq {
+                    graph,
+                    message: kotoba_didcomm::DidCommMessage {
+                        id: id.into(),
+                        message_type: "https://didcomm.org/basicmessage/2.0/message".into(),
+                        from: Some("did:key:zSender".into()),
+                        to: vec!["did:key:zRecipient".into()],
+                        thid: Some("thread-shared-tx-scope".into()),
+                        pthid: None,
+                        created_time: Some(1),
+                        expires_time: None,
+                        body: serde_json::json!({"content": content}),
+                        attachments: vec![],
+                    },
+                    cacao_b64: None,
+                    auth_presentation: None,
+                }),
+            )
+            .await
+            .unwrap()
+            .into_response();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+
+        let first = send_msg(
+            Arc::clone(&state),
+            headers.clone(),
+            graph_mb.clone(),
+            "msg-thread-tx-1",
+            "first",
+        )
+        .await;
+        let second = send_msg(
+            Arc::clone(&state),
+            headers.clone(),
+            graph_mb.clone(),
+            "msg-thread-tx-2",
+            "second",
+        )
+        .await;
+        let first_tx = first["tx_cid"].as_str().expect("first tx_cid").to_string();
+        let second_tx = second["tx_cid"]
+            .as_str()
+            .expect("second tx_cid")
+            .to_string();
+        assert_ne!(first_tx, second_tx);
+        let first_entity = first["entity_cid"]
+            .as_str()
+            .expect("first entity_cid")
+            .to_string();
+        let second_entity = second["entity_cid"]
+            .as_str()
+            .expect("second entity_cid")
+            .to_string();
+        assert_ne!(first_entity, second_entity);
+
+        async fn pull_entity(
+            state: Arc<KotobaState>,
+            headers: axum::http::HeaderMap,
+            graph: String,
+            entity: String,
+        ) -> serde_json::Value {
+            let response = datomic_pull(
+                axum::extract::State(state),
+                headers,
+                axum::Json(DatomicPullReq {
+                    graph,
+                    entity,
+                    pattern_edn: Some("[*]".into()),
+                    as_of: None,
+                    since: None,
+                    remote_peer: None,
+                    remote_ipns_name: None,
+                    cacao_b64: None,
+                    presentation: None,
+                }),
+            )
+            .await
+            .unwrap()
+            .into_response();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+
+        let first_pull = pull_entity(
+            Arc::clone(&state),
+            headers.clone(),
+            graph_mb.clone(),
+            first_entity,
+        )
+        .await;
+        let second_pull = pull_entity(state, headers, graph_mb, second_entity).await;
+        let first_rows = first_pull["datoms"].as_array().expect("first datoms array");
+        let second_rows = second_pull["datoms"]
+            .as_array()
+            .expect("second datoms array");
+        assert!(first_rows
+            .iter()
+            .any(|datom| datom["v_edn"] == serde_json::json!(r#""msg-thread-tx-1""#)));
+        assert!(second_rows
+            .iter()
+            .any(|datom| datom["v_edn"] == serde_json::json!(r#""msg-thread-tx-2""#)));
+        let txs = first_rows
+            .iter()
+            .chain(second_rows.iter())
+            .filter(|datom| datom["a"] == serde_json::json!("didcomm/id"))
+            .filter_map(|datom| datom["t"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(txs.contains(first_tx.as_str()));
+        assert!(txs.contains(second_tx.as_str()));
     }
 
     #[test]

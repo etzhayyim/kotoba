@@ -2,7 +2,7 @@
 //! 4 ProllyTrees → Kubo cold tier → AEAD-sealed summary → IPFS self-pin) + Datalog
 //! coverage scoring.
 //!
-//! Data source:  `60-apps/ai-gftd-project-jp-ashiba/docs/bmc/ashiba-lean-bmc-v48.toml`
+//! Data source:  `60-apps/ai-gftd-project-jp-ashiba/docs/bmc/ashiba-lean-bmc-v50.toml`
 //! Rules source: `60-apps/ai-gftd-project-jp-ashiba/docs/bmc/coverage.dl`
 //!
 //! Requires a running Kubo daemon (default `http://localhost:5001`); override with
@@ -169,13 +169,18 @@ const HYPOTHESES: &[(&str, &str, &str, bool)] = &[
     ("sol_granian_entrypoint",     "solution",      "Granian ASGI entrypoint ✓ (iter-48) — 20-actors/jp-ashiba/py/app.py / lifespan で Zeebe worker bootstrap + /health /metrics /actor-manifest / smoke OK", true),
     ("sol_datalog_evidence_counter","solution",     "Datalog evidence-counter rule ✓ (iter-48) — coverage.dl に real_inbound_count + evidence_gap + mailer_drift_alert (gap>20) 追加、claim vs CF/RW 自動突合", true),
     ("sol_iter48_probe_resend",    "solution",      "iter-48 Resend probe ✓ — test-iter48@mailer.gftd.ai 送信 e43c95e6 / CF Analytics events=8 累計 / Analytics 遅延仮説 引き続き 真", true),
+    // === iter-49/50: kotoba-datomic 接続確認 + 4 actor 半分 refactor ===
+    ("sol_datomic_rust_pipeline",      "solution",   "kotoba-datomic Rust pipeline ✓ (iter-49) — Connection.transact(EDN) → 2 tx / 371 datoms / 126 entities, Datalog q() で per-block validated count 9 行返却", true),
+    ("sol_satellite_detector_datomic", "solution",   "satellite_detector Datomic-first refactor ✓ (iter-50) — slim Input/Output, conn.transact 6 Datoms, WRITTEN_ATTRIBUTES 公開", true),
+    ("sol_owner_resolver_datomic",     "solution",   "owner_resolver Datomic-first refactor ✓ (iter-50) — PULL_QUERY_EDN で q() pull, conn.transact 5 Datoms", true),
+    ("sol_actor_datomic_remaining",    "solution",   "outbound_emailer + safety_predictor Datomic refactor (iter-51+ 残り)", false),
 ];
 
 fn cid(s: &str) -> KotobaCid {
     KotobaCid::from_bytes(s.as_bytes())
 }
 fn graph_cid() -> KotobaCid {
-    cid("bmc:ashiba:v48")
+    cid("bmc:ashiba:v50")
 }
 fn quad(subject: &str, predicate: &str, object: QuadObject) -> Quad {
     Quad {
@@ -191,7 +196,7 @@ fn build_bmc_facts() -> Vec<Delta> {
     deltas.push(Delta::assert(quad(
         "bmc:ashiba",
         "bmc/version",
-        QuadObject::Text("v48".into()),
+        QuadObject::Text("v50".into()),
     )));
     deltas.push(Delta::assert(quad(
         "bmc:ashiba",
@@ -311,13 +316,13 @@ fn print_score_report(derived_covered: usize, derived_at_risk: usize) {
     println!("╔══════════════════════════════════════════════════════════╗");
     println!("║     ashiba.gftd.ai Lean BMC — kotoba Scoring Report      ║");
     println!("╠══════════════════════════════════════════════════════════╣");
-    println!("║  Iteration : 43 (2026-05-28) [iter-48 Dockerfile + Granian + Datalog]║");
+    println!("║  Iteration : 43 (2026-05-28) [iter-50 Datomic-first refactor]║");
     println!("║  Model     : Lean Canvas Hybrid (9 blocks)                ║");
     println!("╠══════════════════════════════════════════════════════════╣");
     println!(
         "║  Coverage  : {derived_covered}/{total} blocks = {coverage_pct}%                       ║"
     );
-    println!("║  Maturity  : {maturity_avg:.1} / 5.0 (avg)  Q2 M1 buildable");
+    println!("║  Maturity  : {maturity_avg:.1} / 5.0 (avg)  Q2 M1 datomic");
     println!("║  At-Risk   : {derived_at_risk} unvalidated hypotheses              ║");
     println!("╠══════════════════════════════════════════════════════════╣");
     println!("║  Per-Block Maturity                                       ║");

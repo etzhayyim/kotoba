@@ -176,7 +176,11 @@ fn kubo_refs(client: &Client, api: &str, cid: &IpldCid) -> Vec<IpldCid> {
         .map(|line| {
             let value: Value = serde_json::from_str(line).expect("kubo refs json line");
             assert!(
-                value.get("Err").and_then(Value::as_str).unwrap_or("").is_empty(),
+                value
+                    .get("Err")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .is_empty(),
                 "kubo refs error: {value}"
             );
             value["Ref"]
