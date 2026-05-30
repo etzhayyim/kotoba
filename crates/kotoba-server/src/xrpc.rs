@@ -3543,16 +3543,43 @@ fn distributed_datomic_datoms(
     components: &[kotoba_edn::EdnValue],
     as_of: Option<&str>,
     since: Option<&str>,
+    remote_peer: Option<&str>,
+    remote_ipns_name: Option<&str>,
 ) -> Result<Option<(Option<String>, Vec<kotoba_datomic::Datom>)>, (StatusCode, String)> {
+    let ipns_name = remote_ipns_name
+        .map(str::to_string)
+        .unwrap_or_else(|| distributed_graph_ipns_name(graph_cid));
+    if let Some(remote_peer) = remote_peer {
+        let socket = parse_remote_peer_socket(remote_peer)?;
+        let remote_store = RemoteIpfsBlockStore::new(socket);
+        let remote_ipns = RemoteIpfsIpnsRegistry::new(socket);
+        let reader = DistributedDatomReader::new(&remote_store, &remote_ipns);
+        return distributed_datomic_datoms_with_reader(
+            &reader, &ipns_name, index, components, as_of, since,
+        );
+    }
+
     let reader = DistributedDatomReader::new(&*state.block_store, &*state.ipns_registry);
-    let Some(head) = reader
-        .resolve_head(&distributed_graph_ipns_name(graph_cid))
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("distributed datomic head read: {e}"),
-            )
-        })?
+    distributed_datomic_datoms_with_reader(&reader, &ipns_name, index, components, as_of, since)
+}
+
+fn distributed_datomic_datoms_with_reader<R>(
+    reader: &DistributedDatomReader<'_, R>,
+    ipns_name: &str,
+    index: DatomicDatomsIndex,
+    components: &[kotoba_edn::EdnValue],
+    as_of: Option<&str>,
+    since: Option<&str>,
+) -> Result<Option<(Option<String>, Vec<kotoba_datomic::Datom>)>, (StatusCode, String)>
+where
+    R: kotoba_ipfs::IpnsRegistry + ?Sized,
+{
+    let Some(head) = reader.resolve_head(ipns_name).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("distributed datomic head read: {e}"),
+        )
+    })?
     else {
         return Ok(None);
     };
@@ -3601,16 +3628,45 @@ fn distributed_datomic_seek_datoms(
     components: &[kotoba_edn::EdnValue],
     as_of: Option<&str>,
     since: Option<&str>,
+    remote_peer: Option<&str>,
+    remote_ipns_name: Option<&str>,
 ) -> Result<Option<(Option<String>, Vec<kotoba_datomic::Datom>)>, (StatusCode, String)> {
+    let ipns_name = remote_ipns_name
+        .map(str::to_string)
+        .unwrap_or_else(|| distributed_graph_ipns_name(graph_cid));
+    if let Some(remote_peer) = remote_peer {
+        let socket = parse_remote_peer_socket(remote_peer)?;
+        let remote_store = RemoteIpfsBlockStore::new(socket);
+        let remote_ipns = RemoteIpfsIpnsRegistry::new(socket);
+        let reader = DistributedDatomReader::new(&remote_store, &remote_ipns);
+        return distributed_datomic_seek_datoms_with_reader(
+            &reader, &ipns_name, index, components, as_of, since,
+        );
+    }
+
     let reader = DistributedDatomReader::new(&*state.block_store, &*state.ipns_registry);
-    let Some(head) = reader
-        .resolve_head(&distributed_graph_ipns_name(graph_cid))
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("distributed datomic head read: {e}"),
-            )
-        })?
+    distributed_datomic_seek_datoms_with_reader(
+        &reader, &ipns_name, index, components, as_of, since,
+    )
+}
+
+fn distributed_datomic_seek_datoms_with_reader<R>(
+    reader: &DistributedDatomReader<'_, R>,
+    ipns_name: &str,
+    index: DatomicDatomsIndex,
+    components: &[kotoba_edn::EdnValue],
+    as_of: Option<&str>,
+    since: Option<&str>,
+) -> Result<Option<(Option<String>, Vec<kotoba_datomic::Datom>)>, (StatusCode, String)>
+where
+    R: kotoba_ipfs::IpnsRegistry + ?Sized,
+{
+    let Some(head) = reader.resolve_head(ipns_name).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("distributed datomic head read: {e}"),
+        )
+    })?
     else {
         return Ok(None);
     };
@@ -3665,16 +3721,42 @@ fn distributed_datomic_index_range(
     attr: &str,
     as_of: Option<&str>,
     since: Option<&str>,
+    remote_peer: Option<&str>,
+    remote_ipns_name: Option<&str>,
 ) -> Result<Option<(Option<String>, Vec<kotoba_datomic::Datom>)>, (StatusCode, String)> {
+    let ipns_name = remote_ipns_name
+        .map(str::to_string)
+        .unwrap_or_else(|| distributed_graph_ipns_name(graph_cid));
+    if let Some(remote_peer) = remote_peer {
+        let socket = parse_remote_peer_socket(remote_peer)?;
+        let remote_store = RemoteIpfsBlockStore::new(socket);
+        let remote_ipns = RemoteIpfsIpnsRegistry::new(socket);
+        let reader = DistributedDatomReader::new(&remote_store, &remote_ipns);
+        return distributed_datomic_index_range_with_reader(
+            &reader, &ipns_name, attr, as_of, since,
+        );
+    }
+
     let reader = DistributedDatomReader::new(&*state.block_store, &*state.ipns_registry);
-    let Some(head) = reader
-        .resolve_head(&distributed_graph_ipns_name(graph_cid))
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("distributed datomic head read: {e}"),
-            )
-        })?
+    distributed_datomic_index_range_with_reader(&reader, &ipns_name, attr, as_of, since)
+}
+
+fn distributed_datomic_index_range_with_reader<R>(
+    reader: &DistributedDatomReader<'_, R>,
+    ipns_name: &str,
+    attr: &str,
+    as_of: Option<&str>,
+    since: Option<&str>,
+) -> Result<Option<(Option<String>, Vec<kotoba_datomic::Datom>)>, (StatusCode, String)>
+where
+    R: kotoba_ipfs::IpnsRegistry + ?Sized,
+{
+    let Some(head) = reader.resolve_head(ipns_name).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("distributed datomic head read: {e}"),
+        )
+    })?
     else {
         return Ok(None);
     };
@@ -4458,30 +4540,30 @@ pub async fn datomic_datoms(
         req.remote_ipns_name.as_deref(),
     )?;
     let components = resolve_datomic_index_components(&db, index, &components)?;
-    if req.remote_peer.is_none() && req.remote_ipns_name.is_none() {
-        if let Some((basis_t, mut datoms)) = distributed_datomic_datoms(
-            &state,
-            &graph_cid,
-            index,
-            &components,
-            req.as_of.as_deref(),
-            req.since.as_deref(),
-        )? {
-            datoms.sort_by_key(|datom| datomic_datoms_sort_key(datom, index));
-            let limit = req.limit.unwrap_or(1000).min(10_000);
-            let datoms = datoms.into_iter().take(limit).collect::<Vec<_>>();
-            let datom_count = datoms.len();
-            return Ok((
-                StatusCode::OK,
-                Json(DatomicDatomsResp {
-                    graph: req.graph,
-                    index: req.index,
-                    basis_t,
-                    datom_count,
-                    datoms: datoms.into_iter().map(datomic_datom_resp).collect(),
-                }),
-            ));
-        }
+    if let Some((basis_t, mut datoms)) = distributed_datomic_datoms(
+        &state,
+        &graph_cid,
+        index,
+        &components,
+        req.as_of.as_deref(),
+        req.since.as_deref(),
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
+    )? {
+        datoms.sort_by_key(|datom| datomic_datoms_sort_key(datom, index));
+        let limit = req.limit.unwrap_or(1000).min(10_000);
+        let datoms = datoms.into_iter().take(limit).collect::<Vec<_>>();
+        let datom_count = datoms.len();
+        return Ok((
+            StatusCode::OK,
+            Json(DatomicDatomsResp {
+                graph: req.graph,
+                index: req.index,
+                basis_t,
+                datom_count,
+                datoms: datoms.into_iter().map(datomic_datom_resp).collect(),
+            }),
+        ));
     }
     let mut datoms = db.datoms();
     datoms.sort_by_key(|datom| datomic_datoms_sort_key(datom, index));
@@ -4542,34 +4624,34 @@ pub async fn datomic_seek_datoms(
     )?;
     let components = resolve_datomic_index_components(&db, index, &components)?;
     let seek_key = datomic_seek_key(index, &components)?;
-    if req.remote_peer.is_none() && req.remote_ipns_name.is_none() {
-        if let Some((basis_t, mut datoms)) = distributed_datomic_seek_datoms(
-            &state,
-            &graph_cid,
-            index,
-            &components,
-            req.as_of.as_deref(),
-            req.since.as_deref(),
-        )? {
-            datoms.sort_by_key(|datom| datomic_datoms_sort_key(datom, index));
-            let limit = req.limit.unwrap_or(1000).min(10_000);
-            let datoms = datoms
-                .into_iter()
-                .filter(|datom| datomic_datoms_sort_values(datom, index) >= seek_key)
-                .take(limit)
-                .collect::<Vec<_>>();
-            let datom_count = datoms.len();
-            return Ok((
-                StatusCode::OK,
-                Json(DatomicDatomsResp {
-                    graph: req.graph,
-                    index: req.index,
-                    basis_t,
-                    datom_count,
-                    datoms: datoms.into_iter().map(datomic_datom_resp).collect(),
-                }),
-            ));
-        }
+    if let Some((basis_t, mut datoms)) = distributed_datomic_seek_datoms(
+        &state,
+        &graph_cid,
+        index,
+        &components,
+        req.as_of.as_deref(),
+        req.since.as_deref(),
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
+    )? {
+        datoms.sort_by_key(|datom| datomic_datoms_sort_key(datom, index));
+        let limit = req.limit.unwrap_or(1000).min(10_000);
+        let datoms = datoms
+            .into_iter()
+            .filter(|datom| datomic_datoms_sort_values(datom, index) >= seek_key)
+            .take(limit)
+            .collect::<Vec<_>>();
+        let datom_count = datoms.len();
+        return Ok((
+            StatusCode::OK,
+            Json(DatomicDatomsResp {
+                graph: req.graph,
+                index: req.index,
+                basis_t,
+                datom_count,
+                datoms: datoms.into_iter().map(datomic_datom_resp).collect(),
+            }),
+        ));
     }
     let mut datoms = db.datoms();
     datoms.sort_by_key(|datom| datomic_datoms_sort_key(datom, index));
@@ -4641,40 +4723,40 @@ pub async fn datomic_index_range(
         }
     }
 
-    if req.remote_peer.is_none() && req.remote_ipns_name.is_none() {
-        if let Some((basis_t, mut datoms)) = distributed_datomic_index_range(
-            &state,
-            &graph_cid,
-            &attr,
-            req.as_of.as_deref(),
-            req.since.as_deref(),
-        )? {
-            datoms.sort_by_key(|datom| datomic_datoms_sort_key(datom, DatomicDatomsIndex::Avet));
-            let limit = req.limit.unwrap_or(1000).min(10_000);
-            let datoms = datoms
-                .into_iter()
-                .filter(|datom| {
-                    datom.a == attr
-                        && start
-                            .as_ref()
-                            .map(|start| datom.v >= *start)
-                            .unwrap_or(true)
-                        && end.as_ref().map(|end| datom.v < *end).unwrap_or(true)
-                })
-                .take(limit)
-                .collect::<Vec<_>>();
-            let datom_count = datoms.len();
-            return Ok((
-                StatusCode::OK,
-                Json(DatomicDatomsResp {
-                    graph: req.graph,
-                    index: ":avet".to_string(),
-                    basis_t,
-                    datom_count,
-                    datoms: datoms.into_iter().map(datomic_datom_resp).collect(),
-                }),
-            ));
-        }
+    if let Some((basis_t, mut datoms)) = distributed_datomic_index_range(
+        &state,
+        &graph_cid,
+        &attr,
+        req.as_of.as_deref(),
+        req.since.as_deref(),
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
+    )? {
+        datoms.sort_by_key(|datom| datomic_datoms_sort_key(datom, DatomicDatomsIndex::Avet));
+        let limit = req.limit.unwrap_or(1000).min(10_000);
+        let datoms = datoms
+            .into_iter()
+            .filter(|datom| {
+                datom.a == attr
+                    && start
+                        .as_ref()
+                        .map(|start| datom.v >= *start)
+                        .unwrap_or(true)
+                    && end.as_ref().map(|end| datom.v < *end).unwrap_or(true)
+            })
+            .take(limit)
+            .collect::<Vec<_>>();
+        let datom_count = datoms.len();
+        return Ok((
+            StatusCode::OK,
+            Json(DatomicDatomsResp {
+                graph: req.graph,
+                index: ":avet".to_string(),
+                basis_t,
+                datom_count,
+                datoms: datoms.into_iter().map(datomic_datom_resp).collect(),
+            }),
+        ));
     }
 
     let mut datoms = db.datoms();
@@ -4741,18 +4823,16 @@ pub async fn datomic_index_pull(
         req.remote_ipns_name.as_deref(),
     )?;
     let components = resolve_datomic_index_components(&db, index, &components)?;
-    let (basis_t, mut datoms) = if req.remote_peer.is_none() && req.remote_ipns_name.is_none() {
-        distributed_datomic_datoms(
-            &state,
-            &graph_cid,
-            index,
-            &components,
-            req.as_of.as_deref(),
-            req.since.as_deref(),
-        )?
-    } else {
-        None
-    }
+    let (basis_t, mut datoms) = distributed_datomic_datoms(
+        &state,
+        &graph_cid,
+        index,
+        &components,
+        req.as_of.as_deref(),
+        req.since.as_deref(),
+        req.remote_peer.as_deref(),
+        req.remote_ipns_name.as_deref(),
+    )?
     .unwrap_or_else(|| {
         let datoms = db
             .datoms()
@@ -9501,6 +9581,103 @@ mod tests {
         let pull_body: serde_json::Value = serde_json::from_slice(&pull_body).unwrap();
         assert!(pull_body["entity_edn"].as_str().unwrap().contains("Alice"));
         assert!(pull_body["entity_edn"].as_str().unwrap().contains("admin"));
+
+        let remote_datoms = datomic_datoms(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicDatomsReq {
+                graph: graph_mb.clone(),
+                index: ":aevt".into(),
+                components_edn: vec![":person/role".into()],
+                as_of: None,
+                since: None,
+                remote_peer: Some(remote_peer.clone()),
+                remote_ipns_name: Some(ipns_name.clone()),
+                cacao_b64: None,
+                presentation: None,
+                limit: Some(10),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(remote_datoms.status(), axum::http::StatusCode::OK);
+        let remote_datoms_body = axum::body::to_bytes(remote_datoms.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let remote_datoms_body: serde_json::Value =
+            serde_json::from_slice(&remote_datoms_body).unwrap();
+        assert_eq!(
+            remote_datoms_body["basis_t"],
+            report.commit.tx_cid.to_multibase()
+        );
+        assert_eq!(remote_datoms_body["datom_count"], 2);
+        assert!(remote_datoms_body["datoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|datom| datom["a"] == ":person/role"));
+
+        let remote_seek = datomic_seek_datoms(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicSeekDatomsReq {
+                graph: graph_mb.clone(),
+                index: ":aevt".into(),
+                components_edn: vec![":person/score".into()],
+                as_of: None,
+                since: None,
+                remote_peer: Some(remote_peer.clone()),
+                remote_ipns_name: Some(ipns_name.clone()),
+                cacao_b64: None,
+                presentation: None,
+                limit: Some(10),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(remote_seek.status(), axum::http::StatusCode::OK);
+        let remote_seek_body = axum::body::to_bytes(remote_seek.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let remote_seek_body: serde_json::Value =
+            serde_json::from_slice(&remote_seek_body).unwrap();
+        assert_eq!(remote_seek_body["datom_count"], 2);
+        assert!(remote_seek_body["datoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|datom| datom["a"] == ":person/score"));
+
+        let remote_range = datomic_index_range(
+            axum::extract::State(Arc::clone(&state)),
+            headers.clone(),
+            axum::Json(DatomicIndexRangeReq {
+                graph: graph_mb.clone(),
+                attr_edn: ":person/score".into(),
+                start_edn: Some("15".into()),
+                end_edn: Some("25".into()),
+                as_of: None,
+                since: None,
+                remote_peer: Some(remote_peer.clone()),
+                remote_ipns_name: Some(ipns_name.clone()),
+                cacao_b64: None,
+                presentation: None,
+                limit: Some(10),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(remote_range.status(), axum::http::StatusCode::OK);
+        let remote_range_body = axum::body::to_bytes(remote_range.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let remote_range_body: serde_json::Value =
+            serde_json::from_slice(&remote_range_body).unwrap();
+        assert_eq!(remote_range_body["datom_count"], 1);
+        assert_eq!(remote_range_body["datoms"][0]["v_edn"], "20");
 
         let tx_range = datomic_tx_range(
             axum::extract::State(Arc::clone(&state)),
