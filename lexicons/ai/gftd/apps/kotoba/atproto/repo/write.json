@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Project an AT Protocol repo write into Kotoba Datoms.",
+      "description": "Project an AT Protocol repo write into Kotoba Datoms, preserving AT URI, record CID, and DAG-CBOR CID metadata when present.",
       "input": {
         "encoding": "application/json",
         "schema": {

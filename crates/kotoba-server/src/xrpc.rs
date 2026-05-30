@@ -2734,6 +2734,54 @@ fn atproto_repo_record_entity_cid(uri: &str) -> kotoba_core::cid::KotobaCid {
     kotoba_core::cid::KotobaCid::from_bytes(uri.as_bytes())
 }
 
+fn append_atproto_cid_datoms(
+    out: &mut Vec<kotoba_datomic::Datom>,
+    entity_cid: &kotoba_core::cid::KotobaCid,
+    at_cid: &str,
+    tx_cid: &kotoba_core::cid::KotobaCid,
+) {
+    out.push(kotoba_datomic::Datom::assert(
+        entity_cid.clone(),
+        "atproto/cid".to_string(),
+        kotoba_edn::EdnValue::string(at_cid),
+        tx_cid.clone(),
+    ));
+    if let Some(kotoba_cid) = kotoba_graph::at_cid_str_to_kotoba(at_cid) {
+        out.extend([
+            kotoba_datomic::Datom::assert(
+                entity_cid.clone(),
+                "atproto/recordWireFormat".to_string(),
+                kotoba_edn::EdnValue::string("application/dag-cbor"),
+                tx_cid.clone(),
+            ),
+            kotoba_datomic::Datom::assert(
+                entity_cid.clone(),
+                "atproto/cidVersion".to_string(),
+                kotoba_edn::EdnValue::int(1),
+                tx_cid.clone(),
+            ),
+            kotoba_datomic::Datom::assert(
+                entity_cid.clone(),
+                "atproto/cidCodec".to_string(),
+                kotoba_edn::EdnValue::string("dag-cbor"),
+                tx_cid.clone(),
+            ),
+            kotoba_datomic::Datom::assert(
+                entity_cid.clone(),
+                "atproto/cidMultihash".to_string(),
+                kotoba_edn::EdnValue::string("sha2-256"),
+                tx_cid.clone(),
+            ),
+            kotoba_datomic::Datom::assert(
+                entity_cid.clone(),
+                "atproto/kotobaCid".to_string(),
+                kotoba_edn::EdnValue::string(kotoba_cid.to_multibase()),
+                tx_cid.clone(),
+            ),
+        ]);
+    }
+}
+
 fn atproto_repo_write_datoms(
     req: &AtprotoRepoWriteReq,
     uri: &kotoba_graph::AtUri,
@@ -2809,12 +2857,7 @@ fn atproto_repo_write_datoms(
         ));
     }
     if let Some(cid) = &req.cid {
-        out.push(kotoba_datomic::Datom::assert(
-            entity_cid.clone(),
-            "atproto/cid".to_string(),
-            kotoba_edn::EdnValue::string(cid),
-            tx_cid.clone(),
-        ));
+        append_atproto_cid_datoms(&mut out, entity_cid, cid, tx_cid);
     }
     if let Some(record) = &req.record {
         out.push(kotoba_datomic::Datom::assert(
@@ -9431,6 +9474,54 @@ mod tests {
             .any(|datom| datom.a == ":person/name" && datom.v == EdnValue::string("Alice")));
     }
 
+    #[test]
+    fn atproto_repo_write_projects_valid_dag_cbor_cid_metadata() {
+        let mut cid_bytes = [0u8; 36];
+        cid_bytes[0] = 1;
+        cid_bytes[1] = KotobaCid::CODEC_DAG_CBOR;
+        cid_bytes[2] = KotobaCid::MH_SHA2_256;
+        cid_bytes[3] = 32;
+        for i in 0..32 {
+            cid_bytes[4 + i] = (i as u8).wrapping_mul(11);
+        }
+        let at_cid = multibase::encode(multibase::Base::Base58Btc, cid_bytes);
+        let kotoba_cid = KotobaCid(cid_bytes);
+        let tx_cid = KotobaCid::from_bytes(b"atproto-dag-cbor-projection-tx");
+        let req = AtprotoRepoWriteReq {
+            graph: KotobaCid::from_bytes(b"atproto-dag-cbor-projection-graph").to_multibase(),
+            uri: "at://did:plc:alice/app.bsky.feed.post/r1".into(),
+            operation: Some("create".into()),
+            cid: Some(at_cid.clone()),
+            record: Some(serde_json::json!({
+                "$type": "app.bsky.feed.post",
+                "text": "DAG-CBOR backed ATProto record"
+            })),
+            cacao_b64: None,
+            auth_presentation: None,
+        };
+        let uri = kotoba_graph::AtUri::parse(&req.uri).unwrap();
+        let entity_cid = atproto_repo_record_entity_cid(&req.uri);
+        let datoms = atproto_repo_write_datoms(&req, &uri, &entity_cid, &tx_cid);
+        let has = |attr: &str, value: EdnValue| {
+            datoms.iter().any(|datom| {
+                datom.e == entity_cid && datom.a == attr && datom.v == value && datom.added
+            })
+        };
+
+        assert!(has("atproto/cid", EdnValue::string(at_cid)));
+        assert!(has(
+            "atproto/recordWireFormat",
+            EdnValue::string("application/dag-cbor")
+        ));
+        assert!(has("atproto/cidVersion", EdnValue::int(1)));
+        assert!(has("atproto/cidCodec", EdnValue::string("dag-cbor")));
+        assert!(has("atproto/cidMultihash", EdnValue::string("sha2-256")));
+        assert!(has(
+            "atproto/kotobaCid",
+            EdnValue::string(kotoba_cid.to_multibase())
+        ));
+    }
+
     #[tokio::test]
     async fn datomic_transact_xrpc_covers_advanced_datomic_forms_on_distributed_head() {
         std::env::set_var("KOTOBA_IPFS", "off");
@@ -12480,6 +12571,15 @@ mod tests {
 
         let atproto_write =
             include_str!("../../../lexicons/ai/gftd/apps/kotoba/atproto/repo/write.json");
+        let atproto_write_value: serde_json::Value =
+            serde_json::from_str(atproto_write).expect("atproto repo write lexicon JSON");
+        let atproto_write_description = atproto_write_value["defs"]["main"]["description"]
+            .as_str()
+            .expect("atproto repo write description");
+        assert!(
+            atproto_write_description.contains("DAG-CBOR CID metadata"),
+            "atproto repo write lexicon must expose AT CID/DAG-CBOR projection"
+        );
         assert_lexicon_input_object_fields(atproto_write, "record", &[], &[]);
         assert_protocol_datom_write_output_fields(atproto_write);
     }
