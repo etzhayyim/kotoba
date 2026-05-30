@@ -2682,7 +2682,7 @@ fn query_apply_value_function(op: &str, args: Vec<EdnValue>) -> Result<EdnValue>
         "assoc" => query_assoc_value(args),
         "dissoc" => query_dissoc_value(args),
         "disj" => query_disj_value(args),
-        "+" | "-" | "*" | "quot" | "rem" | "mod" | "min" | "max" => {
+        "inc" | "dec" | "+" | "-" | "*" | "quot" | "rem" | "mod" | "min" | "max" => {
             query_arithmetic_value(op, args)
         }
         other => Err(DatomicError::UnsupportedOperation(format!(
@@ -3099,6 +3099,24 @@ pub(crate) fn query_arithmetic_value(op: &str, args: Vec<EdnValue>) -> Result<Ed
             acc.checked_add(value)
                 .ok_or_else(|| DatomicError::Query("+ integer overflow".into()))
         })?,
+        "inc" => {
+            if ints.len() != 1 {
+                return Err(DatomicError::Query("inc expects one argument".into()));
+            }
+            ints.next()
+                .expect("arity checked")
+                .checked_add(1)
+                .ok_or_else(|| DatomicError::Query("inc integer overflow".into()))?
+        }
+        "dec" => {
+            if ints.len() != 1 {
+                return Err(DatomicError::Query("dec expects one argument".into()));
+            }
+            ints.next()
+                .expect("arity checked")
+                .checked_sub(1)
+                .ok_or_else(|| DatomicError::Query("dec integer overflow".into()))?
+        }
         "*" => ints.try_fold(1_i64, |acc, value| {
             acc.checked_mul(value)
                 .ok_or_else(|| DatomicError::Query("* integer overflow".into()))
@@ -4752,7 +4770,7 @@ fn eval_query_function(
             .map(|arg| resolve_query_value(arg, binding))
             .collect::<Result<Vec<_>>>()
             .and_then(query_disj_value),
-        "+" | "-" | "*" | "quot" | "rem" | "mod" | "min" | "max" => args
+        "inc" | "dec" | "+" | "-" | "*" | "quot" | "rem" | "mod" | "min" | "max" => args
             .iter()
             .map(|arg| resolve_query_value(arg, binding))
             .collect::<Result<Vec<_>>>()
@@ -7685,6 +7703,42 @@ mod tests {
                     EdnValue::Keyword(Keyword::parse("vc")),
                     EdnValue::Keyword(Keyword::parse("ipld")),
                 ]),
+            ]]
+        );
+    }
+
+    #[tokio::test]
+    async fn q_supports_inc_and_dec_function_bindings() {
+        let conn = Connection::new();
+        conn.transact(
+            parse(
+                r#"[
+                  {:db/id "alice"
+                   :person/score 42
+                   :person/claims {:claim/score 42}}
+                ]"#,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let query = parse(
+            r#"{:find [?incScore ?decScore ?updatedScore]
+                :where [[?e :person/score ?score]
+                        [(inc ?score) ?incScore]
+                        [(dec ?score) ?decScore]
+                        [?e :person/claims ?claims]
+                        [(update ?claims :claim/score inc) ?updatedClaims]
+                        [(get ?updatedClaims :claim/score) ?updatedScore]]}"#,
+        )
+        .unwrap();
+        let rows = q(query, &conn.db(), &[]).unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                EdnValue::Integer(43),
+                EdnValue::Integer(41),
+                EdnValue::Integer(43),
             ]]
         );
     }
